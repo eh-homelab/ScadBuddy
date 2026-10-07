@@ -24,6 +24,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.render import provenance
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
+from tests.support.operations import press
 
 SLUG = "widget"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -38,6 +39,7 @@ def _create(client: TestClient) -> dict[str, Any]:
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()
@@ -271,6 +273,7 @@ def test_a_thumbnail_one_byte_over_the_cap_is_refused_on_create(client: TestClie
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "thumbnail": ("t.png", _png_of(MAX_THUMBNAIL_BYTES + 1), "image/png"),
         },
+        headers=press(),
     )
     assert response.status_code == 422
     assert str(MAX_THUMBNAIL_BYTES) in response.json()["detail"]
@@ -294,7 +297,7 @@ def test_one_create_at_every_part_cap_fits_the_multipart_limit(client: TestClien
     }
     assert sum(len(part[1]) for part in parts.values()) < limits.MAX_MULTIPART_BODY_BYTES
 
-    created = client.post("/api/v1/models?force=true", files=parts)
+    created = client.post("/api/v1/models?force=true", files=parts, headers=press())
 
     assert created.status_code == 201, created.text
     assert created.json()["has_thumbnail"] is True
@@ -304,6 +307,7 @@ def _upload_source(client: TestClient, source: str) -> httpx.Response:
     response: httpx.Response = client.post(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream")},
+        headers=press(),
     )
     return response
 
@@ -338,6 +342,7 @@ def test_an_uploaded_source_at_the_cap_is_accepted(client: TestClient) -> None:
     created = client.post(
         "/api/v1/models?force=true",
         files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream")},
+        headers=press(),
     )
 
     assert created.status_code == 201, created.text
@@ -351,6 +356,7 @@ def test_a_thumbnail_at_the_cap_is_accepted(client: TestClient) -> None:
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "thumbnail": ("t.png", at_cap, "image/png"),
         },
+        headers=press(),
     )
     assert created.status_code == 201, created.text
     assert _put_thumbnail(client, at_cap).status_code == 200
@@ -505,7 +511,7 @@ def test_deleting_a_model_forgets_its_resolved_cover(client: TestClient, paths: 
     store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
     assert store.remembers_plate_cover(SLUG)
 
-    assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
+    assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code == 204
 
     assert not store.remembers_plate_cover(SLUG)
     # Nothing else is kept per slug: the only other state is one store-wide counter.
@@ -526,7 +532,7 @@ def test_a_cover_scan_in_flight_across_a_model_delete_is_not_stored(
     def scan_then_delete(slug: str) -> Any:
         found = real_scan(slug)
         # The model goes away while this scan holds its answer.
-        assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
+        assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code == 204
         return found
 
     monkeypatch.setattr(store, "_scan_plate_cover", scan_then_delete)
@@ -673,6 +679,7 @@ def test_the_readme_uploaded_at_creation_is_readable(client: TestClient) -> None
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "readme": ("README.md", "# Wïdget\n".encode(), "text/markdown"),
         },
+        headers=press(),
     )
     assert response.status_code == 201
     assert client.get(f"/api/v1/models/{SLUG}/readme").text == "# Wïdget\n"
@@ -709,6 +716,7 @@ def test_a_readme_too_long_to_save_again_is_refused_at_creation(client: TestClie
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "readme": ("README.md", b"x" * (MAX_SOURCE_CHARS + 1), "text/markdown"),
         },
+        headers=press(),
     )
 
     assert response.status_code == 422
@@ -724,6 +732,7 @@ def test_a_readme_at_the_cap_is_accepted_at_creation(client: TestClient) -> None
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "readme": ("README.md", b"x" * MAX_SOURCE_CHARS, "text/markdown"),
         },
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     assert _put_readme(client, "x" * MAX_SOURCE_CHARS).status_code == 200
@@ -777,6 +786,7 @@ def test_a_dropped_model_directory_lands_with_its_own_metadata(client: TestClien
             "thumbnail": ("thumbnail.png", PNG_BYTES, "image/png"),
             "readme": ("README.md", b"# Widget\n", "text/markdown"),
         },
+        headers=press(),
     )
 
     assert response.status_code == 201, response.text
@@ -812,7 +822,9 @@ def test_a_dropped_model_json_never_sets_origin_url(client: TestClient, origin_u
 def test_patch_cannot_set_origin_url(client: TestClient) -> None:
     _create(client)
     response = client.patch(
-        f"/api/v1/models/{SLUG}", json={"description": "x", "origin_url": "javascript:alert(1)"}
+        f"/api/v1/models/{SLUG}",
+        json={"description": "x", "origin_url": "javascript:alert(1)"},
+        headers=press(),
     )
     assert response.status_code == 200
     assert response.json()["origin_url"] is None
@@ -830,6 +842,7 @@ def test_form_fields_win_over_the_model_json(client: TestClient) -> None:
             ),
         },
         data={"name": "From Form"},
+        headers=press(),
     )
     assert response.status_code == 201
     assert (response.json()["name"], response.json()["tags"]) == ("From Form", ["json"])
@@ -845,6 +858,7 @@ def _create_with_meta(
             "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
         },
         data=data or {},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()
@@ -913,6 +927,7 @@ def test_blank_fields_without_a_model_json_give_the_defaults(client: TestClient)
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
         data={"description": "   ", "tags": "   "},
+        headers=press(),
     )
     assert response.status_code == 201
     assert (response.json()["description"], response.json()["tags"]) == ("", [])
@@ -956,6 +971,7 @@ def test_a_model_json_that_cannot_be_read_is_refused(client: TestClient, payload
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "meta": ("model.json", payload, "application/json"),
         },
+        headers=press(),
     )
     assert response.status_code == 422
     assert client.get(f"/api/v1/models/{SLUG}").status_code == 404
@@ -968,7 +984,7 @@ def test_a_model_json_that_cannot_be_read_is_refused(client: TestClient, payload
 def test_a_blank_name_is_refused_and_nothing_is_committed(client: TestClient, blank: str) -> None:
     before = _create(client)
 
-    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": blank})
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": blank}, headers=press())
 
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
@@ -979,14 +995,14 @@ def test_a_blank_name_is_refused_and_nothing_is_committed(client: TestClient, bl
 
 def test_a_patched_name_is_stored_stripped(client: TestClient) -> None:
     _create(client)
-    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": "  Widget  "})
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": "  Widget  "}, headers=press())
     assert response.status_code == 200
     assert response.json()["name"] == "Widget"
 
 
 def test_a_patch_without_a_name_leaves_it_alone(client: TestClient) -> None:
     before = _create(client)
-    response = client.patch(f"/api/v1/models/{SLUG}", json={"description": "new"})
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"description": "new"}, headers=press())
     assert response.status_code == 200
     assert response.json()["name"] == before["name"]
 
@@ -995,9 +1011,13 @@ def _create_named(client: TestClient, slug: str, name: str) -> None:
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{slug}.scad", SOURCE.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
-    assert client.patch(f"/api/v1/models/{slug}", json={"name": name}).status_code == 200
+    assert (
+        client.patch(f"/api/v1/models/{slug}", json={"name": name}, headers=press()).status_code
+        == 200
+    )
 
 
 def test_a_rename_to_another_models_name_is_refused_and_nothing_is_committed(
@@ -1008,7 +1028,7 @@ def test_a_rename_to_another_models_name_is_refused_and_nothing_is_committed(
     _create_named(client, SLUG, "Widget")
     before = client.get(f"/api/v1/models/{SLUG}").json()
 
-    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": " gadget "})
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": " gadget "}, headers=press())
 
     assert response.status_code == 409, response.text
     assert response.headers["content-type"] == "application/problem+json"
@@ -1025,8 +1045,10 @@ def test_a_model_keeps_a_name_it_already_shares(client: TestClient, paths: DataP
     meta = paths.model_meta(SLUG)
     meta.write_text(json.dumps({**json.loads(meta.read_text()), "name": "Gadget"}))
 
-    same = client.patch(f"/api/v1/models/{SLUG}", json={"name": "Gadget", "description": "d"})
-    recased = client.patch(f"/api/v1/models/{SLUG}", json={"name": "GADGET"})
+    same = client.patch(
+        f"/api/v1/models/{SLUG}", json={"name": "Gadget", "description": "d"}, headers=press()
+    )
+    recased = client.patch(f"/api/v1/models/{SLUG}", json={"name": "GADGET"}, headers=press())
 
     assert same.status_code == 200, same.text
     assert recased.status_code == 200, recased.text
@@ -1042,7 +1064,9 @@ def test_a_metadata_edit_moves_updated_at(client: TestClient, paths: DataPaths) 
         os.utime(path, (hour_ago, hour_ago))
     before = datetime.fromisoformat(client.get(f"/api/v1/models/{SLUG}").json()["updated_at"])
 
-    patched = client.patch(f"/api/v1/models/{SLUG}", json={"description": "new"}).json()
+    patched = client.patch(
+        f"/api/v1/models/{SLUG}", json={"description": "new"}, headers=press()
+    ).json()
 
     after = datetime.fromisoformat(patched["updated_at"])
     assert after - before > timedelta(minutes=30)
@@ -1075,6 +1099,7 @@ def test_a_deeply_nested_model_json_is_a_422_not_a_500(client: TestClient) -> No
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "meta": ("model.json", deep.encode(), "application/json"),
         },
+        headers=press(),
     )
     assert _refused_without_a_model(response, client)["detail"] == (
         "the model.json is not valid JSON"
@@ -1090,6 +1115,7 @@ def test_a_model_json_nested_too_deep_to_validate_is_a_422(client: TestClient) -
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "meta": ("model.json", f'{{"tags": {nested}}}'.encode(), "application/json"),
         },
+        headers=press(),
     )
     _refused_without_a_model(response, client)
 
@@ -1099,13 +1125,14 @@ def test_deeply_nested_tags_are_a_422_not_a_500(client: TestClient) -> None:
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
         data={"tags": DEEP},
+        headers=press(),
     )
     assert _refused_without_a_model(response, client)["detail"] == "tags is not valid JSON"
 
 
 def test_a_deeply_nested_json_paste_is_a_422_not_a_500(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=DEEP, headers={"Content-Type": "application/json"}
+        "/api/v1/models", content=DEEP, headers={**press(), "Content-Type": "application/json"}
     )
     assert _refused_without_a_model(response, client)["detail"] == (
         "the request body is not valid JSON"
@@ -1123,7 +1150,9 @@ def test_every_details_change_is_one_revision_in_the_models_history(client: Test
         (_put_thumbnail(client, PNG_BYTES), f"Set {SLUG} thumbnail"),
         (_put_readme(client, "# Widget\n"), f"Set {SLUG} README"),
         (
-            client.patch(f"/api/v1/models/{SLUG}", json={"name": "Widget", "tags": ["x"]}),
+            client.patch(
+                f"/api/v1/models/{SLUG}", json={"name": "Widget", "tags": ["x"]}, headers=press()
+            ),
             f"Update {SLUG} metadata",
         ),
         (client.delete(f"/api/v1/models/{SLUG}/thumbnail"), f"Remove {SLUG} thumbnail"),
@@ -1229,6 +1258,7 @@ def _upload_meta(client: TestClient, meta: bytes) -> httpx.Response:
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "meta": ("model.json", meta, "application/json"),
         },
+        headers=press(),
     )
     return response
 
