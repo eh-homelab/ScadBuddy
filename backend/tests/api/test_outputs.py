@@ -22,6 +22,7 @@ from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
+from tests.support.operations import press
 
 
 def _finished_job(client: TestClient, slug: str, width: float = 12) -> str:
@@ -106,6 +107,7 @@ def test_a_job_from_another_model_is_refused(client: TestClient, model: str) -> 
     client.post(
         "/api/v1/models",
         files={"file": ("other.scad", b"width = 1;\n", "application/octet-stream")},
+        headers=press(),
     )
     job_id = _finished_job(client, "other")
     response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})

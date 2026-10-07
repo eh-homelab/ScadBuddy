@@ -28,6 +28,7 @@ from scadbuddy.library.history import GIT, git_env
 from scadbuddy.library.presets import MAX_PRESETS
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
+from tests.support.operations import press
 
 SOURCE = "cube(10);\n"
 
@@ -125,6 +126,7 @@ def test_a_thumbnail_goes_by_claim(client: TestClient, app: FastAPI) -> None:
             "file": ("thumbed.scad", SOURCE.encode(), "application/octet-stream"),
             "thumbnail": ("t.png", png, "image/png"),
         },
+        headers=press(),
     )
     assert created.status_code == 201, created.text
     assert client.get("/api/v1/models/thumbed/thumbnail").content == png
@@ -145,7 +147,9 @@ def test_a_slow_create_answers_202_and_its_operation_ends_with_the_model(
         return await create(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_create", slowly)
-    started = client.post("/api/v1/models", json={"name": "Slow", "source": SOURCE})
+    started = client.post(
+        "/api/v1/models", json={"name": "Slow", "source": SOURCE}, headers=press()
+    )
     assert started.status_code == 202, started.text
     op = started.json()
     deadline = time.monotonic() + 60
@@ -160,25 +164,33 @@ def test_a_create_whose_slug_is_taken_is_refused_by_its_check(
     client: TestClient, app: FastAPI
 ) -> None:
     assert (
-        client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE}).status_code == 201
+        client.post(
+            "/api/v1/models", json={"name": "Taken", "source": SOURCE}, headers=press()
+        ).status_code
+        == 201
     )
-    again = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE})
+    again = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE}, headers=press())
     assert again.status_code == 409, again.text
     assert len(_workflow_ids(app, "model_create")) == 1
 
 
 def test_patch_duplicate_and_delete_are_operations(client: TestClient, app: FastAPI) -> None:
-    assert client.post("/api/v1/models", json={"name": "Base", "source": SOURCE}).status_code == 201
-    patched = client.patch("/api/v1/models/base", json={"description": "d"})
+    assert (
+        client.post(
+            "/api/v1/models", json={"name": "Base", "source": SOURCE}, headers=press()
+        ).status_code
+        == 201
+    )
+    patched = client.patch("/api/v1/models/base", json={"description": "d"}, headers=press())
     assert patched.status_code == 200, patched.text
     assert patched.json()["description"] == "d"
-    copied = client.post("/api/v1/models/base/duplicate", json={"name": "Copy"})
+    copied = client.post("/api/v1/models/base/duplicate", json={"name": "Copy"}, headers=press())
     assert copied.status_code == 201, copied.text
-    refused = client.delete("/api/v1/models/base")
+    refused = client.delete("/api/v1/models/base", headers=press())
     assert refused.status_code == 409, refused.text
     assert refused.json()["slugs"] == ["copy"]
-    assert client.delete("/api/v1/models/copy").status_code == 204
-    assert client.delete("/api/v1/models/base").status_code == 204
+    assert client.delete("/api/v1/models/copy", headers=press()).status_code == 204
+    assert client.delete("/api/v1/models/base", headers=press()).status_code == 204
     for kind in ("model_patch", "model_duplicate", "model_delete"):
         assert _workflow_ids(app, kind), kind
 
@@ -188,11 +200,15 @@ def test_a_request_too_large_for_history_is_refused_before_any_operation(
 ) -> None:
     """Review 3c I2: a field that is not a claim is still bounded, so Temporal never
     refuses the input as a 503 that a retry repeats."""
-    created = client.post("/api/v1/models", json={"name": "Wordy", "source": SOURCE})
+    created = client.post(
+        "/api/v1/models", json={"name": "Wordy", "source": SOURCE}, headers=press()
+    )
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
     monkeypatch.setattr(operations_api, "MAX_REQUEST_BYTES", 1000)
-    response = client.patch(f"/api/v1/models/{slug}", json={"description": "x" * 2000})
+    response = client.patch(
+        f"/api/v1/models/{slug}", json={"description": "x" * 2000}, headers=press()
+    )
     assert response.status_code == 413, response.text
     assert _workflow_ids(app, "model_patch") == []
 
@@ -212,12 +228,13 @@ def test_a_description_or_tags_past_their_caps_are_a_422_naming_the_field(
     (field,) = body
     capped = {"name": "Capped", "source": SOURCE, **body}
     responses = [
-        client.patch(f"/api/v1/models/{model}", json=body),
-        client.post("/api/v1/models", json=capped),
+        client.patch(f"/api/v1/models/{model}", json=body, headers=press()),
+        client.post("/api/v1/models", json=capped, headers=press()),
         client.post(
             "/api/v1/models",
             files={"file": ("capped.scad", SOURCE.encode(), "text/plain")},
             data={field: body[field] if field == "description" else json.dumps(body[field])},
+            headers=press(),
         ),
     ]
     for response in responses:
@@ -251,7 +268,7 @@ def test_a_full_list_of_large_presets_is_patched_by_claim(
         for index in range(MAX_PRESETS)
     ]
     assert len(json.dumps(presets)) > operations_api.MAX_REQUEST_BYTES
-    response = client.patch(f"/api/v1/models/{model}", json={"presets": presets})
+    response = client.patch(f"/api/v1/models/{model}", json={"presets": presets}, headers=press())
     assert response.status_code == 200, response.text
     written = json.loads(_state(app).paths.model_meta(model).read_text(encoding="utf-8"))
     assert len(written["presets"]) == MAX_PRESETS
@@ -260,7 +277,7 @@ def test_a_full_list_of_large_presets_is_patched_by_claim(
 def test_a_refused_keyed_upload_writes_no_claims(client: TestClient, app: FastAPI) -> None:
     """Review 3c 1.2, 1.3: a keyed upload over a taken slug is refused before its
     parts are claimed, and starts nothing."""
-    taken = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE})
+    taken = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE}, headers=press())
     assert taken.status_code == 201, taken.text
     before = _claims(app)
     refused = client.post(
@@ -281,7 +298,7 @@ def test_a_keyed_upload_over_a_taken_slug_is_refused_before_its_parts_are_read(
 ) -> None:
     """Review #1126 1.3, 3.2: the browser keys every upload, so the early taken-slug
     refusal (#436) holds for a keyed one too, unless that key's create already ran."""
-    taken = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE})
+    taken = client.post("/api/v1/models", json={"name": "Taken", "source": SOURCE}, headers=press())
     assert taken.status_code == 201, taken.text
     decoded: list[bytes] = []
     decode = scad.decode_source
@@ -308,6 +325,7 @@ def test_a_request_refused_by_the_cap_drops_its_claims(
     response = client.patch(
         f"/api/v1/models/{model}",
         json={"description": "x" * 2000, "presets": [{"name": "One"}]},
+        headers=press(),
     )
     assert response.status_code == 413, response.text
     assert _claims(app) == set()
@@ -329,7 +347,7 @@ def test_a_finished_create_drops_its_claims_but_not_one_a_running_operation_name
         return await create(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_create", slow_for_slow)
-    slow = client.post("/api/v1/models", json={"name": "Slow", "source": SOURCE})
+    slow = client.post("/api/v1/models", json={"name": "Slow", "source": SOURCE}, headers=press())
     assert slow.status_code == 202, slow.text
     quick = client.post(
         "/api/v1/models",
@@ -337,6 +355,7 @@ def test_a_finished_create_drops_its_claims_but_not_one_a_running_operation_name
             "file": ("quick.scad", SOURCE.encode(), "text/plain"),
             "thumbnail": ("t.png", models_api.PNG_MAGIC + b"\0" * 1000, "image/png"),
         },
+        headers=press(),
     )
     assert quick.status_code == 201, quick.text
     assert _claims(app) == {hashlib.sha256(SOURCE.encode()).hexdigest()}
@@ -353,7 +372,12 @@ def test_a_duplicate_made_between_the_check_and_the_run_refuses_the_delete(
 ) -> None:
     """Review 3c 3.1: the run refuses again just before the delete, and the problem it
     records keeps `duplicates` and `slugs`."""
-    assert client.post("/api/v1/models", json={"name": "Base", "source": SOURCE}).status_code == 201
+    assert (
+        client.post(
+            "/api/v1/models", json={"name": "Base", "source": SOURCE}, headers=press()
+        ).status_code
+        == 201
+    )
     refuse = models_api.refuse_delete
     calls = 0
 

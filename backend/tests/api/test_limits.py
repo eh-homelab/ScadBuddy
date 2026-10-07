@@ -12,6 +12,7 @@ from scadbuddy.api.limits import (
     ClientGoneError,
     unless_the_client_leaves,
 )
+from tests.support.operations import press
 
 
 def _request(receive: object) -> Request:
@@ -107,6 +108,7 @@ def test_an_oversized_upload_is_refused_like_a_paste(client: TestClient) -> None
     response = client.post(
         "/api/v1/models",
         files={"file": ("huge.scad", b"x" * (MAX_MULTIPART_BODY_BYTES + 1), "text/plain")},
+        headers=press(),
     )
     assert response.status_code == 413
     assert response.headers["content-type"] == "application/problem+json"
