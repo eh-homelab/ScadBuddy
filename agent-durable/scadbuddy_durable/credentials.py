@@ -51,6 +51,30 @@ class CredentialSource:
         self._pool = pool
         self._keks = {k.id: k for k in keks}
 
+    async def secrets(self) -> list[str]:
+        """Every credential's secret this worker can open, whatever its status: the ones
+        a segment may have run with, which the projector redacts from what it logs
+        (translate.py `redact`, as classic's turn does)."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(_ROWS)
+            rows = await cur.fetchall()
+        found: list[str] = []
+        for row_id, kind, base_url, secret_sealed, dek_sealed, kek_id, _status, _usable in rows:
+            kek = self._keks.get(kek_id)
+            if kek is None:
+                continue
+            try:
+                found.append(
+                    open_secret(
+                        kek,
+                        Envelope(bytes(secret_sealed), bytes(dek_sealed), kek_id),
+                        credential_aad(row_id, kind, base_url),
+                    )
+                )
+            except SealError:
+                continue
+        return found
+
     async def first_usable(self) -> Credential:
         disabled = cooling = other_key = 0
         async with self._pool.connection() as conn:

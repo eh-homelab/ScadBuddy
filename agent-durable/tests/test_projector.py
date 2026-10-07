@@ -758,3 +758,19 @@ async def test_a_stop_nobody_drained_resolves_as_a_stop(pool: AsyncConnectionPoo
         },
         {"v": 1, "type": "session.status", "sessionId": sid, "status": "idle"},
     ]
+
+
+async def test_the_credentials_are_redacted_from_what_is_logged(pool: AsyncConnectionPool, rig: Rig) -> None:
+    """The worker gives the projector its credentials (worker.py); a model that echoes one
+    logs `[redacted]`, as classic does."""
+    sid = await make_session(pool)
+    wid, inp = rig.new(sid=sid)
+
+    async def secrets() -> list[str]:
+        return ["answer to"]  # the scripted reply quotes it
+
+    async with projecting(pool, rig.client, "a", secrets=secrets):
+        await rig.send(wid, inp, "hello")
+        await until(status_is(pool, sid, "idle"))
+    deltas = [e["delta"] for e in await logged(pool, sid) if e["type"] == "assistant.text.delta"]
+    assert deltas == ["[redacted] hello"]

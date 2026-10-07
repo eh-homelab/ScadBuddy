@@ -29,7 +29,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -314,6 +314,7 @@ class Projector:
         renew_s: float = 5,
         poll_s: float = 0.5,
         tiers: Mapping[str, str] = TIERS,
+        secrets: Callable[[], Awaitable[Sequence[str]]] | None = None,
     ) -> None:
         self._pool = pool
         self._client = client
@@ -322,6 +323,8 @@ class Projector:
         self._renew_s = renew_s
         self._poll_s = poll_s
         self._tiers = tiers
+        # The credentials redacted from everything logged (translate.py `redact`).
+        self._secrets = secrets
         self._followers: dict[str, asyncio.Task[None]] = {}
 
     @property
@@ -430,7 +433,9 @@ class Projector:
                     return
                 # Rebuilt from the log each time: the stream is re-read from the committed offset.
                 open_ids, resolved = await self._open_approvals(session_id)
-                translator = Translator(session_id, self._tiers, open_ids, resolved)
+                translator = Translator(
+                    session_id, self._tiers, open_ids, resolved, secrets=await self._redacted()
+                )
                 try:
                     offset, final, chain = await self._drain(
                         session_id, wid, latest, translator, offset, chain
@@ -453,6 +458,9 @@ class Projector:
             raise
         except Exception:
             log.exception("projector %s: following %s failed", self._holder, session_id)
+
+    async def _redacted(self) -> Sequence[str]:
+        return [] if self._secrets is None else await self._secrets()
 
     async def _latest(self, wid: str) -> LatestRun | None:
         """The ID's latest run, or None when it has none."""
@@ -501,7 +509,9 @@ class Projector:
             return
         open_ids, resolved = await self._open_approvals(session_id)
         if latest is not None and latest.stopped:
-            translator = Translator(session_id, self._tiers, open_ids, resolved)
+            translator = Translator(
+                session_id, self._tiers, open_ids, resolved, secrets=await self._redacted()
+            )
             translator.mark_resolved(await self._resolved_now(session_id, wid))
             events = translator.feed({"type": "cancelled", "offset": 0}).events
         else:

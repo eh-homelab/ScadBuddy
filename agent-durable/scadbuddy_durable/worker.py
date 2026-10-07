@@ -266,7 +266,8 @@ async def serve(config: Config) -> int:
             log.info("segments run in %s", deps.cwd)
             worker = build_worker(client, deps)
             holder = f"agent-durable:{socket.gethostname()}:{os.getpid()}"
-            await run_worker(worker, Projector(pool, client, holder=holder), stop, health)
+            projector = Projector(pool, client, holder=holder, secrets=CredentialSource(pool, keks).secrets)
+            await run_worker(worker, projector, stop, health)
         finally:
             server.close()
             await server.wait_closed()

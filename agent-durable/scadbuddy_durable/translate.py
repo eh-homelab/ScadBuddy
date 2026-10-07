@@ -21,6 +21,28 @@ _WAITING = ("waiting_approval", "waiting_input")
 _SETTLED = ("idle", "done", "failed")
 
 
+REDACTED = "[redacted]"
+
+
+def redact(text: str, secrets: Iterable[str]) -> str:
+    """agent/src/secrets.ts `redact`: every occurrence of each secret of 4 or more characters."""
+    for secret in secrets:
+        if secret and len(secret) >= 4:
+            text = text.replace(secret, REDACTED)
+    return text
+
+
+def _scrub(value: Any, secrets: Sequence[str]) -> Any:
+    """Every string in an event, redacted (as sdkEvents.ts `scrubForLog` scrubs classic's)."""
+    if isinstance(value, str):
+        return redact(value, secrets)
+    if isinstance(value, Mapping):
+        return {k: _scrub(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v, secrets) for v in value]
+    return value
+
+
 def durable_approval_id(session_id: str, tool_use_id: str) -> str:
     """Ruling 7: the id `approval.required` carries, which the approval routes recognise."""
     return f"durable:{session_id}:{tool_use_id}"
@@ -61,7 +83,8 @@ class Translator:
     the log with no result yet, and `resolved` those of them an `approval.resolved` in the
     log already settled (a projector taking over a session mid-turn reads both there).
     An open approval holds the status at `waiting_approval` until its result; `cancelled`
-    resolves only the ones nobody resolved.
+    resolves only the ones nobody resolved. `secrets` (the credentials a segment may have
+    run with) are redacted from every event, as classic redacts its turn's.
     """
 
     def __init__(
@@ -70,9 +93,12 @@ class Translator:
         tiers: Mapping[str, str],
         open_approvals: Iterable[str] = (),
         resolved: Iterable[str] = (),
+        *,
+        secrets: Sequence[str] = (),
     ) -> None:
         self._sid = session_id
         self._tiers = tiers
+        self._secrets = [s for s in secrets if s and len(s) >= 4]
         self._open: list[str] = list(dict.fromkeys(open_approvals))
         self._resolved: set[str] = set(resolved)
         self._texts: list[_Text] = []
@@ -183,6 +209,8 @@ class Translator:
         return Batch([*events, self._event("session.status", status=status)], status, final)
 
     def _event(self, kind: str, **fields: Any) -> dict[str, Any]:
+        if self._secrets:
+            fields = _scrub(fields, self._secrets)
         return {"v": PROTOCOL_VERSION, "type": kind, "sessionId": self._sid, **fields}
 
 

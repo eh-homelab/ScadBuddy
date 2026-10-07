@@ -254,3 +254,21 @@ def test_a_takeover_knows_which_open_approvals_were_resolved() -> None:
     assert b.status is None  # c2 still waits
     stopped = t.feed(ev("cancelled", 8))
     assert [e["id"] for e in stopped.events if e["type"] == "approval.resolved"] == [f"durable:{S}:c2"]
+
+
+def test_the_credential_never_reaches_the_log() -> None:
+    # Classic redacts its turn's credentials from every event it logs (manager.ts
+    # `scrubForLog`, secrets.ts `redact`); the plugin's error text may quote one.
+    secret = "sk-ant-api03-secret-value"
+    t = Translator(S, TIERS, secrets=[secret, "abc"])
+    events = [
+        *t.feed(text(1, f"the key is {secret}")).events,
+        *t.feed(
+            ev("error", 2, error=f"Claude run failed: 401 for key {secret}; abc is too short to redact")
+        ).events,
+    ]
+    assert secret not in json.dumps(events)
+    assert (
+        p("error", message="Claude run failed: 401 for key [redacted]; abc is too short to redact") in events
+    )
+    assert p("assistant.text.delta", messageId=f"{S}-1", delta="the key is [redacted]") in events

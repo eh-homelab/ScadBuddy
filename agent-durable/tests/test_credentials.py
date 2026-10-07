@@ -128,3 +128,17 @@ async def test_no_usable_row_names_each_refusal_without_the_secret(pool: AsyncCo
 async def test_an_empty_table_raises(pool: AsyncConnectionPool) -> None:
     with pytest.raises(NoUsableCredential):
         await CredentialSource(pool, [KEK]).first_usable()
+
+
+@pytest.mark.requires_postgres
+async def test_every_secret_that_opens_is_one_to_redact(pool: AsyncConnectionPool) -> None:
+    # Whichever credential a segment ran with, even one disabled since: never a foreign one.
+    await insert(pool, "a", 0, "sk-secret-a", status="disabled")
+    await insert(pool, "b", 1, "sk-secret-b", status="cooling_down", cooldown="1 hour")
+    await insert(pool, "c", 2, "sk-secret-c", kek=FOREIGN)
+    await insert(pool, "d", 3, "sk-secret-d", kind="gateway", base_url=GATEWAY)
+    assert sorted(await CredentialSource(pool, [KEK]).secrets()) == [
+        "sk-secret-a",
+        "sk-secret-b",
+        "sk-secret-d",
+    ]
