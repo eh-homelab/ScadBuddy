@@ -148,20 +148,6 @@ async def test_the_output_is_matched_by_its_recorded_parts(tmp_path: Path) -> No
     assert choose_output(job, None) == written  # one output: that one
 
 
-async def test_the_output_is_matched_by_its_plate_too(tmp_path: Path) -> None:
-    """#1007: one Parts set laid out on two plates writes two outputs with the same Parts;
-    only the plate tells them apart."""
-    _, job, written = await finished_job(tmp_path, job_id="j1")
-    other_plate = written.model_copy(
-        update={"record": written.record.model_copy(update={"plate_key": "other-plate"})}
-    )
-    both = job.model_copy(update={"outputs": [other_plate, written]})
-    assert choose_output(both, written.record) == written
-    assert choose_output(both, other_plate.record) == other_plate
-    gone = written.record.model_copy(update={"plate_key": "no-such-plate"})
-    assert choose_output(both, gone) is None
-
-
 def _two_legacy(store: OutputStore, job: Job) -> tuple[str, str]:
     """A second output saved before manifests, of the same render, both waiting on it."""
     first = store.ids_for("demo")[0]

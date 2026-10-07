@@ -34,23 +34,16 @@ logger = logging.getLogger(__name__)
 
 def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | None:
     """The re-render's output that is this output: the job's only one, else the one
-    built from the same Parts on the same plate. A Part's key is its slug, revision, file
-    and params, so the same inputs at the same revision give the same keys; a pipeline
-    that lays one Parts set out on several plates writes an output per plate, which
-    only the plate tells apart (#1007)."""
+    built from the same Parts. A Part's key is its slug, revision, file and params, so
+    the same inputs at the same revision give the same keys. Two outputs of one job with
+    the same Parts are not told apart: a saved output records neither its index nor its
+    pipeline name (#1007 item 2)."""
     if len(job.outputs) == 1:
         return job.outputs[0]
     if record is None:
         return None
     wanted = set(record.parts)
-    return next(
-        (
-            out
-            for out in job.outputs
-            if set(out.record.parts) == wanted and out.record.plate_key == record.plate_key
-        ),
-        None,
-    )
+    return next((out for out in job.outputs if set(out.record.parts) == wanted), None)
 
 
 #: The events that settle a job: its re-render is attached, or marked with why not.
