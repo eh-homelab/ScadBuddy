@@ -1332,4 +1332,42 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
     const found = [...media.matchAll(/^THUMBNAIL_VERSION = (\d+)$/gm)].map((match) => Number(match[1]))
     expect(found).toEqual([MEDIA_THUMBNAIL_VERSION])
   })
+
+  describe('getSettings (#1039)', () => {
+    function counting() {
+      let reads = 0
+      server.use(
+        http.get('/api/v1/settings', () => {
+          reads += 1
+          return HttpResponse.json({ display_unit: 'mm', n: reads })
+        }),
+      )
+      return () => reads
+    }
+
+    it('shares one request among callers that ask at once, each with its own copy', async () => {
+      const reads = counting()
+      const [a, b] = await Promise.all([api.getSettings(), api.getSettings()])
+      expect(reads()).toBe(1)
+      expect(a).toEqual(b)
+      expect(a).not.toBe(b)
+    })
+
+    it('reads afresh once the shared request has answered', async () => {
+      const reads = counting()
+      await api.getSettings()
+      await api.getSettings()
+      expect(reads()).toBe(2)
+    })
+
+    it('never lets a caller after a save join a read started before it', async () => {
+      const reads = counting()
+      server.use(http.put('/api/v1/settings', () => HttpResponse.json({})))
+      const before = api.getSettings()
+      const saved = api.putSettings({})
+      const after = api.getSettings()
+      await Promise.all([before, saved, after])
+      expect(reads()).toBe(2)
+    })
+  })
 })
