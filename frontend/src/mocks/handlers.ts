@@ -3094,6 +3094,7 @@ export const handlers = [
     const now = new Date().toISOString()
     const run: PrintRun = {
       id: `run-${nextNumber()}`,
+      subject: `output:${output.id}`,
       output_id: output.id,
       status: 'succeeded',
       created_at: now,
