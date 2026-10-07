@@ -73,8 +73,11 @@ export function getPath(root: Json, path: string): Json | undefined {
   return node
 }
 
+/** `root` with `value` at a dotted path; a path with an `UNSAFE_KEYS` segment leaves it as it is (#1275). */
 export function setPath(root: JsonObject, path: string, value: Json): JsonObject {
-  const [head = '', ...rest] = path.split('.')
+  const segments = path.split('.')
+  if (segments.some((segment) => UNSAFE_KEYS.has(segment))) return root
+  const [head = '', ...rest] = segments
   if (rest.length === 0) return { ...root, [head]: value }
   const child = root[head]
   return { ...root, [head]: setPath(isJsonObject(child) ? child : {}, rest.join('.'), value) }

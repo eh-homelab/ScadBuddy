@@ -44,6 +44,13 @@ describe('inputs from a template are data, never prototype', () => {
     expect(Object.getPrototypeOf(merged)).toBe(Object.prototype)
     expect(({} as Record<string, unknown>)['polluted']).toBeUndefined()
   })
+  it('setPath writes no __proto__, constructor or prototype segment (#1275)', () => {
+    for (const path of ['__proto__', '__proto__.polluted', 'a.constructor', 'a.prototype.x']) {
+      const root = { a: { b: 1 } }
+      expect(setPath(root, path, 1)).toBe(root)
+    }
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined()
+  })
   it('getPath reads own keys only', () => {
     expect(getPath({ a: {} }, 'constructor')).toBeUndefined()
     expect(getPath({ a: {} }, 'a.toString')).toBeUndefined()
