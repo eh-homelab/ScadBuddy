@@ -584,7 +584,7 @@ export function SettingsPage() {
   const unit = value('display_unit') as DisplayUnit
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="sb-settings h-full overflow-y-auto">
       <nav aria-label="Settings sections" className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur">
         {/* #969: wraps from sm up so every section shows at a glance; on a phone it
             scrolls sideways, with a fade on the right edge to say there is more. */}
