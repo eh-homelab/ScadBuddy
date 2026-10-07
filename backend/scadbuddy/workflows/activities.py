@@ -622,6 +622,8 @@ class RenderActivities:
             try:
                 job = await asyncio.to_thread(p.read, projection.job_id)
             except JobNotFoundError:
+                # Gone (pruned): nothing to render into. Unlike the writes below, where
+                # a missing row lets the pipeline carry on, here False stops it.
                 return False
             return job.state == "running"
         if projection.state is None:

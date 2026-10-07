@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -48,7 +49,7 @@ from scadbuddy.render.job_models import (
     now,
     render_key,
 )
-from scadbuddy.render.jobs import SnapshotUnavailableError
+from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, SnapshotUnavailableError
 from scadbuddy.render.projection import (
     CLOSED_ERROR,
     LEGACY_UNSTARTED_ERROR,
@@ -568,7 +569,8 @@ async def test_a_refused_submit_supersedes_nothing(
         await service.aclose()
 
     # No render has finished yet: the initial estimate (#603).
-    assert refused.value.depth == 1 and refused.value.retry_after == 10
+    assert refused.value.depth == 1
+    assert refused.value.retry_after == math.ceil(INITIAL_RENDER_ESTIMATE)
     assert waiting.state == "pending" and waiting.claims == 1
     assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total", RENDER) == 1
 
@@ -2101,7 +2103,7 @@ async def test_retry_after_is_how_long_renders_take_now(
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: None)
-        assert await service.retry_after() == 10
+        assert await service.retry_after() == math.ceil(INITIAL_RENDER_ESTIMATE)
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 42.2)
         assert await service.retry_after() == 43
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 0.2)
