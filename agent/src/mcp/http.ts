@@ -272,7 +272,7 @@ export function mountMcp(
   // Sweeps on a timer, not only when a session opens, so an abandoned session
   // (dropped without DELETE) is ended promptly even when nobody else connects.
   // unref'd: it never keeps the process alive; `close` stops it.
-  const sweeper = setInterval(() => void sweep(Date.now()), deps.sweepIntervalMs ?? 60_000)
+  const sweeper = setInterval(() => void sweep(performance.now()), deps.sweepIntervalMs ?? 60_000)
   sweeper.unref()
 
   async function end(id: string): Promise<void> {
@@ -344,12 +344,12 @@ export function mountMcp(
       // callers, the holder of the session id for anonymous ones. Another
       // principal, even a valid one, may not ride on it.
       if (session.principalId !== principal.id) return jsonRpcError(403, -32001, 'Session belongs to another caller')
-      session.lastSeen = Date.now()
+      session.lastSeen = performance.now()
       return traced(request, (req, options) => session.transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }))
     }
 
     if (request.method !== 'POST') return jsonRpcError(400, -32000, 'Mcp-Session-Id header is required')
-    await sweep(Date.now())
+    await sweep(performance.now())
     const key = callerKey(auth.principal)
     const own = [...sessions.values()].filter((s) => s.callerKey === key).length
     if (own >= maxPerCaller) {
@@ -373,7 +373,7 @@ export function mountMcp(
       sessionIdGenerator: () => id,
       eventStore: new BoundedEventStore(),
       onsessioninitialized: (sid) => {
-        sessions.set(sid, { transport, server, detach, principalId: principal.id, callerKey: key, lastSeen: Date.now() })
+        sessions.set(sid, { transport, server, detach, principalId: principal.id, callerKey: key, lastSeen: performance.now() })
       },
       onsessionclosed: (sid) => {
         void end(sid)

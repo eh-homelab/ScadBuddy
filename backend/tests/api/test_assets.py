@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -445,6 +446,15 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     assert "scadbuddy_assets_swept_total 1.0" in client.get("/metrics").text
 
 
+def _until(done: Callable[[], bool], timeout: float = 30) -> None:
+    """The boot's sweep is the housekeeping Schedule's run (review #1095 1), which
+    starts once the app's library worker has set the Schedule up."""
+    deadline = time.monotonic() + timeout
+    while not done():
+        assert time.monotonic() < deadline, "the boot's sweep never ran"
+        time.sleep(0.1)
+
+
 @pytest.mark.parametrize(("interval", "swept"), [(86400.0, True), (0.0, False)])
 def test_the_boot_sweeps_unless_the_sweep_is_off(
     settings: Settings, pg_conninfo: str, file_model: str, interval: float, swept: bool
@@ -455,8 +465,11 @@ def test_the_boot_sweeps_unless_the_sweep_is_off(
 
     booted = settings.model_copy(update={"asset_sweep_interval": interval})
     with TestClient(create_app(booted)) as second:
-        found = second.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code
-    assert found == (404 if swept else 200)
+        url = f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}"
+        if swept:
+            _until(lambda: second.get(url).status_code == 404)
+        else:
+            assert second.get(url).status_code == 200
 
 
 def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
@@ -464,11 +477,13 @@ def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
 ) -> None:
     """No backfill (#591): the usage is the rows, whatever an old ledger says, and the
     boot's sweep removes the ledger and the sidecars; an upload writes neither."""
+    settings = settings.model_copy(update={"asset_sweep_interval": 86400.0})  # the boot's sweep
     ledger = paths.assets.with_name(f".{paths.assets.name}.usage.json")
     sidecar = paths.assets / f"{'e' * 64}.json"
     for path in (ledger, sidecar):
         path.write_text(json.dumps({"count": 42, "bytes": 4242, "dirty": False}))
     with TestClient(create_app(settings)) as test_client:
+        _until(lambda: not ledger.exists() and not sidecar.exists())
         usage = test_client.get("/api/v1/assets/usage").json()
         uploaded = _upload(test_client, _svg(1))
     assert (usage["count"], usage["bytes"]) == (0, 0)

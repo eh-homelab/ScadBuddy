@@ -4,15 +4,23 @@ import { assertGatewayHostAllowed, type Resolver, systemResolver } from '../http
 
 // Why a query failed, per credential (#1093). Claude Code reports a failed
 // model request three ways, all measured against test/support/fakeAnthropic.ts
-// on Claude Code 2.1.283 (test/fallback.e2e.test.ts):
+// on Claude Code 2.1.283, and again on 2.1.287 (test/fallback.e2e.test.ts):
 //
 //   - `system/api_retry` before each retry it makes, with `error_status` (null
 //     for a connection error) and an `error` category. It retries 401, 429
 //     without a long `retry-after`, 5xx and 529, up to CLAUDE_CODE_MAX_RETRIES.
 //   - a synthetic `assistant` message (model "<synthetic>") with `error` set,
 //     when it gives up. A 403, a 400 and a 429 whose `retry-after` is long are
-//     not retried at all: this is the only sign of them.
+//     not retried with an `api_retry`: this is the only sign of them.
 //   - the `result`, with `is_error` and `api_error_status`.
+//
+// New in 2.1.287 (#1540): a 400 that is not a billing refusal is sent once
+// more, on the same credential, without the `thinking-display-updates` beta
+// that version adds, in case the beta was what the endpoint refused (its
+// bundle: "retry:thinking-display-updates-unclaimed"). Measured through a
+// gateway, as the fake is configured: at most once per query, and the
+// messages above are exactly as before, so nothing here sees it. A refused
+// request is not billed, so it costs one more request, not money.
 //
 // Neither carries the response headers. A 429 with `retry-after: 60` is
 // reported as `api_retry` with `retry_delay_ms: 60000`, but one with

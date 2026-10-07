@@ -53,6 +53,14 @@ describe('trusted proxies', () => {
     expect(list.check('fd12::1', 'ipv6')).toBe(true)
   })
 
+  // #1087: Number('') is 0, so `10.0.0.0/` read as 0.0.0.0/0 and trusted every peer.
+  it.each(['10.0.0.0/', 'fd00::/', '10.0.0.0/ 8', '10.0.0.0/+8', '10.0.0.0/0x8', '10.0.0.0/1e1', '10.0.0.0/33'])(
+    'refuses the malformed range %j',
+    (entry) => {
+      expect(() => parseCidrList(entry)).toThrow(OriginConfigError)
+    },
+  )
+
   it('believes forwarded headers from a trusted peer only, including an IPv4-mapped one', () => {
     const policy = originPolicy('https://scadbuddy.example', '10.42.0.0/16')
     const headers = { host: 'agent:8081', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'scadbuddy.example' }

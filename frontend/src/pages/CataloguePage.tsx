@@ -97,14 +97,16 @@ export function CataloguePage() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
-        <div className="mb-5 flex items-end justify-between gap-4">
-          <div>
+        {/* Wraps, so on a phone the actions drop under the intro rather than pushing
+            Add model past the screen's edge (#932). */}
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+          <div className="min-w-0 flex-[1_1_16rem]">
             <h1 className="text-lg font-semibold tracking-tight">Models</h1>
             <p className="mt-0.5 text-[13px] text-muted">
               Pick a model to set its parameters and generate a multi-colour 3MF.
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button onClick={() => void navigate('/new')}>Paste source</Button>
             <Button onClick={() => setImportOpen(true)}>Import from URL</Button>
             <Button variant="primary" onClick={() => setUploadOpen(true)}>

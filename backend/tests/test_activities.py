@@ -10,7 +10,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
@@ -29,9 +30,18 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, render_key
+from scadbuddy.render.job_models import (
+    CANCELLED_ERROR,
+    Job,
+    JobResult,
+    OutputRecord,
+    PartInfo,
+    PipelineOutput,
+    StepInfo,
+    render_key,
+)
 from scadbuddy.render.jobs import RAW_RENDER_NAME
-from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
+from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store import BlobRefs
@@ -58,9 +68,10 @@ from scadbuddy.workflows.models import (
     RenderMainResult,
     piece_key,
 )
-from scadbuddy.workflows.pipelines import TemplatePipeline
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from tests.conftest import PgPool, write_openscad_3mf
 from tests.support.activities import REVISION, demo_paths, piece_request, worker_deps
+from tests.support.renders import render_to_end
 from tests.support.store import local_content, store_pool
 from tests.support.temporal import temporal_client
 
@@ -277,10 +288,11 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     acts = RenderActivities(worker_deps(tmp_path, paths))
     env = ActivityEnvironment()
     req = piece_request()
-    prepared = await env.run(acts.prepare, req)
 
+    # `prepare` derives the schema to check the parameters (phase 4), so a source that
+    # does not parse fails there, before any render.
     with pytest.raises(ApplicationError) as raised:
-        await env.run(acts.render_main, req, prepared)
+        await env.run(acts.prepare, req)
 
     assert raised.value.type == "OpenSCADError"
     assert raised.value.non_retryable
@@ -301,6 +313,26 @@ async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -
     assert raised.value.non_retryable
     failure = raised.value.details[0]
     assert isinstance(failure, Failure)
+    assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
+async def test_an_openscad_failure_in_render_main_carries_its_failure(tmp_path: Path) -> None:
+    """The source parsed at `prepare`, then stopped parsing: `render_main` maps the
+    render's OpenSCADError to a non-retryable failure with its log tail."""
+    paths = demo_paths(tmp_path)
+    acts = RenderActivities(worker_deps(tmp_path, paths))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    paths.model_source("demo").write_text("%%FAIL%%\n", encoding="utf-8")
+
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(acts.render_main, req, prepared)
+
+    assert raised.value.type == "OpenSCADError" and raised.value.non_retryable
+    failure = raised.value.details[0]
+    assert isinstance(failure, Failure)
+    assert failure.error == raised.value.message
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
 
 
@@ -366,6 +398,23 @@ async def test_render_main_heartbeats_while_its_checkout_waits(
 # ── project ────────────────────────────────────────────────────────────────────
 
 
+def _output(name: str, key: str) -> PipelineOutput:
+    return PipelineOutput(
+        name=name,
+        result=_result(),
+        blob_keys=[key],
+        record=OutputRecord(
+            revision="r",
+            ui_api=None,
+            pipeline_api=1,
+            pipeline_version="v",
+            inputs_v=0,
+            plate_key="default",
+            parts=[key],
+        ),
+    )
+
+
 @pytest.fixture
 def projection(pg_conninfo: str) -> Iterator[JobProjection]:
     bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
@@ -414,8 +463,8 @@ def projecting(
 
 def _submitted(projection: JobProjection) -> Job:
     job = _job(width=1)
-    projection.submit(job, render_key("demo", {"width": 1}, None))
-    return job
+    key = render_key("demo", {"width": 1}, None)
+    return projection.accept(job, key, workflow_id=f"render-{key}", run_id=uuid.uuid4().hex)
 
 
 @pytest.mark.requires_postgres
@@ -436,6 +485,51 @@ async def test_project_running_then_steps(
 
 
 @pytest.mark.requires_postgres
+async def test_project_running_records_the_queue_wait_once(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """From the row's insert to its workflow beginning the render (#1088)."""
+    metrics = Metrics()
+    deps = worker_deps(tmp_path, demo_paths(tmp_path), projection=projection)
+    acts = RenderActivities(replace(deps, metrics=metrics))
+    job = _job(width=1)
+    job.created_at = datetime.now(UTC) - timedelta(seconds=30)
+    key = render_key("demo", {"width": 1}, None)
+    projection.accept(job, key, workflow_id=f"render-{key}", run_id=uuid.uuid4().hex)
+
+    await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
+    # A second "running" (a retried activity) finds the row already started.
+    await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
+
+    registry = metrics.registry
+    assert registry.get_sample_value("scadbuddy_render_queue_wait_seconds_count") == 1
+    waited = registry.get_sample_value("scadbuddy_render_queue_wait_seconds_sum")
+    assert waited is not None and 29 <= waited < 120
+
+
+@pytest.mark.requires_postgres
+async def test_project_running_says_whether_the_row_is_still_open(
+    projecting: tuple[RenderActivities, JobProjection, BlobRefs],
+) -> None:
+    """#603: an older build's API inserts the row and then starts the workflow, so a
+    release can cancel the row before the run's first step. That step says so, and the
+    run renders nothing. A retried step finds its own row running: still open."""
+    acts, projection, _ = projecting
+    job = _submitted(projection)
+    assert await acts.project(Projection(job_id=job.id, slug="demo", state="running")) is True
+    assert await acts.project(Projection(job_id=job.id, slug="demo", state="running")) is True
+
+    cancelled = _submitted(projection)
+    assert projection.release_claim(cancelled.id, slug="demo") is not None
+    running = Projection(job_id=cancelled.id, slug="demo", state="running")
+    assert await acts.project(running) is False
+    assert projection.read(cancelled.id).state == "cancelled"
+
+    gone = Projection(job_id=uuid.uuid4().hex, slug="demo", state="running")
+    assert await acts.project(gone) is False
+
+
+@pytest.mark.requires_postgres
 async def test_project_done_copies_the_result_and_refs_the_blob(
     projecting: tuple[RenderActivities, JobProjection, BlobRefs],
 ) -> None:
@@ -451,6 +545,8 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
         log_tail=["fine"],
         steps=[StepInfo(name="render", state="done", done=1, total=1)],
         blob_key="piece-key",
+        blob_keys=["piece-key", "output-x-0"],
+        outputs=[_output("house", "piece-key"), _output("garage", "output-x-0")],
     )
     await acts.project(done)
 
@@ -462,7 +558,8 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
     assert stored.diagnostics == _result().diagnostics
     assert stored.diagnostics_dropped == 2
     assert stored.steps == done.steps
-    assert "piece-key" in refs.referenced()
+    assert stored.outputs == done.outputs  # both, in order
+    assert {"piece-key", "output-x-0"} <= refs.referenced()
 
     # A second `done` (a retried activity) returns and changes nothing.
     await acts.project(done.model_copy(update={"log_tail": ["other"]}))
@@ -587,8 +684,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     paths = demo_paths(tmp_path)
     refs = BlobRefs(projection.pool)
     deps = worker_deps(tmp_path, paths, projection=projection, refs=refs)
-    job, again = (_job(width=1).model_copy(update={"model_version": REVISION}) for _ in "ab")
-    projection.submit(job, render_key("demo", {"width": 1}, REVISION))
+    request = _job(width=1).model_copy(update={"model_version": REVISION})
     key = piece_key("demo", REVISION, "model.scad", {"width": 1})
     raw = deps.blobs.dir_for(key) / RAW_RENDER_NAME
 
@@ -598,26 +694,16 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             client,
             queue,
             RenderActivities(deps),
+            pipeline=PipelineActivities(deps),
             build_id="test",
             max_concurrent_activities=2,
         ):
             # A versioned worker takes new workflows only once its version is current.
             await _make_current(client)
-            await asyncio.wait_for(
-                client.execute_workflow(
-                    TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
-                ),
-                timeout=120,
-            )
+            job = await render_to_end(client, queue, request)
             rendered = raw.stat().st_mtime_ns
             # The same piece again, after the first one closed: answered from the blob.
-            projection.submit(again, render_key("demo", {"width": 1}, REVISION))
-            await asyncio.wait_for(
-                client.execute_workflow(
-                    TemplatePipeline.run, again, id=workflow_id_for(again.id), task_queue=queue
-                ),
-                timeout=120,
-            )
+            again = await render_to_end(client, queue, request)
 
     stored = projection.read(job.id)
     assert stored.state == "done", stored.error
@@ -650,19 +736,14 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
             client,
             queue,
             RenderActivities(deps),
+            pipeline=PipelineActivities(deps),
             build_id="test",
             max_concurrent_activities=2,
         ):
             await _make_current(client)
 
-            async def rendered(job: Job) -> Path:
-                projection.submit(job, render_key("demo", {"width": 1}, None))
-                await asyncio.wait_for(
-                    client.execute_workflow(
-                        TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
-                    ),
-                    timeout=120,
-                )
+            async def rendered(request: Job) -> Path:
+                job = await render_to_end(client, queue, request)
                 done = projection.read(job.id)
                 assert done.state == "done", done.error
                 assert done.result is not None
@@ -706,6 +787,8 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
 
     monkeypatch.setattr(activities_module, "render_main", refuses)
     monkeypatch.setattr(activities_module, "render_solids_stage", refuses)
+    # The fake openscad's schema has no file parameter; this is about the stage.
+    monkeypatch.setattr(activities_module, "params_problem", lambda *_: None)
     paths = demo_paths(tmp_path)
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
@@ -745,6 +828,8 @@ async def test_an_upload_whose_local_copy_vanished_is_not_called_absent_from_the
         raise AssetUnavailableError("label", meta.id)
 
     monkeypatch.setattr(activities_module, "render_main", vanished)
+    # The fake openscad's schema has no file parameter; this is about the stage.
+    monkeypatch.setattr(activities_module, "params_problem", lambda *_: None)
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
             worker_deps(tmp_path, paths),

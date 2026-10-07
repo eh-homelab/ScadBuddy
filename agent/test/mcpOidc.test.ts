@@ -187,6 +187,24 @@ describe('/api/v1/ai/mcp/oidc (Settings)', () => {
     return { call, stored: () => stored, contexts }
   }
 
+  it('answers its read only to the UI, like every sibling read (#989)', async () => {
+    const { call } = settingsApp()
+    const https = { 'x-forwarded-proto': 'https' }
+    for (const headers of [
+      { ...UI, origin: 'https://evil.example' },
+      { ...https, host: 'scadbuddy.test', 'sec-fetch-site': 'cross-site' },
+      // DNS rebinding: the attacker's name in Host, and no Origin on a same-origin GET.
+      { ...https, host: 'evil.example' },
+    ]) {
+      const res = await call('GET', '', undefined, headers)
+      expect(res.status, JSON.stringify(headers)).toBe(403)
+      expect(JSON.stringify(await res.json())).not.toContain('scadbuddy:read')
+    }
+    // The UI's own same-origin GET sends no Origin.
+    const own = { ...https, host: 'scadbuddy.test', 'sec-fetch-site': 'same-origin' }
+    expect((await call('GET', '', undefined, own)).status).toBe(200)
+  })
+
   it('shows the defaults, the resource and the metadata URL before anything is saved', async () => {
     const { call } = settingsApp()
     const res = await call('GET')

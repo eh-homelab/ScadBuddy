@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { DEFAULT_QUERY, type CatalogueQuery } from '../lib/catalogueQuery'
 import { CatalogueFilters } from './CatalogueFilters'
 
@@ -40,6 +40,25 @@ function Stateful({ initial, onChange }: { initial: CatalogueQuery; onChange: (q
 
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 400)))
 
+/**
+ * For a test whose point is a click landing while the search is still pending: the
+ * debounce's clock is held until `settleHeld`, so a slow host cannot let it fire between
+ * the typing and the click (#1485). Real timers come back after the test.
+ */
+function heldDebounce() {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  // Testing Library's act wrapper waits on a setTimeout, and advances fake timers only
+  // through a global `jest`.
+  vi.stubGlobal('jest', { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) })
+  onTestFinished(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+  return userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+}
+
+const settleHeld = () => act(async () => vi.advanceTimersByTimeAsync(400))
+
 describe('CatalogueFilters', () => {
   it('reports the search once typing settles, replacing the history entry', async () => {
     const { onChange, user } = setup()
@@ -73,8 +92,21 @@ describe('CatalogueFilters', () => {
     other.remove()
   })
 
+  it('folds the tags behind a toggle, keeping a selected one in view (#932)', async () => {
+    const { user } = setup({ tags: ['keychain'] })
+    const toggle = screen.getByRole('button', { name: 'Tags 2' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: 'keychain 2' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: 'Tea & Coffee 1' })).not.toBeInTheDocument()
+
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: 'Tea & Coffee 1' })).toBeInTheDocument()
+  })
+
   it('toggles a tag chip, with its count', async () => {
     const { onChange, user } = setup({ tags: ['keychain'] })
+    await user.click(screen.getByRole('button', { name: 'Tags 2' }))
     const on = screen.getByRole('button', { name: 'keychain 2' })
     expect(on).toHaveAttribute('aria-pressed', 'true')
     await user.click(on)
@@ -108,12 +140,12 @@ describe('CatalogueFilters', () => {
 
   it('does not bring back a pending search after "Clear filters"', async () => {
     const onChange = vi.fn()
-    const user = userEvent.setup()
+    const user = heldDebounce()
     render(<Stateful initial={{ ...DEFAULT_QUERY, tags: ['keychain'] }} onChange={onChange} />)
 
     await user.type(screen.getByRole('searchbox'), 'ab')
     await user.click(screen.getByRole('button', { name: 'Clear filters' }))
-    await settle()
+    await settleHeld()
 
     expect(onChange).toHaveBeenCalledOnce()
     expect(onChange).toHaveBeenLastCalledWith(DEFAULT_QUERY)
@@ -122,12 +154,13 @@ describe('CatalogueFilters', () => {
 
   it('carries a pending search into a tag toggle rather than losing or re-applying it', async () => {
     const onChange = vi.fn()
-    const user = userEvent.setup()
+    const user = heldDebounce()
     render(<Stateful initial={DEFAULT_QUERY} onChange={onChange} />)
 
+    await user.click(screen.getByRole('button', { name: 'Tags 2' }))
     await user.type(screen.getByRole('searchbox'), 'ab')
     await user.click(screen.getByRole('button', { name: 'keychain 2' }))
-    await settle()
+    await settleHeld()
 
     expect(onChange).toHaveBeenCalledOnce()
     expect(onChange).toHaveBeenLastCalledWith({ ...DEFAULT_QUERY, q: 'ab', tags: ['keychain'] })

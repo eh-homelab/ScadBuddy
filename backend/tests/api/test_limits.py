@@ -12,6 +12,7 @@ from scadbuddy.api.limits import (
     ClientGoneError,
     unless_the_client_leaves,
 )
+from tests.support.operations import press
 
 
 def _request(receive: object) -> Request:
@@ -58,7 +59,7 @@ def test_a_body_too_large_is_refused_on_its_headers(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models",
         content=b"x" * (MAX_TEXT_BODY_BYTES + 1),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge"},
     )
     assert response.status_code == 413
     assert response.headers["content-type"] == "application/problem+json"
@@ -76,8 +77,26 @@ def test_a_chunked_body_is_cut_off_at_the_limit(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models",
         content=chunks(),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge"},
     )
+    assert response.status_code == 413
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "most this API reads" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("path", ["/api/v1/models/check", "/api/v1/lsp/diagnostics"])
+def test_a_chunked_json_body_is_a_413_on_a_pydantic_route(client: TestClient, path: str) -> None:
+    """#1315: FastAPI reads a pydantic body itself and turns any error raised while
+    reading into a 400 "error parsing the body", so the gate's own exception never
+    reached it. The refusal is the same 413 a declared length gets."""
+
+    def chunks() -> object:
+        yield b'{"source": "'
+        for _ in range(MAX_TEXT_BODY_BYTES // (1024 * 1024) + 4):
+            yield b"a" * (1024 * 1024)
+        yield b'"}'
+
+    response = client.post(path, content=chunks(), headers={"Content-Type": "application/json"})
     assert response.status_code == 413
     assert response.headers["content-type"] == "application/problem+json"
     assert "most this API reads" in response.json()["detail"]
@@ -89,6 +108,7 @@ def test_an_oversized_upload_is_refused_like_a_paste(client: TestClient) -> None
     response = client.post(
         "/api/v1/models",
         files={"file": ("huge.scad", b"x" * (MAX_MULTIPART_BODY_BYTES + 1), "text/plain")},
+        headers=press(),
     )
     assert response.status_code == 413
     assert response.headers["content-type"] == "application/problem+json"

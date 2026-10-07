@@ -16,17 +16,21 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from email.utils import parsedate
 from pathlib import Path as FilePath
-from typing import IO, Annotated, Any
+from typing import IO, Annotated, Any, Literal
 
-from fastapi import APIRouter, Path, Request, status
+from fastapi import APIRouter, Path, Query, Request, status
 from fastapi.responses import FileResponse, Response
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
+from starlette.datastructures import Headers
 
 from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
 from scadbuddy.api.models import require_model_exists
@@ -332,16 +336,20 @@ def _no_item(slug: str, item_id: str) -> ApiError:
     responses={
         200: {"content": {"image/*": {}, "video/*": {}}},
         206: {"description": "The byte range asked for with `Range`"},
+        304: {"description": "Unchanged since `If-None-Match` or `If-Modified-Since`"},
     },
     summary="One media file",
     description=(
         "Serves one image or video of the template. Honours `Range`, so a video can "
         "seek. An item's id never changes its contents, so it is cached as "
-        "`immutable` -- except `thumbnail`, the legacy item, which is `no-cache`. "
+        "`immutable` -- except `thumbnail`, the legacy item, which is `no-cache` and "
+        "answers 304 to a matching `If-None-Match` or `If-Modified-Since`. "
         "404 for an unknown id and for an entry whose file is missing."
     ),
 )
-def get_media(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> FileResponse:
+def get_media(
+    slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep, request: Request
+) -> Response:
     require_model_exists(catalogue, slug)
     try:
         item, path = catalogue.media_item(slug, item_id)
@@ -350,7 +358,30 @@ def get_media(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> 
     except MediaNotFoundError:
         raise _no_item(slug, item_id) from None
     cache = LEGACY_CACHE_CONTROL if item.id == LEGACY_ID else IMMUTABLE_CACHE_CONTROL
-    return FileResponse(path, media_type=item.content_type, headers={"Cache-Control": cache})
+    headers = {"Cache-Control": cache}
+    # FileResponse sends ETag and Last-Modified but, unlike StaticFiles, never answers a
+    # conditional request with them, so `no-cache` meant a full download every load
+    # (#1042). The validators come from one stat here; the file is stat'ed again when it
+    # is sent, so one replaced in between (a thumbnail PUT) is sent whole, never cut to
+    # the old length.
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        raise _no_item(slug, item_id) from None
+    validators = FileResponse(path, stat_result=stat).headers
+    if _not_modified(request.headers, validators["etag"], validators["last-modified"]):
+        headers |= {"ETag": validators["etag"], "Last-Modified": validators["last-modified"]}
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return FileResponse(path, media_type=item.content_type, headers=headers)
+
+
+def _not_modified(request: Headers, etag: str, last_modified: str) -> bool:
+    """RFC 9110 §13.2.2: `If-None-Match` when sent, else `If-Modified-Since`."""
+    if (if_none_match := request.get("if-none-match")) is not None:
+        return _matches(if_none_match, etag)
+    since = parsedate(request.get("if-modified-since") or "")
+    modified = parsedate(last_modified)
+    return since is not None and modified is not None and since >= modified
 
 
 @router.get(
@@ -379,64 +410,252 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
 
 #: The longest side of a thumbnail: the gallery strip's tile at 2x, with room to spare.
 THUMBNAIL_SIDE = 192
+#: The longest side of a catalogue card's cover (#1034): a card is at most about 400 CSS
+#: pixels wide, so this is sharp at 2x. The original stays for the lightbox.
+CARD_SIDE = 800
+#: The sizes a client may ask for, by name.
+THUMBNAIL_SIDES: dict[str, int] = {"strip": THUMBNAIL_SIDE, "card": CARD_SIDE}
+ThumbnailSize = Literal["strip", "card"]
 #: The most pixels a thumbnail is decoded from: a 10 MB PNG can declare far more than
 #: a photo has, and every request would decode it again. Larger is served as it is.
 MAX_THUMBNAIL_SOURCE_PIXELS = 50_000_000
 #: The decoders a thumbnail may use: only the image types an item can be (`ACCEPTED`),
 #: so a mislabeled legacy file never reaches any other Pillow plugin.
 THUMBNAIL_FORMATS = ("PNG", "JPEG", "WEBP")
+#: The version of what `_thumbnail_of` makes. The client asks for ``?v=`` this, and a
+#: thumbnail is cached as ``immutable`` only when it does: bump it whenever the
+#: output changes for the same source (side, quality, resampler, format), and the
+#: frontend's ``MEDIA_THUMBNAIL_VERSION`` with it, so a browser holding an old copy
+#: asks again (#1424). ``client.test.ts`` fails when the two differ (#1691).
+THUMBNAIL_VERSION = 1
+#: How many thumbnails are decoded at once: a 50 MP PNG costs some 200 MB, and a
+#: gallery strip asks for every item's thumbnail together (#1420).
+MAX_CONCURRENT_THUMBNAILS = 2
+#: How many thumbnails are kept in memory once made, so a source is decoded once
+#: rather than on every request (#1420). A WebP of `THUMBNAIL_SIDE` is some 10 kB, one
+#: of `CARD_SIDE` some 50 kB.
+THUMBNAIL_CACHE_ITEMS = 512
 
 
-def _thumbnail_of(path: FilePath) -> bytes | None:
-    """``path`` shrunk to a WebP no larger than `THUMBNAIL_SIDE`, or None when Pillow
+def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
+    """``file`` shrunk to a WebP no larger than ``side``, or None when Pillow
     cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
     `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
     header, before decoding). ``draft`` lets a JPEG decode at a fraction of its size,
-    so a large photo is still cheap enough to shrink."""
+    so a large photo is still cheap enough to shrink. Any error decoding it -- a
+    malformed EXIF block raises ``ValueError`` or ``SyntaxError`` -- is a None too,
+    since serving the file as it is is always safe.
+
+    The box is square, so an EXIF orientation of 5 to 8, which swaps width and height,
+    fits it either way round: the image is shrunk before it is turned upright, and the
+    full-size copy `exif_transpose` would make is never made (#1426)."""
+    box = (side, side)
     try:
-        with Image.open(path, formats=THUMBNAIL_FORMATS) as image:
-            image.draft("RGB", (THUMBNAIL_SIDE, THUMBNAIL_SIDE))
+        with Image.open(file, formats=THUMBNAIL_FORMATS) as image:
+            image.draft("RGB", box)
             if image.width * image.height > MAX_THUMBNAIL_SOURCE_PIXELS:
                 return None
+            image.thumbnail(box, Image.Resampling.LANCZOS)
             # Upright, as a browser shows the original: the WebP carries no EXIF.
             with ImageOps.exif_transpose(image) as upright:
-                upright.thumbnail((THUMBNAIL_SIDE, THUMBNAIL_SIDE), Image.Resampling.LANCZOS)
                 out = io.BytesIO()
                 upright.save(out, "WEBP", quality=80)
                 return out.getvalue()
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+    except (
+        UnidentifiedImageError,
+        OSError,
+        Image.DecompressionBombError,
+        ValueError,
+        SyntaxError,
+    ):
         return None
+
+
+@dataclass(frozen=True)
+class _Thumbnail:
+    body: bytes
+    media_type: str
+    #: Of the file ``body`` was read from, through the same handle.
+    stat: os.stat_result
+
+
+def _thumbnail_of(path: FilePath, content_type: str, side: int = THUMBNAIL_SIDE) -> _Thumbnail:
+    """``path`` shrunk by `_shrink`, or as it is (typed ``content_type``) when it
+    cannot be. The stat and the bytes come from one open handle, so the legacy
+    item's ETag describes what is served even if a thumbnail PUT replaces the file
+    meanwhile (#1689). ``FileNotFoundError`` when the file is gone. The fallback is
+    read whole, not streamed: an image is capped at `MAX_IMAGE_BYTES`, and at most
+    `MAX_CONCURRENT_THUMBNAILS` are held at once."""
+    with path.open("rb") as file:
+        stat = os.fstat(file.fileno())
+        small = _shrink(file, side)
+        if small is not None:
+            return _Thumbnail(small, "image/webp", stat)
+        file.seek(0)
+        return _Thumbnail(file.read(), content_type, stat)
+
+
+def _cache_key(path: FilePath, stat: os.stat_result, side: int) -> tuple[object, ...]:
+    """Which file, which content of it, and how small: an item replaced in place (the
+    legacy one) or renamed over (a thumbnail PUT) changes its inode, size or times."""
+    return (
+        str(path),
+        side,
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+class _ThumbnailCache:
+    """The WebPs made most recently, by `_cache_key`; only touched on the loop."""
+
+    def __init__(self, size: int = THUMBNAIL_CACHE_ITEMS) -> None:
+        self.size = size
+        self._items: OrderedDict[tuple[object, ...], _Thumbnail] = OrderedDict()
+
+    def get(self, key: tuple[object, ...]) -> _Thumbnail | None:
+        thumbnail = self._items.get(key)
+        if thumbnail is not None:
+            self._items.move_to_end(key)
+        return thumbnail
+
+    def put(self, path: FilePath, side: int, thumbnail: _Thumbnail) -> None:
+        key = _cache_key(path, thumbnail.stat, side)
+        self._items[key] = thumbnail
+        self._items.move_to_end(key)
+        while len(self._items) > self.size:
+            self._items.popitem(last=False)
+
+
+async def _bounded_thumbnail_of(
+    request: Request, path: FilePath, content_type: str, side: int
+) -> _Thumbnail:
+    """`_thumbnail_of`, at most `MAX_CONCURRENT_THUMBNAILS` at a time, and once per
+    content of a file: a WebP made is kept (#1420), while a file served as it is is
+    not. A request waiting its turn holds no thread, and finds the WebP a request
+    ahead of it made. The semaphore and the cache are the app's, made on first use,
+    so they belong to the loop that serves the app."""
+    state = request.app.state
+    decodes: asyncio.Semaphore | None = getattr(state, "thumbnail_decodes", None)
+    if decodes is None:
+        decodes = asyncio.Semaphore(MAX_CONCURRENT_THUMBNAILS)
+        state.thumbnail_decodes = decodes
+    cache: _ThumbnailCache | None = getattr(state, "thumbnail_cache", None)
+    if cache is None:
+        cache = _ThumbnailCache()
+        state.thumbnail_cache = cache
+    key = _cache_key(path, await asyncio.to_thread(path.stat), side)
+    if (kept := cache.get(key)) is not None:
+        return kept
+    async with decodes:
+        if (kept := cache.get(key)) is not None:
+            return kept
+        thumbnail = await asyncio.to_thread(_thumbnail_of, path, content_type, side)
+    if thumbnail.media_type == "image/webp":
+        cache.put(path, side, thumbnail)
+    return thumbnail
+
+
+def _legacy_etag(stat: os.stat_result, side: int = THUMBNAIL_SIDE) -> str:
+    """A validator for the legacy item's thumbnail, which a thumbnail PUT replaces
+    in place: from the source's mtime and size, the side and `THUMBNAIL_VERSION`."""
+    return f'W/"{stat.st_mtime_ns:x}-{stat.st_size:x}-{side}-{THUMBNAIL_VERSION}"'
+
+
+def _matches(if_none_match: str | None, etag: str) -> bool:
+    if if_none_match is None:
+        return False
+    tags = [tag.strip() for tag in if_none_match.split(",")]
+    weak = etag.removeprefix("W/")
+    return "*" in tags or any(tag.removeprefix("W/") == weak for tag in tags)
+
+
+@dataclass(frozen=True)
+class _ThumbnailSource:
+    path: FilePath
+    content_type: str
+    legacy: bool
+
+
+def _thumbnail_source(catalogue: Catalogue, slug: str, item_id: str) -> _ThumbnailSource:
+    """The file a thumbnail is made from: the image, or a video's poster. 404 for an
+    unknown id, a missing file and a video with no poster (or a poster whose file
+    is gone)."""
+    require_model_exists(catalogue, slug)
+    try:
+        item, path = catalogue.media_item(slug, item_id)
+    except ModelNotFoundError:
+        raise _no_model(slug) from None
+    except MediaNotFoundError:
+        raise _no_item(slug, item_id) from None
+    if item.kind != "video":
+        return _ThumbnailSource(path, item.content_type, item.id == LEGACY_ID)
+    try:
+        poster = catalogue.media_poster(slug, item_id)
+    except MediaNotFoundError:
+        poster = None
+    if poster is None or not poster.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no poster for {item_id!r}")
+    return _ThumbnailSource(poster, content_type_of(poster.name), False)
 
 
 @router.get(
     "/models/{slug}/media/{item_id}/thumbnail",
     response_class=Response,
-    responses={200: {"content": {"image/webp": {}, "image/*": {}}}},
+    responses={
+        200: {
+            "content": {"image/*": {}},
+            "description": "Usually `image/webp`; the item's own type when it is served as it is",
+        },
+        304: {"description": "The legacy item's thumbnail has not changed (`If-None-Match`)"},
+    },
     summary="A small copy of one item",
     description=(
         f"The image, or a video's poster, shrunk to at most {THUMBNAIL_SIDE} pixels a "
-        "side as WebP, so a strip of thumbnails does not download every original. A "
+        f"side as WebP ({CARD_SIDE} with `size=card`, for a catalogue card's cover), so "
+        "a strip of thumbnails does not download every original. A "
         "file the server cannot decode is served as it is. 404 for an unknown id, a "
-        "missing file and a video with no poster. Cached as the item itself is."
+        "missing file and a video with no poster. Cached as the item itself is when "
+        f"`v` is {THUMBNAIL_VERSION}, the current thumbnail version, and `no-cache` "
+        "otherwise; the legacy item's carries an `ETag`, and answers 304 to a "
+        "matching `If-None-Match`."
     ),
 )
-def get_media_thumbnail(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> Response:
-    require_model_exists(catalogue, slug)
+async def get_media_thumbnail(
+    slug: SlugPath,
+    item_id: MediaIdPath,
+    catalogue: CatalogueDep,
+    request: Request,
+    v: Annotated[int | None, Query(description="The thumbnail version asked for")] = None,
+    size: Annotated[
+        ThumbnailSize, Query(description="`strip` for a strip's tile, `card` for a card")
+    ] = "strip",
+) -> Response:
+    side = THUMBNAIL_SIDES[size]
+    source = await asyncio.to_thread(_thumbnail_source, catalogue, slug, item_id)
+    if source.legacy or v != THUMBNAIL_VERSION:
+        headers = {"Cache-Control": LEGACY_CACHE_CONTROL}
+    else:
+        headers = {"Cache-Control": IMMUTABLE_CACHE_CONTROL}
+    if source.legacy:
+        # A cheap check before the decode; the ETag sent is the decoded file's own.
+        try:
+            current = _legacy_etag(source.path.stat(), side)
+        except FileNotFoundError:
+            raise _no_item(slug, item_id) from None
+        if _matches(request.headers.get("if-none-match"), current):
+            headers["ETag"] = current
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     try:
-        item, path = catalogue.media_item(slug, item_id)
-        if item.kind == "video":
-            path = catalogue.media_poster(slug, item_id)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaNotFoundError:
+        thumbnail = await _bounded_thumbnail_of(request, source.path, source.content_type, side)
+    except FileNotFoundError:
         raise _no_item(slug, item_id) from None
-    cache = LEGACY_CACHE_CONTROL if item.id == LEGACY_ID else IMMUTABLE_CACHE_CONTROL
-    small = _thumbnail_of(path)
-    if small is None:
-        return FileResponse(
-            path, media_type=content_type_of(path.name), headers={"Cache-Control": cache}
-        )
-    return Response(small, media_type="image/webp", headers={"Cache-Control": cache})
+    if source.legacy:
+        headers["ETag"] = _legacy_etag(thumbnail.stat, side)
+    return Response(thumbnail.body, media_type=thumbnail.media_type, headers=headers)
 
 
 @router.post(

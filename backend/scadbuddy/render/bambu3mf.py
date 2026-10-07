@@ -729,6 +729,7 @@ def replate_3mf(
     *,
     nozzle_diameter: str | None = None,
     nozzle_stats: Sequence[str] | None = None,
+    nozzle_volume_type: Sequence[str] | None = None,
 ) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
@@ -750,6 +751,13 @@ def replate_3mf(
     the slicer's "Auto For Flush" grouping actually follows: an extruder stated with no
     nozzle gets no filament. See
     :func:`scadbuddy.bambuddy.extruders.slicer_nozzle_stats`.
+
+    ``nozzle_volume_type``, when given, is each extruder's flow in the slicer's order
+    ("Standard" or "High Flow"), the key Bambu Studio writes for a High Flow project
+    (#484); the slicer keeps it, since the H2C printer preset states none. See
+    :func:`scadbuddy.bambuddy.extruders.slicer_volume_types`. ``default_nozzle_volume_type``
+    is left alone, as Bambu Studio leaves it, and ``slice_info.config`` is never written:
+    it is the slicer's output.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
@@ -805,6 +813,8 @@ def replate_3mf(
             if nozzle_stats is not None:
                 settings["extruder_nozzle_stats"] = list(nozzle_stats)
                 settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
+            if nozzle_volume_type is not None:
+                settings["nozzle_volume_type"] = list(nozzle_volume_type)
             _set_towers(settings, [placement.tower for placement in placements])
             data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
         rewritten.append((name, data))

@@ -68,6 +68,19 @@ describe('slider', () => {
     expect(range).toHaveValue('14')
   })
 
+  it('sizes the number box for the widest value its range holds (#367)', () => {
+    // building-brick's stud_fit: "-0.06" was cut to "-0.0" in the fixed 4.5 rem box.
+    setup({ ...param, name: 'stud_fit', caption: 'Stud fit', min: -0.2, max: 0.2, step: 0.02 }, -0.06)
+    const number = screen.getByRole('spinbutton', { name: 'Stud fit value' })
+    expect(number.style.getPropertyValue('--sb-box-chars')).toBe('5')
+  })
+
+  it('makes room for an off-step value with more decimals than the step', () => {
+    setup({ ...param, name: 'wall', caption: 'Wall', min: 1, max: 5, step: 0.1 }, 1.255)
+    const number = screen.getByRole('spinbutton', { name: 'Wall value' })
+    expect(number.style.getPropertyValue('--sb-box-chars')).toBe('5')
+  })
+
   it('reports numbers, not strings', async () => {
     const { onChange, user } = setup(param, 14)
     await user.clear(screen.getByRole('spinbutton', { name: 'Text size value' }))
@@ -97,6 +110,119 @@ describe('number and integer', () => {
     await user.clear(input)
     await user.type(input, '7.6')
     expect(onChange).toHaveBeenLastCalledWith(8)
+  })
+})
+
+// #921: a value outside the declared range is flagged on the field, in its own words.
+describe.each([
+  {
+    kind: 'number field',
+    param: { group: 'Main', name: 'text_size', type: 'number', initial: 14, caption: 'Letter height', min: 8, max: 40 } as Param,
+    label: 'Letter height',
+  },
+  {
+    kind: 'slider box',
+    param: {
+      group: 'Main',
+      name: 'text_size',
+      type: 'slider',
+      initial: 14,
+      caption: 'Letter height',
+      min: 8,
+      max: 40,
+      step: 1,
+    } as Param,
+    label: 'Letter height value',
+  },
+])('the $kind range (#921)', ({ param, label }) => {
+  const field = () => screen.getByRole('spinbutton', { name: label })
+
+  it('says an out-of-range value is out of range, with the label and the range', async () => {
+    const { user } = setup(param, 14)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(field()).not.toHaveAttribute('aria-invalid')
+
+    await user.clear(field())
+    await user.type(field(), '500{Enter}')
+    expect(field()).toHaveValue(500)
+    expect(field()).toHaveAttribute('aria-invalid', 'true')
+    expect(field()).toHaveAccessibleDescription('Letter height must be between 8 and 40.')
+    expect(screen.getByRole('alert')).toHaveTextContent('Letter height must be between 8 and 40.')
+  })
+
+  it('clears the message once the value is back in range', async () => {
+    const { user } = setup(param, 500)
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    await user.clear(field())
+    await user.type(field(), '40')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(field()).not.toHaveAttribute('aria-invalid')
+  })
+})
+
+// #1323: a number box keeps what is typed as a draft and commits only a parseable number.
+describe.each([
+  {
+    kind: 'number field',
+    param: { group: 'Main', name: 'thickness', type: 'number', initial: 3, caption: 'Thickness' } as Param,
+    label: 'Thickness',
+  },
+  {
+    kind: 'slider box',
+    param: {
+      group: 'Main',
+      name: 'thickness',
+      type: 'slider',
+      initial: 3,
+      caption: 'Thickness',
+      min: -10,
+      max: 20,
+      step: 0.5,
+    } as Param,
+    label: 'Thickness value',
+  },
+])('the $kind draft (#1323)', ({ param, label }) => {
+  const field = () => screen.getByRole('spinbutton', { name: label })
+
+  it('keeps a cleared field empty and commits nothing', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    expect(field()).toHaveValue(null)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('commits a negative number typed into a cleared field', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '-')
+    expect(onChange).not.toHaveBeenCalled()
+    await user.type(field(), '3')
+    expect(onChange.mock.calls).toEqual([[-3]])
+    expect(field()).toHaveValue(-3)
+  })
+
+  it('commits an exponent only once it is complete', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '1e1')
+    expect(onChange).toHaveBeenLastCalledWith(10)
+    expect(onChange.mock.calls.flat()).not.toContain(0)
+  })
+
+  it('goes back to the last valid value when left empty', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.tab()
+    expect(field()).toHaveValue(3)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('goes back to the last valid value on Enter', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '-{Enter}')
+    expect(field()).toHaveValue(3)
+    expect(onChange).not.toHaveBeenCalled()
   })
 })
 

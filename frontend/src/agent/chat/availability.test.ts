@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import { act, renderHook } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { server } from '../../mocks/server'
 import { AI_STATUS_PATH, fetchAiAvailability, recheckAiAvailability, resetAiAvailability, useAiAvailability } from './availability'
 
@@ -130,13 +130,13 @@ describe('fetchAiAvailability', () => {
 
   it('gives up on a status read that never answers, as unreachable', async () => {
     const hang: typeof fetch = () => new Promise<Response>(() => {})
-    const started = Date.now()
+    const started = performance.now()
     expect(await fetchAiAvailability(hang, 50)).toEqual({
       available: false,
       state: 'unreachable',
       reason: 'The agent service did not answer within 0.05 s.',
     })
-    expect(Date.now() - started).toBeLessThan(2000)
+    expect(performance.now() - started).toBeLessThan(2000)
     // And one that honours the abort signal is aborted.
     let aborted = false
     const listening: typeof fetch = (_input, init) =>
@@ -192,6 +192,32 @@ describe('recheckAiAvailability', () => {
     await before
     // The older read lands last and is not published over the fresh one.
     expect(result.current).toEqual({ available: true, state: 'configured' })
+  })
+})
+
+describe('useAiAvailability on focus', () => {
+  it('does not read again on focus just after a read, whatever the wall clock does (#1485)', async () => {
+    resetAiAvailability()
+    let reads = 0
+    server.use(
+      http.get(AI_STATUS_PATH, () => {
+        reads += 1
+        return HttpResponse.json({ available: false, state: 'disabled', ai: 'disabled', reason: 'no credential' })
+      }),
+    )
+    renderHook(() => useAiAvailability())
+    await act(() => recheckAiAvailability())
+    const before = reads
+    const now = Date.now
+    const stepped = vi.spyOn(Date, 'now').mockImplementation(() => now.call(Date) + 3_600_000)
+    try {
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      expect(reads).toBe(before)
+    } finally {
+      stepped.mockRestore()
+    }
   })
 })
 

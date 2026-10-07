@@ -306,6 +306,54 @@ for ns_file_unset in true false; do
   fi
 done
 
+# 11d. The NamespaceTransformer in a directory the overlay names: kustomize
+#      reads the transformer configs from that directory's kustomization
+#      `resources` (#1210), here one level down, beside a file that is not one.
+overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "${dashboard_line}${old_ref}" \
+  'transformers:' '  - ns')
+for ns_dir_unset in true false; do
+  rm -rf "$work/repo"
+  ns_dir="$work/repo/$(dirname "$KUSTOMIZATION")/ns"
+  mkdir -p "$work/repo/applications/scadbuddy" "$ns_dir/inner"
+  printf '%s\n' "$api_and_agent" > "$work/repo/$MANIFEST"
+  printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
+  printf '%s\n' 'resources:' '  - labels.yaml' '  - inner' > "$ns_dir/kustomization.yaml"
+  printf '%s\n' 'apiVersion: builtin' 'kind: LabelTransformer' 'metadata:' '  name: l' > "$ns_dir/labels.yaml"
+  printf '%s\n' 'resources:' '  - ns.yaml' > "$ns_dir/inner/kustomization.yaml"
+  ns_map "$ns_dir_unset" | yq '.transformers[0]' > "$ns_dir/inner/ns.yaml"
+  (cd "$work/repo" && git init -q)
+  if rerun; then
+    if [ "$ns_dir_unset" = true ]; then
+      grep -qx 'dashboard=pinned' "$work/out" || fail "directory transformer: not pinned"
+    else
+      fail "directory transformer unsetOnly: false: step passed, expected an error"
+    fi
+  elif [ "$ns_dir_unset" = true ]; then
+    fail "directory transformer: step failed: $(grep '::error' "$work/log")"
+  else
+    grep -qF "NamespaceTransformer with unsetOnly: true" "$work/log" \
+      || fail "directory transformer unsetOnly: false: wrong error: $(grep '::error' "$work/log")"
+  fi
+done
+
+# 11e. The presence check could not tell (#1179): a pinned line is an error,
+#      since the ref may move only to a revision that has deploy/grafana, but
+#      an overlay with no pin deploys the images as before.
+overlay=$(overlay_ns "${dashboard_line}${old_ref}")
+if DASHBOARD_AT_REVISION=unknown run "$api_and_agent"; then
+  fail "presence unknown with a pin: step passed, expected an error"
+else
+  grep -qF "could not tell whether ${REVISION} has deploy/grafana" "$work/log" \
+    || fail "presence unknown with a pin: wrong error: $(grep '::error' "$work/log")"
+fi
+overlay=$(overlay)
+if DASHBOARD_AT_REVISION=unknown run "$api_and_agent"; then
+  grep -qx 'dashboard=none' "$work/out" || fail "presence unknown without a pin: dashboard not none"
+  has_line "$pinned" "$MANIFEST" || fail "presence unknown without a pin: api image not pinned"
+else
+  fail "presence unknown without a pin: step failed: $(grep '::error' "$work/log")"
+fi
+
 # 12-17. Near misses are errors, never "not configured".
 dashboard_fails "short sha" "$near_miss" "${dashboard_line}1111111"
 dashboard_fails "branch ref" "$near_miss" "${dashboard_line}main"
@@ -342,6 +390,48 @@ if run "$api_and_agent"; then
 else
   grep -qF "$KUSTOMIZATION is not in clusters" "$work/log" || fail "no overlay: wrong error: $(grep '::error' "$work/log")"
 fi
+
+# 20-23. The presence check (step id `grafana`, #1179), with a stub `gh` that
+#        answers from $work/gh-answers one line per call (`ok`, or an error
+#        message; the last line repeats), and a `sleep` that returns at once.
+#        Only a 404 is "absent"; any other error is retried, and one that
+#        persists is `unknown`, which fails the deploy only if the overlay pins
+#        the dashboard (11e).
+yq '.jobs[].steps[] | select(.id == "grafana") | .run' "$workflow" > "$work/grafana.sh"
+[ -s "$work/grafana.sh" ] || { echo "FAIL: no step with id 'grafana' in $workflow" >&2; exit 1; }
+mkdir -p "$work/bin"
+cat > "$work/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+n=$(( $(cat "$GH_CALLS" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$GH_CALLS"
+answer=$(sed -n "${n}p" "$GH_ANSWERS")
+[ -n "$answer" ] || answer=$(tail -n 1 "$GH_ANSWERS")
+[ "$answer" = ok ] && exit 0
+echo "$answer" >&2
+exit 1
+STUB
+printf '#!/bin/sh\n' > "$work/bin/sleep"
+chmod +x "$work/bin/gh" "$work/bin/sleep"
+# `presence <answer>...`: run the step; "<exit>:<present>:<gh calls>".
+presence() {
+  local status=0
+  printf '%s\n' "$@" > "$work/gh-answers"
+  rm -f "$work/gh-calls" && : > "$work/out"
+  PATH="$work/bin:$PATH" GH_ANSWERS="$work/gh-answers" GH_CALLS="$work/gh-calls" GITHUB_OUTPUT="$work/out" \
+    GITHUB_REPOSITORY=eh-homelab/ScadBuddy bash -e "$work/grafana.sh" > "$work/log" 2>&1 || status=$?
+  printf '%s:%s:%s' "$status" "$(sed -n 's/^present=//p' "$work/out")" "$(cat "$work/gh-calls")"
+}
+not_found='gh: Not Found (HTTP 404)'
+server_error='gh: Internal Server Error (HTTP 500)'
+got=$(presence ok)
+[ "$got" = 0:true:1 ] || fail "presence: present: got $got, expected 0:true:1"
+got=$(presence "$not_found")
+[ "$got" = 0:false:1 ] || fail "presence: 404: got $got, expected 0:false:1"
+got=$(presence "$server_error" "$server_error" ok)
+[ "$got" = 0:true:3 ] || fail "presence: 500 then ok: got $got, expected 0:true:3"
+got=$(presence "$server_error")
+[ "$got" = 0:unknown:5 ] || fail "presence: 500 every time: got $got, expected 0:unknown:5"
+grep -qF '::warning::could not tell whether' "$work/log" || fail "presence: 500 every time: no warning: $(cat "$work/log")"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures case(s) failed" >&2

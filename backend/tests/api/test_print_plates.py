@@ -297,6 +297,31 @@ def test_all_plates_of_a_3mf_that_lists_none_is_refused(
     assert not queue.called
 
 
+@respx.mock
+def test_a_plate_the_3mf_does_not_have_is_refused_by_the_check_and_the_run(
+    client: TestClient, model: str
+) -> None:
+    """#1320: a one-plate output asked for plate 5 passed the check, then the run
+    uploaded the file and failed in Bambuddy's slicer with no reason given."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload = upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue = queue_route()
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=run_request(plate_id=5))
+    run = run_print(client, output_id, json=run_request(plate_id=5))
+
+    assert run.status_code == 422, run.text
+    assert "no plate 5" in run.json()["detail"]
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == [run.json()["detail"]]
+    assert not upload.called
+    assert not sliced.called
+    assert not queue.called
+
+
 def _drop_plates(path: Path) -> None:
     with zipfile.ZipFile(path) as archive:
         entries = {name: archive.read(name) for name in archive.namelist()}

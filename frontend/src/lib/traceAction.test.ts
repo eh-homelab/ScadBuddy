@@ -3,6 +3,7 @@ import { SpanStatusCode, trace } from '@opentelemetry/api'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import { installTestTracing } from '../test/tracing'
+import { scrubSpan } from './traceScrub'
 import { failureClass, messageTraceparent, traceAction, traceparentOf } from './traceAction'
 
 describe('traceAction', () => {
@@ -43,12 +44,27 @@ describe('traceAction', () => {
     expect(span?.status.message ?? '').not.toContain('SECRET')
   })
 
+  it('records the exception, which leaves the browser without its message', async () => {
+    const failed = new TypeError('SECRET')
+    await expect(traceAction('generate', {}, async () => Promise.reject(failed))).rejects.toBe(failed)
+    const [span] = tracing.exporter.getFinishedSpans()
+    const event = span?.events.find((e) => e.name === 'exception')
+    expect(event?.attributes?.['exception.type']).toBe('TypeError')
+    const [scrubbed] = scrubSpan(span!).events.filter((e) => e.name === 'exception')
+    expect(scrubbed?.attributes?.['exception.message']).toBeUndefined()
+    expect(scrubbed?.attributes?.['exception.stacktrace']).toEqual(expect.any(String))
+    expect(JSON.stringify(scrubbed)).not.toContain('SECRET')
+  })
+
   it('does not mark a superseded (aborted) action as an error', async () => {
     const aborted = new DOMException('superseded', 'AbortError')
     await expect(traceAction('print', {}, async () => Promise.reject(aborted))).rejects.toBe(aborted)
     const [span] = tracing.exporter.getFinishedSpans()
     expect(span?.status.code).not.toBe(SpanStatusCode.ERROR)
     expect(span?.attributes['scadbuddy.failure_class']).toBeUndefined()
+    expect(span?.events).toEqual([])
+    // Told apart from an action that completed.
+    expect(span?.attributes['scadbuddy.outcome']).toBe('abandoned')
   })
 
   it('gives the chat turn a traceparent of a span of its own', () => {

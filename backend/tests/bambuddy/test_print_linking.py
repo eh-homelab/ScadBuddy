@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 
@@ -21,14 +22,17 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import (
     ARCHIVE_OVERLAP,
     ARCHIVE_PAGE,
+    LIBRARY_LINK_BACKSTOP,
     MAX_ARCHIVE_PAGES,
     SCAN_AFTER,
     SCAN_BEFORE,
     link_by_hash,
+    link_library_prints,
 )
-from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.progress import progress_for
 from scadbuddy.bambuddy.projects import attach_results
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.glb import BoundingBox
@@ -103,7 +107,7 @@ async def test_a_dispatched_queue_item_links_its_archive(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    [link] = await links.for_output(OUTPUT)
+    [link] = await links.for_subject(PrintSubject.output(OUTPUT))
     assert (link.archive_id, link.matched_by, link.queue_item_id) == (18, "queue_item", 34)
     assert (link.printer_id, link.plate_id) == (1, 1)
 
@@ -118,7 +122,7 @@ async def test_an_item_not_yet_dispatched_links_nothing(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    assert await links.for_output(OUTPUT) == []
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
 
 
 async def _sliced(uploads: BambuddyUploadStore, sliced_id: int = 80) -> None:
@@ -159,7 +163,9 @@ async def test_a_settled_print_is_not_scanned_for_again_once_it_is_linked(
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
     assert scan.call_count == 1
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 @respx.mock
@@ -170,7 +176,8 @@ async def test_one_plates_link_does_not_keep_another_plates_archive_from_being_f
     and the read still scans for plate 2's archive, whichever plate is read first."""
     await _sliced(uploads)
     await links.record(
-        OUTPUT, PrintLink(archive_id=17, matched_by="queue_item", queue_item_id=51, plate_id=1)
+        PrintSubject.output(OUTPUT),
+        PrintLink(archive_id=17, matched_by="queue_item", queue_item_id=51, plate_id=1),
     )
     for entry in (51, 52):
         respx.get(f"{API}/queue/{entry}").mock(
@@ -198,7 +205,9 @@ async def test_one_plates_link_does_not_keep_another_plates_archive_from_being_f
 
     await progress_for(bambuddy, plates, uploads=uploads, links=links)
 
-    assert sorted(link.archive_id for link in await links.for_output(OUTPUT)) == [17, 18]
+    assert sorted(
+        link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))
+    ) == [17, 18]
 
 
 @respx.mock
@@ -206,7 +215,10 @@ async def test_an_item_linked_before_it_went_is_not_scanned_for(
     bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
 ) -> None:
     await _sliced(uploads)
-    await links.record(OUTPUT, PrintLink(archive_id=18, matched_by="queue_item", queue_item_id=34))
+    await links.record(
+        PrintSubject.output(OUTPUT),
+        PrintLink(archive_id=18, matched_by="queue_item", queue_item_id=34),
+    )
     respx.get(f"{API}/queue/34").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
     scan = archives_page(archive_row(18, HASH))
 
@@ -230,7 +242,7 @@ async def test_a_queue_item_gone_by_the_first_poll_is_found_by_hash(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    [link] = await links.for_output(OUTPUT)
+    [link] = await links.for_subject(PrintSubject.output(OUTPUT))
     assert (link.archive_id, link.matched_by) == (18, "content_hash")
     # The window is the days around the output's sends, and the hash is kept so it is
     # read only once.
@@ -256,7 +268,9 @@ async def test_one_sliced_file_printed_three_times_links_three_archives(
     found = await link_by_hash(bambuddy, uploads, links, meta())
 
     assert sorted(link.archive_id for link in found) == [16, 17, 23]
-    assert sorted(link.archive_id for link in await links.for_output(OUTPUT)) == [16, 17, 23]
+    assert sorted(
+        link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))
+    ) == [16, 17, 23]
 
 
 @respx.mock
@@ -276,7 +290,9 @@ async def test_the_hash_scan_pages_until_bambuddy_runs_out(
     await link_by_hash(bambuddy, uploads, links, meta())
 
     assert [call.request.url.params.get("offset") for call in scan.calls] == [None, "90"]
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 def shifting_archives(rows: list[dict[str, Any]], shift: int) -> respx.Route:
@@ -337,7 +353,9 @@ async def test_archives_deleted_between_page_reads_do_not_hide_a_print(
 
     assert scan.call_count == 2
     assert [link.archive_id for link in found] == [18]
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 @respx.mock
@@ -368,7 +386,9 @@ async def test_attaching_to_a_project_records_the_archives_it_found(
         bambuddy, 7, queue_item_ids=[90, 91], output_id=OUTPUT, links=links, linkable={90}
     )
 
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [32]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        32
+    ]
 
 
 @respx.mock
@@ -384,7 +404,7 @@ async def test_attaching_links_nothing_the_output_does_not_own(
     result = await attach_results(bambuddy, 7, queue_item_ids=[91], output_id=OUTPUT, links=links)
 
     assert result.archive_ids == [77], "still filed under the project"
-    assert await links.for_output(OUTPUT) == []
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
 
 
 @respx.mock
@@ -416,3 +436,169 @@ async def test_a_scan_that_runs_out_of_pages_stops_inside_its_window(
         assert call.request.url.params["date_from"] == (window[0] - SCAN_BEFORE).date().isoformat()
         assert call.request.url.params["date_to"] == (window[1] + SCAN_AFTER).date().isoformat()
     assert "stopped scanning archives" in caplog.text
+
+
+async def _library_items(links: PrintLinkStore, *ids: int) -> None:
+    for queue_item_id in ids:
+        await links.record_sends(
+            PrintSubject.library(89),
+            [PrintSend(queue_item_id=queue_item_id, plate_id=1, printer_id=1)],
+        )
+
+
+async def _pending(links: PrintLinkStore) -> set[int]:
+    return {
+        row.queue_item_id for row in await links.pending_library(50, max_age=LIBRARY_LINK_BACKSTOP)
+    }
+
+
+@respx.mock
+async def test_a_library_run_queued_long_ago_is_still_linked_once_dispatched(
+    bambuddy: BambuddyClient, links: PrintLinkStore, pool_store: JobProjection
+) -> None:
+    """#1664: nothing ages an item out; it is read until Bambuddy is done with it."""
+    await _library_items(links, 51)
+    with pool_store.pool.connection() as conn:
+        conn.execute("UPDATE print_sends SET first_seen = now() - interval '60 days'")
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="printing", archive_id=90))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    linked = await links.linked(90)
+    assert linked is not None and linked.library_file_id == 89
+    assert await _pending(links) == set()
+
+
+@respx.mock
+async def test_a_library_item_settled_without_an_archive_is_not_read_again(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    """#1705: Bambuddy commits a library item's ``archive_id`` before the item can be
+    ``printing``, so one that settles without it failed or was cancelled before
+    dispatch. The status is read the way `stages.stage_of` reads it, any case (#1704)."""
+    statuses = {
+        51: "cancelled",
+        52: "pending",
+        53: "Completed",
+        54: " FAILED ",
+        55: "Aborted",
+        56: "printing",
+    }
+    await _library_items(links, *statuses)
+    for item_id, item_status in statuses.items():
+        respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status=item_status, archive_id=None)
+            )
+        )
+
+    await link_library_prints(bambuddy, links)
+
+    assert await _pending(links) == {52, 56}
+
+
+@respx.mock
+async def test_a_skipped_library_item_is_read_on_and_linked_once_resumed(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    """#1704/#1705: Bambuddy's resume-after-failure puts a skipped item back to
+    ``pending``, so ``skipped``, in any case, does not mark it gone."""
+    await _library_items(links, 51, 52)
+    routes = {
+        item_id: respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status=item_status, archive_id=None)
+            )
+        )
+        for item_id, item_status in ((51, "skipped"), (52, "Skipped"))
+    }
+
+    await link_library_prints(bambuddy, links)
+
+    assert await _pending(links) == {51, 52}
+    routes[51].mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="printing", archive_id=90))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    linked = await links.linked(90)
+    assert linked is not None and linked.library_file_id == 89
+    assert await _pending(links) == {52}
+
+
+@respx.mock
+async def test_a_library_item_past_the_backstop_is_marked_gone_without_a_read(
+    bambuddy: BambuddyClient, links: PrintLinkStore, pool_store: JobProjection
+) -> None:
+    """#1703: an item that never settles stops costing a read once it is older than
+    `LIBRARY_LINK_BACKSTOP`; one just inside it is still read."""
+    await _library_items(links, 51, 52)
+    days = LIBRARY_LINK_BACKSTOP.days
+    with pool_store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_sends SET first_seen = now() - make_interval(days => %s)"
+            " WHERE queue_item_id = 51",
+            (days + 1,),
+        )
+        conn.execute(
+            "UPDATE print_sends SET first_seen = now() - make_interval(days => %s)"
+            " WHERE queue_item_id = 52",
+            (days - 1,),
+        )
+    old = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="pending", archive_id=None))
+    )
+    recent = respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json=queue_item(52, status="pending", archive_id=None))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    assert not old.called
+    assert recent.called
+    assert await _pending(links) == {52}
+    with pool_store.pool.connection() as conn:
+        row = conn.execute("SELECT gone FROM print_sends WHERE queue_item_id = 51").fetchone()
+    assert row is not None and row["gone"] is True
+
+
+@respx.mock
+async def test_a_database_error_on_one_library_item_does_not_stop_the_others(
+    bambuddy: BambuddyClient, links: PrintLinkStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1662: it is logged and the item is left to the next call."""
+    await _library_items(links, 51, 52)
+    for item_id, archive_id in ((51, 90), (52, 91)):
+        respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status="printing", archive_id=archive_id)
+            )
+        )
+    real = links.link_library
+
+    async def failing(queue_item_id: int, archive_id: int, name: str | None) -> None:
+        if queue_item_id == 51:
+            raise psycopg.OperationalError("connection lost")
+        await real(queue_item_id, archive_id, name)
+
+    monkeypatch.setattr(links, "link_library", failing)
+
+    await link_library_prints(bambuddy, links)
+
+    assert await links.linked(90) is None
+    assert await links.linked(91) is not None
+    assert await _pending(links) == {51}
+
+
+async def test_a_database_error_reading_the_library_items_links_nothing_and_raises_nothing(
+    bambuddy: BambuddyClient, links: PrintLinkStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing(limit: int, *, max_age: object) -> list[object]:
+        raise psycopg.OperationalError("connection lost")
+
+    monkeypatch.setattr(links, "pending_library", failing)
+
+    await link_library_prints(bambuddy, links)

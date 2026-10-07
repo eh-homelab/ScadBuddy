@@ -124,7 +124,7 @@ export class SessionEventPublisher {
       this.#send(kind, sessionId, lastSeq, status)
       return
     }
-    const now = Date.now()
+    const now = performance.now()
     const w = this.#windows.get(sessionId)
     if (!w || (now - w.last >= this.#throttleMs && w.timer === undefined)) {
       this.#windows.set(sessionId, { last: now })
@@ -137,7 +137,7 @@ export class SessionEventPublisher {
     w.timer = setTimeout(
       () => {
         w.timer = undefined
-        w.last = Date.now()
+        w.last = performance.now()
         const { seq, status: latest } = w
         w.seq = undefined
         w.status = undefined

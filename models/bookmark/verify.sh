@@ -101,6 +101,14 @@ CASES=(
     "text-clear-of-hole|base_color,border_color,text_color|text_y=0;label=\"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\";text_size=30;hole_from_top=30;hole_diameter=10;bead_count=0;mask_file=\"\";overlay_file=\"\""
     "text-y-off-strip|base_color,border_color,text_color,bead_color,bead_color_2|length=60;text_y=120;mask_file=\"\";overlay_file=\"\""
     "text-y-off-strip-across|base_color,border_color,text_color,bead_color,bead_color_2|text_direction=\"horizontal\";text_y=-120;mask_file=\"\";overlay_file=\"\""
+    # The text keeps off the shaped ends (#511): the point / notch of pointed
+    # and ribbon, the round of rounded_tab, and the star / heart topper. The
+    # clamp used to measure only the rectangular strip, so it moved text into
+    # these ends, where the outline clipped it.
+    "text-pointed-end|base_color,border_color,text_color|shape=\"pointed\";text_direction=\"horizontal\";text_y=-120;label=\"HELLO\";mask_file=\"\";overlay_file=\"\""
+    "text-ribbon-end|base_color,border_color,text_color|shape=\"ribbon\";text_y=-120;label=\"HELLO\";mask_file=\"\";overlay_file=\"\""
+    "text-rounded-tab-end|base_color,border_color,text_color|shape=\"rounded_tab\";text_direction=\"horizontal\";text_y=120;label=\"HELLO\";mask_file=\"\";overlay_file=\"\""
+    "text-star-top-end|base_color,topper_color,border_color,text_color|shape=\"star_top\";text_y=60;label=\"HELLO\";mask_file=\"\";overlay_file=\"\""
     "overlay-off-strip|base_color,border_color,text_color,bead_color,bead_color_2|length=60;mask_file=\"\""
     "largest|base_color,border_color,text_color,overlay_color,bead_color,bead_color_2|length=250;width=80;mask_repeat=4;bead_count=6;overlay_file=\"sample-leaf.png\";overlay_type=\"png_threshold\";overlay_scale=40;overlay_y=90;label=\"Largest bookmark\""
 )
@@ -417,6 +425,10 @@ for line in open(os.path.join(OUT, "cases.txt")):
         "star-top-short": "NOTE: topper_size reduced to 37.9 mm to fit a 40 mm wide, 60 mm long bookmark",
         "text-y-off-strip": "NOTE: text_y 120 would put the text off the bookmark; moved to 14 mm",
         "text-y-off-strip-across": "NOTE: text_y -120 would put the text off the bookmark; moved to -67.5 mm",
+        "text-pointed-end": "NOTE: text_y -120 would put the text off the bookmark; moved to -49.5 mm",
+        "text-ribbon-end": "NOTE: text_y -120 would put the text off the bookmark; moved to -49.5 mm",
+        "text-rounded-tab-end": "NOTE: text_y 120 would put the text off the bookmark; moved to 47.5 mm",
+        "text-star-top-end": "NOTE: text_y 60 would put the text off the bookmark; moved to 14.3 mm",
         "overlay-off-strip": "NOTE: overlay_x / overlay_y (0, 46) put the overlay's centre off the 40 x 60 mm bookmark;",
     }
     if name in NOTES:
@@ -431,6 +443,23 @@ for line in open(os.path.join(OUT, "cases.txt")):
         hole_bottom = p["length"] / 2 - p["hole_from_top"] - p["hole_diameter"] / 2
         check(name, max(ty) <= hole_bottom, "text (top at %.2f) stays below the cord hole (bottom at %.2f)"
               % (max(ty), hole_bottom))
+
+    # Text keeps off the shaped ends (#511): it stays where the strip is full
+    # width, below a topper and the round of a tab, above a point or notch.
+    if shape != "corner" and not from_file and p["label"] and tcol in got and tcol not in others:
+        ty = [V[i][1] for t in T if mats[t[3]][1] == tcol for i in t[:3]]
+        L, W = p["length"], p["width"]
+        lo, hi = -L / 2, L / 2
+        if shape in ("pointed", "ribbon"):
+            lo = -L / 2 + min(p["end_length"], L / 2)
+        if shape == "rounded_tab":
+            hi = L / 2 - min(W / 2, L / 2)
+        if shape in ("star_top", "heart_top"):
+            k = 0.9 if shape == "heart_top" else 0.95
+            hi = L / 2 - min(p["topper_size"], 2.5 * W, 0.6 * L / k) * k
+        check(name, min(ty) >= lo - tol and max(ty) <= hi + tol,
+              "text (y %.2f..%.2f) stays off the %s ends (full-width strip %.2f..%.2f)"
+              % (min(ty), max(ty), shape, lo, hi))
 
     if name == "dotdot-name-read":
         check(name, ('NOTE: mask_file "%s" ignored' % p["mask_file"]) not in log and "Can't open" not in log,

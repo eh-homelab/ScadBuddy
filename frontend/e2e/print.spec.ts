@@ -104,12 +104,36 @@ test.describe('print dialog', () => {
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
     await dialog.getByLabel('Process').selectOption('0.24mm Standard @BBL H2C')
     await dialog.getByLabel('Preset for slot 1').selectOption({ label: 'Bambu ABS @BBL H2C' })
-    // High Flow is offered per side, and says it slices as Standard.
+    // High Flow is offered per side, and sliced as High Flow (#484): nothing says otherwise.
     await dialog.getByRole('radio', { name: 'Left High Flow' }).check()
-    await expect(dialog.getByText(/High Flow presets aren't supported/)).toBeVisible()
+    await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toBeVisible()
-    await expect(dialog.getByTestId('run-warnings')).toContainText('slices this as Standard flow')
+    await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
+  })
+
+  // #944 — at phone width every slot's fieldset and spool rows ran past the screen's
+  // right edge, cutting off the grams, the "rests on" badge and the "prints in" colour.
+  test('keeps the slots and spool rows inside the screen at phone width', async ({ page }) => {
+    // Opened at desktop width: reaching the Print button on a phone is #362's problem.
+    const dialog = await openDialog(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    const right = 390
+    for (const slot of await dialog.locator('[data-testid^="filament-slot-"]').all()) {
+      const box = (await slot.boundingBox())!
+      expect(box.x + box.width, 'the slot fits the screen').toBeLessThanOrEqual(right)
+    }
+    const printsIn = dialog.getByTestId('slot-prints-in-1')
+    const printsInBox = (await printsIn.boundingBox())!
+    expect(printsInBox.x + printsInBox.width, '"prints in" fits').toBeLessThanOrEqual(right)
+    const rows = dialog.getByTestId('filament-slot-1').getByRole('listitem')
+    for (const row of await rows.all()) {
+      for (const part of await row.locator('label > *').all()) {
+        const box = await part.boundingBox()
+        if (!box) continue
+        expect(box.x + box.width, `${await part.textContent()} fits`).toBeLessThanOrEqual(right)
+      }
+    }
   })
 })

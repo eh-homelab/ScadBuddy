@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
@@ -51,12 +53,12 @@ async function getJob(ctx: ToolContext, id: string) {
  * tool "submits a render and streams progress until it settles").
  */
 export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatus> {
-  const deadline = Date.now() + ctx.renderWaitMs
+  const deadline = performance.now() + ctx.renderWaitMs
   for (let step = 1; ; step++) {
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (settled(job.status) || Date.now() >= deadline) return job
+    if (settled(job.status) || performance.now() >= deadline) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
   }
 }
@@ -78,13 +80,13 @@ function settled(status: JobStatus['status']): boolean {
  * cannot be reached, or after `holdMs` (30 min) at most (#774).
  */
 async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
-  const deadline = Date.now() + holdMs
+  const deadline = performance.now() + holdMs
   try {
-    while (Date.now() < deadline) {
+    while (performance.now() < deadline) {
       await sleep(ctx.pollIntervalMs)
       const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
         params: { path: { job_id: id } },
-        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        signal: AbortSignal.timeout(Math.max(1, deadline - performance.now())),
       })
       if (!data || settled(data.status)) return
     }
@@ -184,12 +186,18 @@ export const customizerTools: Tool[] = [
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
-        const accepted = await ok(
-          ctx.backend.POST('/api/v1/models/{slug}/render', {
-            params: { path: { slug } },
-            body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
-            signal: ctx.signal,
-          }),
+        // Sent again while the backend is still accepting it (#1053), with one
+        // `Idempotency-Key`: the backend counts the re-sends as this one request's claim.
+        const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
+        const accepted = await reattach(
+          ctx,
+          () =>
+            ctx.backend.POST('/api/v1/models/{slug}/render', {
+              params: { path: { slug } },
+              headers,
+              body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
+              signal: ctx.signal,
+            }),
           `render ${slug}`,
         )
         submitted = accepted.job_id

@@ -110,6 +110,14 @@ CASES = [
      W_IN_UP + ["door_frame_color"]),
     ("door-lower-french-notrim", dict(piece="wall_door_lower", door_style="french", width_units=1.5,
                                       door_width=140, trim=False, wallpaper="stars"), W_IN_LO),
+    # #415: a pattern edge crossing a curved opening's lining near one of its vertices
+    # left a sliver between the inside and wallpaper colours, and the 3MF export
+    # failed ("Can't add triangle"). These two did before the fix.
+    ("arch-stars-sliver-415", dict(piece="wall_door_upper", door_style="arched", module_size=100, width_units=0.5,
+                                   wallpaper="stars", pattern_repeats=12, door_height=320, clip_clearance=0.5),
+     W_IN_UP + ["door_frame_color"]),
+    ("round-dots-sliver-415", dict(window_style="round", module_size=60, width_units=1.5, wallpaper="polka_dots",
+                                   pattern_repeats=12, clip_clearance=0.3), None),
     ("door-upper-french", dict(piece="wall_door_upper", door_style="french", width_units=1.5, door_width=140),
      W_IN_UP + ["door_frame_color"]),
     ("leaf-lower", dict(piece="door_leaf_lower"), ["door_color", "door_knob_color"]),
@@ -187,7 +195,8 @@ for pc in PIECES:
 CASES.append(("room-preview", dict(preview="room"), None))
 # the closed-solid overlap check runs on these (plus every maxcol case)
 OVERLAP = {"defaults", "wall-brick-lower", "window-arched-siding", "window-round-stone", "door-lower",
-           "door-upper-arched", "leaf-lower", "corner-siding", "floor-herringbone-rug", "roof-tiles",
+           "door-upper-arched", "arch-stars-sliver-415", "round-dots-sliver-415", "leaf-lower", "corner-siding",
+           "floor-herringbone-rug", "roof-tiles",
            "stairs-upper", "railing", "thin-walls"}
 
 
@@ -495,3 +504,13 @@ if failures:
     sys.exit(1)
 print("\nOK")
 PY
+
+# The whole-house pipeline (spec 2026-09-27 §5.5), in the image that has the backend:
+# the OpenSCAD image has no Python. CI sets SCADBUDDY_PIPELINE_IMAGE to the test image.
+PIPELINE_IMAGE="${SCADBUDDY_PIPELINE_IMAGE:-}"
+if [ -n "$PIPELINE_IMAGE" ]; then
+    echo "==> pipeline: the house cases in pipeline/verify-inputs.json, in $PIPELINE_IMAGE"
+    docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD:/template/dollhouse-kit:ro" -w /app/backend "$PIPELINE_IMAGE" uv run --frozen --no-sync python -m scadbuddy.workflows.verify_pipeline /template/dollhouse-kit --inputs /template/dollhouse-kit/pipeline/verify-inputs.json
+else
+    echo "==> SCADBUDDY_PIPELINE_IMAGE unset: pipeline check skipped (docker build --target test -t scadbuddy:test . and set it to run)"
+fi

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -14,6 +15,8 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import Client, ScheduleActionExecutionStartWorkflow
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
@@ -26,7 +29,13 @@ from scadbuddy.library.catalogue import (
 from scadbuddy.library.history import GitTimeoutError, ModelHistory, RevisionNotFoundError
 from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
+from tests.support.operations import press
+from tests.support.temporal import WorkflowReaper
+
+#: How long `_a_sweep_run_from_now` waits before calling the Schedule broken.
+SWEEP_RUN_BOUND = 300
 
 pytestmark = pytest.mark.requires_git
 
@@ -67,7 +76,9 @@ def _versions(client: TestClient, model_id: str) -> list[dict[str, Any]]:
 
 
 def _duplicate(client: TestClient, model_id: str, name: str) -> dict[str, Any]:
-    response = client.post(f"/api/v1/models/{model_id}/duplicate", json={"name": name})
+    response = client.post(
+        f"/api/v1/models/{model_id}/duplicate", json={"name": name}, headers=press()
+    )
     assert response.status_code == 201, response.text
     record: dict[str, Any] = response.json()
     return record
@@ -139,7 +150,9 @@ def test_a_metadata_edit_never_clobbers_the_upstream(client: TestClient) -> None
     upstream = _duplicate(client, BUILTIN, "My keychain")["upstream"]
 
     patched = client.patch(
-        "/api/v1/models/my-keychain", json={"name": "Renamed", "description": "mine now"}
+        "/api/v1/models/my-keychain",
+        json={"name": "Renamed", "description": "mine now"},
+        headers=press(),
     )
 
     assert patched.status_code == 200, patched.text
@@ -152,6 +165,7 @@ def test_a_patch_cannot_set_the_upstream(client: TestClient, model: str) -> None
     client.patch(
         f"/api/v1/models/{model}",
         json={"upstream": {"id": BUILTIN, "path": "x", "base": None}},
+        headers=press(),
     )
 
     assert client.get(f"/api/v1/models/{model}").json()["upstream"] is None
@@ -179,14 +193,20 @@ def test_derived_state_is_not_copied(client: TestClient, paths: DataPaths) -> No
 
 
 def test_a_name_is_refused_as_on_create(client: TestClient, model: str) -> None:
-    invalid = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "!!!"})
+    invalid = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "!!!"}, headers=press()
+    )
     assert invalid.status_code == 422
     assert (
         invalid.json()["detail"]
-        == client.post("/api/v1/models", json={"name": "!!!", "source": SOURCE}).json()["detail"]
+        == client.post(
+            "/api/v1/models", json={"name": "!!!", "source": SOURCE}, headers=press()
+        ).json()["detail"]
     )
 
-    taken = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Demo"})
+    taken = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Demo"}, headers=press()
+    )
     assert taken.status_code == 409
     assert "'demo' already exists" in taken.json()["detail"]
     assert client.get(f"/api/v1/models/{model}").json()["upstream"] is None
@@ -194,7 +214,9 @@ def test_a_name_is_refused_as_on_create(client: TestClient, model: str) -> None:
 
 def test_an_unknown_template_is_a_404(client: TestClient) -> None:
     for model_id in ("nope", "builtin:nope"):
-        response = client.post(f"/api/v1/models/{model_id}/duplicate", json={"name": "Copy"})
+        response = client.post(
+            f"/api/v1/models/{model_id}/duplicate", json={"name": "Copy"}, headers=press()
+        )
         assert response.status_code == 404
     assert client.get("/api/v1/models/copy").status_code == 404
 
@@ -242,7 +264,9 @@ def test_a_create_racing_a_duplicate_for_its_slug_is_a_409(
         monkeypatch,
         lambda _: raced.append(
             client.post(
-                "/api/v1/models", json={"name": "Copy", "source": "cube(1);\n", "force": True}
+                "/api/v1/models",
+                json={"name": "Copy", "source": "cube(1);\n", "force": True},
+                headers=press(),
             )
         ),
     )
@@ -262,12 +286,16 @@ def test_a_duplicate_racing_a_create_for_its_slug_is_a_409(
     _interrupt_first_claim(
         monkeypatch,
         lambda _: raced.append(
-            client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+            client.post(
+                f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+            )
         ),
     )
 
     created = client.post(
-        "/api/v1/models", json={"name": "Copy", "source": "cube(1);\n", "force": True}
+        "/api/v1/models",
+        json={"name": "Copy", "source": "cube(1);\n", "force": True},
+        headers=press(),
     )
 
     assert created.status_code == 201, created.text
@@ -287,7 +315,9 @@ def test_a_claim_written_into_refuses_the_rename_and_keeps_what_was_written(
         lambda directory: (directory / "model.scad").write_text("cube(2);\n", encoding="utf-8"),
     )
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 409, response.text
     assert paths.model_source("copy").read_text(encoding="utf-8") == "cube(2);\n"
@@ -302,7 +332,9 @@ def test_a_git_failure_reading_the_upstream_is_a_problem_and_leaves_nothing(
 
     monkeypatch.setattr(ModelHistory, "export", export)
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 500
     assert response.json()["detail"] == "git archive timed out after 1s"
@@ -327,7 +359,9 @@ def test_a_copy_deleted_right_after_its_commit_is_a_404_naming_the_copy(
 
     monkeypatch.setattr(Catalogue, "_commit", commit_then_delete)
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 404, response.text
     assert response.json()["detail"] == "no model named 'copy'"
@@ -347,7 +381,9 @@ def test_an_upstream_deleted_mid_copy_is_a_404_naming_the_upstream(
 
     monkeypatch.setattr(ModelHistory, "export", export)
 
-    response = client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 404, response.text
     assert response.json()["detail"] == f"no model named {mine!r}"
@@ -383,7 +419,9 @@ def test_a_duplicate_sweeps_staging_an_earlier_one_crashed_out_of(
     old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
     os.utime(staged.parent, (old, old))
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     assert _no_staging_left(paths)
@@ -399,7 +437,9 @@ def test_a_sweep_failure_after_a_duplicate_is_not_the_duplicates_failure(
 
     monkeypatch.setattr(Catalogue, "sweep_duplicate_staging", sweep)
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
 
@@ -467,16 +507,55 @@ def test_the_staging_max_age_is_the_setting(settings: Settings, paths: DataPaths
     assert newer.is_dir()
 
 
+async def _a_sweep_run_from_now(client: Client, schedule_id: str) -> None:
+    """Wait for a run of the housekeeping Schedule that starts after this call, and
+    for it to finish: the event the sweep is, however long a loaded host takes to
+    reach it. The bound only keeps a broken Schedule from hanging the test."""
+    before: set[str] | None = None
+    async with asyncio.timeout(SWEEP_RUN_BOUND):
+        while True:
+            try:
+                info = (await client.get_schedule_handle(schedule_id).describe()).info
+            except RPCError as error:
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    raise
+                before = before if before is not None else set()  # not yet created
+            else:
+                # `recent_actions` keeps only the latest few; with overlaps skipped the
+                # Schedule starts at most one run per tick, far slower than these polls,
+                # so a new run cannot rotate out between two of them unseen.
+                started = [result.action for result in info.recent_actions]
+                started += info.running_actions
+                runs = {
+                    run.workflow_id: run.first_execution_run_id
+                    for run in started
+                    if isinstance(run, ScheduleActionExecutionStartWorkflow)
+                }
+                if before is None:
+                    before = set(runs)
+                elif new := [id for id in runs if id not in before]:
+                    handle = client.get_workflow_handle(new[0], run_id=runs[new[0]])
+                    await handle.result()
+                    return
+            await asyncio.sleep(0.1)
+
+
 def test_the_periodic_sweep_clears_old_duplicate_staging(
-    settings: Settings, paths: DataPaths
+    settings: Settings, paths: DataPaths, workflow_reaper: WorkflowReaper
 ) -> None:
-    """Without waiting for the next boot or duplicate (#397)."""
+    """Without waiting for the next boot or duplicate (#397): the next run of the
+    housekeeping Schedule clears it."""
     periodic = settings.model_copy(update={"asset_sweep_interval": 0.05})
     with TestClient(create_app(periodic)):
         staged = _stage(paths, "late", DUPLICATE_STAGING_MAX_AGE + 60)
-        deadline = time.monotonic() + 10
-        while staged.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
+        assert workflow_reaper.client is not None
+        schedule_id = schedule_id_for(periodic.temporal_task_queue_library)
+        workflow_reaper.run(
+            _a_sweep_run_from_now(workflow_reaper.client, schedule_id),
+            # The inner bound is what fires: the reaper's own default (60 s) would not
+            # cancel the poll, and is shorter than a loaded host's sweep run.
+            timeout=SWEEP_RUN_BOUND + 10,
+        )
         assert not staged.exists()
 
 
@@ -490,7 +569,9 @@ def test_a_git_failure_reading_the_base_fails_the_duplicate(
 
     monkeypatch.setattr(ModelHistory, "last_commit", last_commit)
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 500
     assert response.json()["detail"] == "git log timed out after 1s"
@@ -505,7 +586,9 @@ def test_an_unreadable_base_fails_the_duplicate(
     must not read as "no history" and copy the working tree."""
     monkeypatch.setattr(ModelHistory, "last_commit", lambda self, slug: None)
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 500
     assert "could not read the current revision" in response.json()["detail"]
@@ -574,7 +657,7 @@ def test_a_duplicate_takes_the_thumbnail_and_readme_as_its_own_and_can_edit_them
         f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
     )
     readme = client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Mine\n"})
-    patched = client.patch(f"/api/v1/models/{slug}", json={"name": "Keyring"})
+    patched = client.patch(f"/api/v1/models/{slug}", json={"name": "Keyring"}, headers=press())
 
     assert (replaced.status_code, readme.status_code, patched.status_code) == (200, 200, 200)
     assert client.get(f"/api/v1/models/{slug}/thumbnail").content == PNG_BYTES
@@ -596,16 +679,20 @@ def test_a_duplicate_has_no_plate_fallback_until_it_is_generated(
 ) -> None:
     """Outputs are derived, so not copied: the upstream's plate image is not the
     duplicate's, and a slug a gone model used leaves no cached cover behind."""
-    created = client.post("/api/v1/models", json={"name": "Upstream", "source": SOURCE})
+    created = client.post(
+        "/api/v1/models", json={"name": "Upstream", "source": SOURCE}, headers=press()
+    )
     model = created.json()["slug"]
     _generate_with_cover(client, paths, model, PNG_BYTES + b"upstream")
     assert client.get(f"/api/v1/models/{model}").json()["thumbnail_source"] == "output"
 
     # A model of the duplicate's slug that was generated, listed, then deleted.
-    gone = client.post("/api/v1/models", json={"name": "Copy", "source": SOURCE}).json()["slug"]
+    gone = client.post(
+        "/api/v1/models", json={"name": "Copy", "source": SOURCE}, headers=press()
+    ).json()["slug"]
     _generate_with_cover(client, paths, gone, PNG_BYTES + b"gone")
     assert client.get("/api/v1/models").status_code == 200
-    assert client.delete(f"/api/v1/models/{gone}").status_code == 204
+    assert client.delete(f"/api/v1/models/{gone}", headers=press()).status_code == 204
 
     record = _duplicate(client, model, "Copy")
     assert record["slug"] == gone
@@ -649,6 +736,7 @@ def test_a_dropped_model_json_cannot_claim_an_upstream(client: TestClient) -> No
             "file": ("widget.scad", SOURCE.encode(), "application/octet-stream"),
             "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
         },
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     assert response.json()["upstream"] is None
@@ -668,9 +756,13 @@ def test_the_boot_sweeps_a_claim_a_crashed_create_stranded(app: FastAPI, paths: 
     with TestClient(app) as client:
         assert not stranded.exists()
         assert fresh.is_dir()
-        created = client.post("/api/v1/models", json={"name": "Stranded", "source": SOURCE})
+        created = client.post(
+            "/api/v1/models", json={"name": "Stranded", "source": SOURCE}, headers=press()
+        )
         assert created.status_code == 201, created.text
-        taken = client.post("/api/v1/models", json={"name": "Fresh", "source": SOURCE})
+        taken = client.post(
+            "/api/v1/models", json={"name": "Fresh", "source": SOURCE}, headers=press()
+        )
         assert taken.status_code == 409
 
 

@@ -200,6 +200,13 @@ class FontInstalled(BaseEvent):
     family: str
 
 
+class PresetsChanged(BaseEvent):
+    """A saved preset of the template was created, changed or deleted (#357)."""
+
+    kind: Literal["presets.changed"] = "presets.changed"
+    slug: str
+
+
 SettingsSection = Literal[
     "connection",
     "print_options",
@@ -288,6 +295,7 @@ Event = Annotated[
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled
+    | PresetsChanged
     | SettingsChanged
     | AnalyzerDecisionEvent
     | SessionBusEvent

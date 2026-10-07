@@ -1,9 +1,9 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { ApiError, api } from '../api/client'
+import { ApiError, OFFLINE, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
-import { useRenderJob } from './useRenderJob'
+import { READ_RETRIES, TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
 const JOB_B = 'b'.repeat(32)
@@ -75,6 +75,8 @@ describe('useRenderJob', () => {
       { params: { name: 'Hi' }, tab: 'lid' },
       undefined,
       undefined,
+      expect.any(AbortSignal),
+      expect.any(String),
     )
   })
 
@@ -84,8 +86,8 @@ describe('useRenderJob', () => {
     rerender({ slug: 'demo', params: { n: 2 } })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { params: { n: 1 } }, undefined, undefined)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
   })
 
   it('supersedes a render whose answer arrives after the next one was asked for', async () => {
@@ -101,7 +103,82 @@ describe('useRenderJob', () => {
     first.resolve(accepted(JOB_A))
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
+  })
+
+  it("aborts a superseded render's re-sends, never the request in flight (review #1066 2.2)", async () => {
+    const first = deferred<RenderAccepted>()
+    submit.mockImplementationOnce(() => first.promise)
+    const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    const signal = submit.mock.calls[0]![4]!
+    expect(signal.aborted).toBe(false)
+
+    rerender({ slug: 'demo', params: { n: 2 } })
+    await settle()
+    expect(signal.aborted).toBe(true)
+
+    // Its answer still arrives, and names the job the next render supersedes.
+    first.resolve(accepted(JOB_A))
+    await settle()
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
+  })
+
+  it('re-sends a render the server is still accepting with its key, so it stays one claim (review #1066 (7) 3)', async () => {
+    const accepting = new ApiError({
+      type: STILL_ACCEPTING,
+      title: 'Service Unavailable',
+      status: 503,
+      detail: 'ScadBuddy is still checking this request. Send it again to follow it.',
+      retry_after: 2,
+    })
+    submit.mockRejectedValueOnce(accepting)
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    const key = submit.mock.calls[0]![5]
+    expect(key).toEqual(expect.any(String))
+    expect(submit.mock.calls[1]![5]).toBe(key)
+  })
+
+  it('re-sends a render Temporal could not take with its key: a start may exist (review #1066 (8) 3)', async () => {
+    // As the client reads it: the 503's Retry-After header becomes `retry_after`.
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'Temporal could not start this render right now.',
+        retry_after: 5,
+      }),
+    )
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit.mock.calls[1]![5]).toBe(submit.mock.calls[0]![5])
+  })
+
+  it('retries a full queue under a new key: the refusal is all its key was answered', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({ title: 'Service Unavailable', status: 503, detail: 'the render queue is full', retry_after: 3 }),
+    )
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit.mock.calls[1]![5]).toEqual(expect.any(String))
+    expect(submit.mock.calls[1]![5]).not.toBe(submit.mock.calls[0]![5])
   })
 
   it('retries a render the full queue refused, after the delay it names', async () => {
@@ -115,7 +192,7 @@ describe('useRenderJob', () => {
     const { result } = mount({ slug: 'demo', params: { n: 1 } })
     await settle()
 
-    expect(result.current.busy).toBe(3)
+    expect(result.current.busy).toEqual({ seconds: 3, reason: 'queue-full' })
     expect(result.current.error).toBeUndefined()
     expect(result.current.rendering).toBe(true)
     expect(submit).toHaveBeenCalledTimes(1)
@@ -125,9 +202,83 @@ describe('useRenderJob', () => {
     })
 
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
     expect(result.current.busy).toBeUndefined()
     expect(result.current.error).toBeUndefined()
+  })
+
+  it('says why it waits: an unreachable render service, or a request still accepting', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'Temporal is unavailable',
+        retry_after: 5,
+      }),
+    )
+    submit.mockRejectedValueOnce(
+      new ApiError({
+        type: STILL_ACCEPTING,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'still accepting',
+        retry_after: 2,
+      }),
+    )
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    expect(result.current.busy).toEqual({ seconds: 5, reason: 'temporal-unavailable' })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(result.current.busy).toEqual({ seconds: 2, reason: 'still-accepting' })
+    expect(result.current.error).toBeUndefined()
+  })
+
+  it.each([TEMPORAL_UNAVAILABLE, STILL_ACCEPTING])(
+    'gives up on a %s 503 after a bounded number of retries, as an error it can try again (review #1066 (11) 1)',
+    async (type) => {
+      submit.mockRejectedValue(
+        new ApiError({ type, title: 'Service Unavailable', status: 503, detail: 'Temporal is down', retry_after: 5 }),
+      )
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      for (let i = 0; i < TRANSIENT_RETRIES + 2; i++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5000)
+        })
+      }
+
+      expect(submit).toHaveBeenCalledTimes(TRANSIENT_RETRIES + 1)
+      expect(result.current.busy).toBeUndefined()
+      expect(result.current.error?.message).toBe('Temporal is down')
+      expect(result.current.rendering).toBe(false)
+
+      submit.mockResolvedValueOnce(accepted(JOB_B))
+      act(() => result.current.retry())
+      await settle()
+      expect(submit).toHaveBeenCalledTimes(TRANSIENT_RETRIES + 2)
+      expect(result.current.error).toBeUndefined()
+    },
+  )
+
+  it('waits out a refusal in elapsed time, not on a wall clock that steps (#1485)', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({ title: 'Service Unavailable', status: 503, detail: 'full', retry_after: 3 }),
+    )
+    mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    vi.setSystemTime(Date.now() + 3_600_000)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+    })
+    expect(submit).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+    })
+    expect(submit).toHaveBeenCalledTimes(2)
   })
 
   it('treats any other refusal as an error, not a wait', async () => {
@@ -156,7 +307,7 @@ describe('useRenderJob', () => {
     // The newer render went out within a stale-check, not after the 30 s wait,
     // and the refused one was never retried.
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
   })
 
   it('reports a settle only for the newest render, never a superseded one (#254)', async () => {
@@ -171,7 +322,7 @@ describe('useRenderJob', () => {
     await settle()
     rerender({ slug: 'demo', params: second })
     await settle()
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: second }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: second }, undefined, JOB_A, expect.any(AbortSignal), expect.any(String))
 
     // A says "done" now, but it was superseded: neither its job nor its params count.
     lateA.resolve(job(JOB_A, 'done'))
@@ -196,8 +347,8 @@ describe('useRenderJob', () => {
     rerender({ slug: 'other', params: { n: 1 }, version: 'f'.repeat(40) })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'other', { params: { n: 1 } }, undefined, undefined)
-    expect(submit).toHaveBeenNthCalledWith(3, 'other', { params: { n: 1 } }, 'f'.repeat(40), undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'other', { params: { n: 1 } }, undefined, undefined, expect.any(AbortSignal), expect.any(String))
+    expect(submit).toHaveBeenNthCalledWith(3, 'other', { params: { n: 1 } }, 'f'.repeat(40), undefined, expect.any(AbortSignal), expect.any(String))
   })
 
   describe('following a job (#267)', () => {
@@ -309,5 +460,128 @@ describe('useRenderJob', () => {
       })
       expect(read.mock.calls.length - before).toBe(3)
     })
+
+    it('keeps following a running job through a failed read, and reads it again (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockRejectedValueOnce(new ApiError(500, 'injected 500'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(result.current.error).toBeUndefined()
+      expect(result.current.rendering).toBe(true)
+      expect(realtime.following()).toEqual([`job:${JOB_A}`])
+
+      read.mockImplementation(async (id) => job(id, 'done'))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      expect(result.current.error).toBeUndefined()
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.job?.status).toBe('done')
+    })
+
+    it('reads the job on its job.done after a failed read (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      read.mockImplementation(async (id) => job(id, 'done'))
+      await realtime.signal(`job:${JOB_A}`, 'job.done')
+      expect(result.current.error).toBeUndefined()
+      expect(result.current.job?.status).toBe('done')
+      expect(result.current.rendering).toBe(false)
+    })
+
+    it('backs off between failed reads, then gives up and offers try again (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockRejectedValue(new ApiError(502, 'Bad Gateway'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(read).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(read).toHaveBeenCalledTimes(2)
+      // The second wait is longer than the first.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(read).toHaveBeenCalledTimes(2)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000)
+      })
+      expect(read).toHaveBeenCalledTimes(READ_RETRIES + 1)
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.error?.message).toContain('Bad Gateway')
+      expect(canRetry(result.current.error)).toBe(true)
+      expect(realtime.following()).toEqual([])
+    })
+
+    it('does not poll past a pending retry while the socket is unavailable (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      realtime.setStatus('unavailable')
+      read.mockRejectedValue(new ApiError(500, 'injected 500'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(result.current.error).toBeUndefined()
+      // At 0, then the backoff's 400 and 1200 ms: no 400 ms poll in between.
+      expect(read).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not read past a pending retry for events that came during the failed read (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      let fail!: (cause: Error) => void
+      read.mockImplementationOnce(
+        () =>
+          new Promise<Job>((_, reject) => {
+            fail = reject
+          }),
+      )
+      await realtime.signal(`job:${JOB_A}`)
+      await realtime.signal(`job:${JOB_A}`)
+      const before = read.mock.calls.length
+      await act(async () => {
+        fail(new ApiError(502, 'Bad Gateway'))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      // The event that came during the failed read waits for its backoff.
+      expect(read.mock.calls.length - before).toBe(0)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(read.mock.calls.length - before).toBe(1)
+    })
+
+    it('gives up at once on a job that is gone, and offers try again (#1040)', async () => {
+      vi.mocked(api.getJob).mockRejectedValue(new ApiError(404, 'no such job'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(api.getJob).toHaveBeenCalledTimes(1)
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.error?.message).toContain('no such job')
+      expect(canRetry(result.current.error)).toBe(true)
+      expect(realtime.following()).toEqual([])
+    })
+  })
+})
+
+
+describe('canRetry (review #1066 (13) 2)', () => {
+  it.each([
+    [new ApiError({ type: TEMPORAL_UNAVAILABLE, title: 'Service Unavailable', status: 503, detail: 'down' }), true],
+    [new ApiError({ type: STILL_ACCEPTING, title: 'Service Unavailable', status: 503, detail: 'checking' }), true],
+    [new ApiError({ type: UNANSWERED, title: 'Bad Gateway', status: 502, detail: 'no answer' }), true],
+    [new ApiError({ type: OFFLINE, title: 'Offline', status: 0, detail: 'offline' }), true],
+    [new TypeError('Failed to fetch'), true],
+    [new ApiError({ title: 'Unprocessable Content', status: 422, detail: 'width must be at most 100' }), false],
+    [new ApiError({ title: 'Internal Server Error', status: 500, detail: 'the render could not be started' }), false],
+    [new Error('openscad exited with 1'), false],
+  ])('%#: %s is %s', (error, expected) => {
+    expect(canRetry(error)).toBe(expected)
   })
 })

@@ -87,10 +87,12 @@ def _stage(source: str, directory: Path, context: Path | None) -> Path:
         for entry in context.iterdir():
             if entry.name in SIDECARS:
                 continue
-            if entry.is_dir():
-                shutil.copytree(entry, directory / entry.name, dirs_exist_ok=True)
+            # Links are copied as links, never followed (#994): this runs unconfined,
+            # and the sandbox refuses openscad a link that leads out of the model.
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.copytree(entry, directory / entry.name, symlinks=True, dirs_exist_ok=True)
             else:
-                shutil.copy2(entry, directory / entry.name)
+                shutil.copy2(entry, directory / entry.name, follow_symlinks=False)
     scad_path = directory / "model.scad"
     scad_path.write_text(source, encoding="utf-8")
     return scad_path

@@ -35,6 +35,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH
 from scadbuddy.main import create_app
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.support.operations import press
 
 WS = "/api/v1/ws"
 JOB_ID = "a" * 32
@@ -100,7 +101,9 @@ def test_unsubscribe_stops_delivery(client: TestClient, bus: EventBus) -> None:
 def test_a_real_mutation_is_delivered(client: TestClient) -> None:
     with client.websocket_connect(WS) as ws:
         subscribe(ws, "models")
-        response = client.post("/api/v1/models", json={"name": "Widget", "source": "x = 1;\n"})
+        response = client.post(
+            "/api/v1/models", json={"name": "Widget", "source": "x = 1;\n"}, headers=press()
+        )
         assert response.status_code == 201, response.text
         frame = ws.receive_json()
         assert (frame["kind"], frame["data"]) == ("model.created", {"slug": "widget"})

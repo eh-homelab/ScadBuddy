@@ -65,6 +65,40 @@ describe('MediaLightbox (#275)', () => {
     expect(trigger).toHaveFocus()
   })
 
+  // #1322 — Tab can carry focus out of the lightbox to <body>, where its own
+  // keyboard listener (on its container) never hears a key.
+  describe('once focus has left it for <body>', () => {
+    async function openedThenBlurred() {
+      const user = userEvent.setup()
+      render(<Gallery />)
+      await user.click(screen.getByRole('button', { name: `Open ${slides[0]!.alt}` }))
+      await opened()
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      expect(document.activeElement).toBe(document.body)
+      return user
+    }
+
+    it('still closes on Esc', async () => {
+      const user = await openedThenBlurred()
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument(), {
+        timeout: 3000,
+      })
+    })
+
+    it('still moves between slides with the arrow keys, and takes focus back', async () => {
+      const user = await openedThenBlurred()
+      await user.keyboard('{ArrowRight}')
+      await waitFor(() =>
+        expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+          'src',
+          slides[1]!.src,
+        ),
+      )
+      expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true)
+    })
+  })
+
   it('plays a video only here, with native controls and without autoplay', async () => {
     const user = userEvent.setup()
     render(<Gallery />)

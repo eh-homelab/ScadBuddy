@@ -31,6 +31,7 @@ from scadbuddy.library.presets import (
 )
 from scadbuddy.main import sweep_assets
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
+from tests.support.operations import press
 
 # Saved presets are rows in Postgres (#332): every test here runs on a throwaway schema.
 pytestmark = pytest.mark.requires_postgres
@@ -161,6 +162,85 @@ def test_a_dropdown_value_has_to_be_one_of_its_options(
     assert update.status_code == 422
 
 
+def test_a_text_value_past_its_max_length_is_refused(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1330: a `// 8` text limit is enforced on a save and an update, not only in the
+    browser."""
+    schema = CustomizerSchema(
+        parameters=[Parameter(name="label", type="string", initial="hi", max_length=8)]
+    )
+
+    async def with_a_limit(*args: Any, **kwargs: Any) -> tuple[None, CustomizerSchema]:
+        return None, schema
+
+    monkeypatch.setattr(params_api, "schema_of", with_a_limit)
+    refused = client.post(_url(model), json={"name": "X", "params": {"label": "x" * 16}})
+    assert refused.status_code == 422
+    assert refused.json()["parameters"] == ["label"]
+    saved = _save(client, model, "Short", {"label": "x" * 8})
+    update = client.patch(_url(model, saved["id"]), json={"params": {"label": "x" * 9}})
+    assert update.status_code == 422
+    assert client.get(_url(model)).json()[0]["params"] == {"label": "x" * 8}
+
+
+def test_a_colour_value_has_to_be_a_hex_colour(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#353: a preset's colour is what the colour picker could pick, `#RRGGBB`. A name
+    or anything else was saved, then shown as `#RREEDD` with a black swatch."""
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(name="col", type="color", initial="#00FF00"),
+            Parameter(name="named", type="color", initial="red"),
+        ]
+    )
+
+    async def with_a_colour(*args: Any, **kwargs: Any) -> tuple[None, CustomizerSchema]:
+        return None, schema
+
+    monkeypatch.setattr(params_api, "schema_of", with_a_colour)
+    for value in ("red", "red; cube(100)", "#12345", "#1234567", "#GGGGGG", "00FF00", ""):
+        refused = client.post(_url(model), json={"name": "X", "params": {"col": value}})
+        assert refused.status_code == 422, value
+        assert refused.json()["parameters"] == ["col"]
+    saved = _save(client, model, "Blue", {"col": "#0000ff"})
+    update = client.patch(_url(model, saved["id"]), json={"params": {"col": "blue"}})
+    assert update.status_code == 422
+    assert client.get(_url(model)).json()[0]["params"] == {"col": "#0000ff"}
+    # The template's own default is its business, whatever it spells.
+    _save(client, model, "Default", {"named": "red"})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "p nul\x00", "params": {}},
+        {"name": "p desc", "params": {}, "description": "a\x00b"},
+        {"name": "p tag", "params": {}, "tags": ["a\x00"]},
+        {"name": "p param", "params": {"label": "a\x00"}},
+    ],
+)
+def test_a_nul_in_a_preset_is_a_422(client: TestClient, model: str, body: dict[str, Any]) -> None:
+    """#965: Postgres cannot hold a NUL, so a save was a 500 echoing the driver's error."""
+    response = client.post(_url(model), json=body)
+    assert response.status_code == 422, response.text
+    assert "NUL byte" in response.text
+    assert client.get(_url(model)).json() == []
+
+
+def test_a_nul_in_a_preset_update_or_duplicate_is_a_422(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    for body in ({"name": "x\x00"}, {"params": {"label": "a\x00"}}, {"tags": ["\x00"]}):
+        response = client.patch(_url(model, saved["id"]), json=body)
+        assert response.status_code == 422, response.text
+        assert "NUL byte" in response.text
+    duplicate = _duplicate(client, model, saved["id"], "y\x00")
+    assert duplicate.status_code == 422, duplicate.text
+    assert "NUL byte" in duplicate.text
+    assert [p["name"] for p in client.get(_url(model)).json()] == ["Big"]
+
+
 def test_names_are_unique_per_template_ignoring_case(client: TestClient, model: str) -> None:
     _save(client, model, "Big", {"width": 25})
     clash = client.post(_url(model), json={"name": "big", "params": {}})
@@ -210,6 +290,36 @@ def test_a_preset_can_be_deleted(client: TestClient, model: str, pg_conninfo: st
 def test_an_unknown_preset_is_a_404(client: TestClient, model: str) -> None:
     missing = "0" * 32
     assert client.patch(_url(model, missing), json={"name": "X"}).status_code == 404
+
+
+def test_problems_read_for_people(client: TestClient, model: str) -> None:
+    """#357: no internal ids, no Python quoting, and a clash names the preset that
+    has the name, as it is spelled, not the spelling just typed."""
+    saved = _save(client, model, "C· d6 Numbers - Red team", {"width": 25})
+    clash = client.post(_url(model), json={"name": "c· d6 numbers - red TEAM", "params": {}})
+    assert clash.status_code == 409
+    assert clash.json()["detail"] == 'A preset named "C· d6 Numbers - Red team" already exists.'
+    assert clash.json()["existing"] == "C· d6 Numbers - Red team"
+    other = _save(client, model, "Small", {"width": 5})
+    rename = client.patch(_url(model, other["id"]), json={"name": "C· D6 NUMBERS - RED TEAM"})
+    assert rename.json()["detail"] == clash.json()["detail"]
+
+    assert client.delete(_url(model, saved["id"])).status_code == 204
+    for gone in (
+        client.delete(_url(model, saved["id"])),
+        client.patch(_url(model, saved["id"]), json={"name": "X"}),
+        _duplicate(client, model, saved["id"], "Copy"),
+    ):
+        assert gone.status_code == 404
+        detail = gone.json()["detail"]
+        assert detail == "That preset no longer exists; it may have been deleted elsewhere."
+        assert gone.json()["preset_id"] == saved["id"]
+
+
+def test_an_unknown_template_preset_is_a_404_not_read_only(client: TestClient, model: str) -> None:
+    """#357: a `template-*` id the template does not have was refused as read-only."""
+    assert client.delete(_url(model, "template-0")).status_code == 404
+    assert client.patch(_url(model, "template-0"), json={"name": "X"}).status_code == 404
 
 
 def test_an_unknown_model_is_a_404(client: TestClient) -> None:
@@ -268,7 +378,9 @@ def test_a_broken_preset_list_costs_only_the_template_presets(
 @pytest.mark.requires_git
 def test_a_duplicate_takes_the_saved_presets_along(client: TestClient) -> None:
     saved = _save(client, BUILTIN, "Mine", {"label": "Bo"})
-    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    created = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
     listed = client.get(_url(slug)).json()
@@ -286,7 +398,7 @@ def test_deleting_a_model_takes_its_presets(
     client: TestClient, model: str, pg_conninfo: str
 ) -> None:
     _save(client, model, "Big", {"width": 25})
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
     assert _rows(pg_conninfo, model) == []
 
 
@@ -416,7 +528,7 @@ def test_a_legacy_presets_file_is_still_read_below_model_json(
 
 
 def _patch_presets(client: TestClient, model_id: str, presets: Any) -> Any:
-    return client.patch(f"/api/v1/models/{model_id}", json={"presets": presets})
+    return client.patch(f"/api/v1/models/{model_id}", json={"presets": presets}, headers=press())
 
 
 def test_a_template_of_mine_edits_its_presets_through_its_metadata(
@@ -703,7 +815,9 @@ def test_a_template_duplicate_copies_its_saved_presets_details(client: TestClien
         _url(BUILTIN),
         json={"name": "Mine", "params": {}, "description": "Mine", "tags": ["x"]},
     )
-    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    created = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     copied = client.get(_url(created.json()["slug"])).json()[1]
     assert (copied["name"], copied["description"], copied["tags"]) == ("Mine", "Mine", ["x"])
@@ -923,7 +1037,9 @@ def test_the_migration_backfills_inputs_from_params(
 def test_a_duplicated_template_takes_its_presets_inputs_along(client: TestClient) -> None:
     body = {"name": "Mine", "inputs": {"params": {"label": "Bo"}, "ui": {"tab": "text"}}}
     assert client.post(_url(BUILTIN), json=body).status_code == 201
-    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    created = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     [mine] = [p for p in client.get(_url(created.json()["slug"])).json() if p["origin"] == "mine"]
     assert mine["inputs"] == {"params": {"label": "Bo"}, "ui": {"tab": "text"}, "v": 0}
@@ -1041,7 +1157,7 @@ def test_an_unrelated_metadata_patch_leaves_model_json_presets_as_written(
         "inputs": {"params": {"width": 5}, "v": 0},
     }
     _define(paths, model, [legacy])
-    tagged = client.patch(f"/api/v1/models/{model}", json={"tags": ["box"]})
+    tagged = client.patch(f"/api/v1/models/{model}", json={"tags": ["box"]}, headers=press())
     assert tagged.status_code == 200, tagged.text
     [written] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
     assert written == legacy

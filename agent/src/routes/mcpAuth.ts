@@ -15,7 +15,7 @@ import {
 } from '../auth/oidc.js'
 import { EgressError } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp/oidc (issue #262): the OIDC configuration for `/mcp`,
@@ -106,6 +106,8 @@ export function registerMcpAuthRoutes(app: Hono, deps: McpAuthRouteDeps): void {
   }
 
   app.get(base, async (c) => {
+    const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'MCP OIDC reads')
+    if (problem) return c.json({ detail: problem }, 403)
     const r = await repo()
     if (typeof r === 'string') return c.json({ detail: r }, 503)
     return c.json(view(await r.get()))

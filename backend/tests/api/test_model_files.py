@@ -13,6 +13,7 @@ from scadbuddy.api.model_files import MAX_SOURCE_FILES
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import TooManySourceFilesError
 from scadbuddy.render.provenance import source_version
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -26,6 +27,7 @@ def upload(client: TestClient) -> dict[str, Any]:
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", MAIN.encode(), "application/octet-stream")},
         data={"force": "true"},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { FailClosedTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { BoundedEventStore } from '../src/mcp/eventStore.js'
@@ -95,6 +95,20 @@ describe('PendingActionStore bounds', () => {
     const kept = [...(await prep(store, 'A', 2)), ...(await prep(store, 'B', 2))]
     await expect(prep(store, 'C')).rejects.toThrow(PendingStoreFullError)
     for (const [i, action] of kept.entries()) expect(await store.find(action.id, who(i < 2 ? 'A' : 'B'))).toBeDefined()
+  })
+
+  it('expires an action on elapsed time, not on a wall clock that steps (#1485)', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = new PendingActionStore({ ttlMs: 60_000 })
+      const [action] = await prep(store, 'A')
+      vi.setSystemTime(Date.now() + 3_600_000)
+      expect(await store.find(action!.id, who('A'))).toBeDefined()
+      vi.advanceTimersByTime(60_000)
+      expect(await store.find(action!.id, who('A'))).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('never confirms: without the database nothing can approve an action', async () => {

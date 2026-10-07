@@ -46,4 +46,20 @@ test.describe('library', () => {
     const scrollWidth = await page.evaluate('document.documentElement.scrollWidth')
     expect(scrollWidth).toBeLessThanOrEqual(375)
   })
+
+  // #935 — two uploads of one output share a long generated name, cut at the end to the
+  // common prefix, and the cards showed nothing else: no date, no size.
+  test('tells identically named files apart at phone width', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 800 })
+    await page.goto('/library')
+    const first = page.getByTestId('library-file-89')
+    const second = page.getByTestId('library-file-91')
+    await expect(first).toBeVisible()
+    await expect(second).toBeVisible()
+    expect(await first.innerText()).not.toEqual(await second.innerText())
+    // The name is cut in the middle, so the end (and the extension) stays readable.
+    await expect(first.getByText('64efc.3mf', { exact: false })).toBeVisible()
+    await expect(first.locator('time')).toHaveAttribute('datetime', '2026-09-26T17:05:45Z')
+    await expect(first).toContainText('110 kB')
+  })
 })

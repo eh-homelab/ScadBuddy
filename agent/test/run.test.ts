@@ -259,6 +259,8 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     expect(calls.flatMap((c) => c.body?.tools ?? [])).toEqual([])
     const init = messages.find((m) => m.type === 'system' && m.subtype === 'init')
     expect(init && 'tools' in init ? init.tools : undefined).toEqual([])
+    // The mode in which canUseTool decides every call (test/permissionMode.test.ts).
+    expect(init).toMatchObject({ permissionMode: 'default' })
     // The credential appears in no message and no stderr line.
     expect(JSON.stringify(messages)).not.toContain(GATEWAY_TOKEN)
     expect(stderr.join('\n')).not.toContain(GATEWAY_TOKEN)
@@ -409,7 +411,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
       return { hang: true }
     }
     const messages: SDKMessage[] = []
-    const started = Date.now()
+    const started = performance.now()
     const run = (async () => {
       for await (const m of runHarness({
         paths: { stateDir },
@@ -421,9 +423,12 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
         messages.push(m)
       }
     })()
-    await expect(run).rejects.toThrow(/abort/i)
-    expect(messages.some((m) => m.type === 'result')).toBe(false)
-    expect(Date.now() - started).toBeLessThan(10_000)
+    // Interrupted first (run.ts stopFirst, #1168): Claude Code ends the turn
+    // with an error result, and the SDK throws on it.
+    await expect(run).rejects.toThrow(/error result/i)
+    expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'error_during_execution' })
+    expect(fake.messageCalls()).toHaveLength(1)
+    expect(performance.now() - started).toBeLessThan(10_000)
   })
 
   describe('testConnection', () => {

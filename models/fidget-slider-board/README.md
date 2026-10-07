@@ -56,6 +56,21 @@ track, knob or the name and the edge.
 In each of these cases the render log says so with a `NOTE:` line. The log's
 `SB_FIDGET` line lists the beads in each row.
 
+## Fitting the name
+
+The name is fitted from its real ink box: the width and height of every
+character in DejaVu Sans Bold, measured at size 10 with `textmetrics()` and kept
+in a table in the source (MakerWorld's OpenSCAD has no `textmetrics()`). The
+name's band is as tall as its ink at `name_size`, so letters that hang below the
+line (g, j, p, q, y) and accented capitals get the room they need, and a name
+too wide for the shape is made smaller until it fits. The name is never cut.
+
+Characters outside ASCII are counted as the widest and tallest glyph the face
+has, so a name with them comes out a little smaller than it could be. Another
+`font` is fitted with the DejaVu Sans Bold widths: a wider face could reach the
+edge of the name's band and be cut off there, and the render log says so with a
+`NOTE:`.
+
 ## Parameters
 
 ### Board
@@ -91,7 +106,7 @@ In each of these cases the render log says so with a `NOTE:` line. The log's
 |---|---|---|
 | `name` | `MIA` | Up to 12 characters, inlaid flush into the board below the rows. Leave empty for none. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface. ScadBuddy fills this dropdown from the fonts installed in the image. |
-| `name_size` | `14` | Largest letter height in mm, 8–30. A long name is made smaller to fit the shape, down to 6 mm. Below that it is left out, and a `NOTE:` says so. |
+| `name_size` | `13` | Largest letter height in mm, 8–30. A long name is made smaller to fit the shape, down to 6 mm. Below that it is left out, and a `NOTE:` says so. |
 
 ## Colours and extruders
 
@@ -141,11 +156,12 @@ beads now and then.
 ./verify.sh
 ```
 
-It renders the defaults and eight variations in `scadbuddy-verify:local`:
+It renders the defaults and eleven variations in `scadbuddy-verify:local`:
 
 - every shape;
 - every colour pattern;
-- names that fit, that shrink to fit, and that do not fit;
+- names that fit, that shrink to fit, and that do not fit, including round
+  and wide capitals and letters with descenders;
 - the biggest beads at the loosest clearance with three free places;
 - one tiny bead at the tightest clearance with half a free place;
 - the smallest heart and dinosaur with the biggest beads, where rows are
@@ -170,6 +186,8 @@ For each one it checks:
 - **every row can slide.** Each bead is swept along its track by the free
   room, grown by `clearance - 0.03`, and must touch nothing;
 - every track, knob and the name stay at least 3 mm inside the outline;
+- **the name is never cut.** The name inlay is exactly as wide and as tall as
+  the same text rendered on its own at the size the log reports;
 - rendered once per colour the way ScadBuddy builds its closed parts, the
   colour parts do not overlap. The volume of the union equals the sum of the
   parts.

@@ -59,7 +59,7 @@ export function usePrintProgress(
     let unfollow: (() => void) | undefined
     let stopped = false
     let finished = false
-    let lastRead = 0
+    let lastRead = Number.NEGATIVE_INFINITY
     let reading = false
     let again = false
 
@@ -87,7 +87,7 @@ export function usePrintProgress(
         return
       }
       reading = true
-      lastRead = Date.now()
+      lastRead = performance.now()
       try {
         const next = await api.getPrintProgress(id)
         if (isStale()) return
@@ -113,7 +113,7 @@ export function usePrintProgress(
     const fallback = () => {
       timer = setTimeout(() => {
         if (finished || isStale()) return
-        if (realtime.status === 'unavailable' || Date.now() - lastRead >= LIVE_BACKSTOP_MS) {
+        if (realtime.status === 'unavailable' || performance.now() - lastRead >= LIVE_BACKSTOP_MS) {
           void read(id)
         }
         fallback()

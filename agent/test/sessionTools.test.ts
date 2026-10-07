@@ -171,6 +171,21 @@ describe('session.* on the bus', () => {
     publisher.close()
   })
 
+  it('keeps throttling when the wall clock steps forward (#1485)', () => {
+    vi.useFakeTimers()
+    const { sql, payloads } = fakeSql()
+    const publisher = new SessionEventPublisher(sql, { replica: 'r1', throttleMs: 100 })
+    const delta = (n: number) => [event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm', delta: `${n}` })]
+    publisher.onAppend(S, delta(1), 1)
+    // NTP steps the clock an hour on; no time has passed.
+    vi.setSystemTime(Date.now() + 3_600_000)
+    publisher.onAppend(S, delta(2), 2)
+    expect(payloads.map((p) => p.seq)).toEqual([1])
+    vi.advanceTimersByTime(100)
+    expect(payloads.map((p) => p.seq)).toEqual([1, 2])
+    publisher.close()
+  })
+
   it("wakes followers for other replicas' sessions, all of them after a resync or reconnect", () => {
     const woken: string[] = []
     const log = { wake: (id: string) => woken.push(id), wakeAll: () => woken.push('*') } as unknown as EventLog

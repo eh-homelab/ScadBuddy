@@ -47,11 +47,11 @@ const TAB_ID = 'e2e-tab-0123456789abcdef'
 const TOKEN = 'gw-bridge-e2e-token-5555666677778888'
 
 async function until<T>(read: () => T | undefined, what: string, timeoutMs = 10_000): Promise<T> {
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   for (;;) {
     const value = read()
     if (value !== undefined && value !== false) return value
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await new Promise((r) => setTimeout(r, 20))
   }
 }
@@ -200,10 +200,10 @@ describe.skipIf(skip !== undefined)(`the browser bridge over its real socket${sk
     expect((await call('browser_get_form')).text).toMatch(/the tab answered get_form with unavailable/)
 
     // A page that does not answer: the call gives up (render's own wait, 0 ms here, plus the margin).
-    const started = Date.now()
+    const started = performance.now()
     const slow = await call('browser_render', { timeout_ms: 0 })
     expect(slow.text).toMatch(/the tab did not answer render within 10 s/)
-    expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
+    expect(performance.now() - started).toBeGreaterThanOrEqual(9_000)
 
     // Outward stops at the approval gate and never reaches the tab.
     expect((await call('browser_open_print_dialog')).body).toMatchObject({ status: 'pending_approval' })

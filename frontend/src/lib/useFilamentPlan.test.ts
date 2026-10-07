@@ -80,6 +80,95 @@ describe('useFilamentPlan', () => {
     expect(result.current.plan).toEqual([])
   })
 
+  it('a plate change keeps the spools already picked (#1044)', async () => {
+    const { result, rerender } = renderHook(
+      ({ plate }: { plate: number | 'all' }) => useFilamentPlan(OUTPUT, choicesView, plate),
+      { initialProps: { plate: 1 as number | 'all' } },
+    )
+    await waitFor(() => expect(result.current.filaments).not.toBeNull())
+    const picks = [
+      { slot_id: 1, spool_id: 22 },
+      { slot_id: 2, spool_id: 24 },
+    ]
+    act(() => result.current.setPlan(picks))
+
+    rerender({ plate: 2 })
+    await waitFor(() => expect(getFilaments).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(result.current.filaments).not.toBeNull())
+    expect(result.current.plan).toEqual(picks)
+
+    rerender({ plate: 'all' })
+    await waitFor(() => expect(getFilaments).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.filaments).not.toBeNull())
+    expect(result.current.plan).toEqual(picks)
+  })
+
+  it('a plate change seeds only slots new to it, and a pick survives a plate that lacks its slot (#1044)', async () => {
+    const plateTwo = {
+      ...filamentOptions,
+      slots: (filamentOptions.slots ?? []).slice(0, 1),
+      suggested: [{ slot_id: 1, spool_id: 21 }],
+    }
+    const { result, rerender } = renderHook(
+      ({ plate }: { plate: number | 'all' }) => useFilamentPlan(OUTPUT, choicesView, plate),
+      { initialProps: { plate: 1 as number | 'all' } },
+    )
+    await waitFor(() => expect(result.current.filaments).not.toBeNull())
+    act(() =>
+      result.current.setPlan([
+        { slot_id: 1, spool_id: 22 },
+        { slot_id: 2, spool_id: 24 },
+      ]),
+    )
+
+    getFilaments.mockResolvedValueOnce(plateTwo)
+    rerender({ plate: 2 })
+    await waitFor(() => expect(result.current.plan).toEqual([{ slot_id: 1, spool_id: 22 }]))
+
+    // Back to every plate: slot 2's pick comes back rather than the suggestion.
+    rerender({ plate: 'all' })
+    await waitFor(() =>
+      expect(result.current.plan).toEqual([
+        { slot_id: 1, spool_id: 22 },
+        { slot_id: 2, spool_id: 24 },
+      ]),
+    )
+  })
+
+  it('a slot new to a later plate is seeded from the remembered plan, not the auto-match (#1044 review)', async () => {
+    const plateOne = {
+      ...filamentOptions,
+      slots: (filamentOptions.slots ?? []).slice(0, 1),
+      suggested: [{ slot_id: 1, spool_id: 21 }],
+    }
+    const remembering: ChoicesView = {
+      ...choicesView,
+      filaments: plateOne,
+      model_choices: { printer_id: null, filament_plan: [{ slot_id: 2, spool_id: 27 }] },
+    }
+    // Every plate's slots, with an auto-match for slot 2 other than the remembered spool.
+    getFilaments.mockResolvedValueOnce({
+      ...filamentOptions,
+      suggested: [
+        { slot_id: 1, spool_id: 21 },
+        { slot_id: 2, spool_id: 22 },
+      ],
+    })
+    const { result, rerender } = renderHook(
+      ({ plate }: { plate: number | 'all' }) => useFilamentPlan(OUTPUT, remembering, plate),
+      { initialProps: { plate: 1 as number | 'all' } },
+    )
+    await waitFor(() => expect(result.current.plan).toEqual([{ slot_id: 1, spool_id: 21 }]))
+
+    rerender({ plate: 'all' })
+    await waitFor(() =>
+      expect(result.current.plan).toEqual([
+        { slot_id: 1, spool_id: 21 },
+        { slot_id: 2, spool_id: 27 },
+      ]),
+    )
+  })
+
   it('a failed read reports the error and clears the plan', async () => {
     getFilaments.mockRejectedValueOnce(new ApiError(503, 'Bambuddy is down.'))
     const { result } = renderHook(() => useFilamentPlan(OUTPUT, choicesView, 2))

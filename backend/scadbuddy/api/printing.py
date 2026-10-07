@@ -12,7 +12,7 @@ import logging
 import time
 from contextlib import suppress
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 import psycopg
 from fastapi import APIRouter, Query, Response, status
@@ -20,29 +20,30 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.service import RPCError
 
-from scadbuddy.api.analyzers import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.deps import (
+    AppState,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
     PrintLinksDep,
     PrintProgressDep,
     PrintRunsDep,
-    PrintWatcherDep,
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     STILL_ACCEPTING_PROBLEM,
-    TEMPORAL_UNAVAILABLE_PROBLEM,
     IdempotencyKey,
     operation_answer,
     run_operation,
+    temporal_problems,
+    temporal_refused,
+    temporal_unavailable,
 )
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
@@ -54,7 +55,7 @@ from scadbuddy.bambuddy.print_run import (
     check_for_output,
     filament_options_for_output,
 )
-from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
     ProjectAttach,
@@ -63,8 +64,9 @@ from scadbuddy.bambuddy.projects import (
     ProjectView,
     describe_projects,
 )
-from scadbuddy.bambuddy.runs import PrintRun, run_key
-from scadbuddy.core.problems import ApiError
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.operations.component import OperationsDep
@@ -77,9 +79,13 @@ from scadbuddy.workflows.commands import (
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
     TemporalUnavailableError,
+    TemporalUnreachableError,
     start_command,
 )
+from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import (
     ACCEPTED_UPDATE,
     PRINT_RUN_WORKFLOW,
@@ -89,6 +95,47 @@ from scadbuddy.workflows.print_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: ``TemporalRefusedError``. Not "nothing was queued": some refusals come after the start
+#: was persisted, and the same request sent again follows it (review #1316 4).
+TEMPORAL_REFUSED_DETAIL = (
+    "Temporal refused to start this print; see ScadBuddy's logs. Send the same request"
+    " again to follow it if it started."
+)
+#: ``TemporalUnreachableError``: the first connect failed, so no request was written.
+TEMPORAL_UNREACHABLE_DETAIL = (
+    "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued; try again shortly."
+)
+#: ``TemporalUnavailableError``: no answer within the bound, or ``UNAVAILABLE``. Either
+#: may follow a persisted start (review #1316 (9) 1a).
+TEMPORAL_DOWN_DETAIL = (
+    "ScadBuddy cannot reach Temporal, where print runs run. Send the same request again"
+    " shortly to follow it if it started."
+)
+#: ``TemporalBusyError``: Temporal answered, or gRPC ended the call, so it is not "cannot
+#: reach" (review #1316 (9) 1b).
+TEMPORAL_BUSY_DETAIL = (
+    "Temporal could not start this print right now. Send the same request again shortly"
+    " to follow it if it started."
+)
+STILL_CHECKING_DETAIL = (
+    "ScadBuddy is still checking this print. Send the same request again to follow it."
+)
+
+#: What a print run's routes answer beside the 200 and 202, built from the details the
+#: route sends (review #1316 (10) 3, (11) 1, (12) 2).
+PRINT_RUN_PROBLEMS: dict[int | str, dict[str, Any]] = temporal_problems(
+    refused=TEMPORAL_REFUSED_DETAIL,
+    unreachable=TEMPORAL_UNREACHABLE_DETAIL,
+    down=TEMPORAL_DOWN_DETAIL,
+    busy=TEMPORAL_BUSY_DETAIL,
+    still_checking=STILL_CHECKING_DETAIL,
+    unexpected=UNEXPECTED_DETAIL,
+    other="Any other problem. The check's refusal passes through with its own status and"
+    " type (409, 422, or Bambuddy's own, such as 404 for a library file it no longer has,"
+    " 502 or 504); the route's own are 404 for an unknown output and 409 for a run whose"
+    " record expired.",
+)
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -190,9 +237,17 @@ def put_printer_rack_algorithm(
             if rolled_back
             else "could not confirm the save; check the setting before resending"
         )
+        # Say which failure it was (#1283): a full pool, a statement cut off, or a
+        # connection that failed, rather than calling each one a timeout.
+        if isinstance(error, PoolTimeout):
+            cause = "no database connection came free in time"
+        elif isinstance(error, psycopg.errors.QueryCanceled):
+            cause = "the database did not answer in time"
+        else:
+            cause = "the connection to the database failed"
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"{outcome}: the database did not answer in time ({type(error).__name__})",
+            f"{outcome}: {cause} ({type(error).__name__})",
             type_=DATABASE_UNAVAILABLE_PROBLEM,
         ) from None
     return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
@@ -226,6 +281,7 @@ async def get_printer_camera(printer_id: int, store: SettingsStoreDep) -> Respon
             "description": "A repeat of a run in flight, or one that succeeded (or failed "
             "after it tried to queue) within the last ten minutes: that run, and no new print.",
         },
+        **PRINT_RUN_PROBLEMS,
     },
     summary="Slice this output with the dialog's choices and queue it, in the background",
 )
@@ -266,7 +322,7 @@ async def post_run(
     return await accept_run(
         runs,
         response,
-        subject=meta.id,
+        subject=PrintSubject.output(meta.id),
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
@@ -287,7 +343,7 @@ async def accept_run(
     runs: PrintCommands,
     response: Response,
     *,
-    subject: str,
+    subject: PrintSubject,
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
@@ -295,20 +351,22 @@ async def accept_run(
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
 
-    ``subject`` is what the run is keyed and recorded under: an output's id, or
-    ``library:<file id>``. Our record is read first: a repeat answers 200 with its run
-    and touches nothing else. Otherwise ``PrintRun`` is started (or attached to) with
-    update-with-start, and its ``accepted`` Update answers with the new row (202), the
-    run it repeats (200) or the refusal, raised as the problem it carries.
+    ``subject`` is what the run prints. It is keyed and announced under its
+    ``run_subject`` (an output's id, or ``library:<file id>``), as before #1750, so a
+    retry across the upgrade still finds its run. Our record is read first: a repeat
+    answers 200 with its run and touches nothing else. Otherwise ``PrintRun`` is started
+    (or attached to) with update-with-start, and its ``accepted`` Update answers with
+    the new row (202), the run it repeats (200) or the refusal, raised as the problem it
+    carries.
     """
-    key = run_key(subject, request)
+    key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
     repeated = await runs.store.find(key, has_request_id=has_request_id)
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
     arg = PrintRunInput(
-        subject=subject,
+        subject=subject.run_subject,
         slug=slug,
         key=key,
         source=source,
@@ -379,18 +437,26 @@ async def accept_run(
         # the same request sent again starts a new one.
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "ScadBuddy is still checking this print. Send the same request again to follow it.",
+            STILL_CHECKING_DETAIL,
             type_=STILL_ACCEPTING_PROBLEM,
             headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from None
-    except (RPCError, TemporalUnavailableError):
-        logger.warning("could not start a print run on Temporal", exc_info=True)
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued; try"
-            " again shortly.",
-            type_=TEMPORAL_UNAVAILABLE_PROBLEM,
-            headers={"Retry-After": "5"},
+    except TemporalRefusedError:
+        # A misconfiguration, not a blip (review #1061 (3) 3).
+        raise temporal_refused(
+            "to start a print run", TEMPORAL_REFUSED_DETAIL, may_have_started=True
+        ) from None
+    except TemporalUnavailableError as error:
+        if isinstance(error, TemporalUnreachableError):
+            detail = TEMPORAL_UNREACHABLE_DETAIL
+        elif isinstance(error, TemporalBusyError):
+            detail = TEMPORAL_BUSY_DETAIL
+        else:
+            detail = TEMPORAL_DOWN_DETAIL
+        raise temporal_unavailable(
+            "a print run",
+            detail,
+            may_have_started=not isinstance(error, TemporalUnreachableError),
         ) from None
     if answer.refusal is not None:
         refusal = answer.refusal
@@ -522,6 +588,24 @@ async def get_choices(
         )
 
 
+async def _failed_before_queueing(state: AppState, output_id: str) -> str | None:
+    """Why the output's newest run failed, when it failed before it queued anything
+    (#1049); else ``None``. A run that may have queued recorded what it queued, so its
+    print's own progress says more. Without a database, or with one that does not
+    answer, there are no runs to read, and the progress is read as it was before."""
+    runs = state.print_runs.store
+    if not runs.available:
+        return None
+    try:
+        latest = await runs.latest_for_output(output_id)
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; progress read without them")
+        return None
+    if latest is None or latest.status != "failed" or latest.may_have_queued:
+        return None
+    return latest.error.detail if latest.error is not None else None
+
+
 @router.get(
     "/outputs/{output_id}/progress",
     response_model=PrintProgress | None,
@@ -534,26 +618,37 @@ async def get_progress(
     links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
+    follows: FollowsDep,
+    state: StateDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
     ``null`` means this output has never been printed — that is an answer, not an
     error, and the send bar shows nothing rather than a failure.
 
+    When the output's newest run failed before it queued anything, that failure is the
+    progress (``route: "run"``, #1049): such a run leaves no slice job or queue item to
+    follow, and read as never printed once the dialog that started it was gone.
+
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
+    failed = await _failed_before_queueing(state, meta.id)
+    progress: PrintProgress | None
     async with client_for(store.load()) as client:
-        progress = await progress_for(
-            client, meta, uploads=uploads, links=links if links.available else None
-        )
+        if failed is not None:
+            progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
+        else:
+            progress = await progress_for(
+                client, meta, uploads=uploads, links=links if links.available else None
+            )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
-    # (#268). The watcher may not be, after a restart without a database, for a print
-    # sent before the watcher existed, or once it gave up on a quiet print.
+    # (#268, #1053). Its follow may have given up on a quiet print, or been sent before
+    # there was one. In the background: a Temporal that does not answer never holds this
+    # read up. It needs only the client and queue, never the print runs' store.
     if progress is not None and not progress.settled:
-        watcher.watch(meta.id)
+        follows.ensure(meta.id)
     return progress
 
 

@@ -18,8 +18,8 @@ export interface ParamWidgetProps {
   fonts: FontFamily[]
   /** Seeds the font picker's preview: the text this model will actually set. */
   sampleText?: string
-  /** 1-based extruder index for `color` params (spec §7). */
-  extruder?: number
+  /** 1-based extruder index for `color` params (spec §7); null when the render did not use it (#938). */
+  extruder?: number | null
   onChange: (next: ParamValue) => void
 }
 

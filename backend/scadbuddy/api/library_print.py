@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from scadbuddy.api.deps import PrintRunsDep, SettingsStoreDep
 from scadbuddy.api.outputs import OutputPlate
-from scadbuddy.api.printing import accept_run
+from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.runs import PrintRun
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.print_models import SourceSpec
@@ -165,6 +166,7 @@ async def get_library_filaments(
             "description": "A repeat of a run in flight, or one that succeeded (or failed "
             "after it tried to queue) within the last ten minutes: that run, and no new print.",
         },
+        **PRINT_RUN_PROBLEMS,
     },
     summary="Slice this library file with the dialog's choices and queue it, in the background",
 )
@@ -177,11 +179,12 @@ async def post_library_run(
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
-    202 and any slice. The run's ``output_id`` is ``library:<file id>``."""
+    202 and any slice. The run's ``subject`` is ``library:<file id>``, and so is its
+    ``output_id``, which older clients read."""
     return await accept_run(
         runs,
         response,
-        subject=f"library:{file_id}",
+        subject=PrintSubject.library(file_id),
         slug=f"library-{file_id}",
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),

@@ -16,8 +16,12 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.proxies import Network
 from scadbuddy.core.settings import Settings
 from scadbuddy.telemetry.admission import RelayLimits
-from scadbuddy.telemetry.forwarder import TraceForwarder
-from scadbuddy.telemetry.target import otlp_traces_target
+from scadbuddy.telemetry.forwarder import FORWARD_TIMEOUT, TraceForwarder
+from scadbuddy.telemetry.target import (
+    OtlpClientOptions,
+    otlp_traces_client_options,
+    otlp_traces_target,
+)
 
 
 @dataclass(frozen=True)
@@ -36,8 +40,16 @@ TRACE_RELAY: Key[TraceRelay] = Key("trace_relay")
 
 
 def _build(core: Core, components: Components) -> TraceRelay:
+    target = otlp_traces_target()
+    # Off, no TLS file is read: a stale path must not stop a start that never posts.
+    options = otlp_traces_client_options() if target is not None else OtlpClientOptions()
     return TraceRelay(
-        forwarder=TraceForwarder(metrics=core.metrics, target=otlp_traces_target()),
+        forwarder=TraceForwarder(
+            metrics=core.metrics,
+            target=target,
+            verify=options.verify,
+            forward_timeout=FORWARD_TIMEOUT if options.timeout is None else options.timeout,
+        ),
         limits=RelayLimits(),
         settings=lambda: core.settings,
         trusted_proxies=core.settings.trusted_proxy_networks,

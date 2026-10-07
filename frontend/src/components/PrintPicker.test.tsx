@@ -1,14 +1,13 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
-import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError, printRunPoll, rackAlgorithmSave } from '../api/client'
 import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
-import { resetMockState } from '../mocks/handlers'
+import { lastArrangeRequest, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
@@ -261,11 +260,7 @@ describe('PrintPicker', () => {
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
     await user.selectOptions(screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
 
-    rerender(
-      <MemoryRouter>
-        <PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
-      </MemoryRouter>,
-    )
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
@@ -280,9 +275,8 @@ describe('PrintPicker', () => {
       ...queuedResult,
       warnings: [
         {
-          kind: 'hf-unsupported',
-          message:
-            "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet.",
+          kind: 'not-installed',
+          message: 'No 0.6 mm nozzle is installed. Install one before this prints.',
         },
         {
           kind: 'plate-differs',
@@ -297,7 +291,7 @@ describe('PrintPicker', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     const warnings = await screen.findByTestId('run-warnings')
-    expect(warnings).toHaveTextContent('High Flow presets')
+    expect(warnings).toHaveTextContent('No 0.6 mm nozzle is installed')
     expect(warnings).toHaveTextContent('Swap to Textured PEI Plate')
     expect(screen.getByTestId('queued-items')).toHaveTextContent('Sliced and queued for 3DP-31B-598')
     expect(onRan).toHaveBeenCalledTimes(1)
@@ -340,6 +334,394 @@ describe('PrintPicker', () => {
     await loaded()
     expect(screen.queryByRole('alert')).toBeNull()
     expect(reads).toBe(2)
+  })
+
+  it('re-arranges for the chosen spools and switches to the new output', async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await user.selectOptions(screen.getByLabelText('Arrange for'), 'fewest_swaps')
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    // Two copies: the mock writes one plate, and the job's empty `plates` says so.
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    const sent = lastArrangeRequest()
+    expect(sent).toMatchObject({
+      goal: 'fewest_swaps',
+      colours: output.colors,
+      objects: [{ output_id: output.id, part: 'piece-wall', count: 2 }],
+      name: 'Reagan (arranged)',
+    })
+    expect(sent?.filament_plan?.slots?.length).toBeGreaterThan(0)
+    // The dialog now reads the new output: its plates are asked for by the new id.
+    await screen.findByTestId('filament-slot-1')
+  })
+
+  it('keeps the spools and settings a re-arrange was made for', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    const slot1 = screen.getByTestId('filament-slot-1')
+    const other = within(slot1)
+      .getAllByRole('radio')
+      .find((radio) => !(radio as HTMLInputElement).checked) as HTMLInputElement
+    const spool = Number(other.value)
+    await user.click(other)
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    expect(lastArrangeRequest()?.filament_plan?.slots).toContainEqual({ slot_id: 1, spool_id: spool })
+    // The new output's choices are read again; the mapping and the process survive it.
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${spool}`)).toBeChecked(),
+    )
+    expect(screen.getByLabelText('Process')).toHaveValue('0.24mm Standard @BBL H2C')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({
+      filament_plan: { slots: expect.arrayContaining([{ slot_id: 1, spool_id: spool }]) },
+      choices: { tier: null, process_name: '0.24mm Standard @BBL H2C' },
+    })
+  })
+
+  /** Slot 1's checked spool, and one that is not. */
+  function slot1Radios() {
+    const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[]
+    return { checked: radios.find((radio) => radio.checked)!, other: radios.find((radio) => !radio.checked)! }
+  }
+
+  it('drops the carry when the dialog is closed', async () => {
+    // Closing resets the dialog's choices; a carry left behind by a failed read must not
+    // skip the seeding when it opens again.
+    const originals = new Set(fixtures.outputs.map((entry) => entry.id))
+    let failures = 1
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ params }) => {
+        if (originals.has(String(params.id)) || failures === 0) return undefined
+        failures -= 1
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'no choices' },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const shown = { ...output }
+    function Reopening() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>Open it</button>
+          <PrintPicker open={open} source={{ kind: 'output', output: shown }} onClose={() => setOpen(false)} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Reopening />)
+    await loaded()
+    const { checked, other } = slot1Radios()
+    await user.click(other)
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('no choices')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Open it', hidden: true }))
+    await loaded()
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${checked.value}`)).toBeChecked(),
+    )
+  })
+
+  it('keeps the spools across a failed read of the arranged output and a Retry', async () => {
+    const originals = new Set(fixtures.outputs.map((entry) => entry.id))
+    let failures = 1
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ params }) => {
+        if (originals.has(String(params.id)) || failures === 0) return undefined
+        failures -= 1
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'no choices' },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const { other } = slot1Radios()
+    const chosen = other.value
+    await user.click(other)
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('no choices')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    await loaded()
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${chosen}`)).toBeChecked(),
+    )
+  })
+
+  it('carries nothing when the caller switches outputs while a re-arrange saves', async () => {
+    let saved!: (output: Output) => void
+    vi.spyOn(api, 'createOutput').mockImplementation(
+      () => new Promise<Output>((resolve) => (saved = resolve)),
+    )
+    const choices = vi.spyOn(api, 'getChoices')
+    const other = fixtures.outputs[1] as Output
+    function Switching() {
+      const [shown, setShown] = useState<Output>(output)
+      return (
+        <>
+          <button onClick={() => setShown(other)}>Next output</button>
+          <PrintPicker open source={{ kind: 'output', output: shown }} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Switching />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    await waitFor(() => expect(api.createOutput).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: 'Next output' }))
+    saved({ ...output, id: 'o-arranged' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await loaded()
+    expect(screen.queryByText(/Arranged onto/)).toBeNull()
+    expect(choices.mock.calls.map(([id]) => id)).not.toContain('o-arranged')
+  })
+
+  it('carries nothing to an output the caller passes in', async () => {
+    // The arranged output's choices are still on their way when the caller switches the
+    // dialog to another output; that output opens on its own choices.
+    const originals = new Set(fixtures.outputs.map((entry) => entry.id))
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', async ({ params }) => {
+        if (originals.has(String(params.id))) return undefined
+        await delay('infinite')
+        return undefined
+      }),
+    )
+    const other = { ...(fixtures.outputs[1] as Output) }
+    function Switching() {
+      const [shown, setShown] = useState<Output>({ ...output })
+      return (
+        <>
+          <button onClick={() => setShown(other)}>Next output</button>
+          <PrintPicker open source={{ kind: 'output', output: shown }} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Switching />)
+    await loaded()
+    const { checked, other: unchosen } = slot1Radios()
+    await user.click(unchosen)
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Next output' }))
+    await loaded()
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${checked.value}`)).toBeChecked(),
+    )
+  })
+
+  it('stops a re-arrange when the dialog closes, so nothing is saved after it', async () => {
+    const created_at = '2026-09-28T12:00:00Z'
+    let status = 'pending'
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json({ id: 'arrange-wait', slug: 'name-keychain', status: 'pending', created_at }, { status: 202 }),
+      ),
+      http.get('/api/v1/jobs/arrange-wait', () =>
+        HttpResponse.json({ id: 'arrange-wait', slug: 'name-keychain', status, created_at }),
+      ),
+    )
+    const save = vi.spyOn(api, 'createOutput')
+    const shown = { ...output }
+    function Closing() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(false)}>Close it</button>
+          <PrintPicker open={open} source={{ kind: 'output', output: shown }} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Closing />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    await waitFor(() => expect(lastArrangeRequest()).toBeDefined())
+    await user.click(screen.getByRole('button', { name: 'Close it', hidden: true }))
+    status = 'done'
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it('keeps its output when it is closed while the arranged one is being saved', async () => {
+    let saved!: (output: Output) => void
+    vi.spyOn(api, 'createOutput').mockImplementation(
+      () => new Promise<Output>((resolve) => (saved = resolve)),
+    )
+    const choices = vi.spyOn(api, 'getChoices')
+    const shown = { ...output }
+    function Closing() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(false)}>Close it</button>
+          <button onClick={() => setOpen(true)}>Open it</button>
+          <PrintPicker open={open} source={{ kind: 'output', output: shown }} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Closing />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    await waitFor(() => expect(api.createOutput).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: 'Close it', hidden: true }))
+    saved({ ...output, id: 'o-arranged' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // Reopened, it is still the output it was opened for.
+    await user.click(screen.getByRole('button', { name: 'Open it', hidden: true }))
+    await loaded()
+    expect(screen.queryByText(/Arranged onto/)).toBeNull()
+    expect(choices.mock.calls.map(([id]) => id)).not.toContain('o-arranged')
+  })
+
+  it('shows a failed re-arrange as an error, not as a note', async () => {
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'nothing to arrange' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    const alert = await screen.findByText('nothing to arrange')
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert).toHaveClass('text-warn')
+  })
+
+  it('does not stack "(arranged)" on a re-arranged output', async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    const again = screen.getByRole('button', { name: 'Re-arrange for these spools' })
+    await waitFor(() => expect(again).toBeEnabled())
+    await user.click(again)
+    await waitFor(() => expect(lastArrangeRequest()?.objects[0]?.output_id).not.toBe(output.id))
+    expect(lastArrangeRequest()?.name).toBe('Reagan (arranged)')
+  })
+
+  describe('an output saved before Arrange (#902)', () => {
+    const nova = fixtures.outputs[1] as Output
+    const picker = (open = true) => (
+      <PrintPicker open={open} source={{ kind: 'output', output: nova }} onClose={vi.fn()} onRan={vi.fn()} />
+    )
+
+    it('asks before re-rendering, and Cancel queues nothing', async () => {
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const { user } = renderPage(picker())
+      await loaded()
+      expect(screen.getByText('Nova was saved before Arrange existed; re-render to get its layout.')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      const prompt = screen.getByRole('group', { name: 'Re-render first' })
+      expect(prompt).toHaveTextContent('Re-render Nova, then arrange?')
+      await user.click(within(prompt).getByRole('button', { name: 'Cancel' }))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      expect(backfill).not.toHaveBeenCalled()
+      expect(lastArrangeRequest()).toBeNull()
+    })
+
+    it('re-renders it, then re-arranges', async () => {
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const { user } = renderPage(picker())
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      expect(await screen.findByText('Arranged onto 1 plate.', {}, { timeout: 5000 })).toBeInTheDocument()
+      expect(backfill).toHaveBeenCalledExactlyOnceWith(nova.id)
+      expect(lastArrangeRequest()).toMatchObject({
+        objects: [{ output_id: nova.id, part: 'piece-body', count: 1 }],
+        name: 'Nova (arranged)',
+      })
+    })
+
+    it('says why a re-render failed and arranges nothing', async () => {
+      server.use(
+        http.post(`/api/v1/outputs/${nova.id}/backfill`, () =>
+          HttpResponse.json(
+            { type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'revision abc is gone' },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const { user } = renderPage(picker())
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Nova could not be re-rendered: revision abc is gone.')
+      expect(lastArrangeRequest()).toBeNull()
+    })
+
+    it('asks when Arrange itself says the output needs a re-render', async () => {
+      // The caller's copy shows objects the server no longer records.
+      const stale: Output = { ...nova, manifest: output.manifest }
+      const { user } = renderPage(
+        <PrintPicker open source={{ kind: 'output', output: stale }} onClose={vi.fn()} onRan={vi.fn()} />,
+      )
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(await screen.findByRole('group', { name: 'Re-render first' })).toHaveTextContent(
+        'Re-render Nova, then arrange?',
+      )
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('keeps a refusal and its prompt to the output they were for', async () => {
+      const stale: Output = { ...nova, manifest: output.manifest }
+      // ActionBar keeps one picker mounted and changes its source.
+      function Switching() {
+        const [source, setSource] = useState<Output>(stale)
+        return (
+          <>
+            <button onClick={() => setSource(output)}>Show Reagan</button>
+            <PrintPicker open source={{ kind: 'output', output: source }} onClose={vi.fn()} onRan={vi.fn()} />
+          </>
+        )
+      }
+      const { user } = renderPage(<Switching />)
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await screen.findByRole('group', { name: 'Re-render first' })
+      await user.click(screen.getByRole('button', { name: 'Show Reagan', hidden: true }))
+      await waitFor(() => expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument())
+      expect(screen.queryByText(/saved before Arrange existed/)).not.toBeInTheDocument()
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    })
+
+    it('stops polling when it is closed mid-re-render', async () => {
+      server.use(
+        http.get('/api/v1/jobs/:id', ({ params }) =>
+          HttpResponse.json({
+            id: String(params['id']),
+            slug: 'name-keychain',
+            status: 'running',
+            created_at: '2026-09-28T12:00:00Z',
+          }),
+        ),
+      )
+      const read = vi.spyOn(api, 'getJob')
+      const { user, rerender } = renderPage(picker())
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      await waitFor(() => expect(read).toHaveBeenCalled())
+      rerender(picker(false))
+      const polls = read.mock.calls.length
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      expect(read.mock.calls.length).toBe(polls)
+      expect(lastArrangeRequest()).toBeNull()
+    })
   })
 })
 
@@ -1135,13 +1517,23 @@ describe('PrintPicker · Remembered choices', () => {
   }
 
   it('reopens on the spools this model last printed with', async () => {
+    await putChoices({ printer_id: 1, filament_plan: [{ slot_id: 1, spool_id: 26 }] })
+    renderPicker()
+    await loaded()
+
+    // The shelf's blue, over the loaded blue the auto-match picks.
+    expect(within(screen.getByTestId('filament-slot-1')).getByTestId('spool-26')).toBeChecked()
+    // A slot with nothing remembered still opens on the auto-match.
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-27')).toBeChecked()
+  })
+
+  it('does not reopen on a remembered spool whose colour no longer fits the slot (#933)', async () => {
+    // Hot Pink was what slot 2 last printed with; the slot is #FF1493 now.
     await putChoices({ printer_id: 1, filament_plan: [{ slot_id: 2, spool_id: 22 }] })
     renderPicker()
     await loaded()
 
-    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')).toBeChecked()
-    // A slot with nothing remembered still opens on the auto-match.
-    expect(within(screen.getByTestId('filament-slot-1')).getByTestId('spool-21')).toBeChecked()
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-27')).toBeChecked()
   })
 
   it('reopens on the nozzle size and quality this model last printed with', async () => {
@@ -1619,8 +2011,13 @@ describe('PrintPicker · Plates of a 3MF', () => {
   })
 
   it("drops the previous output's plates while the next output's load", async () => {
-    const first = { ...output, id: 'a'.repeat(32), library_files: [] }
-    const second = { ...output, id: 'b'.repeat(32), library_files: [] }
+    // Both outputs are ones the mock knows, so the second's choices read lands and the
+    // dialog stays up: only the reset can take the first output's plates away.
+    const [firstFixture, secondFixture] = fixtures.outputs
+    expect(firstFixture, 'fixtures.outputs[0]').toBeDefined()
+    expect(secondFixture, 'fixtures.outputs[1]').toBeDefined()
+    const first = { ...(firstFixture as Output), library_files: [] }
+    const second = { ...(secondFixture as Output), library_files: [] }
     server.use(
       http.get('/api/v1/outputs/:id/plates', async ({ params }) => {
         if (params.id === second.id) await delay('infinite')
@@ -1630,17 +2027,16 @@ describe('PrintPicker · Plates of a 3MF', () => {
         ])
       }),
     )
+    const reads = watch('GET', '/choices')
     const { rerender } = renderPage(
       <PrintPicker open source={{ kind: 'output', output: first }} onClose={vi.fn()} onRan={vi.fn()} />,
     )
     await screen.findByTestId('plate-choice')
 
-    rerender(
-      <MemoryRouter>
-        <PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
-      </MemoryRouter>,
-    )
-    await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await waitFor(() => expect(reads.urls.at(-1)).toContain(`/print/outputs/${second.id}/choices`))
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 })
 
@@ -1780,10 +2176,11 @@ describe('PrintPicker · A library file (#313)', () => {
           ...choicesView,
           model_choices: {
             printer_id: 1,
-            // Slot 2's suggestion is 27; 22 is in the inventory, 99999 is not.
+            // Slot 1's suggestion is 21; 26 is in the inventory and the same blue, 99999
+            // is not in the inventory.
             filament_plan: [
-              { slot_id: 1, spool_id: 99999 },
-              { slot_id: 2, spool_id: 22 },
+              { slot_id: 1, spool_id: 26 },
+              { slot_id: 2, spool_id: 99999 },
             ],
           },
         }),
@@ -1791,10 +2188,10 @@ describe('PrintPicker · A library file (#313)', () => {
     )
     renderPage(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
-    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')).toBeChecked()
+    expect(within(screen.getByTestId('filament-slot-1')).getByTestId('spool-26')).toBeChecked()
     // A remembered spool that is no longer in the inventory falls back to the suggestion.
-    const suggested = choicesView.filaments.suggested?.find((c) => c.slot_id === 1)?.spool_id
-    expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${suggested}`)).toBeChecked()
+    const suggested = choicesView.filaments.suggested?.find((c) => c.slot_id === 2)?.spool_id
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId(`spool-${suggested}`)).toBeChecked()
   })
 
   it('carries nothing of an output over when the source becomes a library file', async () => {
@@ -1823,11 +2220,7 @@ describe('PrintPicker · A library file (#313)', () => {
     await user.click(screen.getByText('Options'))
     await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
 
-    rerender(
-      <MemoryRouter>
-        <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />
-      </MemoryRouter>,
-    )
+    rerender(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
     await waitFor(() => expect(reads.urls.at(-1)).toContain('/print/library/89/choices'))
     await loaded()
     await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
@@ -1836,13 +2229,15 @@ describe('PrintPicker · A library file (#313)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(urls).toEqual([expect.stringContaining('/print/library/89/run')])
-    expect(bodies[0]).toMatchObject({
+    // toMatchObject would take `{}` as "any object": the cleared halves are compared exactly.
+    const body = bodies[0] as { options: unknown; choices: { filament_overrides: unknown } }
+    expect(body).toMatchObject({
       plate_id: 1,
       all_plates: false,
-      options: {},
-      choices: { filament_overrides: {} },
       filament_plan: { slots: expect.arrayContaining([{ slot_id: 2, spool_id: 27 }]) },
     })
+    expect(body.options).toEqual({})
+    expect(body.choices.filament_overrides).toEqual({})
   })
 })
 

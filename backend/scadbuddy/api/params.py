@@ -4,6 +4,7 @@ render route, the preset routes and the metadata route that edits a template's p
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterable, Mapping
 
 from fastapi import status
@@ -161,6 +162,10 @@ async def require_installed_fonts(
         )
 
 
+#: A colour as the colour picker writes one (#353).
+_PICKED_COLOUR = re.compile(r"#[0-9A-Fa-f]{6}")
+
+
 def require_valid_preset_params(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> None:
     """422 unless ``params`` would render as they are *and* every dropdown value is one
     of its options or a value the template retired.
@@ -168,12 +173,24 @@ def require_valid_preset_params(schema: CustomizerSchema, params: Mapping[str, P
     Stricter than a render, which takes any value of the right type: a preset is kept
     and replayed, so it holds only what the dropdown itself could pick, or picked
     before the option was renamed (`// retired`, #432; `render/runner.py` accepts the
-    same values).
+    same values). Likewise a colour is a `#RRGGBB` the picker could pick (#353), where a
+    render takes any string and only warns that a name it cannot read gets no extruder;
+    the template's own default is its business, however it spells it.
     """
     require_valid_params(schema, params)
     by_name = {parameter.name: parameter for parameter in schema.parameters}
     for name, value in params.items():
         parameter = by_name[name]
+        if (
+            parameter.type == "color"
+            and value != parameter.initial
+            and not (isinstance(value, str) and _PICKED_COLOUR.fullmatch(value))
+        ):
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"colour parameter {name!r} must be a colour written #RRGGBB, got {value!r}",
+                parameters=[name],
+            )
         options = [option.value for option in parameter.options]
         if options and value not in (*options, *parameter.retired):
             raise ApiError(

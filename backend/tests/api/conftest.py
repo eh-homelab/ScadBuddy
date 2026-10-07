@@ -14,12 +14,23 @@ import pytest
 import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import Client
 
+from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.render import submit as submit_module
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
-from tests.conftest import write_openscad_3mf
+from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
+from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
+from tests.conftest import TEST_ANSWER_DEADLINE, write_openscad_3mf
+from tests.support.deployment import (
+    BUILD_SERVES_MAX_POLL,
+    BUILD_SERVES_POLL,
+    BUILD_SERVES_TIMEOUT,
+    wait_until_build_serves,
+)
 from tests.support.temporal import (
     WorkflowReaper,
     temporal_available,
@@ -73,6 +84,24 @@ def _temporal(temporal_address: str) -> None:
     """The API tests skip without a Temporal: the app renders nowhere else (#546)."""
 
 
+@pytest.fixture(autouse=True)
+def _print_answer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The print route's own answer deadline (`COMMAND_ANSWER_DEADLINE`, and
+    `ACCEPT_BUDGET` built on it) waits as long as `start_command`'s test default
+    (`tests.conftest.TEST_ANSWER_DEADLINE`): under load its first start answered a 503
+    `command-still-accepting`. Only the API tests reach that route (review #1316 4a)."""
+    longer = (TEST_ANSWER_DEADLINE - COMMAND_ANSWER_DEADLINE).total_seconds()
+    monkeypatch.setattr(printing_api, "COMMAND_ANSWER_DEADLINE", TEST_ANSWER_DEADLINE)
+    monkeypatch.setattr(printing_api, "ACCEPT_BUDGET", printing_api.ACCEPT_BUDGET + longer)
+    # Under load, a print run's execution outlived the 5 s a reprint waits for it to
+    # close, so the reprint joined it and answered the earlier run.
+    monkeypatch.setattr(printing_api, "CLOSING_WAIT", printing_api.CLOSING_WAIT + longer)
+    # The render submit's bound is built on the same deadline at import: under load a
+    # render's first submit answered a 503 `command-still-accepting` past it, and the
+    # tests that render an output to send or print failed on it.
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", submit_module.SUBMIT_DEADLINE + longer)
+
+
 @pytest.fixture
 def settings(
     settings: Settings,
@@ -101,16 +130,68 @@ def settings(
             "temporal_namespace": "default",
             "temporal_task_queue_render": queue,
             "temporal_task_queue_bambuddy": f"{queue}-bambuddy",
+            "temporal_task_queue_library": f"{queue}-library",
             "temporal_worker_inprocess": True,
+            # No sweep Schedule: its trigger at start would run every sweep once,
+            # beside the test's own (#1095 CI). A test of the sweeps sets its interval.
+            "asset_sweep_interval": 0,
         }
+    )
+    # Before the runs: a Schedule left behind would start more on a queue nobody serves.
+    workflow_reaper.delete_schedules(
+        schedule_id_for(f"{queue}-library"), prune_schedule_id_for(f"{queue}-library")
     )
     workflow_reaper.terminate(queue)
     workflow_reaper.terminate(f"{queue}-bambuddy")
+    workflow_reaper.terminate(f"{queue}-library")
 
 
 @pytest.fixture
 def app(settings: Settings) -> FastAPI:
     return create_app(settings)
+
+
+@pytest.fixture(autouse=True)
+def _clients_wait_for_the_render_build(
+    monkeypatch: pytest.MonkeyPatch, workflow_reaper: WorkflowReaper
+) -> None:
+    """Every `TestClient` an api test enters (this module's `client`, a module's own,
+    one around `create_app`) is handed over once its app's in-process worker's build
+    serves the render queue: a render started before then waits unrouted, and on a
+    loaded host (the dev server's SetCurrentVersion taking 10 s) outlived the submit's
+    deadline as a 503. An app with no in-process worker is not waited on."""
+    enter = TestClient.__enter__
+
+    def entered(self: TestClient) -> TestClient:
+        test_client = enter(self)
+        state = getattr(getattr(self.app, "state", None), STATE_ATTR, None)
+        settings = state.settings if isinstance(state, AppState) else None
+        if settings is None or not settings.temporal_worker_inprocess:
+            return test_client
+        queue, build_id = settings.temporal_task_queue_render, settings.revision
+        serving = workflow_reaper.run(
+            wait_until_build_serves(
+                _reaper_client(workflow_reaper),
+                queue,
+                build_id,
+                timeout=BUILD_SERVES_TIMEOUT,
+                poll=BUILD_SERVES_POLL,
+                max_poll=BUILD_SERVES_MAX_POLL,
+            ),
+            # Past the wait's own bound by its last check's describe.
+            timeout=BUILD_SERVES_TIMEOUT + 10,
+        )
+        if not serving:
+            self.__exit__(None, None, None)
+            pytest.fail(f"build {build_id!r} never came to serve task queue {queue!r}")
+        return test_client
+
+    monkeypatch.setattr(TestClient, "__enter__", entered)
+
+
+def _reaper_client(reaper: WorkflowReaper) -> Client:
+    assert reaper.client is not None, "use the reaper as a context manager"
+    return reaper.client
 
 
 @pytest.fixture

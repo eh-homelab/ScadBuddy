@@ -32,7 +32,6 @@ EOF
   cat > "$work/repo/CLAUDE.md" <<'EOF'
 - Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-23@sha256:…`
   Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.23). Bump
-  (`CLAUDE_CODE_VERSION`, currently 2.1.283 for SDK 0.3.283)
 EOF
 }
 
@@ -74,7 +73,6 @@ grep -qx "FROM ghcr.io/astral-sh/uv:0.12.19 AS uv" "$work/repo/Dockerfile" || fa
 grep -q 'dev.2026-09-30@sha256:…' "$work/repo/CLAUDE.md" || fail "bump: CLAUDE.md tag"
 # shellcheck disable=SC2016 # literal backticks
 grep -q '`OPENSCAD_VERSION` (currently 2026.09.30)' "$work/repo/CLAUDE.md" || fail "bump: CLAUDE.md version"
-grep -q 'currently 2.1.283 for SDK' "$work/repo/CLAUDE.md" || fail "bump: touched CLAUDE_CODE_VERSION"
 grep -qx "openscad/openscad:dev.2026-09-30@$new_digest" "$work/seen" || fail "bump: version read from the wrong image"
 
 # 2. Already on the newest: nothing changes.

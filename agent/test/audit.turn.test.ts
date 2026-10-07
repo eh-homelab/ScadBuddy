@@ -85,10 +85,10 @@ describe('TurnAuditor', () => {
       await turn.observe(call(id))
       void gate({ toolName: 'mcp__scadbuddy__print_output', input: {}, toolUseId: id, tier: 'outward', signal: new AbortController().signal })
     }
-    const started = Date.now()
+    const started = performance.now()
     await turn.finish('the turn was interrupted')
     // One after another would be 4 × 200 ms.
-    expect(Date.now() - started).toBeLessThan(500)
+    expect(performance.now() - started).toBeLessThan(500)
     expect(entries.map((e) => e.toolUseId).sort()).toEqual(ids)
     expect(entries.every((e) => e.outcome === 'error' && e.detail === 'no result: the turn was interrupted')).toBe(true)
   })

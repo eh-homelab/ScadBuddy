@@ -1,9 +1,9 @@
 """Route dependencies on a component (`core/components.py`).
 
-A feature declares its own alias beside its component, as ``deps.py`` does for the
-core services::
+A feature declares its own alias beside its component, as ``bambuddy/component.py``
+does::
 
-    PrintWatcherDep = Annotated[PrintWatcher, component_dep(PRINT_WATCHER)]
+    ArchiveCacheDep = Annotated[ArchiveCache, component_dep(ARCHIVE_CACHE)]
 
 Not in ``core/components.py``: the getter reads ``deps.get_state``, and ``deps.py``
 imports the registry. No ``from __future__ import annotations`` here either: FastAPI

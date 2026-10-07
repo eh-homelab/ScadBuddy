@@ -142,7 +142,9 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             raise ApiError(400, "parent_id applies only to a new project, not a linked one")
         project = await client.project(request.project_id)
     else:
-        if not request.name:
+        # Trimmed: a name of spaces made a blank project and folder in Bambuddy (#1332).
+        name = (request.name or "").strip()
+        if not name:
             raise ApiError(400, "a new project needs a name")
         if request.parent_id is not None and request.folder_id is not None:
             # A linked folder stays where it is, so the project would be nested and its
@@ -150,7 +152,7 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             raise ApiError(400, "parent_id cannot be combined with folder_id")
         project = await client.create_project(
             ProjectCreate(
-                name=request.name,
+                name=name,
                 description=request.description,
                 color=request.colour,
                 tags=request.tags,

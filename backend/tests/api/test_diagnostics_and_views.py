@@ -59,7 +59,7 @@ def test_the_model_diagnostics_are_the_latest_settled_render(
     projection = getattr(app.state, STATE_ATTR).projection
     now = datetime.now(UTC)
     job = Job(id="f" * 32, slug=model, created_at=now)
-    projection.submit(job, "planted")
+    projection.accept(job, "planted", workflow_id="render-planted", run_id="r")
     job.state = "failed"
     job.finished_at = now + timedelta(minutes=1)
     job.error = "openscad exited with 1"

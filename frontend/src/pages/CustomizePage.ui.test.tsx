@@ -15,12 +15,14 @@ import { CustomizePage } from './CustomizePage'
 // WebGL does not exist in jsdom: the viewer is a stand-in that renders the page's own
 // buttons, which it lays over the scene (as CustomizePage.test.tsx does).
 // It counts its mounts, so a test can tell a moved viewer from one that stayed put.
+// In a layout effect, which runs in the commit that inserts its node: a passive
+// effect runs later, so a check that waits for the node could see it uncounted (#1311).
 const previews = vi.hoisted(() => ({ mounts: 0 }))
 vi.mock('../components/Preview', async () => {
-  const { useEffect } = await import('react')
+  const { useLayoutEffect } = await import('react')
   return {
     Preview: ({ leading, controls }: { leading?: ReactNode; controls?: ReactNode }) => {
-      useEffect(() => {
+      useLayoutEffect(() => {
         previews.mounts += 1
       }, [])
       return (
@@ -464,6 +466,40 @@ describe('the page slot', () => {
     Reflect.deleteProperty(document, 'fullscreenEnabled')
   })
 
+  it('shows a reopened output\'s inputs read-only when they cannot be migrated (#917)', async () => {
+    const outputId = 'c'.repeat(32)
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    server.use(
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: UI_DEMO_SLUG,
+          name: 'Old',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPage(<CustomizePage />, { route: `/m/${UI_DEMO_SLUG}?from=${outputId}`, path: '/m/:slug' })
+    expect(
+      await screen.findByText(/could not be brought up to this template version: defines no migrate/, undefined, {
+        timeout: 5000,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    expect(within(screen.getByTestId('workspace')).getByRole('alert')).toHaveTextContent('defines no migrate')
+    // The template's page still mounts, on the current (default) values.
+    await waitFor(() => expect(shadowText()).toMatch(/^custom /))
+  })
+
   it('covers the frame in full screen where the Fullscreen API is refused, with no flyout button', async () => {
     Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false })
     setUiModuleLoader(async () => ({
@@ -507,9 +543,17 @@ describe('the page slot', () => {
         return HttpResponse.json({ ...model, ui: { module: 'ui/index.js', slot: 'page', api: 1 } })
       }),
     )
+    // The count the viewer had at the moment its node landed: what any check that
+    // waits for the node (as the `waitFor` below does) can see (#1311).
+    let countedAtInsert: number | undefined
     setUiModuleLoader(async () => ({
       mount: (root: ShadowRoot) => {
         root.innerHTML = '<sb-preview></sb-preview>'
+        new MutationObserver(() => {
+          if (countedAtInsert === undefined && root.querySelector('[data-testid="preview"]')) {
+            countedAtInsert = previews.mounts
+          }
+        }).observe(root, { childList: true, subtree: true })
       },
     }))
     // The viewer is lazy: load it first, so "no preview yet" is the page's choice.
@@ -524,6 +568,7 @@ describe('the page slot', () => {
     release()
     await waitFor(() => expect(shadow().querySelector('[data-testid="preview"]')).not.toBeNull(), { timeout: 5000 })
     expect(previews.mounts).toBe(1)
+    expect(countedAtInsert).toBe(1)
   })
 
   it("reports the template Generate's error, and takes one click at a time", async () => {

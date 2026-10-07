@@ -53,6 +53,9 @@ MAX_LINKS: Final = 8
 #: The spec names no cap for a link's attributes; the event cap, which the frontend's
 #: ``spanLimits`` sets as ``attributePerLinkCountLimit`` too.
 MAX_LINK_ATTRIBUTES: Final = 16
+#: What `prepare` may return, the route's body limit: `rewrite` fills in every default
+#: field and the output escapes non-ASCII, so a smaller body can grow past it (#1137).
+MAX_PREPARED_BYTES: Final = 256 * 1024
 
 WEB_SERVICE_NAME: Final = "scadbuddy-web"
 #: Every other resource attribute the page sends is dropped.
@@ -588,7 +591,12 @@ def prepare(body: bytes, match_route: RouteMatcher, own_origin: OriginCheck) -> 
     rewritten = rewrite(parse(body), match_route, own_origin)
     if rewritten is None:
         return None
-    return json.dumps(rewritten, separators=(",", ":")).encode("ascii")
+    prepared = json.dumps(rewritten, separators=(",", ":")).encode("ascii")
+    if len(prepared) > MAX_PREPARED_BYTES:
+        raise BatchTooLargeError(
+            f"a trace batch is at most {MAX_PREPARED_BYTES // 1024} KiB once rewritten"
+        )
+    return prepared
 
 
 __all__ = [
@@ -601,6 +609,7 @@ __all__ = [
     "MAX_LINKS",
     "MAX_LINK_ATTRIBUTES",
     "MAX_NAME_CHARS",
+    "MAX_PREPARED_BYTES",
     "MAX_RESOURCES",
     "MAX_SCOPES",
     "MAX_SPANS",

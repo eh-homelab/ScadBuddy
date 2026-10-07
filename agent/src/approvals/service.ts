@@ -242,6 +242,12 @@ export type GateContext = {
   signal: AbortSignal
   /** The turn's trace (telemetry/turn.ts TurnTrace): told when a call parks and when it is decided. */
   trace?: GateTrace
+  /**
+   * Resolves once the turn's log has the call's `tool.call`, logging it if the turn
+   * has not (sessions/sdkEvents.ts ShownCalls, #881), so its `approval.required` is
+   * logged after it. Not asked for a subagent's call, which is never shown.
+   */
+  shown?: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>
 }
 
 /**
@@ -697,7 +703,7 @@ export class ApprovalService {
     // `running`) before the event that reports it is in the log.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
     // Started only once the UPDATE has won, so a lost race leaves no span.
-    const traced: { span?: Span } = {}
+    const traced: { span?: Span; committed?: boolean } = {}
     try {
       const approval = await this.deps.sql.begin(async (tx) => {
         const [row] = await tx.unsafe<Row[]>(
@@ -724,13 +730,16 @@ export class ApprovalService {
             sessionId: settled.sessionId,
             id,
             approved: decision === 'approved',
+            decision,
             ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
+            ...(reason && (decision === 'expired' || decision === 'cancelled') ? { reason } : {}),
           })
           const events = [scrubForLog(resolved, [])]
           logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
         }
         return settled
       })
+      traced.committed = true
       if (!approval) return undefined
       // Committed: wake followers, and announce it on the bus (#300).
       if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
@@ -738,7 +747,11 @@ export class ApprovalService {
       await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
       return approval
     } catch (err) {
-      if (traced.span) recordFailure(traced.span, err)
+      if (traced.span) {
+        recordFailure(traced.span, err)
+        // The span says the decision; a rollback means nothing was decided.
+        if (!traced.committed) traced.span.setAttribute('scadbuddy.outcome', 'rolled_back')
+      }
       throw err
     } finally {
       traced.span?.end()
@@ -1086,7 +1099,11 @@ export class ApprovalService {
       })
       return row ? record(row) : undefined
     } catch (err) {
-      for (const span of evicted) recordFailure(span, err)
+      // Only the transaction can throw here, and it rolled the cancellations back.
+      for (const span of evicted) {
+        recordFailure(span, err)
+        span.setAttribute('scadbuddy.outcome', 'rolled_back')
+      }
       throw err
     } finally {
       for (const span of evicted) span.end()
@@ -1171,6 +1188,10 @@ export class ApprovalService {
       // This turn resumes an orphan approved for this very call: use it once.
       const resumed = await this.consume(context.sessionId, context.turnId, request.toolName, hash)
       if (resumed) return { approved: true, input, approvalId: resumed.id, decision: 'approved' }
+
+      if (context.shown && request.agentId === undefined) {
+        await context.shown(request.toolUseId, request.toolName, request.input)
+      }
 
       // The turn's trace (#988): the call's span context goes on the row, and
       // the span and the turn's open segment end as soon as the row exists.

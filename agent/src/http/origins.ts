@@ -107,7 +107,9 @@ export function parseCidrList(raw: string | undefined, name = 'SCADBUDDY_AGENT_T
     const [address = '', prefixText, extra] = entry.split('/')
     const family = isIP(address)
     const max = family === 4 ? 32 : 128
-    const prefix = prefixText === undefined ? max : Number(prefixText)
+    // Digits only: Number() reads '' as 0, so `10.0.0.0/` would trust every peer (#1087),
+    // and it also takes ' 8', '+8', '0x8' and '1e1'.
+    const prefix = prefixText === undefined ? max : /^\d+$/.test(prefixText) ? Number(prefixText) : Number.NaN
     if (family === 0 || extra !== undefined || !Number.isInteger(prefix) || prefix < 0 || prefix > max) {
       throw new OriginConfigError(`${name}: "${entry}" is not an IP address or CIDR range`)
     }

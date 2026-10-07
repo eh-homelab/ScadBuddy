@@ -41,6 +41,67 @@ describe('ParameterPanel', () => {
     expect(screen.getByRole('tab', { name: 'Plate' })).toHaveAttribute('aria-selected', 'true')
   })
 
+  describe('tabs keyboard pattern (#968, WAI-ARIA APG Tabs)', () => {
+    it('is one Tab stop: only the selected tab is in the tab order', async () => {
+      const user = userEvent.setup()
+      render(
+        <>
+          <button>Before</button>
+          <Harness />
+        </>,
+      )
+      const tabs = screen.getAllByRole('tab')
+      expect(tabs.map((tab) => tab.getAttribute('tabindex'))).toEqual(['0', '-1', '-1'])
+
+      await user.click(screen.getByRole('button', { name: 'Before' }))
+      await user.tab()
+      expect(tabs[0]).toHaveFocus()
+      await user.tab()
+      // Past the tablist, into the panel's first control; not the next tab.
+      expect(screen.getByRole('tabpanel')).toContainElement(document.activeElement as HTMLElement)
+    })
+
+    it('moves and selects with the arrow keys, wrapping, and Home and End', async () => {
+      const user = userEvent.setup()
+      render(<Harness />)
+      const [text, plate, colours] = screen.getAllByRole('tab') as [HTMLElement, HTMLElement, HTMLElement]
+      text.focus()
+
+      const at = (tab: HTMLElement) => {
+        expect(tab).toHaveFocus()
+        expect(tab).toHaveAttribute('aria-selected', 'true')
+        expect(tab).toHaveAttribute('tabindex', '0')
+      }
+      await user.keyboard('{ArrowRight}')
+      at(plate)
+      expect(screen.getByRole('switch', { name: 'Keyring hole' })).toBeInTheDocument()
+      await user.keyboard('{ArrowRight}')
+      at(colours)
+      await user.keyboard('{ArrowRight}')
+      at(text)
+      await user.keyboard('{ArrowLeft}')
+      at(colours)
+      await user.keyboard('{Home}')
+      at(text)
+      await user.keyboard('{End}')
+      at(colours)
+    })
+
+    it('ties each tab to the panel, and the panel back to its tab', async () => {
+      const user = userEvent.setup()
+      render(<Harness />)
+      const plate = screen.getByRole('tab', { name: 'Plate' })
+      await user.click(plate)
+
+      const panel = screen.getByRole('tabpanel', { name: 'Plate' })
+      expect(panel).toHaveAttribute('aria-labelledby', plate.id)
+      expect(plate).toHaveAttribute('aria-controls', panel.id)
+      for (const tab of screen.getAllByRole('tab')) {
+        expect(tab).toHaveAttribute('aria-controls', panel.id)
+      }
+    })
+  })
+
   it('pins a Global group above every tab', async () => {
     const user = userEvent.setup()
     const schema: CustomizerSchema = {

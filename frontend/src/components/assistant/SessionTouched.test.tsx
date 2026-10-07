@@ -1,6 +1,5 @@
 import { act, screen, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { MemoryRouter } from 'react-router'
 import { api } from '../../api/client'
 import type { SessionResource } from '../../api/types'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
@@ -152,11 +151,7 @@ describe('SessionTouched', () => {
         return HttpResponse.json({ resources: [row({ type: 'model', id: 'later', model: 'later' })] })
       }),
     )
-    view.rerender(
-      <MemoryRouter>
-        <SessionTouched sessionId="sess-1" refreshKey="idle" />
-      </MemoryRouter>,
-    )
+    view.rerender(<SessionTouched sessionId="sess-1" refreshKey="idle" />)
     await reread
     expect(screen.getByRole('link', { name: /first/ })).toBeInTheDocument()
     expect(screen.queryByText('Loading…')).toBeNull()
@@ -174,11 +169,7 @@ describe('SessionTouched', () => {
       http.get('/api/v1/ai/sessions/:id/resources', () => HttpResponse.json({ detail: 'down' }, { status: 503 })),
     )
     const reads = vi.spyOn(api, 'listAiSessionResources')
-    view.rerender(
-      <MemoryRouter>
-        <SessionTouched sessionId="sess-1" refreshKey="idle" />
-      </MemoryRouter>,
-    )
+    view.rerender(<SessionTouched sessionId="sess-1" refreshKey="idle" />)
     await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1))
     // useAsync's handlers were attached when it called; once this settles, theirs has run.
     await act(async () => {

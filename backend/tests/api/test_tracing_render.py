@@ -36,7 +36,8 @@ def test_a_render_is_one_trace_from_request_to_activities(
     in_trace = [
         s.name for s in spans.get_finished_spans() if s.context.trace_id == request.context.trace_id
     ]
-    assert "StartWorkflow:TemplatePipeline" in in_trace
+    # Started with update-with-start (#1053).
+    assert "StartUpdateWithStartWorkflow:TemplatePipeline" in in_trace
     assert "RunWorkflow:TemplatePipeline" in in_trace
     assert any(name.startswith("RunActivity:") for name in in_trace)
     assert "openscad.export" in in_trace

@@ -4,26 +4,30 @@ import asyncio
 import importlib
 import logging
 import pkgutil
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Final
 
 from fastapi import APIRouter, FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
+from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import assets, health, libraries, media, metrics, models, telemetry
+from scadbuddy.api import assets, health, libraries, media, metrics, models, outputs, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
-from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
+from scadbuddy.api.compression import Compression
+from scadbuddy.api.cross_site import CrossSiteGate
+from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -34,14 +38,18 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.library.assets import referenced_asset_ids
+from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
-from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.component import OPERATIONS, OperationCommands
+from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -53,9 +61,19 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
     bambuddy_worker,
     connect,
+    follow_worker,
     reconcile_lost_operations,
     reconcile_lost_runs,
 )
+from scadbuddy.workflows.follow import resume_followed
+from scadbuddy.workflows.housekeeping import (
+    BACKFILL_SWEEP,
+    HEARTBEAT_TIMEOUT,
+    SWEEPS,
+    ensure_schedules,
+    library_worker,
+)
+from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -213,36 +231,41 @@ async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: date
         await remote.drop(removed, cutoff=cutoff)
 
 
-async def _sweep_assets_logged(state: AppState, *, converge: bool = True) -> None:
-    # Best effort, like the boot's other sweeps: a store or volume error skips this
-    # sweep (removing nothing it could not prove unused) and the next one retries.
-    # The boot's sweep does not converge: reconcile and backfill talk to Bambuddy at
-    # length, so they run from the periodic sweep and never hold up the start.
+async def _sweep_assets_logged(state: AppState) -> None:
+    # Best effort: a store or volume error skips this sweep (removing nothing it could
+    # not prove unused) and the next one retries. Only the Schedule's sweep runs it, so
+    # a failure is logged and fails its activity, which reports it.
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
         removed = await asyncio.to_thread(sweep_assets, state)
         if remote is not None and cutoff is not None:
             await drop_swept_assets(state, removed, cutoff=cutoff)
-            if not converge:
-                return
             # What an earlier drop failed to remove, and what the store lost (a copy an
             # `ensure` dropped, a race with a delete): both converge here, per sweep.
             await remote.reconcile(state.assets, cutoff=cutoff)
             await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
+        raise
 
 
-async def _sweep_duplicate_staging_logged(state: AppState) -> None:
+async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = False) -> None:
+    """The boot skips a volume error; the Schedule's sweep (``reraise``) logs any error,
+    then fails its activity (review #1095b 4)."""
     try:
         await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
-    except OSError:
+    except Exception as error:
+        if not reraise and not isinstance(error, OSError):
+            raise
         logger.exception("could not sweep duplicate staging folders")
+        if reraise:
+            raise
 
 
 async def _sweep_blobs_logged(state: AppState) -> None:
-    """The Temporal path's blob store: the pieces no job references any more."""
+    """The Temporal path's blob store: the pieces no job references any more. Only
+    the Schedule's sweep runs it, so a failure is logged and fails its activity."""
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
@@ -256,34 +279,97 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 await asyncio.to_thread(state.store.blobs.evict)
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
-        return
+        raise
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
 
 
-async def _backfill_store_logged(state: AppState, *, uploads: bool) -> None:
+async def _backfill_store_logged(state: AppState, *, uploads: bool, fonts: bool = True) -> None:
     """The boot's mirror of what predates the store, in the background and best effort:
-    an unreachable Bambuddy never holds up or fails the start. Uploads only when no
-    periodic asset sweep runs (`SCADBUDDY_ASSET_SWEEP_INTERVAL` 0); otherwise that
-    sweep backfills them. Fonts always: nothing else mirrors a family installed before."""
+    an unreachable Bambuddy never holds up or fails the start. Uploads only when the
+    housekeeping Schedule's sweep does not backfill them: `SCADBUDDY_ASSET_SWEEP_INTERVAL`
+    0, or the Schedule paused (`_run_library_worker`, review #1095 2). Fonts on every
+    boot: nothing else mirrors a family installed before."""
     try:
         if uploads and state.store.remote_assets is not None:
             mirrored = await state.store.remote_assets.backfill(state.assets)
             logger.info("mirrored uploads", extra={"count": mirrored})
-        if state.store.fonts is not None:
+        if fonts and state.store.fonts is not None:
             logger.info("mirrored fonts", extra={"count": await state.store.fonts.backfill()})
     except Exception:
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
-async def _asset_sweeper(state: AppState) -> None:
-    while True:
-        await asyncio.sleep(state.config.asset_sweep_interval)
-        await _sweep_assets_logged(state)
-        await _sweep_blobs_logged(state)
-        # The periodic housekeeping pass: a crashed duplicate's staging otherwise
-        # waits for the next boot or duplicate (#397).
-        await _sweep_duplicate_staging_logged(state)
+#: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
+HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
+
+
+async def _heartbeating(work: Coroutine[Any, Any, None]) -> None:
+    """Run ``work`` in the current activity, heartbeating until it ends (review #1095
+    2): a worker lost mid-sweep is then noticed within the heartbeat timeout."""
+    running = asyncio.create_task(work)
+    try:
+        while not (await asyncio.wait({running}, timeout=HEARTBEAT_EVERY))[0]:
+            activity.heartbeat()
+    finally:
+        running.cancel()
+    await running
+
+
+def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The Schedule's sweeps (#1054), in `SWEEPS` order, each the loop's best-effort
+    call: it logs a failure, then fails the activity (review #1095 1), so the run
+    reports it; the other sweeps still run and the next tick tries again."""
+
+    @activity.defn(name=SWEEPS[0])
+    async def prune_jobs() -> None:
+        try:
+            await state.render.prune()
+        except Exception:
+            logger.exception("could not prune settled render jobs")
+            raise
+
+    @activity.defn(name=SWEEPS[1])
+    async def sweep_assets() -> None:
+        await _heartbeating(_sweep_assets_logged(state))
+
+    @activity.defn(name=SWEEPS[2])
+    async def sweep_blobs() -> None:
+        await _heartbeating(_sweep_blobs_logged(state))
+
+    @activity.defn(name=SWEEPS[3])
+    async def sweep_staging() -> None:
+        # A crashed duplicate's staging otherwise waits for the next boot (#397).
+        await _heartbeating(_sweep_duplicate_staging_logged(state, reraise=True))
+
+    @activity.defn(name=SWEEPS[4])
+    async def sweep_claims() -> None:
+        try:
+            await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
+        except Exception:
+            logger.exception("could not sweep operation claims")
+            raise
+
+    @activity.defn(name=BACKFILL_SWEEP)
+    async def sweep_backfills() -> None:
+        # #902: `follow_backfills` attaches on the job's event; this finds what no
+        # process heard (the API was down, the listener reconnecting).
+        await _heartbeating(_attach_backfills_logged(state))
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims, sweep_backfills]
+
+
+async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:
+    """#902's backstop pass. The Schedule's sweep (``reraise``) fails its activity on an
+    error; the boot's pass only logs it."""
+    try:
+        await asyncio.to_thread(
+            attach_backfills, state.outputs, state.refs, state.render.store.read
+        )
+    except Exception:
+        logger.exception("could not attach the finished output re-renders")
+        if reraise:
+            raise
 
 
 async def _prepare_catalogue(state: AppState) -> None:
@@ -351,13 +437,14 @@ async def _prepare_catalogue(state: AppState) -> None:
 
 async def _start_render(state: AppState) -> None:
     """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
-    queue left running, connect the in-process worker's client, adopt what it left
-    pending, prune, and start the reconciler. A failure leaves the projection to the
-    lifespan's guard, which closes everything a failed start opened, each once."""
+    queue left running, connect the in-process worker's client, prune, and start the
+    service (which settles the pending rows no workflow will run, then prunes). A
+    failure leaves the projection to the lifespan's guard, which closes everything a
+    failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
     await _prepare_catalogue(state)
-    # Before the reconciler: what a pre-Temporal release was running, nothing
+    # What a pre-Temporal release was running, nothing
     # will finish (#546).
     failed = await asyncio.to_thread(projection.fail_legacy_running)
     if failed:
@@ -368,15 +455,6 @@ async def _start_render(state: AppState) -> None:
     if settings.temporal_worker_inprocess:
         # Eager: a worker cannot run on the API's lazy client (dev and tests).
         state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
-    # Before the reconciler's first pass (`service.start`), which starts only rows
-    # that name a workflow: what a pre-Temporal release's queue left pending
-    # becomes this path's.
-    adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
-    if adopted:
-        logger.info(
-            "adopted the renders the legacy queue left pending",
-            extra={"count": len(adopted), "job_ids": adopted},
-        )
     await service.prune()
     await service.start()
 
@@ -452,50 +530,148 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         catalogue=state.catalogue,
         store=state.print_runs.store,
         observer=state.print_progress,
-        watcher=state.print_watcher,
         rack=state.components.get(RACK_USAGE),
+        links=state.print_links,
     )
     ops = state.components.get(OPERATIONS)
     activities = [
         *PrintActivities(deps).all(),
-        *operation_activities(ops.store, state.settings_store, ops.kinds),
+        *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
     ]
+    # Beside the workers (review #1091 4): each follow it starts may wait out an RPC
+    # timeout on a slow Temporal, and the queue is polled meanwhile.
+    handoff = asyncio.create_task(_hand_off_watches(state, client))
+    try:
+        while not stop.is_set():
+            # A worker that fails is said at once and started again: until then every
+            # print run waits on a queue nothing polls.
+            queue = settings.temporal_task_queue_bambuddy
+            workers = [
+                bambuddy_worker(client, queue, activities),
+                follow_worker(
+                    client,
+                    queue,
+                    FollowActivities(
+                        state.print_follower, running=state.metrics.print_follows_running
+                    ).follow_print,
+                ),
+            ]
+            if not await _serve_until(
+                workers, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+            ):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        # A row whose follow did not start stays for the next boot.
+        handoff.cancel()
+        with suppress(asyncio.CancelledError):
+            await handoff
+
+
+async def _hand_off_watches(state: AppState, client: Client) -> None:
+    """Follow on Temporal the prints the old in-process watcher recorded (#268)."""
+    try:
+        resumed = await resume_followed(
+            state.projection.pool,
+            client,
+            state.settings.temporal_task_queue_bambuddy,
+            datetime.now(UTC),
+        )
+        if resumed:
+            logger.info(
+                "following on Temporal the prints the old watcher followed",
+                extra={"output_ids": resumed},
+            )
+    except Exception:
+        logger.exception("could not hand the old watcher's prints to FollowPrint")
+
+
+async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
+    """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
+    sweeps need the data volume this process holds. Once connected it sets the
+    Schedule up; Temporal down at boot only delays that."""
+    client = await _connect_until(state, stop, "library")
+    if client is None:
+        return
+    settings = state.settings
+    queue = settings.temporal_task_queue_library
+
+    async def set_up() -> None:
+        paused = await _set_up_housekeeping(client, queue, state.config.asset_sweep_interval, stop)
+        if paused and state.store.content is not None:
+            # Its sweep would backfill the uploads (review #1095 2); paused, the start does.
+            await _backfill_store_logged(state, uploads=True, fonts=False)
+
+    schedules = asyncio.create_task(set_up())
+    ops = state.components.get(OPERATIONS)
+    activities = [
+        *_housekeeping_activities(state),
+        *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
+    ]
+    try:
+        while not stop.is_set():
+            worker = library_worker(client, queue, activities, workflows=[OperationWorkflow])
+            if not await _serve_until([worker], stop, name="library"):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        schedules.cancel()
+
+
+def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
+    """The kinds one worker serves (§4.3): only those whose effect it holds."""
+    return {name: kind for name, kind in ops.kinds.items() if kind.queue == queue}
+
+
+async def _set_up_housekeeping(
+    client: Client, queue: str, interval: float, stop: asyncio.Event
+) -> bool:
+    """The housekeeping Schedules, retried until Temporal takes them: a frontend can
+    answer the connect before it can create one. True when the sweeps' one is paused."""
     while not stop.is_set():
-        # A worker that fails is said at once and started again: until then every
-        # print run waits on a queue nothing polls.
-        worker = bambuddy_worker(client, settings.temporal_task_queue_bambuddy, activities)
-        if not await _serve_until(
-            worker, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
-        ):
+        try:
+            return await ensure_schedules(client, queue, interval)
+        except Exception:
+            logger.warning("could not set up the housekeeping Schedules; retrying", exc_info=True)
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    return False
 
 
 async def _serve_until(
-    worker: Worker, stop: asyncio.Event, alongside: Coroutine[Any, Any, None]
+    workers: Sequence[Worker],
+    stop: asyncio.Event,
+    alongside: Coroutine[Any, Any, None] | None = None,
+    *,
+    name: str = "print",
 ) -> bool:
-    """Run ``worker`` and ``alongside`` until ``stop``: True. A worker that ends first,
-    failed or not, is said at once (review #1061: a poller that dies while running
-    would otherwise leave the queue unpolled until the pod restarts): False."""
-    running = asyncio.create_task(worker.run())
-    beside = asyncio.create_task(alongside)
+    """Run ``workers`` (and ``alongside``) until ``stop``: True. A worker that ends
+    first, failed or not, is said at once (review #1061: a poller that dies while running
+    would otherwise leave the queue unpolled until the pod restarts), and the others
+    are shut down so all start again together: False."""
+    running = [asyncio.create_task(worker.run()) for worker in workers]
+    beside = asyncio.create_task(alongside) if alongside is not None else None
     stopping = asyncio.create_task(stop.wait())
     try:
-        await asyncio.wait({running, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({*running, stopping}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        beside.cancel()
+        if beside is not None:
+            beside.cancel()
         stopping.cancel()
-    if running.done():
-        error = running.exception()
+    ended = [task for task in running if task.done()]
+    for task in ended:
+        error = task.exception()
         logger.error(
-            "the print worker failed; starting it again",
+            "the %s worker failed; starting it again",
+            name,
             exc_info=error if error is not None else RuntimeError("the worker stopped"),
         )
-        return False
-    await worker.shutdown()
-    with suppress(Exception):
-        await running
-    return True
+    for worker, task in zip(workers, running, strict=True):
+        if not task.done():
+            await worker.shutdown()
+            with suppress(Exception):
+                await task
+    return not ended
 
 
 async def _end_lost_runs_until(
@@ -521,15 +697,16 @@ async def _end_lost_runs_until(
             await asyncio.wait_for(stop.wait(), LOST_RUN_INTERVAL)
 
 
-async def _stop_print_worker(task: asyncio.Task[None] | None) -> None:
+async def _stop_queue_worker(task: asyncio.Task[None] | None, name: str) -> None:
+    """Wait for the ``name`` queue's worker task (print, library) to stop."""
     if task is None:
         return
     try:
         await asyncio.wait_for(task, PRINT_WORKER_STOP_TIMEOUT)
     except TimeoutError:
-        logger.warning("the print worker did not stop in time; cancelled it")
+        logger.warning("the %s worker did not stop in time; cancelled it", name)
     except Exception:
-        logger.exception("the print worker failed")
+        logger.exception("the %s worker failed", name)
 
 
 #: The worker's own graceful shutdown (30 s) and a margin.
@@ -595,12 +772,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
 
     # Everything from here holds the render service's resources (the Postgres pool,
-    # its reconciler), so it runs inside the `try` whose `finally` releases them: a
+    # its pruner), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes them as a shutdown does, rather than leaking.
-    sweeper: asyncio.Task[None] | None = None
+    library: asyncio.Task[None] | None = None
+    stop_library = asyncio.Event()
     backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
+    unfollow_backfills: Callable[[], None] | None = None
+    attach_now: asyncio.Task[None] | None = None
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
     stop = asyncio.Event()
@@ -618,14 +798,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             task.add_done_callback(partial(_worker_exited, stop))
             worker = (task, deps)
-        # Follows the prints a previous process was following (#268).
-        await state.print_watcher.start()
+        # #902: a finished re-render is attached on its event, by every replica;
+        # the housekeeping Schedule's `BACKFILL_SWEEP` catches one none heard.
+        unfollow_backfills = follow_backfills(
+            state.events,
+            partial(attach_job_backfills, state.outputs, state.refs, state.render.store.read),
+        )
+        # And once now, whatever the Schedule: a re-render that settled while no replica
+        # was listening (the sweeps' interval 0, or the Schedule paused).
+        attach_now = asyncio.create_task(_attach_backfills_logged(state, reraise=False))
         # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
         printing = asyncio.create_task(_run_print_worker(state, stop_printing))
-        # After the projection has opened: the jobs in it are references too.
-        if state.config.asset_sweep_interval > 0:
-            await _sweep_assets_logged(state, converge=False)
-            sweeper = asyncio.create_task(_asset_sweeper(state))
+        # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
+        # run once at once (the boot's sweep of the uploads, converging with the store;
+        # review #1095 1: the boot no longer walks them itself first), then every interval.
+        library = asyncio.create_task(_run_library_worker(state, stop_library))
         if state.store.content is not None:
             backfill = asyncio.create_task(
                 _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
@@ -659,15 +846,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()
-        for background in (sweeper, backfill):
+        stop_library.set()
+        await _stop_queue_worker(library, "library")
+        if unfollow_backfills is not None:
+            unfollow_backfills()
+        for background in (backfill, attach_now):
             if background is not None:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
                     await background
-        # Before the watcher: a run's last activity starts one.
         stop_printing.set()
-        await _stop_print_worker(printing)
-        await state.print_watcher.aclose()
+        await _stop_queue_worker(printing, "print")
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)
@@ -698,6 +887,10 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         description=DESCRIPTION,
         version=__version__,
         lifespan=lifespan,
+        # FastAPI (0.142) would otherwise add exporters of its own to
+        # OTEL_EXPORTER_OTLP_ENDPOINT: spans past the scrub, which wraps only ours
+        # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
+        telemetry={"auto_configure": False},
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)
@@ -731,6 +924,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             telemetry.RELAY_ROUTE_LIMIT,
         ],
     )
+    # A write from a page on another origin is refused before its body is read (#962).
+    app.add_middleware(
+        CrossSiteGate,
+        public_url=lambda: state.settings_store.load().public_url,
+        allowed_origins=lambda: state.settings.allowed_origin_list,
+    )
+    # Outside every route and gate, so their answers go out gzipped too (#1033).
+    app.add_middleware(Compression)
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth
     # counting. It reads no body, so wrapping the gate costs the gate nothing.
@@ -741,7 +942,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource, media.MediaUpload)
+    _name_in_openapi(app, models.PastedSource, media.MediaUpload, outputs.NeedsBackfillProblem)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

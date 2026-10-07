@@ -2,6 +2,7 @@ import type {
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
+  ArrangeRequest,
   DecisionCreate,
   Asset,
   AssetUsage,
@@ -34,6 +35,7 @@ import type {
   LibraryRepinRequest,
   LibraryUser,
   MediaView,
+  MigrateResult,
   ModelPatch,
   LastProject,
   ModelPrintChoices,
@@ -84,6 +86,7 @@ import type {
   UpstreamStatus,
   UrlImport,
   VersionDiff,
+  NeedsBackfillProblem,
 } from './types'
 import type {
   McpAuthSetting,
@@ -105,6 +108,13 @@ import type { JsonObject } from '../lib/inputs'
 import type { Within } from '../lib/traceAction'
 
 export const API_BASE = '/api/v1'
+
+/**
+ * #1424 — the backend's `THUMBNAIL_VERSION` (`api/media.py`): a media thumbnail is
+ * cached as `immutable` only when asked for at this version. Bump the two together;
+ * `client.test.ts` fails when they differ (#1691).
+ */
+export const MEDIA_THUMBNAIL_VERSION = 1
 
 /** What a model thumbnail's URL is keyed on (#179). */
 export type ThumbnailKeyed = Pick<
@@ -143,6 +153,9 @@ export class ApiError extends Error {
   }
 }
 
+
+/** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
+let settingsInFlight: Promise<Settings> | undefined
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -204,6 +217,11 @@ export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
  * enqueue, and Bambuddy may have done it.
  */
 export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+/**
+ * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
+ * `needs_backfill` and `output_ids` names every one, to re-render before arranging.
+ */
+export const NEEDS_BACKFILL = 'needs_backfill' satisfies NeedsBackfillProblem['code']
 
 /**
  * The failure no problem body explained, said by its status. The detail is what the
@@ -304,15 +322,21 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * Whether a failed request may still have done its work: the server's own answer never
  * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
  * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
- * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
- * browser all mean it did not. For a request with a physical effect (a print), retrying
- * one of these blind can do it twice. A failed print run (#470) says so itself: its
- * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
+ * Or the backend said its start may have reached Temporal (`may_have_started`, on a
+ * `temporal-unavailable` or `temporal-refused`), or an operation was still running when
+ * `command()` stopped following it. Any other problem the backend wrote, a 503 (nothing
+ * upstream took it) and an offline browser all mean it did not. For a request with a
+ * physical effect (a print), retrying one of these blind can do it twice. A failed print
+ * run (#470) says so itself: its `may_have_queued` is whether it had tried to queue,
+ * which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   // Its run may be checking still, and will print once it is accepted (#1052).
   if (error.problem.type === STILL_ACCEPTING) return true
+  // Temporal may hold a start of it: only the same key follows it (review #1316 (13) 1a).
+  if (error.problem.may_have_started === true) return true
+  if (error.problem.type === OPERATION_UNFINISHED) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -362,8 +386,9 @@ export const printRunPoll = {
  * How long the print dialog waits for one rack-algorithm save before counting it as
  * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
  * later one back (#1086 review). Aborting only stops the browser waiting, so the server
- * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, #1129): once
- * a save reaches the store it commits or fails inside that bound. Time before it reaches
+ * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, 5 s, #1129):
+ * once a save reaches the store it commits or fails within twice that bound, one for
+ * the pool wait and one for the write (#1264). Time before it reaches
  * the store is not bounded, so a save held up there can still land after the next one;
  * ordering saves explicitly is #1216.
  */
@@ -381,15 +406,19 @@ export function newRequestId(): string {
 
 /** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
 export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+/** Temporal did not answer: nothing was started, or a start that reached it is unknown. */
+export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-unavailable'
 
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
- * Or ScadBuddy answered that the same request is still being accepted.
+ * Or ScadBuddy answered that the same request is still being accepted, or that Temporal
+ * may hold a start of it (`may_have_started`, review #1066 (10) 4): the same key follows it.
  */
 function unanswered(caught: unknown): boolean {
   if (!(caught instanceof ApiError)) return false
   if (caught.problem.type === STILL_ACCEPTING) return true
+  if (caught.problem.may_have_started === true) return true
   return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
@@ -412,25 +441,43 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
+/**
+ * `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run.
+ * With `finish`, `signal` aborting between re-sends sends once more, at once, instead of
+ * giving up: the request may already hold a claim, and that answer names it (review #1066
+ * 1.1). Still unanswered then, it gives up. `within` wraps each attempt.
+ */
 async function reattach<T>(
   attempt: () => Promise<T>,
   signal?: AbortSignal,
+  finish = false,
   within?: Within,
 ): Promise<T> {
-  const began = Date.now()
+  // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
+  const began = performance.now()
+  let last = false
   for (let tries = 0; ; ) {
     try {
       return await (within ? within(attempt) : attempt())
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught)) throw caught
+      if (last || !unanswered(caught)) throw caught
+      if (signal?.aborted) {
+        if (!finish) throw caught
+        last = true
+        continue
+      }
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
-      if (accepting ? Date.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+      if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
         throw caught
       }
-      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
-      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
-      await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+      // The server's Retry-After paces a re-send it answered (review #1061 4a).
+      const after = caught instanceof ApiError ? caught.problem.retry_after : undefined
+      try {
+        await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+      } catch (reason) {
+        if (!finish) throw reason
+        last = true
+      }
     }
   }
 }
@@ -448,9 +495,9 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   if (first.status !== 202) return first.body as T
   let op: Operation = first.body as OperationAccepted
-  const began = Date.now()
+  const began = performance.now()
   while (op.status === 'running') {
-    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+    if (performance.now() - began >= printRunPoll.operationFollowMs) {
       throw new ApiError({
         type: OPERATION_UNFINISHED,
         title: 'Still running',
@@ -493,11 +540,12 @@ async function followPrintRun(
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
+    false,
     within,
   )
-  const began = Date.now()
+  const began = performance.now()
   while (run.status === 'running') {
-    if (Date.now() - began >= printRunPoll.followMs) {
+    if (performance.now() - began >= printRunPoll.followMs) {
       throw new ApiError({
         type: 'urn:scadbuddy:print-run-unfinished',
         title: 'Still preparing',
@@ -546,7 +594,7 @@ export const api = {
     if (extras.meta) body.append('meta', extras.meta)
     if (extras.thumbnail) body.append('thumbnail', extras.thumbnail)
     if (extras.readme) body.append('readme', extras.readme)
-    return request<ModelSummary>('/models', { method: 'POST', body })
+    return command<ModelSummary>('/models', { method: 'POST', body })
   },
 
   /** Multipart with a `file` part, like the output thumbnail PUT. */
@@ -609,11 +657,11 @@ export const api = {
 
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
-    request<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
 
   /** #153 — fetched on the server, then created through the same path as a paste. */
   importModel: (body: UrlImport) =>
-    request<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
 
   getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
 
@@ -646,18 +694,18 @@ export const api = {
 
   /** Metadata: name, description, tags. Libraries have their own routes below. */
   updateModel: (slug: string, patch: ModelPatch) =>
-    request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    command<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   /** #156 — a new template of mine copied from `slug`, recording it as `upstream`. */
   duplicateModel: (slug: string, name: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
+    command<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
   /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
   deleteModel: (slug: string, force = false) =>
-    request<void>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+    command<unknown>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }).then(() => undefined),
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
   getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
@@ -714,12 +762,14 @@ export const api = {
 
   /**
    * #624 — a small copy of an image or of a video's poster, for a strip of
-   * thumbnails; undefined for a video with no poster, which has none.
+   * thumbnails; undefined for a video with no poster, which has none. It is
+   * cached as `immutable`, so the URL carries the thumbnail version (#1424).
+   * `card` asks for a larger copy, sized for a catalogue card's cover (#1034).
    */
-  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>, size?: 'card') =>
     item.kind === 'video' && !item.poster
       ? undefined
-      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail`,
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}${size ? `&size=${size}` : ''}`,
 
   /**
    * #274 — adds an image or video as the template's last item. XHR rather than
@@ -859,17 +909,40 @@ export const api = {
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
-   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait. `signal` (a superseded
+   * preview) stops the re-sends after one more, sent at once: the request may already
+   * hold a claim on a job, and that answer names the job the next render supersedes. A
+   * request already sent is never aborted, for the same reason. Unanswered even then, the
+   * claim is left to the render it made, which runs to its end (review #1066 1.1).
+   * `requestId` is the `Idempotency-Key`: a caller that sends the render again itself
+   * passes the same one, so the server counts every send as one claim (review #1066 (7) 3).
    */
-  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
-    request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-      method: 'POST',
-      body: JSON.stringify({
-        inputs,
-        version: version ?? null,
-        ...(supersedes ? { supersedes } : {}),
-      }),
-    }),
+  render: (
+    slug: string,
+    inputs: JsonObject,
+    version?: string,
+    supersedes?: string,
+    signal?: AbortSignal,
+    requestId: string = newRequestId(),
+  ) => {
+    // Sent again while the server is still accepting it (#1053), with one
+    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () =>
+        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            inputs,
+            version: version ?? null,
+            ...(supersedes ? { supersedes } : {}),
+          }),
+        }),
+      signal,
+      true,
+    )
+  },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 
@@ -882,11 +955,36 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject) =>
+  /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
+  arrangeOutputs: (body: ArrangeRequest) =>
+    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
+  backfillOutput: (outputId: string) =>
+    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
+
+  /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
     request<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId, name: name ?? null, ...(inputs ? { inputs } : {}) }),
+      body: JSON.stringify({
+        job_id: jobId,
+        name: name ?? null,
+        ...(inputs ? { inputs } : {}),
+        ...(index !== undefined ? { index } : {}),
+      }),
     }),
+
+  /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
+  migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>
+    request<MigrateResult>(`/models/${seg(slug)}/inputs/migrate`, {
+      method: 'POST',
+      body: JSON.stringify({ inputs, version: version ?? null }),
+    }),
+
+  /** An extra file a pipeline wrote beside an output (spec 2026-09-27 §5.2). */
+  outputFileUrl: (outputId: string, name: string) =>
+    `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
 
@@ -1204,9 +1302,10 @@ export const api = {
   /**
    * Clones the library at `ref` server-side and pins the resolved commit into this
    * model only. `url`/`ref` default to the catalogue's; re-pinning is the same call.
+   * A command (#1054): a clone past the server's deadline is followed to the model.
    */
   pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
@@ -1231,22 +1330,38 @@ export const api = {
 
   /** #169 — re-pins from the URL the model already pins, at `ref`; one commit per model. */
   repinModelLibrary: (slug: string, name: string, body: LibraryRepinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
-    request<ModelSummary>(
+    command<ModelSummary>(
       `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
       { method: 'DELETE' },
     ),
 
-  getSettings: () => request<Settings>('/settings'),
+  /**
+   * #1039 — callers that ask at once share one request: the shell's unit and link
+   * loaders and the page all read it on the same load. Nothing is kept once it
+   * answers, so a later call always reads afresh, and a save stops later callers
+   * joining a read that started before it. Each caller gets its own copy.
+   */
+  getSettings: (): Promise<Settings> => {
+    if (!settingsInFlight) {
+      const read = request<Settings>('/settings').finally(() => {
+        if (settingsInFlight === read) settingsInFlight = undefined
+      })
+      settingsInFlight = read
+    }
+    return settingsInFlight.then((settings) => structuredClone(settings))
+  },
 
-  putSettings: (body: SettingsUpdate) =>
-    request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  putSettings: (body: SettingsUpdate) => {
+    settingsInFlight = undefined
+    return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
+  },
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 

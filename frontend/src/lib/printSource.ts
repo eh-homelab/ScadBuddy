@@ -17,7 +17,11 @@ import type {
  * in Bambuddy's library. Everything else about the dialog is the same.
  */
 export type PrintSource =
-  | { kind: 'output'; output: Pick<Output, 'id' | 'slug'> }
+  | {
+      kind: 'output'
+      /** `manifest`, `colors` and `name` are what Re-arrange needs, when the caller has them (§7). */
+      output: Pick<Output, 'id' | 'slug'> & Partial<Pick<Output, 'manifest' | 'colors' | 'name'>>
+    }
   | { kind: 'library'; file: Pick<LibraryEntry, 'id' | 'filename'> }
 
 export type FilamentQuery = { printerId?: number | null; plateId?: number; allPlates?: boolean }

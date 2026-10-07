@@ -212,4 +212,32 @@ describe('PrintProgressPanel', () => {
 
     expect(container).toBeEmptyDOMElement()
   })
+
+  it('says a run that failed before queueing anything failed there, with its reason (#1049)', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          route: 'run',
+          stage: 'failed',
+          settled: true,
+          copies: 1,
+          copies_completed: 0,
+          copies_failed: 0,
+          copies_cancelled: 0,
+          copies_in_progress: 0,
+          error_message: 'Slot 2 has no spool chosen.',
+          fix: 'Nothing was queued. Fix what it says, then print again.',
+          bambuddy_url: 'https://bambuddy.internal.nullreference.io/queue',
+        }}
+        polling={false}
+      />,
+    )
+
+    const panel = screen.getByTestId('print-progress')
+    expect(panel).toHaveTextContent('Print failed before it was queued')
+    expect(panel).not.toHaveTextContent('Slice')
+    expect(screen.getByTestId('print-progress-error')).toHaveTextContent(
+      'Slot 2 has no spool chosen.',
+    )
+  })
 })

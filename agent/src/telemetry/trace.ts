@@ -94,7 +94,7 @@ export async function withSpan<T>(
 // In-process tool calls (decision 10 of the plan). The SDK runs an in-process
 // MCP handler in the async context the query started in, not in its tool's
 // span. Claude Code sends the call's tool_use id in every tools/call's `_meta`
-// under this key (measured on the bundled 2.1.283 binary), so telemetry/turn.ts
+// under this key (measured on the bundled 2.1.283 and 2.1.287 binaries), so telemetry/turn.ts
 // binds each tool span's context under its id and tools/projections.ts finds it.
 export const TOOL_USE_META = 'claudecode/toolUseId'
 
@@ -114,8 +114,13 @@ export function toolUseIdFrom(extra: unknown): string | undefined {
   return typeof id === 'string' ? id : undefined
 }
 
-/** The bound context of the call `extra` belongs to, else the active one. */
-export function toolContextFor(extra: unknown): Context {
+/**
+ * The bound context of the call `extra` belongs to, else `fallback`'s: the
+ * turn's open segment for a harness call (tools/projections.ts), so a call
+ * whose `_meta` lost its id is still traced under its turn. The active
+ * context is the query's start, not the turn's, and only the default.
+ */
+export function toolContextFor(extra: unknown, fallback: () => Context = () => context.active()): Context {
   const id = toolUseIdFrom(extra)
-  return (id !== undefined ? toolContexts.get(id) : undefined) ?? context.active()
+  return (id !== undefined ? toolContexts.get(id) : undefined) ?? fallback()
 }

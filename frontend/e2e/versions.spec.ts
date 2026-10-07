@@ -24,6 +24,8 @@ test.describe('model versions', () => {
 
     const oldest = versions.locator('li').last()
     await oldest.getByRole('button', { name: 'Restore this version' }).click()
+    // #975 — asked first: a mis-press among many identically placed buttons rewrites the model.
+    await page.getByRole('dialog', { name: /^Restore version / }).getByRole('button', { name: 'Restore', exact: true }).click()
 
     await expect(versions.locator('li')).toHaveCount(4)
     const head = versions.locator('li').first()

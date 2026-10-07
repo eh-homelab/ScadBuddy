@@ -43,7 +43,9 @@ async function open(route = '/m/name-keychain') {
     </Shell>,
     { route, path: '/m/:slug' },
   )
-  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 4000 })
+  // The first render goes through the whole mocked pipeline; on a loaded host it took
+  // over 4 s to show (#1485).
+  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 10_000 })
   return view
 }
 
@@ -126,6 +128,8 @@ describe('customizer tools', () => {
     expect(!tooLong.ok && tooLong.error).toMatchObject({ code: 'invalid_args', message: '"name" is at most 20 characters.' })
     const outOfRange = await call('set_param', { name: 'text_size', value: 99 })
     expect(!outOfRange.ok && outOfRange.error.message).toBe('"text_size" is at most 28.')
+    const outOfRangeText = await call('set_param', { name: 'text_size', value: '99' })
+    expect(!outOfRangeText.ok && outOfRangeText.error.message).toBe('"text_size" is at most 28.')
     const unknown = await call('set_param', { name: 'nope', value: 1 })
     expect(!unknown.ok && unknown.error.code).toBe('invalid_args')
 
@@ -133,6 +137,12 @@ describe('customizer tools', () => {
     const mixed = await call('set_params', { values: { name: 'Ok', text_size: 'big' } })
     expect(!mixed.ok && mixed.error.code).toBe('invalid_args')
     expect(field).toHaveValue('Reagan')
+  })
+
+  it('takes a number sent as a numeric string, as the model sometimes sends it (#948)', async () => {
+    await open()
+    const outcome = await call('set_param', { name: 'text_size', value: '20' })
+    expect(outcome).toMatchObject({ ok: true, result: { name: 'text_size', value: 20 } })
   })
 
   it('shows the tab of the parameter it changed, and resets it', async () => {

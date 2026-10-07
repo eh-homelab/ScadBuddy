@@ -14,7 +14,7 @@ import type { HarnessRun } from '../src/harness/run.js'
 
 // runWithFallback with scripted queries standing in for Claude Code (the real
 // binary against the fake endpoint is test/fallback.e2e.test.ts). The
-// messages are shaped as Claude Code 2.1.283 sends them.
+// messages are shaped as Claude Code 2.1.283 and 2.1.287 send them.
 
 const SESSION = '00000000-0000-4000-8000-0000000000aa'
 
@@ -309,6 +309,22 @@ describe('runWithFallback (#1093)', () => {
     expect(h.runs[1]?.maxBudgetUsd).toBeCloseTo(0.47, 10)
   })
 
+  it('reads a restored total an ulp below the prior it was given as restored (#991)', async () => {
+    // The manager passes cost_usd - unpriced_cost_usd, a float difference that
+    // can land above the transcript's total: (0.1 + 0.2) - 0.2 > 0.1.
+    const prior = 0.1 + 0.2 - 0.2
+    expect(prior).toBeGreaterThan(0.1)
+    // A restores 0.1 and spends nothing more before it fails; B then spends 0.05.
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', 0.1, 1)], throws: new Error('x') }
+        : [init(), success('done', 0.15, 1)],
+    )
+    const { messages } = await h.collect([A, B], { resume: SESSION, sessionId: undefined, maxBudgetUsd: 0.5 }, undefined, prior)
+    expect((messages.at(-1) as { total_cost_usd: number }).total_cost_usd).toBeCloseTo(0.15, 10)
+    expect(h.runs[1]?.maxBudgetUsd).toBeCloseTo(0.5, 10)
+  })
+
   it('leaves the last credential’s failed result as it came: its cost and turns count themselves once', async () => {
     const h = harness(() => ({
       messages: [init(), toolUse(), toolResult(), apiError('API Error: 529 Overloaded', 'server_error'), errorResult(529, 'API Error: 529 Overloaded', 0.03, 2)],
@@ -452,9 +468,9 @@ describe('runWithFallback (#1093)', () => {
     })
     // A probe that only ends when its signal does.
     const never = () => new Promise<ProbeVerdict>(() => {})
-    const started = Date.now()
+    const started = performance.now()
     const { error } = await h.collect([A, B], { signal: stop.signal }, never)
-    expect(Date.now() - started).toBeLessThan(1000)
+    expect(performance.now() - started).toBeLessThan(1000)
     expect(error).toBeInstanceOf(Error)
     expect(h.probes[0]?.signal).toBe(stop.signal)
   })

@@ -26,7 +26,7 @@ export type ConnectionTestOptions = {
 export const TEST_PROMPT = 'Reply with the single word: ok'
 
 export async function testConnection(credential: Credential, options: ConnectionTestOptions): Promise<ConnectionTest> {
-  const started = Date.now()
+  const started = performance.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('timed out')), options.timeoutMs ?? 60_000)
   const stderr: string[] = []
@@ -34,7 +34,7 @@ export async function testConnection(credential: Credential, options: Connection
   const done = (ok: boolean, detail: string): ConnectionTest => ({
     ok,
     detail: redact(detail, [credential.secret]),
-    duration_ms: Date.now() - started,
+    duration_ms: performance.now() - started,
     model,
   })
   try {

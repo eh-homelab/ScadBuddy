@@ -40,7 +40,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
-from scadbuddy.render.job_models import Job, render_key
+from scadbuddy.render.job_models import Job
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
@@ -51,6 +51,9 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
+    MAKE_CURRENT_BACKOFF,
+    MAKE_CURRENT_DEADLINE,
+    MAKE_CURRENT_EVERY,
     _drain,
     _poll,
     make_current_until_polled,
@@ -73,6 +76,7 @@ from tests.conftest import (
     PgPool,
     fake_3mf_openscad,
 )
+from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
 
@@ -151,13 +155,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
                         },
                     }
 
-                    projection.submit(job, render_key(model, params, revision))
-                    await asyncio.wait_for(
-                        client.execute_workflow(
-                            TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
-                        ),
-                        timeout=120,
-                    )
+                    job = await render_to_end(client, queue, job)
                     metrics = (await http.get("/metrics")).text
             finally:
                 stop.set()
@@ -344,12 +342,41 @@ async def test_is_current_names_the_deployments_current_build() -> None:
         assert await make_current_until_polled(
             lambda: make_current(client, namespace=client.namespace, build_id=build_id),
             build_id=build_id,
-            backoff=(0.1,),
-            every=0.2,
-            deadline=30,
+            backoff=MAKE_CURRENT_BACKOFF,
+            every=MAKE_CURRENT_EVERY,
+            deadline=MAKE_CURRENT_DEADLINE,
         )
-        assert await is_current(client, namespace=client.namespace, build_id=build_id)
-        assert not await is_current(client, namespace=client.namespace, build_id="other")
+        assert await _is_current_answer(client, build_id)
+        assert not await _is_current_answer(client, "other")
+
+
+#: `is_current`'s attempts and the longest wait between two (`_is_current_answer`).
+IS_CURRENT_ATTEMPTS = 12
+IS_CURRENT_MAX_WAIT = 5.0
+#: What a busy server answers meanwhile; anything else is a real error, raised at once.
+IS_CURRENT_TRANSIENT = frozenset(
+    {
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        RPCStatusCode.UNAVAILABLE,
+    }
+)
+
+
+async def _is_current_answer(client: Client, build_id: str) -> bool:
+    """`is_current`, asked again while Temporal cannot answer yet. Just after a build is
+    made current, the deployment's own workflow is still propagating it (over 13 s on a
+    loaded host), and a describe meanwhile times out or is refused as "too many
+    requests"; the worker's `still_current` reads either as not current. Counted
+    attempts, not a deadline: this host's clocks step."""
+    for attempt in range(IS_CURRENT_ATTEMPTS):
+        try:
+            return await is_current(client, namespace=client.namespace, build_id=build_id)
+        except RPCError as error:
+            if error.status not in IS_CURRENT_TRANSIENT or attempt == IS_CURRENT_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
+    raise AssertionError("unreachable")
 
 
 @pytest.mark.requires_temporal
@@ -382,6 +409,81 @@ async def test_the_in_process_worker_stops_without_draining(
 
 
 @pytest.mark.requires_temporal
+async def test_the_worker_names_its_image_and_openscad_for_every_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What `OutputRecord.image_revision` / `openscad_version` read (§8.4)."""
+
+    async def never(*_: object, **__: object) -> bool:
+        raise AssertionError("the in-process worker must not drain")
+
+    monkeypatch.setattr(worker_module, "drained", never)
+    openscad = tmp_path / "openscad"
+    openscad.write_text("#!/bin/sh\necho 'OpenSCAD version 2026.09.28' >&2\n")
+    openscad.chmod(0o755)
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad=str(openscad), data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+    )
+    stop = asyncio.Event()
+    stop.set()
+    async with temporal_client() as client:
+        await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
+    assert deps.revision == settings.revision
+    assert deps.openscad_version == "OpenSCAD version 2026.09.28"
+
+
+@pytest.mark.requires_temporal
+async def test_a_worker_given_the_apis_openscad_version_does_not_run_openscad_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-process worker takes the API's probe (`worker_deps_from_state`): a second
+    `openscad --version`, in a task beside the API's first requests, would race them."""
+
+    async def never(*_: object, **__: object) -> bool:
+        raise AssertionError("the in-process worker must not drain")
+
+    monkeypatch.setattr(worker_module, "drained", never)
+    ran = tmp_path / "ran"
+    openscad = tmp_path / "openscad"
+    openscad.write_text(f"#!/bin/sh\ntouch {ran}\necho 'OpenSCAD version 2099.01.01' >&2\n")
+    openscad.chmod(0o755)
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad=str(openscad), data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+        openscad_version="OpenSCAD version 2026.09.28",
+    )
+    stop = asyncio.Event()
+    stop.set()
+    async with temporal_client() as client:
+        await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
+    assert deps.openscad_version == "OpenSCAD version 2026.09.28"
+    assert not ran.exists()
+
+
+@pytest.mark.requires_temporal
 async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -393,8 +495,12 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
     marked = threading.Event()
 
     class _Projection:
-        """Only what the pipeline's first activity needs: the `project` activity's
-        `mark_started`, which proves the worker polled and ran it."""
+        """Only what the pipeline's first activities need: `render_accept`'s insert,
+        then the `project` activity's `mark_started`, which proves the worker polled
+        and ran it."""
+
+        def accept(self, job: Job, key: str, **_: object) -> Job:
+            return job
 
         def mark_started(self, job_id: str) -> None:
             started.append(job_id)
@@ -428,13 +534,13 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
         worker = asyncio.create_task(run_inprocess_worker(settings, deps, client, stop))
         handle = await client.start_workflow(
             TemplatePipeline.run,
-            job,
+            start_of(job),
             id=workflow_id_for(job.id),
             task_queue=settings.temporal_task_queue_render,
         )
         try:
             assert await asyncio.wait_for(asyncio.to_thread(marked.wait, 60), 65)
-            assert started == [job.id]
+            assert len(started) == 1
             # The workflow is still running (its next activity cannot succeed on these
             # deps): the worker ends on `stop` all the same, without draining.
             stop.set()

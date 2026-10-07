@@ -47,7 +47,7 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 // CLAUDE_CONFIG_DIR (spec §4.4). This module adds, per query:
 //
 //   - the credential, through the SDK's `env` option only. `env` "REPLACES the
-//     subprocess environment entirely" (sdk.d.ts, 0.3.283), so the key reaches
+//     subprocess environment entirely" (sdk.d.ts, 0.3.283 and 0.3.287), so the key reaches
 //     that one Claude Code process and never the container environment
 //     (spec §4.4, "Credentials are passed per query through the SDK's `env`
 //     option"). Variable names, from
@@ -65,13 +65,15 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     gateway path"). The service has no use for any of it.
 //   - CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (#946): an `Agent` call asked to
 //     `run_in_background` then runs inside the turn, as a foreground one does.
-//     Backgrounded, it outlived its parent's turn: the SDK closes Claude Code's
-//     input at a string prompt's first result, and after that Claude Code
+//     Backgrounded, it outlived its parent's turn: SDK 0.3.283 closed Claude
+//     Code's input at a string prompt's first result, and after that Claude Code
 //     refused every permission request itself, with "The user doesn't want to
 //     take this action right now", asking neither canUseTool nor the user. Its
 //     calls, and those of the turn Claude Code starts when it reports back,
 //     were refused that way, read tools included (measured on Claude Code
-//     2.1.283, test/harnessWiring.test.ts). In the turn, every call goes
+//     2.1.283, test/harnessWiring.test.ts). SDK 0.3.287 keeps the input open
+//     until the session reports idle (its sdk.mjs, #1540); the variable stays,
+//     and the same tests check, on 2.1.287 too, that in the turn every call goes
 //     through the permission seam below, and an outward one parks at the gate.
 //   - CLAUDE_CODE_MAX_RETRIES, only with `maxRetries`: fallback.ts bounds
 //     Claude Code's retries on one credential when there is another to fall
@@ -242,16 +244,19 @@ export class PluginConfigError extends Error {
  * `disallowedTools`.
  *
  * - `{ type: 'http', url }` is the SDK's `McpHttpServerConfig` (sdk.d.ts
- *   0.3.283), the Streamable HTTP transport (spec D5); `'sse'` is the legacy
- *   transport D5 rejects and is never produced. The URL is the loopback
- *   forwarder's, and no header is configured: the forwarder adds the plugin's
- *   own. The SDK passes this config on Claude Code's argv (`--mcp-config`,
- *   sdk.mjs 0.3.283), where the forwarder token is all there is to see.
+ *   0.3.283 and 0.3.287), the Streamable HTTP transport (spec D5); `'sse'` is
+ *   the legacy transport D5 rejects and is never produced. The URL is the
+ *   loopback forwarder's, and no header is configured: the forwarder adds the
+ *   plugin's own. The SDK passes this config on Claude Code's argv
+ *   (`--mcp-config`, sdk.mjs 0.3.283 and 0.3.287), where the forwarder token is
+ *   all there is to see.
  * - `alwaysLoad: true`: "all tools from this server are always included in
- *   the prompt and never deferred behind tool search ... this also blocks
- *   startup until the server is connected (capped at the standard 5s connect
- *   timeout)" (sdk.d.ts). Without it MCP startup is non-blocking and the first
- *   turn may not see the plugin's tools.
+ *   the prompt and never deferred behind tool search, except a tool the server
+ *   itself lists with _meta anthropic/alwaysLoad set to false ... true also
+ *   blocks startup until the server is connected (capped at the standard 5s
+ *   connect timeout)" (sdk.d.ts 0.3.287; the exception is new since 0.3.283).
+ *   Without it MCP startup is non-blocking and the first turn may not see the
+ *   plugin's tools.
  * - disabled tools: `disallowedTools` "will be removed from the model's
  *   context and cannot be used" (sdk.d.ts), by the name Claude Code gives the
  *   tool (`harnessToolName`); the forwarder also hides them from tools/list.
@@ -300,15 +305,6 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | 
   })
 }
 
-function linkedController(signal: AbortSignal | undefined): AbortController {
-  const controller = new AbortController()
-  if (signal) {
-    if (signal.aborted) controller.abort(signal.reason)
-    else signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
-  }
-  return controller
-}
-
 /** canUseTool with AskUserQuestion answered through the question gate (#940). */
 function answeringQuestions(questions: QuestionGate, inner: CanUseTool): CanUseTool {
   return (toolName, input, options) =>
@@ -338,12 +334,24 @@ const QUESTION_PROMPT_HOOK: HookCallbackMatcher = {
   ],
 }
 
-/** The full SDK options for one run. Pure apart from the AbortController; tests read it. */
+/**
+ * The full SDK options for one run. Pure apart from the AbortController,
+ * which `run.signal` aborts directly; tests read it. runHarness interrupts
+ * first instead (`stopFirst`).
+ */
 export function buildHarnessOptions(run: HarnessRun): Options {
-  return buildHarness(run).options
+  const { options, abort } = buildHarness(run)
+  if (run.signal) {
+    if (run.signal.aborted) abort.abort(run.signal.reason)
+    else run.signal.addEventListener('abort', () => abort.abort(run.signal?.reason), { once: true })
+  }
+  return options
 }
 
-function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined } {
+/** How long an interrupted query may take to end on its own before it is aborted. */
+export const INTERRUPT_GRACE_MS = 5_000
+
+function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined; abort: AbortController } {
   const base = buildQueryOptions(run.paths)
   const harnessTiers = harnessTierOf(run)
   const questions = run.questionGate
@@ -420,6 +428,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     }
   }
   const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
+  const abort = new AbortController()
   const options: Options = {
     ...base,
     env: {
@@ -432,7 +441,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     mcpServers: { ...local, ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
-    abortController: linkedController(run.signal),
+    abortController: abort,
     canUseTool: questions ? answeringQuestions(questions, permission) : permission,
     hooks: mergeHooks(
       mergeHooks(
@@ -456,7 +465,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     options.sessionStore = run.sessionStore
     // 'eager': every transcript frame is appended as it is written, not at the
     // turn's end ('batched', the default: "flush at end-of-turn or when pending
-    // thresholds are exceeded", sdk.d.ts 0.3.283 SessionStoreFlush). An aborted
+    // thresholds are exceeded", sdk.d.ts 0.3.283 and 0.3.287 SessionStoreFlush). An aborted
     // query still flushes its batch as it ends, if the process lives that long
     // (SessionManager.stopTurns waits for it; test/sessions.e2e.test.ts). One
     // that dies first (a SIGKILL, an OOM, the grace period running out) would
@@ -481,11 +490,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     // see the tool and cannot attempt it." (spec §3.1, permissions). Measured
     // for a plugin server's tools too (test/headlessBrowser.e2e.test.ts).
     options.disallowedTools = [...remote.disallowedTools, ...disallowedBrowserTools()]
-    // Measured on Claude Code 2.1.283: with `strictMcpConfig` a plugin's MCP
-    // servers are not started at all (the init message lists the plugin but no
-    // server). The option exists to ignore MCP configs from settings files,
-    // and `settingSources: []` already loads none: the e2e test plants a
-    // project `.mcp.json` in the session's cwd and asserts it is not started.
+    // Measured on Claude Code 2.1.283 and 2.1.287: with `strictMcpConfig` a
+    // plugin's MCP servers are not started at all (the init message lists the
+    // plugin but no server). The option exists to ignore MCP configs from
+    // settings files, and `settingSources: []` already loads none: the e2e test
+    // plants a project `.mcp.json` in the session's cwd and asserts it is not
+    // started.
     options.strictMcpConfig = false
   }
   if (run.systemPromptAppend !== undefined) {
@@ -498,7 +508,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     stderr = redactor
     options.stderr = (data) => redactor.write(data)
   }
-  return { options, stderr }
+  return { options, stderr, abort }
 }
 
 /**
@@ -507,19 +517,23 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
  * stderr line is flushed, redacted.
  */
 export function runHarness(run: HarnessRun): Query {
-  const { options, stderr } = buildHarness(run)
+  const { options, stderr, abort } = buildHarness(run)
   const q = query({ prompt: run.prompt, options })
-  if (!stderr) return q
+  const ended = stopFirst(q, run.signal, abort)
   const next = q.next.bind(q)
   const ret = q.return.bind(q)
   const thr = q.throw.bind(q)
+  const end = () => {
+    ended()
+    stderr?.flush()
+  }
   q.next = async (...args) => {
     try {
       const result = await next(...args)
-      if (result.done) stderr.flush()
+      if (result.done) end()
       return result
     } catch (err) {
-      stderr.flush()
+      end()
       throw err
     }
   }
@@ -527,15 +541,54 @@ export function runHarness(run: HarnessRun): Query {
     try {
       return await ret(value)
     } finally {
-      stderr.flush()
+      end()
     }
   }
   q.throw = async (err) => {
     try {
       return await thr(err)
     } finally {
-      stderr.flush()
+      end()
     }
   }
+  // The SDK's Query hands for-await its inner message stream, which bypasses
+  // the wrappers above (#1009). Iterate the Query itself.
+  q[Symbol.asyncIterator] = () => q
   return q
+}
+
+/**
+ * Stops the query when `signal` aborts (#1168): by interrupting it first, as
+ * Claude Code's own Esc does, and aborting it only if it has not ended within
+ * INTERRUPT_GRACE_MS. An abort alone closes the control stream, and a call
+ * parked in canUseTool (an approval, a question) then fails with "Tool
+ * permission request failed: AbortError: Tool permission stream closed
+ * before response received", which Claude Code hands the model as the tool's
+ * error and calls it again: a reply nobody asked for, and spend. Interrupted,
+ * it refuses the pending call and ends the turn with an
+ * `error_during_execution` result, and the model is not called. Measured on
+ * SDK 0.3.283 and 0.3.287 (test/questions.e2e.test.ts, test/approvals.e2e.test.ts).
+ * Returns what the caller calls once the stream has ended.
+ */
+function stopFirst(q: Query, signal: AbortSignal | undefined, abort: AbortController): () => void {
+  let done = false
+  let grace: ReturnType<typeof setTimeout> | undefined
+  const stop = () => {
+    if (done) {
+      abort.abort(signal?.reason)
+      return
+    }
+    grace = setTimeout(() => abort.abort(signal?.reason), INTERRUPT_GRACE_MS)
+    grace.unref()
+    q.interrupt().catch(() => abort.abort(signal?.reason))
+  }
+  if (signal?.aborted) abort.abort(signal.reason)
+  else signal?.addEventListener('abort', stop, { once: true })
+  return () => {
+    done = true
+    clearTimeout(grace)
+    signal?.removeEventListener('abort', stop)
+    // Whatever stopped it, the process goes with the stream.
+    if (signal?.aborted) abort.abort(signal.reason)
+  }
 }
