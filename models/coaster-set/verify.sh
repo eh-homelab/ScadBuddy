@@ -114,6 +114,9 @@ CASES+=(
     'seven-defaults|count=7'
     # One colour needs no tower, so the whole bed is used.
     'twelve-one-colour|count=12;border_width=0;pattern="none"'
+    # No pattern, but alternate_colors still prints every other body in
+    # pattern_color: two colours, so the tower applies (#1842 review).
+    'alt-no-pattern|count=9;pattern="none";border_width=0;alternate_colors=true'
     'twelve-small-holder|count=12;size=60;holder=true;pattern="sunburst";holder_color="#8D6E63"'
     # #411: coaster cells are coaster-sized and the holder goes beside, below or
     # at the end of the last row; with holder-sized cells these fitted 5 and 8.
@@ -268,6 +271,7 @@ EXPECT_PLATES = {
     "twelve-defaults": [6, 6],
     "seven-defaults": [6, 1],
     "twelve-one-colour": [9, 3],
+    "alt-no-pattern": [6, 3],
     "too-many-for-plate": [2, 2, 2, 2, 2, 2],
     "holder-95-eight": [5, 3],
     "holder-70-twelve": [11, 1],
@@ -427,6 +431,8 @@ for line in open(os.path.join(OUT, "cases.txt")):
     check(name, ("NOTE: pattern is" in log) == blank, "%s the empty-pattern note" % ("logs" if blank else "no"))
     if p["pattern"] != "none" and not blank:
         cols_expected.add(p["pattern_color"].upper())
+    if p["alternate_colors"] and p["count"] > 1:
+        cols_expected.add(p["pattern_color"].upper())  # every other body
     if p["border_width"] > 0:
         cols_expected.add(p["border_color"].upper())
     if overlay:
@@ -457,8 +463,10 @@ for line in open(os.path.join(OUT, "cases.txt")):
         check(name, per_plate == EXPECT_PLATES[name],
               "coasters per plate %s (want %s)" % (per_plate, EXPECT_PLATES[name]))
     if plates > 1:
-        check(name, "NOTE: %d of %d coasters fit on plate 1" % (per_plate[0], p["count"]) in log,
-              "the log says how many fit on plate 1")
+        rest = " 2" if plates == 2 else "s 2 to %d" % plates
+        check(name, re.search(r"NOTE: %d of %d coasters fit on plate 1( with the prime tower)?;"
+                              r" the rest are on plate%s\"" % (per_plate[0], p["count"], rest), log) is not None,
+              "the log says how many fit on plate 1 and which plates hold the rest")
     else:
         check(name, "fit on plate 1" not in log, "no note of a second plate")
     if p["underside"] == "recess" and p["recess_depth"] > recess_max + 1e-9:

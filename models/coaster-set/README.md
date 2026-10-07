@@ -26,7 +26,10 @@ plate with more than one colour also leaves room for the prime tower:
 ScadBuddy reserves it against one edge (the 60 mm tower, its 3 mm brim each
 side, 5 mm to the parts and 2 mm to the edge), so the parts stay within
 227 × 320 or 300 × 247 mm (#1048). Six 95 mm coasters fit a plate with the
-tower, nine without it.
+tower, nine without it. Alternating colours count as a second colour even with
+no pattern, since every other body prints in the pattern colour. The tower is
+decided once for all the plates after the first, so a last plate holding a
+single unswapped coaster may still leave the strip free.
 
 If `count` coasters do not fit one plate, the rest go on more plates of the
 same 3MF (ScadBuddy's plate convention): the model echoes `plates = N`, and

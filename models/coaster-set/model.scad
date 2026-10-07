@@ -441,7 +441,12 @@ function count_distinct(v, i = 0, seen = []) =
     i == len(v) ? len(seen)
     : count_distinct(v, i + 1, len([for (s = seen) if (s == v[i]) 1]) > 0 ? seen : concat(seen, [v[i]]));
 function multi(colours) = count_distinct([for (c = colours) lower(c)]) > 1;
-COASTER_COLOURS = concat([coaster_color], pattern != "none" ? [pattern_color] : [],
+// The colours coaster(i) draws: with alternate_colors, every other body is
+// pattern_color even with no pattern (#1842 review), so it counts whenever a
+// second coaster exists. A plate whose coasters are all unswapped may still
+// reserve the strip: conservative, never refused.
+COASTER_COLOURS = concat([coaster_color],
+                         pattern != "none" || (alternate_colors && count > 1) ? [pattern_color] : [],
                          has_border ? [border_color] : [], OVERLAY_ON ? [overlay_color] : []);
 TOWER_1 = multi(concat(COASTER_COLOURS, holder ? [holder_color] : []));
 TOWER_N = multi(COASTER_COLOURS);
@@ -495,6 +500,8 @@ if (holder)
     echo(HOLDER = STACKED ? "stacked" : HOLDER_MODES[BEST[1]]);
 
 // Plates 2 on: coasters only, [columns, rows, width, height] of plate k.
+// best() is defined here because PER was chosen under the same TOWER_N, and a
+// plate holds at most PER coasters; change one and the other must follow.
 function grid(k) = let (b = best(plate_n(k), false, TOWER_N), c = b[0])
                    [c, ceil(plate_n(k) / c), b[2], b[3]];
 function grid_pos(k, j) = let (g = grid(k))
