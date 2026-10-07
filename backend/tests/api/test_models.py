@@ -868,6 +868,13 @@ def test_a_json_body_missing_its_source_is_rejected_like_any_other_body(
     assert body["errors"][0]["loc"] == ["body", "source"]
 
 
+def _openscad_runs(log: Path) -> int:
+    """Runs the fake openscad logged, less the worker's `--version` probe at start."""
+    if not log.exists():
+        return 0
+    return sum(line != "--version" for line in log.read_text(encoding="utf-8").splitlines())
+
+
 def test_replacing_the_source_runs_openscad_once(
     client: TestClient, model: str, tmp_path: Path
 ) -> None:
@@ -878,11 +885,11 @@ def test_replacing_the_source_runs_openscad_once(
     replacement = 'width = 3;\nlabel = "x";\n'
     put = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
     assert put.status_code == 200
-    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert _openscad_runs(log) == 1
 
     # And the schema the check derived was kept, so opening the customizer adds none.
     assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
-    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert _openscad_runs(log) == 1
 
 
 def test_a_pasted_model_opens_without_deriving_its_schema_again(
@@ -894,7 +901,7 @@ def test_a_pasted_model_opens_without_deriving_its_schema_again(
     created = client.post("/api/v1/models", json={"name": "Pasted", "source": SOURCE})
     assert created.status_code == 201
     assert client.get("/api/v1/models/pasted/schema").status_code == 200
-    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert _openscad_runs(log) == 1
 
 
 def test_a_text_content_type_other_than_plain_is_not_a_paste(client: TestClient) -> None:
@@ -1005,7 +1012,7 @@ def test_a_source_too_large_to_be_a_model_is_refused_before_openscad_runs(
     replaced = client.put(f"/api/v1/models/{model}/source", json={"source": huge})
     assert replaced.status_code == 422
 
-    assert not log.exists(), "openscad ran for a body that was refused on shape"
+    assert _openscad_runs(log) == 0, "openscad ran for a body that was refused on shape"
 
 
 def test_a_text_plain_paste_is_capped_the_same_way(client: TestClient) -> None:
@@ -1017,3 +1024,49 @@ def test_a_text_plain_paste_is_capped_the_same_way(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "too large" in response.json()["detail"]
+
+
+def _declare_pipeline(paths: DataPaths, slug: str, declaration: object, source: str | None) -> None:
+    meta = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    paths.model_meta(slug).write_text(
+        json.dumps({**meta, "pipeline": declaration}), encoding="utf-8"
+    )
+    if source is not None:
+        (paths.model_dir(slug) / "pipeline").mkdir(exist_ok=True)
+        (paths.model_dir(slug) / "pipeline" / "p.py").write_text(source, encoding="utf-8")
+
+
+def test_a_template_shows_its_pipelines_inputs_version(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    _declare_pipeline(paths, model, {"module": "pipeline/p.py", "api": 1}, "INPUTS_VERSION = 2\n")
+    body = client.get(f"/api/v1/models/{model}").json()
+    assert body["inputs_version"] == 2
+    assert body["pipeline"] == {"module": "pipeline/p.py", "api": 1}
+    assert body["pipeline_error"] is None
+
+
+def test_a_malformed_pipeline_declaration_shows_its_error(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    _declare_pipeline(paths, model, {"module": "../p.py", "api": 1}, None)
+    detail = client.get(f"/api/v1/models/{model}").json()
+    assert detail["pipeline"] is None and "module" in detail["pipeline_error"]
+    [listed] = [row for row in client.get("/api/v1/models").json() if row["slug"] == model]
+    assert listed["pipeline_error"] == detail["pipeline_error"]
+
+
+def test_a_pipeline_the_parser_chokes_on_never_breaks_the_listing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """ast.parse raises MemoryError on this (measured); the API only parses template code."""
+    other = paths.model_dir("other")
+    other.mkdir(parents=True)
+    paths.model_source("other").write_text("cube();\n", encoding="utf-8")
+    paths.model_meta("other").write_text(json.dumps({"name": "Other"}), encoding="utf-8")
+    _declare_pipeline(paths, model, {"module": "pipeline/p.py", "api": 1}, "-" * 200_000 + "1")
+    listing = client.get("/api/v1/models")
+    assert listing.status_code == 200
+    assert {row["slug"] for row in listing.json()} >= {model, "other"}
+    detail = client.get(f"/api/v1/models/{model}")
+    assert detail.status_code == 200 and detail.json()["inputs_version"] == 0

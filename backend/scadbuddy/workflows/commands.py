@@ -198,6 +198,7 @@ async def start_command[T](
     memo: Mapping[str, Any] | None = None,
     deadline: timedelta = COMMAND_ANSWER_DEADLINE,
     update_id: str | None = None,
+    execution_timeout: timedelta | None = None,
 ) -> T:
     """Start ``workflow`` as ``id`` (or attach to its running execution) and return its
     ``update``'s answer. ``update_id`` names the Update: Temporal answers a second one
@@ -211,6 +212,7 @@ async def start_command[T](
         id_reuse_policy=reuse,
         search_attributes=search_attributes,
         memo=memo,
+        execution_timeout=execution_timeout,
     )
     # `rpc_timeout` bounds each RPC, not the Update: the server may answer a poll
     # with no outcome just before it, and the SDK then polls again. So the outer bound

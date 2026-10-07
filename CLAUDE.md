@@ -41,6 +41,13 @@ because advisory locks and NOTIFY channels are per database: workers sharing one
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
 Temporal dev server.
+CI runs the suite in four `backend-pytest` jobs (#1167), each `--splits 4 --group N`
+(pytest-split) by the timings in `backend/.test_durations`; `backend-pytest-split`
+checks that the four selections add up to the whole collection. A test missing from
+the file is placed by the average, so a stale file only unbalances the shards. Refresh
+it with `uv run --frozen pytest -n auto --store-durations` (best from the test image,
+for CI's timings) and commit it; it is in `.dockerignore`, so a refresh leaves the
+image's layers alone.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
@@ -134,9 +141,13 @@ stage (OpenSCAD plus the image's fonts):
 
 ```bash
 docker build --target base -t scadbuddy-verify:ci .
+docker build --target test -t scadbuddy:test .   # for templates with a pipeline/ (#427)
 SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-verify:ci \
+  SCADBUDDY_PIPELINE_IMAGE=scadbuddy:test \
   bash -c '.github/scripts/select-models.sh all | .github/scripts/verify-models.sh'
 ```
+
+Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 
 ## Layout
 
@@ -156,6 +167,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
+- `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
+  quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
+  `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
@@ -196,7 +210,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
-  renders* across jobs. Never swap them.
+  renders* across jobs. Never swap them. Template pipelines (#427): `TemplatePipeline`
+  runs a template's `pipeline/pipeline.py`, or the built-in default, `exec`'d in the
+  workflow sandbox; `MigrateInputs`; `ctx.py` (the `ctx` a pipeline gets),
+  `pipeline_activities.py` (`load_pipeline`, `pack`, `write_output`,
+  `run_template_activity`, `migrate_inputs`), `template_process.py`/`template_runner.py`
+  (template Python in its own process group, env allowlisted), `verify_pipeline.py`
+  (for `verify.sh`). `scadbuddy/template.py` is the surface a template's
+  `activities.py` imports.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

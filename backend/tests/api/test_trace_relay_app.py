@@ -16,12 +16,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import SpanKind
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.telemetry import component
 from scadbuddy.telemetry.forwarder import TraceForwarder
+from tests.conftest import http_server_span
 from tests.support.otlp import SENTINEL, export, span, string
 
 PATH = "/telemetry/v1/traces"
@@ -162,7 +162,7 @@ def test_the_page_is_never_served_for_it(
 
 def test_it_is_not_traced(relay_client: TestClient, spans: InMemorySpanExporter) -> None:
     assert relay_client.post(PATH, content=export(span()), headers=UI).status_code == 204
-    servers = [s for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
+    servers = [s for s in spans.get_finished_spans() if http_server_span(s)]
     assert servers == []
 
 
