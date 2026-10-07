@@ -26,6 +26,11 @@ configure({
   },
 })
 
+// jsdom parses its whole default stylesheet the first time anything asks for a computed
+// style (~0.15-0.45 s), and every role query asks. Done here, before the tests, it no
+// longer lands inside the first findByRole's 1 s wait in each file (#1485).
+getComputedStyle(document.documentElement)
+
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   server.resetHandlers()

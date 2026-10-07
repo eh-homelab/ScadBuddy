@@ -528,10 +528,10 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     // Wait until the request reached the "model".
     for (let i = 0; i < 200 && fake.messageCalls().length === 0; i++) await new Promise((r) => setTimeout(r, 50))
     expect(fake.messageCalls().length).toBeGreaterThan(0)
-    const started = Date.now()
+    const started = performance.now()
     expect(await a.interrupt(session.id, browser)).toBe(true)
     expect(await turn.done).toEqual({ kind: 'interrupted' })
-    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(performance.now() - started).toBeLessThan(10_000)
     expect(await a.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
     const last = (await allEvents(a, session.id)).map((e) => e.event).slice(-2)
     expect(last).toEqual([

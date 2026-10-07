@@ -32,6 +32,8 @@ try {
 
 const TOKEN_A = 'gw-fallback-first-token-aaaa'
 const TOKEN_B = 'gw-fallback-second-token-bbbb'
+/** A wall-clock step tolerated between two Date.now() reads (#1485). */
+const WALL_CLOCK_SLACK_MS = 60_000
 
 describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake endpoint${cliMissing ? ` (skipped: ${cliMissing})` : ''}`, () => {
   let fake: FakeAnthropic
@@ -129,8 +131,11 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const cooled = reports.find((r) => r.id === 'a' && 'replacing' in r.outcome)?.outcome
     expect(cooled).toMatchObject({ class: 'rate_limited' })
     const until = cooled && 'until' in cooled ? cooled.until.getTime() : 0
-    expect(until).toBeGreaterThanOrEqual(started + 600_000)
-    expect(until).toBeLessThan(Date.now() + 601_000)
+    // `until` is a stored wall-clock time, read against the wall clock here at other
+    // moments; the slack absorbs a clock step between them (WSL steps ~11 s, #1485)
+    // and still tells the endpoint's 600 s from the 60 s default.
+    expect(until).toBeGreaterThanOrEqual(started + 600_000 - WALL_CLOCK_SLACK_MS)
+    expect(until).toBeLessThan(Date.now() + 601_000 + WALL_CLOCK_SLACK_MS)
     // The probe was one more request with that key, for one token.
     expect(callsWith(TOKEN_A).at(-1)?.body).toMatchObject({ max_tokens: 1, model: 'claude-sonnet-4-5' })
   }, 60_000)

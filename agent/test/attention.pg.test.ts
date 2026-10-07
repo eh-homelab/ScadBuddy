@@ -181,7 +181,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   // The check runs beside the wait, not before it: the row resolving ends the wait at once, however long the check takes.
   it('a reply or a reconnect ends the wait at once while the reconnect check still hangs', async () => {
     const hangs = () => new Promise<void>(() => undefined)
-    const started = Date.now()
+    const started = performance.now()
     const m = manager({
       sql: db.sql,
       paths: await tempPaths(),
@@ -199,7 +199,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       { answered: false, reconnected: true, message: expect.any(String) },
     ])
     // Neither the 300 s timer nor even one 5 s poll: wake() ended both waits.
-    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(performance.now() - started).toBeLessThan(5_000)
   })
 
   // #1394: the wait's own row read can see the row before the commit that resolves it; the wake() that commit

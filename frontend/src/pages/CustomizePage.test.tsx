@@ -679,8 +679,13 @@ describe('CustomizePage', () => {
       </AssistantOpenerContext.Provider>,
       { route: `/m/name-keychain?from=${id}`, path: '/m/:slug' },
     )
-    expect(await screen.findByRole('button', { name: 'Changed by assistant (2)' })).toBeInTheDocument()
-    await user.click(await screen.findByRole('button', { name: 'Output changed by assistant (1)' }))
+    // Waited for by text, then found by role once: a role query re-run on every change
+    // while the page loads costs ~0.2-0.45 s each in jsdom (a computed style per
+    // element), which kept the menu from appearing within the 1 s wait (#1485).
+    await screen.findByText('Changed by assistant (2)')
+    await screen.findByText('Output changed by assistant (1)')
+    expect(screen.getByRole('button', { name: 'Changed by assistant (2)' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Output changed by assistant (1)' }))
     await user.click(screen.getByRole('button', { name: /Saved it/ }))
     expect(openSession).toHaveBeenCalledWith('sess-output')
   })
