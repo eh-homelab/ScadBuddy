@@ -41,7 +41,9 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
-from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.component import OPERATIONS, OperationCommands
+from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
@@ -67,6 +69,7 @@ from scadbuddy.workflows.housekeeping import (
     ensure_schedules,
     library_worker,
 )
+from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -335,7 +338,15 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A crashed duplicate's staging otherwise waits for the next boot (#397).
         await _heartbeating(_sweep_duplicate_staging_logged(state, reraise=True))
 
-    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging]
+    @activity.defn(name=SWEEPS[4])
+    async def sweep_claims() -> None:
+        try:
+            await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
+        except Exception:
+            logger.exception("could not sweep operation claims")
+            raise
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims]
 
 
 async def _prepare_catalogue(state: AppState) -> None:
@@ -502,7 +513,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     ops = state.components.get(OPERATIONS)
     activities = [
         *PrintActivities(deps).all(),
-        *operation_activities(ops.store, state.settings_store, ops.kinds),
+        *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
     ]
     # Beside the workers (review #1091 4): each follow it starts may wait out an RPC
     # timeout on a slow Temporal, and the queue is polled meanwhile.
@@ -569,15 +580,24 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             await _backfill_store_logged(state, uploads=True, fonts=False)
 
     schedules = asyncio.create_task(set_up())
-    activities = _housekeeping_activities(state)
+    ops = state.components.get(OPERATIONS)
+    activities = [
+        *_housekeeping_activities(state),
+        *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
+    ]
     try:
         while not stop.is_set():
-            worker = library_worker(client, queue, activities)
+            worker = library_worker(client, queue, activities, workflows=[OperationWorkflow])
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
         schedules.cancel()
+
+
+def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
+    """The kinds one worker serves (§4.3): only those whose effect it holds."""
+    return {name: kind for name, kind in ops.kinds.items() if kind.queue == queue}
 
 
 async def _set_up_housekeeping(

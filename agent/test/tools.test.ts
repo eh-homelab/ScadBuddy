@@ -1520,6 +1520,98 @@ describe('Bambuddy writes as operations (#1053)', () => {
   })
 })
 
+describe('library pins as operations (#1054)', () => {
+  const op = { id: 'op-7', kind: 'library_pin', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+  const pinned = { name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', commit: 'a'.repeat(40) }
+  const CATALOGUE = [{ name: 'BOSL2', url: pinned.url, ref: 'v2.0.0', homepage: '', licence: '' }]
+
+  it.each([
+    ['pin_library', { slug: 'w', name: 'BOSL2' }, 'put', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['pin_library_from_url', { slug: 'w', name: 'X', url: 'https://g.example/x.git', ref: 'v1' }, 'put', '/api/v1/models/w/libraries/X', { slug: 'w' }],
+    ['repin_library', { slug: 'w', name: 'BOSL2' }, 'patch', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['repin_library_from_pinned_url', { slug: 'w', name: 'X' }, 'patch', '/api/v1/models/w/libraries/X', { slug: 'w' }],
+    ['unpin_library', { slug: 'w', name: 'BOSL2' }, 'delete', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['remove_library_checkout', { name: 'BOSL2' }, 'delete', '/api/v1/libraries/BOSL2', { removed: 'BOSL2' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path, expected) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+      // repin_library's two reads before its PATCH.
+      http.get(`${BACKEND}/api/v1/models/w`, () => HttpResponse.json({ ...model, libraries: [pinned] })),
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+    // The operation's result, not the 202's body.
+    const answer = firstText(result)
+    expect(answer).toMatchObject(expected)
+    expect(answer).not.toHaveProperty('status')
+  })
+
+  it('remove_library_checkout hands back a removal still running past the follow, not "removed" (review #1119)', async () => {
+    const removing = { ...op, kind: 'library_remove', subject: 'library:BOSL2' }
+    server.use(
+      http.delete(`${BACKEND}/api/v1/libraries/BOSL2`, () => HttpResponse.json(removing, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json(removing)),
+    )
+    const result = await runTool(
+      { ...tool('remove_library_checkout'), gated: false },
+      { name: 'BOSL2' },
+      ctx({ commandFollowMs: 50 }),
+    )
+    expect(result.isError).toBeFalsy()
+    const answer = firstText(result)
+    expect(answer).toMatchObject({ status: 'running', operation_id: 'op-7' })
+    expect(answer).not.toHaveProperty('removed')
+  })
+})
+
+describe("a model's lifecycle as operations (#1054)", () => {
+  const op = { id: 'op-8', kind: 'model_create', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+
+  it.each([
+    ['create_model', { name: 'W', source: 'cube(1);' }, 'post', '/api/v1/models'],
+    ['import_model', { url: 'https://example.com/w.scad' }, 'post', '/api/v1/models/import'],
+    ['duplicate_model', { slug: 'v', name: 'W' }, 'post', '/api/v1/models/v/duplicate'],
+    ['update_model_details', { slug: 'w', description: 'd' }, 'patch', '/api/v1/models/w'],
+    ['delete_model', { slug: 'w' }, 'delete', '/api/v1/models/w'],
+    ['create_from_template', { name: 'W', from: 'blank' }, 'post', '/api/v1/models'],
+    ['create_from_template', { name: 'W', from: 'v' }, 'post', '/api/v1/models/v/duplicate'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-8`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('delete_model accepts a 204 at once', async () => {
+    let key: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, { slug: 'w' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
 describe('get_output_preview (#308)', () => {
   it("embeds the output's preview mesh", async () => {
     const id = 'a'.repeat(32)

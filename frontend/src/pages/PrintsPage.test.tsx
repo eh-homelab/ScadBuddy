@@ -50,17 +50,25 @@ function location(): string {
   return screen.getByTestId('location').textContent ?? ''
 }
 
+/**
+ * The list, found by its label: a role query re-runs getComputedStyle over the whole
+ * page on every change while it loads (~0.25 s each in jsdom), which held the list past
+ * the 1 s wait under load (#1485).
+ */
+function list(): Promise<HTMLElement> {
+  return screen.findByLabelText('Prints', { selector: 'ul' })
+}
+
 /** The rendered prints, by archive id, in order. */
 async function shown(): Promise<string[]> {
-  const list = await screen.findByRole('list', { name: 'Prints' })
-  return within(list)
+  return within(await list())
     .getAllByRole('listitem')
     .map((item) => item.getAttribute('data-print') ?? '')
     .filter(Boolean)
 }
 
 async function item(archiveId: number): Promise<HTMLElement> {
-  await screen.findByRole('list', { name: 'Prints' })
+  await list()
   const found = document.querySelector(`[data-print="${archiveId}"]`)
   if (!(found instanceof HTMLElement)) throw new Error(`no print ${archiveId}`)
   return found

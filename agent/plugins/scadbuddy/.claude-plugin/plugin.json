@@ -1,7 +1,7 @@
 {
   "name": "scadbuddy",
   "displayName": "ScadBuddy",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "ScadBuddy's own plugin as the agent harness loads it: the skills and subagents of plugins/scadbuddy, without the userConfig and .mcp.json an external install needs.",
   "author": {
     "name": "eh-homelab",

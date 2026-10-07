@@ -40,9 +40,9 @@ function ok<T = Record<string, unknown>>(result: Result): T {
 }
 
 async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await new Promise((r) => setTimeout(r, 10))
   }
 }
@@ -315,7 +315,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       closers.push(async () => stop.abort())
       const from = await replicaB.events.lastSeq(session.id)
       const follow = await replicaB.attach(session.id, BROWSER_USER, { afterSeq: from, signal: stop.signal })
-      const started = Date.now()
+      const started = performance.now()
       const reading = collectUntil(follow, (e) => e.event.type === 'session.status' && e.event.status === 'idle', 5000)
       // Give the follower its first (empty) read, so it is waiting when the turn runs.
       await new Promise((r) => setTimeout(r, 100))
@@ -323,7 +323,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const events = await reading
       expect(events.map((e) => e.event.type)).toContain('assistant.text.delta')
       // Far inside the 60 s poll: the NOTIFY woke it.
-      expect(Date.now() - started).toBeLessThan(5000)
+      expect(performance.now() - started).toBeLessThan(5000)
       expect(pubA.sent).toBeGreaterThan(0)
     })
 
