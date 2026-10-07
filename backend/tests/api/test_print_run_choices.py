@@ -1722,3 +1722,65 @@ def test_a_rack_warning_repeated_on_every_plate_is_shown_once(
     kinds = [w["kind"] for w in response.json()["warnings"]]
     assert kinds.count("rack-unsafe-material") == 1
     assert "rack-left-to-bambuddy" not in kinds
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("plan", "overrides", "detail"),
+    [
+        ([], {}, "Slot 1 has no spool chosen."),
+        ([{"slot_id": 1, "spool_id": 9}], {}, "Slot 2 has no spool chosen."),
+        (
+            [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 99999}],
+            {},
+            "Slot 2 has no spool chosen.",
+        ),
+        (None, {"1": {"source": "cloud", "id": "NOPE"}}, "slot 1"),
+    ],
+    ids=["no-slot-picked", "slot-2-unpicked", "unknown-spool", "unknown-override"],
+)
+def test_a_slot_error_is_the_checks_error_too(
+    client: TestClient,
+    model: str,
+    plan: list[dict[str, int]] | None,
+    overrides: dict[str, Any],
+    detail: str,
+) -> None:
+    """#1050: ``/check`` judged only what the choices decide, so a plan the run refuses
+    by its slots (no spool, a spool Bambuddy lacks, an override it lacks) passed the
+    check, and the run then uploaded the file and failed after its 202. The check now
+    makes the run's own slot refusal, in the run's words."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    request = body(filament_overrides=overrides)
+    if plan is not None:
+        request["filament_plan"] = {"slots": plan}
+    # The dialog reads the choices first, which gives Bambuddy the copy the check reads.
+    read = client.get(f"/api/v1/print/outputs/{output_id}/filaments", params={"printer_id": 1})
+    assert read.status_code == 200, read.text
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    run = run_print(client, output_id, json=request)
+
+    assert run.status_code == 422, run.text
+    assert detail in run.json()["detail"]
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == [run.json()["detail"]]
+    assert not sliced.called
+
+
+@respx.mock
+def test_a_plan_the_run_accepts_has_no_check_error(client: TestClient, model: str) -> None:
+    """#1050: the slot judgement adds no error to a plan every slot of which resolves."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    read = client.get(f"/api/v1/print/outputs/{output_id}/filaments", params={"printer_id": 1})
+    assert read.status_code == 200, read.text
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []

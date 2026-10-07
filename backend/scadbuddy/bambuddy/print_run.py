@@ -467,6 +467,70 @@ def _spools_by_slot(options: FilamentOptions, plan: FilamentPlan) -> dict[int, S
     return {slot.slot_id: by_id[slot.spool_id] for slot in plan.slots if slot.spool_id in by_id}
 
 
+async def resolve_plates(
+    client: BambuddyClient,
+    plate_ids: list[int],
+    per_plate: list[FilamentOptions],
+    plan: FilamentPlan,
+    choices: PrintChoices,
+    catalogue: _Catalogue,
+) -> tuple[list[Resolved], list[str]]:
+    """Each plate resolved for ``plan``, and every slot refusal among them in the run's
+    own words: what :func:`plan_run` refuses with, and what :func:`check_print` reports
+    (#1050). A spool the inventory lacks resolves as no spool chosen, so its presets
+    are not read: Bambuddy would answer for a spool it does not have with an error."""
+    inventory = {spool.spool_id for options in per_plate for spool in options.spools}
+    # Read once for every plate: the plan's spools are the same on every plate.
+    spool_presets = {
+        spool_id: await client.spool_filament_presets(spool_id)
+        for spool_id in sorted({slot.spool_id for slot in plan.slots} & inventory)
+    }
+    every: list[Resolved] = []
+    errors: list[str] = []
+    for plate_id, options in zip(plate_ids, per_plate, strict=True):
+        resolved = resolve(options, plan, choices, catalogue, spool_presets)
+        for error in resolved.errors:
+            message = (
+                f"Plate {plate_id}: {error.message}"
+                if error.slot_id is not None and len(plate_ids) > 1
+                else error.message
+            )
+            if message not in errors:
+                errors.append(message)
+        every.append(resolved)
+    return every, errors
+
+
+async def _slot_errors(
+    client: BambuddyClient, source: PrintSource, request: PrintRunRequest, prepared: PreparedRun
+) -> list[str]:
+    """The run's slot refusals for ``request``, judged before anything is uploaded for it
+    (#1050): read from a copy Bambuddy already has, which has the same slots as the one
+    the run prints, as :func:`filament_options` reads them. The dialog's own choices read
+    made one; with none (an API caller that never read the choices) there is nothing to
+    read without an upload, and the run still judges the slots after its own."""
+    read_file = await source.file_read_already(client)
+    if read_file is None:
+        return []
+    per_plate = await gather_plate_options(
+        client,
+        library_file_id=read_file.id,
+        printer_id=prepared.printer_id,
+        plate_ids=prepared.plate_ids,
+        fallback_colours=list(source.colours),
+        own_colours=read_file.own_colours,
+    )
+    _, errors = await resolve_plates(
+        client,
+        prepared.plate_ids,
+        per_plate,
+        request.filament_plan,
+        request.choices,
+        prepared.catalogue,
+    )
+    return errors
+
+
 async def check_print(
     client: BambuddyClient,
     source: PrintSource,
@@ -483,8 +547,10 @@ async def check_print(
     nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
     slice through the one 0.2 mm nozzle. It warns only of a side the slice may use whose
     mounted nozzle of the size is not of the flow sliced there (#723, #797, #484), and
-    not of the rack side once the preview picks it a hotend (#1238). What needs
-    the uploaded file is still found by the run. Only the run's own refusals
+    not of the rack side once the preview picks it a hotend (#1238). The run's slot
+    refusals (no spool, an override Bambuddy lacks) are judged from a copy Bambuddy
+    already has, so they are errors here before the run uploads (#1050). Only
+    the run's own refusals
     (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the
     check, as it would fail the run. With no printer chosen or configured there is
     nothing to judge, and the run says why."""
@@ -514,6 +580,10 @@ async def check_print(
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
     else:
         errors = []
+    # The run's 422 after its upload (#1050): every slot refusal, joined as it joins them.
+    slot_errors = await _slot_errors(client, source, request, prepared)
+    if slot_errors:
+        errors.append(" ".join(slot_errors))
     # The one mounted-nozzle advisory kept (#723, #797): a warning, never a refusal. Not
     # for the rack side when the preview picks it a hotend (#1238).
     rack_picked = rack_view is not None and rack_view.position is not None
@@ -923,16 +993,10 @@ async def plan_run(
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 
-    # Read once for every plate: the plan's spools are the same on every plate.
-    spool_presets = {
-        spool_id: await client.spool_filament_presets(spool_id)
-        for spool_id in sorted({slot.spool_id for slot in request.filament_plan.slots})
-    }
     # Each plate's slots are read on their own: a plate uses only some of the project's
     # filaments (#83). The one plan applies to every plate because a slot is a project
     # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
     planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
-    errors: list[str] = []
     per_plate = await gather_plate_options(
         client,
         library_file_id=library_file_id,
@@ -940,16 +1004,10 @@ async def plan_run(
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
     )
-    for plate_id, options in zip(plate_ids, per_plate, strict=True):
-        resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
-        for error in resolved.errors:
-            message = (
-                f"Plate {plate_id}: {error.message}"
-                if error.slot_id is not None and len(plate_ids) > 1
-                else error.message
-            )
-            if message not in errors:
-                errors.append(message)
+    every, errors = await resolve_plates(
+        client, plate_ids, per_plate, request.filament_plan, choices, catalogue
+    )
+    for plate_id, options, resolved in zip(plate_ids, per_plate, every, strict=True):
         if resolved.errors:
             continue
         if resolved.printer_preset is None or resolved.process_preset is None:
