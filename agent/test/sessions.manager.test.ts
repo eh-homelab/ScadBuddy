@@ -393,7 +393,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       // Two turns whose process died before finish() (a restart closed the pool
       // under them, 2026-09-30); one of them left an approval pending.
       await db.sql`
-        UPDATE ai_sessions SET status = 'running', turn_id = gen_random_uuid(), lease_until = now() - interval '1 second'
+        UPDATE ai_sessions SET status = 'running', turn_id = gen_random_uuid(), lease_until = now() - interval '1 minute'
         WHERE id IN ${db.sql([dead.id, parked.id])}`
       await db.sql`
         INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,

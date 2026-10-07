@@ -145,13 +145,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await actions.claim(denied.id, principalA, SEND)).toMatchObject({ status: 'refused', reason: expect.stringContaining('denied') })
 
       const expired = await prepare(principalA)
-      await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${expired.id}`
+      await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id = ${expired.id}`
       expect(await actions.claim(expired.id, principalA, SEND)).toMatchObject({ status: 'refused', reason: expect.stringContaining('expired') })
       expect((await approvals.get(expired.id, browser)).decision).toBe('expired')
 
       const stale = await prepare(principalA)
       await approvals.decide(browser, stale.id, true)
-      await db.sql`UPDATE ai_approvals SET usable_until = now() - interval '1 second' WHERE id = ${stale.id}`
+      await db.sql`UPDATE ai_approvals SET usable_until = now() - interval '1 minute' WHERE id = ${stale.id}`
       expect(await actions.claim(stale.id, principalA, SEND)).toMatchObject({ status: 'refused', reason: expect.stringContaining('no longer usable') })
     })
 

@@ -125,7 +125,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
 
   it('refuses an expired request', async () => {
     const request = await store.request(agent)
-    await db.sql`UPDATE ai_browser_pairings SET expires_at = now() - interval '1 second' WHERE id = ${request.id}`
+    await db.sql`UPDATE ai_browser_pairings SET expires_at = now() - interval '1 minute' WHERE id = ${request.id}`
     expect(await store.accept(request.id, request.code, TAB)).toEqual({ ok: false, reason: 'gone' })
     expect(await store.pending()).toEqual([])
   })
@@ -146,7 +146,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
   it('stops pairing at the end of the pairing lifetime', async () => {
     const request = await store.request(agent)
     await store.accept(request.id, request.code, TAB)
-    await db.sql`UPDATE ai_browser_pairings SET expires_at = now() - interval '1 second' WHERE id = ${request.id}`
+    await db.sql`UPDATE ai_browser_pairings SET expires_at = now() - interval '1 minute' WHERE id = ${request.id}`
     expect(await store.pairedTab(agent)).toBeUndefined()
     expect((await store.pairedWith([TAB])).size).toBe(0)
   })

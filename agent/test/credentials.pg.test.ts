@@ -144,7 +144,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await store.record(a.id, a.epoch, { kind: 'cooling_down', until: new Date(Date.now() + 30_000), reason: 'HTTP 429' })
         expect(await store.get(a.id)).toMatchObject({ status: 'cooling_down', cooldown_until: later.toISOString() })
 
-        await db.sql`UPDATE ai_credentials SET cooldown_until = now() - interval '1 second' WHERE id = ${a.id}`
+        await db.sql`UPDATE ai_credentials SET cooldown_until = now() - interval '1 minute' WHERE id = ${a.id}`
         expect(await store.get(a.id)).toMatchObject({ status: 'active', cooldown_until: null })
         // The first success after it clears the row and says it recovered.
         expect(await store.record(a.id, a.epoch, { kind: 'used' })).toEqual({
@@ -258,7 +258,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           expect(JSON.stringify(audit)).not.toMatch(/credential-aaaa|third-credential/)
 
           // Recovery: the cooldown passes, the credential is offered first again, and its next success is audited.
-          await db.sql`UPDATE ai_credentials SET cooldown_until = now() - interval '1 second' WHERE id = ${a.id}`
+          await db.sql`UPDATE ai_credentials SET cooldown_until = now() - interval '1 minute' WHERE id = ${a.id}`
           const [back] = await pool.candidates()
           expect(back?.id).toBe(a.id)
           await pool.report(back!, { class: 'ok' }, undefined)

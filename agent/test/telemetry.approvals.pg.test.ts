@@ -79,7 +79,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
 
   it('an expiry is a trace of its own, linked to the parked span', async () => {
     const { approval } = await orphan(TRACEPARENT)
-    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${approval.id}`
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id = ${approval.id}`
     expect(await m.approvals.expireDue()).toBe(1)
     const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
     expect(decision.parentSpanContext).toBeUndefined()

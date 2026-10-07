@@ -483,7 +483,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const three = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'three' })).session.id
       ok(await a.call('sessions_handoff', { session_id: three, to: b.owner.id }))
       expect(ok<unknown[]>(await b.call('sessions_list'))).toHaveLength(1)
-      await db.sql`UPDATE ai_sessions SET pending_owner_until = now() - interval '1 second' WHERE id = ${three}`
+      await db.sql`UPDATE ai_sessions SET pending_owner_until = now() - interval '1 minute' WHERE id = ${three}`
       expect(ok<unknown[]>(await b.call('sessions_list'))).toEqual([])
       expect(errorText(await b.call('sessions_accept_handoff', { session_id: three }))).toMatch(/no session/)
       expect(ok<{ session: { offer: unknown } }>(await a.call('sessions_get', { session_id: three })).session.offer).toBeNull()

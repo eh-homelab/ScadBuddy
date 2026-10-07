@@ -131,7 +131,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
   it('expires an orphan that nobody decided, and the session goes back to idle', async () => {
     const { session, approval } = await orphan()
     expect(await m.approvals.expireDue()).toBe(0)
-    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${approval.id}`
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id = ${approval.id}`
     expect(await m.approvals.expireDue()).toBe(1)
     expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'expired', reason: 'no decision before it expired' })
     expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle' })
@@ -146,7 +146,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('an approval decided just as it expires cannot be approved', async () => {
     const { approval } = await orphan()
-    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${approval.id}`
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id = ${approval.id}`
     // Not swept yet: the decision itself finds it due.
     await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'expired', status: 410 })
     expect((await m.approvals.get(approval.id, browser)).decision).toBe('expired')
@@ -279,7 +279,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await service.decide(browser, pending!.id, true)
     // Changing the setting afterwards does not move it; time passing does.
     values.set(SETTING_APPROVAL_EXPIRY_SECONDS, 86_400)
-    await db.sql`UPDATE ai_approvals SET usable_until = now() - interval '1 second' WHERE id = ${pending!.id}`
+    await db.sql`UPDATE ai_approvals SET usable_until = now() - interval '1 minute' WHERE id = ${pending!.id}`
     expect(await service.consume(session.id, turnA, pending!.tool, pending!.inputHash)).toBeUndefined()
   })
 

@@ -221,7 +221,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     const denied = await ask('t2')
     await approvals.decide(browser, denied.id, false)
     const lapsed = await ask('t3')
-    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${lapsed.id}`
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id = ${lapsed.id}`
     expect(await approvals.expireDue()).toBe(1)
 
     const entries = (await audit.list({ kind: 'approval' })).entries

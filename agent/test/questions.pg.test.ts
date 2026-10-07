@@ -341,7 +341,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const reaper = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20 })
     const { session, turn } = await stuck.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(stuck, session.id)
-    await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 second' WHERE id = ${session.id}`
+    await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 minute' WHERE id = ${session.id}`
 
     expect(await reaper.reapExpired()).toEqual([session.id])
     expect((await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`)[0]).toEqual({ outcome: 'cancelled' })
