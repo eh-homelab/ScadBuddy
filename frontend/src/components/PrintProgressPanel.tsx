@@ -44,6 +44,9 @@ function queuedCount(progress: PrintProgress): number {
 }
 
 function headline(progress: PrintProgress): string {
+  // #1049 — the run failed before it queued anything: there is no slice or queue entry,
+  // only its reason, in `error_message`.
+  if (progress.route === 'run') return 'Print failed before it was queued'
   // The slice-and-queue route has no run: the queue item is the whole print, and until
   // a plate has sliced it does not exist yet. An all-plates print is still slicing until
   // one of its plates has an entry (#295).

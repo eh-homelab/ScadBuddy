@@ -239,11 +239,13 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-center gap-1.5 border-b border-line px-3 py-2">
+      {/* #1038 — wraps: the buttons outgrow the 380 px panel once "Sessions (N)" reaches two
+          digits, and an unwrapped row pushed Close past the viewport's edge. */}
+      <header className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-2">
         <h2 ref={heading} tabIndex={-1} className="text-[13px] font-semibold outline-none">
           Assistant
         </h2>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
           <Button
             variant="ghost"
             size="sm"

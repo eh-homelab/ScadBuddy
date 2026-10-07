@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
+import psycopg
 import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.dispatch import QueueOutcome
+from scadbuddy.bambuddy.print_links import PrintSend
 from scadbuddy.bambuddy.print_source import (
     UNKNOWN_COLOUR,
     LibrarySource,
@@ -17,7 +20,9 @@ from scadbuddy.bambuddy.print_source import (
     PrintSource,
     printable,
 )
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -177,3 +182,93 @@ async def test_a_file_deleted_in_bambuddy_is_a_404(bambuddy: BambuddyClient) -> 
         await LibrarySource.load(bambuddy, 89)
 
     assert missing.value.status == 404
+
+
+class _Sends:
+    """Records `record_sends` as the link store would take it."""
+
+    available = True
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.recorded: list[tuple[PrintSubject, list[PrintSend]]] = []
+        self.error = error
+
+    async def record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
+        if self.error is not None:
+            raise self.error
+        self.recorded.append((subject, list(sends)))
+
+
+class _Outputs:
+    def __init__(self) -> None:
+        self.sends: list[dict[str, Any]] = []
+
+    def record_send(self, output_id: str, **fields: Any) -> None:
+        self.sends.append({"output_id": output_id, **fields})
+
+
+class _Uploads:
+    async def record_sliced(self, *args: Any) -> None:
+        return None
+
+
+OUTCOME = QueueOutcome(
+    slice_job_id=9, sliced_library_file_id=21, queue_item_ids=[51, 52], printer_id=2
+)
+SENT = [
+    PrintSend(queue_item_id=51, plate_id=1, printer_id=2, project_id=7, slice_job_id=9),
+    PrintSend(queue_item_id=52, plate_id=1, printer_id=2, project_id=7, slice_job_id=9),
+]
+
+
+async def test_an_output_print_records_its_send_by_subject() -> None:
+    # #1750 (R1): both sources write one send record; an output's meta keeps its own too.
+    sends, outputs = _Sends(), _Outputs()
+    meta: Any = _Meta()
+    source = OutputSource(
+        store=outputs,  # type: ignore[arg-type]
+        uploads=_Uploads(),  # type: ignore[arg-type]
+        meta=meta,
+        settings=StoredSettings(),
+        sends=sends,  # type: ignore[arg-type]
+    )
+
+    sent = await source.record(11, 1, OUTCOME, 7, [])
+
+    assert source.subject == PrintSubject.output(meta.id)
+    assert sends.recorded == [(PrintSubject.output(meta.id), SENT)]
+    assert [send["queue_item_id"] for send in outputs.sends] == [51, 52]
+    assert sent == [
+        PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9),
+        PlateSend(plate_id=1, queue_item_id=52, slice_job_id=9),
+    ]
+
+
+async def test_a_library_print_records_its_send_by_subject() -> None:
+    # #1750 (R1, R2): a library file's print is recorded exactly as an output's is.
+    sends = _Sends()
+    source = LibrarySource(file_id=41, colours=["#FF0000"], plates=[1], sends=sends)  # type: ignore[arg-type]
+
+    sent = await source.record(41, 1, OUTCOME, 7, [])
+
+    assert source.subject == PrintSubject.library(41)
+    assert sends.recorded == [(PrintSubject.library(41), SENT)]
+    assert sent == [
+        PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9),
+        PlateSend(plate_id=1, queue_item_id=52, slice_job_id=9),
+    ]
+
+
+async def test_a_send_record_that_fails_does_not_fail_the_queued_plate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The plate is on Bambuddy's queue: failing the run over its record would tell the
+    # user it was not (#976).
+    sends = _Sends(psycopg.OperationalError("connection refused"))
+    source = LibrarySource(file_id=41, colours=["#FF0000"], plates=[1], sends=sends)  # type: ignore[arg-type]
+
+    sent = await source.record(41, 1, OUTCOME, None, [])
+
+    assert [s.queue_item_id for s in sent] == [51, 52]
+    assert "OperationalError" in caplog.text
+    assert "connection refused" not in caplog.text

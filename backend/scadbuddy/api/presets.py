@@ -86,6 +86,13 @@ async def _require_valid(
 # or preset ids, and no Python quoting. The ids stay in the problem's own fields.
 
 
+def invalid_copy_detail(error: InputsError | ValidationError) -> str:
+    """Every problem with a copy that failed validation, not only the first (#1274)."""
+    if isinstance(error, ValidationError):
+        return "; ".join(str(e["msg"]) for e in error.errors())
+    return str(error)
+
+
 def _taken(error: PresetExistsError) -> ApiError:
     """Names the preset that has the name, as it is spelled, not the spelling asked for."""
     (name,) = error.args
@@ -243,8 +250,7 @@ async def duplicate_preset(
             tags=source.tags,
         )
     except (InputsError, ValidationError) as error:
-        detail = str(error.errors()[0]["msg"]) if isinstance(error, ValidationError) else str(error)
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, detail) from None
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, invalid_copy_detail(error)) from None
     try:
         created = await asyncio.to_thread(presets.create, slug, copy)
     except PresetExistsError as error:

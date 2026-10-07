@@ -6,6 +6,7 @@ import type { ConnectionTest } from '../src/harness/testConnection.js'
 import { originPolicy } from '../src/http/origins.js'
 import { kekFromBase64, type KekStatus, loadKek } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
+import type { SessionManager } from '../src/sessions/manager.js'
 
 const up = () => Promise.resolve(true)
 const down = () => Promise.resolve(false)
@@ -543,5 +544,26 @@ describe('/api/v1/ai/approvals (#258; the store is covered in test/approvals.pg.
     expect(bare.status).toBe(403)
     expect(await bare.json()).toEqual({ detail: 'approval decisions must come through the HTTPS ingress' })
     expect((await app.request(`/api/v1/ai/approvals/${id}/approve`, { method: 'POST', headers: UI })).status).toBe(503)
+  })
+})
+
+describe('/api/v1/ai/pending-input (#815; the store is covered in test/attention.pg.test.ts)', () => {
+  const sessions = {} as SessionManager // never reached: each answer here comes first
+  const respond = { method: 'POST', headers: { ...UI, 'content-type': 'application/json' }, body: '{"kind":"answer","text":"x"}' }
+
+  it('answers 503 without the database (#1228)', async () => {
+    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const read = await app.request('/api/v1/ai/pending-input', { headers: UI })
+    expect(read.status).toBe(503)
+    expect(await read.json()).toEqual({ detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/) })
+    expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
+  })
+
+  it('answers 503 before the migrations have applied (#1228)', async () => {
+    const app = createApp(deps({ database: { ping: up, ready: down }, sessions }))
+    const read = await app.request('/api/v1/ai/pending-input', { headers: UI })
+    expect(read.status).toBe(503)
+    expect(await read.json()).toEqual({ detail: expect.stringMatching(/migrations have not applied/) })
+    expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
   })
 })

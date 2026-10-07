@@ -35,7 +35,8 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
   // that `has_thumbnail` may name, so the picture is always the slide it opens on.
   const coverIndex = slides.findIndex((slide) => slide.kind === 'image' || slide.poster)
   const cover = coverIndex >= 0 ? slides[coverIndex] : undefined
-  const src = cover?.kind === 'image' ? cover.src : cover?.poster
+  // The strip-sized copy for an 80 px tile, never the original (#1034).
+  const src = cover?.thumbnail ?? (cover?.kind === 'image' ? cover.src : cover?.poster)
   const tags = model.tags ?? []
   // Only an http(s) origin is shown, so only one takes the provenance line.
   const origin = safeHttpUrl(model.origin_url)

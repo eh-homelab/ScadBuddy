@@ -153,6 +153,9 @@ export class ApiError extends Error {
   }
 }
 
+
+/** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
+let settingsInFlight: Promise<Settings> | undefined
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -761,11 +764,12 @@ export const api = {
    * #624 — a small copy of an image or of a video's poster, for a strip of
    * thumbnails; undefined for a video with no poster, which has none. It is
    * cached as `immutable`, so the URL carries the thumbnail version (#1424).
+   * `card` asks for a larger copy, sized for a catalogue card's cover (#1034).
    */
-  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>, size?: 'card') =>
     item.kind === 'video' && !item.poster
       ? undefined
-      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}`,
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}${size ? `&size=${size}` : ''}`,
 
   /**
    * #274 — adds an image or video as the template's last item. XHR rather than
@@ -1338,10 +1342,26 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  getSettings: () => request<Settings>('/settings'),
+  /**
+   * #1039 — callers that ask at once share one request: the shell's unit and link
+   * loaders and the page all read it on the same load. Nothing is kept once it
+   * answers, so a later call always reads afresh, and a save stops later callers
+   * joining a read that started before it. Each caller gets its own copy.
+   */
+  getSettings: (): Promise<Settings> => {
+    if (!settingsInFlight) {
+      const read = request<Settings>('/settings').finally(() => {
+        if (settingsInFlight === read) settingsInFlight = undefined
+      })
+      settingsInFlight = read
+    }
+    return settingsInFlight.then((settings) => structuredClone(settings))
+  },
 
-  putSettings: (body: SettingsUpdate) =>
-    request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  putSettings: (body: SettingsUpdate) => {
+    settingsInFlight = undefined
+    return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
+  },
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 

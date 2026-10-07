@@ -91,6 +91,16 @@ export class RealtimeClient {
     return this.currentStatus
   }
 
+  /**
+   * #1039 — true when a `subscribe` made now is sure to be followed by a `'resync'`:
+   * the socket is open, so the server's `subscribed` (or, for a topic already live,
+   * the catch-up signal) comes within a round trip. A caller about to read and
+   * subscribe can then leave the read to that signal rather than read twice.
+   */
+  get willResync(): boolean {
+    return !this.closed && this.socket?.readyState === this.WebSocketImpl.OPEN
+  }
+
   /** True while anything is followed: the "unavailable" hint only matters then. */
   get following(): boolean {
     return this.listeners.size > 0

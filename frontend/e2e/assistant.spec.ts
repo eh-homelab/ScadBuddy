@@ -238,3 +238,30 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(dialog).toBeVisible()
   })
 })
+
+// #1038 — at 768 px the header's buttons outgrew the 380 px panel once the session count
+// reached two digits, and Close sat past the viewport's edge.
+test.describe('assistant panel header at 768 px (#1038)', () => {
+  test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
+  test.use({ viewport: { width: 768, height: 1024 } })
+
+  test('keeps every button inside the panel however many sessions there are', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const sessions = panel.getByRole('button', { name: /^Sessions \(/ })
+    await expect(sessions).toBeVisible()
+    // The mock agent seeds a handful of sessions; a long-lived install has hundreds. Grow
+    // the label in place to that width rather than starting a hundred chats.
+    await sessions.evaluate((el) => {
+      el.textContent = 'Sessions (999)'
+    })
+
+    const edge = (await panel.boundingBox())!
+    for (const button of await panel.locator('header').getByRole('button').all()) {
+      const box = (await button.boundingBox())!
+      expect(box.x + box.width, await button.innerText()).toBeLessThanOrEqual(edge.x + edge.width + 0.5)
+    }
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(768)
+  })
+})

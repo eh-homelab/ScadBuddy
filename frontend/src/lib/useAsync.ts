@@ -21,6 +21,9 @@ export interface AsyncState<T> {
   setData: (next: T, options?: { supersede?: boolean }) => void
 }
 
+/** How long a first read left to the subscription's resync waits for it (#1039). */
+export const RESYNC_WAIT_MS = 500
+
 interface Snapshot<T> {
   key: string
   data?: T
@@ -39,6 +42,13 @@ interface Snapshot<T> {
  * data when it answers. `loading` stays false and the old data stays on screen
  * meanwhile. A page whose form may hold unsaved edits passes no topics for that
  * data, and follows the topic itself to offer a reload rather than overwrite.
+ *
+ * #1039 — subscribing makes the realtime client signal `'resync'` once the topic is
+ * live, and that signal reads. A read made just before it is the same read twice, so
+ * when the socket is already open (`willResync`: in-app navigation) the first read is
+ * left to that signal. On a cold page load the socket is not open yet; the read
+ * starts at once, and the signal's read is still needed, since a change made between
+ * the first read and the server's `subscribed` would otherwise go unseen.
  */
 export function useAsync<T>(
   load: () => Promise<T>,
@@ -54,21 +64,42 @@ export function useAsync<T>(
   })
   /** Bumped by every fetch, so an older answer never replaces a newer one. */
   const sequence = useRef(0)
+  const topicList = topics.join('\n')
+  /** The topics the subscription effect below follows now, or '' when none. */
+  const followed = useRef('')
 
   useEffect(() => {
     let cancelled = false
-    const mine = ++sequence.current
-    load()
-      .then((data) => {
-        if (!cancelled && sequence.current === mine) setSnapshot({ key, data })
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled && sequence.current === mine) {
-          setSnapshot({ key, error: cause instanceof Error ? cause : new Error(String(cause)) })
-        }
-      })
+    const read = () => {
+      const mine = ++sequence.current
+      load()
+        .then((data) => {
+          if (!cancelled && sequence.current === mine) setSnapshot({ key, data })
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled && sequence.current === mine) {
+            setSnapshot({ key, error: cause instanceof Error ? cause : new Error(String(cause)) })
+          }
+        })
+    }
+    // This effect runs before the subscription's, so a list it has not followed yet is
+    // about to be subscribed, and with the socket open its resync reads (#1039).
+    const resyncComing = topicList !== '' && followed.current !== topicList && getRealtime().willResync
+    if (!resyncComing) {
+      read()
+      return () => {
+        cancelled = true
+      }
+    }
+    // Should the signal not come (a topic the server refused, the socket lost before it
+    // answered), read anyway. Any read started meanwhile is the signal's.
+    const before = sequence.current
+    const fallback = setTimeout(() => {
+      if (sequence.current === before) read()
+    }, RESYNC_WAIT_MS)
     return () => {
       cancelled = true
+      clearTimeout(fallback)
     }
     // `load` is a fresh closure every render; `key` encodes its real inputs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -109,12 +140,13 @@ export function useAsync<T>(
     })
   }, [])
 
-  const topicList = topics.join('\n')
   useEffect(() => {
     if (!topicList) return
     const realtime = getRealtime()
     const stops = topicList.split('\n').map((topic) => realtime.subscribe(topic, () => refresh()))
+    followed.current = topicList
     return () => {
+      followed.current = ''
       for (const stop of stops) stop()
     }
   }, [topicList, refresh])
