@@ -420,7 +420,9 @@ function OutputRow({
         {diff.length === 0 ? (
           <p className="text-[12px] text-faint">Model defaults, unchanged.</p>
         ) : (
-          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[12px]">
+          // #1036 — the caption column is capped at half the card: as `auto`, a long caption
+          // took the whole row on a phone and pushed the values off the screen.
+          <dl className="grid grid-cols-[fit-content(50%)_minmax(0,1fr)] gap-x-4 gap-y-1 text-[12px]">
             {diff.map((entry) => (
               <div key={entry.name} className="contents">
                 <dt className="text-muted">{entry.caption}</dt>

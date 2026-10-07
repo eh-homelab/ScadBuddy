@@ -92,7 +92,8 @@ export const keychainSchema: CustomizerSchema = {
       name: 'text_depth',
       type: 'slider',
       initial: 1.6,
-      caption: 'Raised height',
+      // As long as real captions run (#1036): HistoryPage's diff must wrap it.
+      caption: 'How far the letters stand proud of the plate, mm',
       min: 0.4,
       max: 4,
       step: 0.2,
