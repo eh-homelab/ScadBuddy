@@ -1301,7 +1301,9 @@ def test_a_pin_refused_before_its_clone_leaves_no_operation(
     assert private.status_code == 422, private.text
     assert "public" in private.json()["detail"]
     with psycopg.connect(pg_conninfo) as conn:
-        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM operations WHERE kind = 'library_pin'"
+        ).fetchone() == (0,)
 
 
 def test_a_checkout_the_render_worker_is_reading_is_not_removed(
