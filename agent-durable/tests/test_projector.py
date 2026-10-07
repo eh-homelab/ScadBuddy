@@ -351,7 +351,7 @@ async def test_a_turn_after_a_stop_runs_again(pool: AsyncConnectionPool, rig: Ri
         await until(status_is(pool, sid, "waiting_approval"))
         await rig.handle(wid).cancel()
         await until(status_is(pool, sid, "idle"))
-        state = await rig.handle(wid).result()
+        state = await asyncio.wait_for(rig.handle(wid).result(), WAIT)
         # The agent service's next execution (ruling 9): a new start, its offset reset, running.
         await rig.send(wid, inp, "print 2", state)
         async with pool.connection() as conn:
@@ -585,7 +585,7 @@ async def test_a_closed_run_left_running_settles_idle_once(pool: AsyncConnection
     await rig.send(wid, inp, "print 1")
     await rig.pending(wid)
     await rig.handle(wid).cancel()
-    await rig.handle(wid).result()
+    await asyncio.wait_for(rig.handle(wid).result(), WAIT)
     async with pool.connection() as conn:
         await conn.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
     async with projecting(pool, rig.client, "a"):
@@ -743,7 +743,7 @@ async def test_a_stop_nobody_drained_resolves_as_a_stop(pool: AsyncConnectionPoo
         await until(status_is(pool, sid, "waiting_approval"))
     pending: list[dict[str, Any]] = await rig.handle(wid).query(PENDING_QUERY)
     await rig.handle(wid).cancel()
-    await rig.handle(wid).result()
+    await asyncio.wait_for(rig.handle(wid).result(), WAIT)
     async with projecting(pool, rig.client, "b"):
         await until(status_is(pool, sid, "idle"))
     events = await logged(pool, sid)
