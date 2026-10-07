@@ -29,9 +29,10 @@ from scadbuddy.bambuddy.linking import (
     link_by_hash,
     link_library_prints,
 )
-from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.progress import progress_for
 from scadbuddy.bambuddy.projects import attach_results
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.glb import BoundingBox
@@ -106,7 +107,7 @@ async def test_a_dispatched_queue_item_links_its_archive(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    [link] = await links.for_output(OUTPUT)
+    [link] = await links.for_subject(PrintSubject.output(OUTPUT))
     assert (link.archive_id, link.matched_by, link.queue_item_id) == (18, "queue_item", 34)
     assert (link.printer_id, link.plate_id) == (1, 1)
 
@@ -121,7 +122,7 @@ async def test_an_item_not_yet_dispatched_links_nothing(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    assert await links.for_output(OUTPUT) == []
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
 
 
 async def _sliced(uploads: BambuddyUploadStore, sliced_id: int = 80) -> None:
@@ -162,7 +163,9 @@ async def test_a_settled_print_is_not_scanned_for_again_once_it_is_linked(
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
     assert scan.call_count == 1
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 @respx.mock
@@ -173,7 +176,8 @@ async def test_one_plates_link_does_not_keep_another_plates_archive_from_being_f
     and the read still scans for plate 2's archive, whichever plate is read first."""
     await _sliced(uploads)
     await links.record(
-        OUTPUT, PrintLink(archive_id=17, matched_by="queue_item", queue_item_id=51, plate_id=1)
+        PrintSubject.output(OUTPUT),
+        PrintLink(archive_id=17, matched_by="queue_item", queue_item_id=51, plate_id=1),
     )
     for entry in (51, 52):
         respx.get(f"{API}/queue/{entry}").mock(
@@ -201,7 +205,9 @@ async def test_one_plates_link_does_not_keep_another_plates_archive_from_being_f
 
     await progress_for(bambuddy, plates, uploads=uploads, links=links)
 
-    assert sorted(link.archive_id for link in await links.for_output(OUTPUT)) == [17, 18]
+    assert sorted(
+        link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))
+    ) == [17, 18]
 
 
 @respx.mock
@@ -209,7 +215,10 @@ async def test_an_item_linked_before_it_went_is_not_scanned_for(
     bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
 ) -> None:
     await _sliced(uploads)
-    await links.record(OUTPUT, PrintLink(archive_id=18, matched_by="queue_item", queue_item_id=34))
+    await links.record(
+        PrintSubject.output(OUTPUT),
+        PrintLink(archive_id=18, matched_by="queue_item", queue_item_id=34),
+    )
     respx.get(f"{API}/queue/34").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
     scan = archives_page(archive_row(18, HASH))
 
@@ -233,7 +242,7 @@ async def test_a_queue_item_gone_by_the_first_poll_is_found_by_hash(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    [link] = await links.for_output(OUTPUT)
+    [link] = await links.for_subject(PrintSubject.output(OUTPUT))
     assert (link.archive_id, link.matched_by) == (18, "content_hash")
     # The window is the days around the output's sends, and the hash is kept so it is
     # read only once.
@@ -259,7 +268,9 @@ async def test_one_sliced_file_printed_three_times_links_three_archives(
     found = await link_by_hash(bambuddy, uploads, links, meta())
 
     assert sorted(link.archive_id for link in found) == [16, 17, 23]
-    assert sorted(link.archive_id for link in await links.for_output(OUTPUT)) == [16, 17, 23]
+    assert sorted(
+        link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))
+    ) == [16, 17, 23]
 
 
 @respx.mock
@@ -279,7 +290,9 @@ async def test_the_hash_scan_pages_until_bambuddy_runs_out(
     await link_by_hash(bambuddy, uploads, links, meta())
 
     assert [call.request.url.params.get("offset") for call in scan.calls] == [None, "90"]
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 def shifting_archives(rows: list[dict[str, Any]], shift: int) -> respx.Route:
@@ -340,7 +353,9 @@ async def test_archives_deleted_between_page_reads_do_not_hide_a_print(
 
     assert scan.call_count == 2
     assert [link.archive_id for link in found] == [18]
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 @respx.mock
@@ -371,7 +386,9 @@ async def test_attaching_to_a_project_records_the_archives_it_found(
         bambuddy, 7, queue_item_ids=[90, 91], output_id=OUTPUT, links=links, linkable={90}
     )
 
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [32]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        32
+    ]
 
 
 @respx.mock
@@ -387,7 +404,7 @@ async def test_attaching_links_nothing_the_output_does_not_own(
     result = await attach_results(bambuddy, 7, queue_item_ids=[91], output_id=OUTPUT, links=links)
 
     assert result.archive_ids == [77], "still filed under the project"
-    assert await links.for_output(OUTPUT) == []
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
 
 
 @respx.mock
@@ -423,7 +440,10 @@ async def test_a_scan_that_runs_out_of_pages_stops_inside_its_window(
 
 async def _library_items(links: PrintLinkStore, *ids: int) -> None:
     for queue_item_id in ids:
-        await links.record_library(89, queue_item_id, plate_id=1, printer_id=1)
+        await links.record_sends(
+            PrintSubject.library(89),
+            [PrintSend(queue_item_id=queue_item_id, plate_id=1, printer_id=1)],
+        )
 
 
 async def _pending(links: PrintLinkStore) -> set[int]:
@@ -439,7 +459,7 @@ async def test_a_library_run_queued_long_ago_is_still_linked_once_dispatched(
     """#1664: nothing ages an item out; it is read until Bambuddy is done with it."""
     await _library_items(links, 51)
     with pool_store.pool.connection() as conn:
-        conn.execute("UPDATE library_bambuddy_prints SET first_seen = now() - interval '60 days'")
+        conn.execute("UPDATE print_sends SET first_seen = now() - interval '60 days'")
     respx.get(f"{API}/queue/51").mock(
         return_value=httpx.Response(200, json=queue_item(51, status="printing", archive_id=90))
     )
@@ -519,12 +539,12 @@ async def test_a_library_item_past_the_backstop_is_marked_gone_without_a_read(
     days = LIBRARY_LINK_BACKSTOP.days
     with pool_store.pool.connection() as conn:
         conn.execute(
-            "UPDATE library_bambuddy_prints SET first_seen = now() - make_interval(days => %s)"
+            "UPDATE print_sends SET first_seen = now() - make_interval(days => %s)"
             " WHERE queue_item_id = 51",
             (days + 1,),
         )
         conn.execute(
-            "UPDATE library_bambuddy_prints SET first_seen = now() - make_interval(days => %s)"
+            "UPDATE print_sends SET first_seen = now() - make_interval(days => %s)"
             " WHERE queue_item_id = 52",
             (days - 1,),
         )
@@ -541,9 +561,7 @@ async def test_a_library_item_past_the_backstop_is_marked_gone_without_a_read(
     assert recent.called
     assert await _pending(links) == {52}
     with pool_store.pool.connection() as conn:
-        row = conn.execute(
-            "SELECT gone FROM library_bambuddy_prints WHERE queue_item_id = 51"
-        ).fetchone()
+        row = conn.execute("SELECT gone FROM print_sends WHERE queue_item_id = 51").fetchone()
     assert row is not None and row["gone"] is True
 
 

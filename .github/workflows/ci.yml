@@ -902,13 +902,7 @@ jobs:
           rest=${line#*/}
           collected=${rest%% *}
           mkdir -p counts
-          echo "${{ matrix.group }} ${selected} ${collected}" > counts/shard-${{ matrix.group }}.txt
-
-      - name: Upload the count
-        uses: actions/upload-artifact@v7
-        with:
-          name: backend-pytest-count-${{ matrix.group }}
-          path: counts/shard-${{ matrix.group }}.txt
+          echo "${{ matrix.group }} ${selected} ${collected}" > counts/selected.txt
 
       # No `-m` filter: inside the image `requires_openscad` tests are supposed
       # to run, and the point of building the image at all is that they can.
@@ -924,17 +918,41 @@ jobs:
       # worker gets a database of its own on the service (tests/conftest.py
       # `_pg_database_url`), since advisory locks and NOTIFY channels are per
       # database, and a Temporal dev server of its own, each well under 1 GiB of shm.
+      #
+      # `--junitxml`: the next step counts what this run reported, one testcase per
+      # test whatever its outcome, to set beside what the shard selected.
       - name: pytest
         run: >-
+          mkdir -p results && chmod 777 results &&
           docker run --rm --network host --shm-size=1g
           -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"
+          -v "$PWD/results:/results"
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
           --splits 4 --group ${{ matrix.group }}
-          --durations=20
+          --junitxml=/results/junit.xml --durations=20
+
+      # Even when pytest failed, so the split check still says what ran.
+      - name: Count what this shard ran
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          ran=0
+          [ -f results/junit.xml ] && ran=$(grep -o '<testcase ' results/junit.xml | wc -l)
+          echo "$(cat counts/selected.txt) ${ran}" > counts/shard-${{ matrix.group }}.txt
+          cat counts/shard-${{ matrix.group }}.txt
+
+      - name: Upload the count
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-pytest-count-${{ matrix.group }}
+          path: counts/shard-${{ matrix.group }}.txt
 
   # The shards between them ran every test: each one's selection adds up to the
-  # whole collection, which every shard saw the same.
+  # whole collection, which every shard saw the same, and each shard's run
+  # reported exactly the tests it selected (the `--collect-only` count is serial,
+  # the run is under xdist). Each count file is "<group> <selected> <collected> <ran>".
   backend-pytest-split:
     name: Backend pytest shards cover the suite
     needs: backend-pytest
@@ -958,7 +976,9 @@ jobs:
           [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards collected different suites: $totals"; exit 1; }
           sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
           [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
-          echo "The four shards select all ${totals} tests."
+          short=$(awk '$4 != $2 {print "shard " $1 " ran " $4 " of the " $2 " it selected"}' counts/shard-*.txt)
+          [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
+          echo "The four shards select and ran all ${totals} tests."
 
   # ── Each template's verify.sh (#229) ────────────────────────────────────────
   #
@@ -1537,7 +1557,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, agent, image, backend-pytest, models, summary]
+    needs: [lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

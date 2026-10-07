@@ -1604,7 +1604,7 @@ export class SessionManager {
     // the turn was aborted: only an abort ends a wait (approvals/service.ts).
     // A shutdown keeps it, and the session waiting on it, for after the
     // restart; anything else (an interrupt) cancels it. Measured on SDK
-    // 0.3.283 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
+    // 0.3.283 and 0.3.287 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
     // is pending fails that call ("Tool permission request failed: AbortError:
     // Tool permission stream closed before response received"), and Claude
     // Code may still reach the model and end with a `result` before it exits;

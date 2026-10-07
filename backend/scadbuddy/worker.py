@@ -205,7 +205,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
     )
 
 
-DrainOutcome = Literal["drained", "current", "timed_out"]
+DrainOutcome = Literal["drained", "current", "timed_out", "stopped"]
 
 
 async def _drain(
@@ -215,24 +215,38 @@ async def _drain(
     timeout: float,
     poll: float,
     grace: float,
+    stop_now: asyncio.Event | None = None,
 ) -> DrainOutcome:
     """Poll until no run is pinned to this build (``drained``) or ``timeout`` passes
     (``timed_out``). A build that is still, or again, current (``current``) ends it
     too, because another worker of the same build serves its pinned runs (#874); but
     only after ``grace``, during which this worker keeps serving them itself, in case
-    the pod that replaces it is slow to come, or never comes."""
+    the pod that replaces it is slow to come, or never comes. ``stop_now`` (a second
+    signal, #605) ends it at once (``stopped``)."""
     loop = asyncio.get_running_loop()
     trust_current_at = loop.time() + grace
+
+    async def polled() -> DrainOutcome:
+        try:
+            async with asyncio.timeout(timeout):
+                while True:
+                    if await is_drained():
+                        return "drained"
+                    if loop.time() >= trust_current_at and await still_current():
+                        return "current"
+                    await asyncio.sleep(poll)
+        except TimeoutError:
+            return "timed_out"
+
+    polling = asyncio.create_task(polled())
+    stopping = asyncio.create_task((stop_now or asyncio.Event()).wait())
     try:
-        async with asyncio.timeout(timeout):
-            while True:
-                if await is_drained():
-                    return "drained"
-                if loop.time() >= trust_current_at and await still_current():
-                    return "current"
-                await asyncio.sleep(poll)
-    except TimeoutError:
-        return "timed_out"
+        await asyncio.wait({polling, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        polling.cancel()
+        stopping.cancel()
+        await asyncio.wait({polling, stopping})
+    return polling.result() if not polling.cancelled() else "stopped"
 
 
 async def make_current_until_polled(
@@ -271,7 +285,13 @@ async def make_current_until_polled(
 
 
 async def _poll(
-    settings: Settings, deps: WorkerDeps, client: Client, stop: asyncio.Event, *, drain: bool
+    settings: Settings,
+    deps: WorkerDeps,
+    client: Client,
+    stop: asyncio.Event,
+    *,
+    drain: bool,
+    stop_now: asyncio.Event | None = None,
 ) -> None:
     config = deps.config
     build_id = settings.revision
@@ -299,6 +319,7 @@ async def _poll(
         build_id=build_id,
         deployment_name=DEPLOYMENT_NAME,
         drain_timeout=2 * config.activity_timeout + 120 if drain else None,
+        stop_now=stop_now,
     )
 
 
@@ -311,10 +332,12 @@ async def _serve_versioned(
     deployment_name: str,
     drain_timeout: float | None,
     ignore_types: Sequence[str] = (),
+    stop_now: asyncio.Event | None = None,
 ) -> None:
     """Run ``workers`` (one deployment version) until ``stop``, making the build current
     beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs.
-    ``ignore_types`` are AUTO_UPGRADE workflow types the drain does not wait for."""
+    ``ignore_types`` are AUTO_UPGRADE workflow types the drain does not wait for;
+    ``stop_now`` cuts the drain short (#605)."""
 
     async def is_drained() -> bool:
         try:
@@ -387,6 +410,7 @@ async def _serve_versioned(
             timeout=drain_timeout,
             poll=DRAIN_POLL,
             grace=min(DRAIN_CURRENT_GRACE, drain_timeout),
+            stop_now=stop_now,
         )
         if outcome == "drained":
             logger.info("drained", extra={"build_id": build_id})
@@ -395,6 +419,12 @@ async def _serve_versioned(
                 "stopping without draining: this build is still current, so its pinned"
                 " workflows are left to the next worker of this build; until one polls,"
                 " they wait",
+                extra={"build_id": build_id},
+            )
+        elif outcome == "stopped":
+            logger.warning(
+                "stopping now on a second signal; exiting with workflows still running"
+                " on this build",
                 extra={"build_id": build_id},
             )
         else:
@@ -532,6 +562,7 @@ async def run_worker(
     settings: Settings,
     *,
     stop: asyncio.Event | None = None,
+    stop_now: asyncio.Event | None = None,
     health_port: int | None = HEALTH_PORT,
     client: Client | None = None,
 ) -> None:
@@ -553,7 +584,7 @@ async def run_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            await _poll(settings, deps, client, stop, drain=True)
+            await _poll(settings, deps, client, stop, drain=True, stop_now=stop_now)
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
@@ -733,15 +764,27 @@ async def run_print_worker(
 Queue = Literal["render", "bambuddy"]
 
 
+def _on_signal(stop: asyncio.Event, stop_now: asyncio.Event) -> Callable[[], None]:
+    """The first SIGTERM/SIGINT stops and drains; a second cuts the drain short (#605)."""
+
+    def handle() -> None:
+        if stop.is_set():
+            stop_now.set()
+        else:
+            stop.set()
+
+    return handle
+
+
 async def _main(settings: Settings, queue: Queue = "render") -> None:
-    stop = asyncio.Event()
+    stop, stop_now = asyncio.Event(), asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+        loop.add_signal_handler(sig, _on_signal(stop, stop_now))
     if queue == "bambuddy":
         await run_print_worker(settings, stop=stop)
     else:
-        await run_worker(settings, stop=stop)
+        await run_worker(settings, stop=stop, stop_now=stop_now)
 
 
 def parse_queue(argv: Sequence[str] | None = None) -> Queue:

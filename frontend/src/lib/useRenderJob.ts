@@ -95,8 +95,10 @@ export class LostRenderError extends Error {
 /**
  * Whether sending the render again may succeed, so the page offers "try again": an
  * outage it gave up waiting out, or a request that never got ScadBuddy's answer (a
- * dropped connection, a proxy's error, an offline browser). Never a refusal no retry
- * fixes (a 422, a 500) or a render that failed (review #1066 (13) 2).
+ * dropped connection, a proxy's error, an offline browser), or a render the preview lost
+ * track of (`LostRenderError`, #1040: whatever the failed read was, even a 500, the
+ * render may have finished). Never a refusal of the submit no retry fixes (a 422, a
+ * 500) or a render that failed (review #1066 (13) 2).
  */
 export function canRetry(error: unknown): boolean {
   if (error instanceof LostRenderError) return true
@@ -182,6 +184,8 @@ export function useRenderJob(
     // the server is still accepting, after one last send that learns the job it made.
     const superseded = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
+    /** A failed read's next try (#1040), cleared with `timer` when the view moves on. */
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
     let unfollow: (() => void) | undefined
     let stopped = false
 
@@ -207,7 +211,6 @@ export function useRenderJob(
       let again = false
       let settled = false
       let failures = 0
-      let retryTimer: ReturnType<typeof setTimeout> | undefined
 
       const finish = () => {
         settled = true
@@ -251,7 +254,8 @@ export function useRenderJob(
           reading = false
           if (again) {
             again = false
-            void read()
+            // A failed read's retry is already waiting: reading now would skip its backoff.
+            if (!retryTimer) void read()
           }
         }
       }
@@ -337,6 +341,7 @@ export function useRenderJob(
       superseded.abort()
       unfollow?.()
       if (timer) clearTimeout(timer)
+      if (retryTimer) clearTimeout(retryTimer)
       // The job is no longer followed, so its last step is no longer news: the
       // preview must not name it through the debounce before the next submit.
       setStage(undefined)

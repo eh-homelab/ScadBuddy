@@ -259,6 +259,8 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     expect(calls.flatMap((c) => c.body?.tools ?? [])).toEqual([])
     const init = messages.find((m) => m.type === 'system' && m.subtype === 'init')
     expect(init && 'tools' in init ? init.tools : undefined).toEqual([])
+    // The mode in which canUseTool decides every call (test/permissionMode.test.ts).
+    expect(init).toMatchObject({ permissionMode: 'default' })
     // The credential appears in no message and no stderr line.
     expect(JSON.stringify(messages)).not.toContain(GATEWAY_TOKEN)
     expect(stderr.join('\n')).not.toContain(GATEWAY_TOKEN)

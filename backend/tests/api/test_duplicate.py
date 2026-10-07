@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -14,6 +15,8 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import Client, ScheduleActionExecutionStartWorkflow
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
@@ -26,8 +29,13 @@ from scadbuddy.library.catalogue import (
 from scadbuddy.library.history import GitTimeoutError, ModelHistory, RevisionNotFoundError
 from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
+from tests.support.temporal import WorkflowReaper
+
+#: How long `_a_sweep_run_from_now` waits before calling the Schedule broken.
+SWEEP_RUN_BOUND = 300
 
 pytestmark = pytest.mark.requires_git
 
@@ -505,16 +513,55 @@ def test_the_staging_max_age_is_the_setting(settings: Settings, paths: DataPaths
     assert newer.is_dir()
 
 
+async def _a_sweep_run_from_now(client: Client, schedule_id: str) -> None:
+    """Wait for a run of the housekeeping Schedule that starts after this call, and
+    for it to finish: the event the sweep is, however long a loaded host takes to
+    reach it. The bound only keeps a broken Schedule from hanging the test."""
+    before: set[str] | None = None
+    async with asyncio.timeout(SWEEP_RUN_BOUND):
+        while True:
+            try:
+                info = (await client.get_schedule_handle(schedule_id).describe()).info
+            except RPCError as error:
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    raise
+                before = before if before is not None else set()  # not yet created
+            else:
+                # `recent_actions` keeps only the latest few; with overlaps skipped the
+                # Schedule starts at most one run per tick, far slower than these polls,
+                # so a new run cannot rotate out between two of them unseen.
+                started = [result.action for result in info.recent_actions]
+                started += info.running_actions
+                runs = {
+                    run.workflow_id: run.first_execution_run_id
+                    for run in started
+                    if isinstance(run, ScheduleActionExecutionStartWorkflow)
+                }
+                if before is None:
+                    before = set(runs)
+                elif new := [id for id in runs if id not in before]:
+                    handle = client.get_workflow_handle(new[0], run_id=runs[new[0]])
+                    await handle.result()
+                    return
+            await asyncio.sleep(0.1)
+
+
 def test_the_periodic_sweep_clears_old_duplicate_staging(
-    settings: Settings, paths: DataPaths
+    settings: Settings, paths: DataPaths, workflow_reaper: WorkflowReaper
 ) -> None:
-    """Without waiting for the next boot or duplicate (#397)."""
+    """Without waiting for the next boot or duplicate (#397): the next run of the
+    housekeeping Schedule clears it."""
     periodic = settings.model_copy(update={"asset_sweep_interval": 0.05})
     with TestClient(create_app(periodic)):
         staged = _stage(paths, "late", DUPLICATE_STAGING_MAX_AGE + 60)
-        deadline = time.monotonic() + 10
-        while staged.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
+        assert workflow_reaper.client is not None
+        schedule_id = schedule_id_for(periodic.temporal_task_queue_library)
+        workflow_reaper.run(
+            _a_sweep_run_from_now(workflow_reaper.client, schedule_id),
+            # The inner bound is what fires: the reaper's own default (60 s) would not
+            # cancel the poll, and is shorter than a loaded host's sweep run.
+            timeout=SWEEP_RUN_BOUND + 10,
+        )
         assert not staged.exists()
 
 

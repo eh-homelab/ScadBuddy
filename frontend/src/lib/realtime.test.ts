@@ -83,6 +83,17 @@ afterEach(() => {
 })
 
 describe('RealtimeClient', () => {
+  it('promises a resync only while the socket is open (#1039)', () => {
+    const realtime = client()
+    expect(realtime.willResync).toBe(false)
+    realtime.subscribe('models', () => {})
+    expect(realtime.willResync).toBe(false)
+    last().open()
+    expect(realtime.willResync).toBe(true)
+    last().close()
+    expect(realtime.willResync).toBe(false)
+  })
+
   it('connects on the first subscription and subscribes once open', () => {
     const realtime = client()
     expect(FakeSocket.instances).toHaveLength(0)

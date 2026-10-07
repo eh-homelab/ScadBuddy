@@ -534,6 +534,26 @@ describe('CataloguePage cards (#277)', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('shows a card-sized copy on the card and the original in the lightbox (#1034)', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+
+    expect(within(card).getByRole('img', { name: 'Printed in blue and orange' })).toHaveAttribute(
+      'src',
+      `/api/v1/models/${GALLERY_SLUG}/media/a1b2c3d4e5f6/thumbnail?v=1&size=card`,
+    )
+    await user.click(
+      within(card).getByRole('button', { name: 'View Printed in blue and orange full size' }),
+    )
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'src',
+        `/api/v1/models/${GALLERY_SLUG}/media/a1b2c3d4e5f6`,
+      ),
+    )
+  })
+
   it('opens the lightbox at the slide shown from its expand button', async () => {
     const { user } = renderWithRoutes()
     const card = await coasterCard()
@@ -870,6 +890,11 @@ describe('CataloguePage list mode (#278)', () => {
 
     const thumbnail = within(coaster).getByRole('button', { name: 'View media of Crème Coaster (4)' })
     expect(within(thumbnail).getByTestId('media-count')).toHaveTextContent('4')
+    // The strip-sized copy for the row's tile, never the original (#1034).
+    expect(thumbnail.querySelector('img')).toHaveAttribute(
+      'src',
+      `/api/v1/models/${GALLERY_SLUG}/media/a1b2c3d4e5f6/thumbnail?v=1`,
+    )
     await user.click(thumbnail)
 
     const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })

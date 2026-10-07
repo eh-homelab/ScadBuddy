@@ -179,3 +179,85 @@ def test_the_projection_migration_backfills_inputs_of_existing_rows(pg_conninfo:
         assert migrate(conn)[0] == MIGRATIONS[projection].id
         row = conn.execute("SELECT inputs FROM render_jobs WHERE id = 'old'").fetchone()
     assert row == ({"params": {"width": 7}},)
+
+
+@pytest.mark.requires_postgres
+def test_the_print_subjects_migration_keeps_every_output_and_library_row(
+    pg_conninfo: str,
+) -> None:
+    # #1750: both link tables become one subject-keyed `print_links`, and the library
+    # file's queue items become `print_sends`. Rows written before it, by either kind,
+    # survive with their first sighting; gone stays gone.
+    merge = next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_print_subjects"))
+    output = "a" * 32
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:merge])
+        conn.execute(
+            "INSERT INTO output_bambuddy_prints"
+            " (output_id, archive_id, queue_item_id, plate_id, printer_id, matched_by,"
+            "  first_seen)"
+            " VALUES (%s, 18, 34, 1, 2, 'queue_item', '2026-10-01T10:00:00Z'),"
+            "        (%s, 19, NULL, NULL, NULL, 'content_hash', '2026-10-01T11:00:00Z')",
+            (output, output),
+        )
+        conn.execute(
+            "INSERT INTO library_bambuddy_prints"
+            " (queue_item_id, library_file_id, plate_id, printer_id, archive_id, name, gone,"
+            "  first_seen)"
+            " VALUES (51, 89, 1, 2, 40, 'cube.3mf', false, '2026-10-02T10:00:00Z'),"
+            "        (52, 89, 2, 2, NULL, NULL, false, '2026-10-02T11:00:00Z'),"
+            "        (53, 90, 1, 2, NULL, NULL, true, '2026-10-02T12:00:00Z')"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[merge].id
+        links = conn.execute(
+            "SELECT subject, archive_id, matched_by, queue_item_id, plate_id, printer_id,"
+            " name, first_seen::text FROM print_links ORDER BY archive_id"
+        ).fetchall()
+        sends = conn.execute(
+            "SELECT subject, queue_item_id, plate_id, printer_id, gone, first_seen::text"
+            " FROM print_sends ORDER BY queue_item_id"
+        ).fetchall()
+    assert links == [
+        (f"output:{output}", 18, "queue_item", 34, 1, 2, None, "2026-10-01 10:00:00+00"),
+        (f"output:{output}", 19, "content_hash", None, None, None, None, "2026-10-01 11:00:00+00"),
+        ("library:89", 40, "queue_item", 51, 1, 2, "cube.3mf", "2026-10-02 10:00:00+00"),
+    ]
+    assert sends == [
+        ("library:89", 51, 1, 2, False, "2026-10-02 10:00:00+00"),
+        ("library:89", 52, 2, 2, False, "2026-10-02 11:00:00+00"),
+        ("library:90", 53, 1, 2, True, "2026-10-02 12:00:00+00"),
+    ]
+
+
+@pytest.mark.requires_postgres
+def test_a_previous_release_writing_the_old_link_tables_still_reaches_the_new_ones(
+    pg_conninfo: str,
+) -> None:
+    # #1750: a pod of the previous release, still draining during the rollout, records
+    # into the old tables. Until a later migration drops them, its writes are forwarded.
+    output = "a" * 32
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn)
+        conn.execute(
+            "INSERT INTO output_bambuddy_prints (output_id, archive_id, matched_by)"
+            " VALUES (%s, 18, 'queue_item')",
+            (output,),
+        )
+        conn.execute(
+            "INSERT INTO library_bambuddy_prints"
+            " (queue_item_id, library_file_id, plate_id, printer_id)"
+            " VALUES (51, 89, 1, 2), (52, 89, 1, 2)"
+        )
+        conn.execute(
+            "UPDATE library_bambuddy_prints SET archive_id = 40, name = 'cube.3mf'"
+            " WHERE queue_item_id = 51"
+        )
+        conn.execute("UPDATE library_bambuddy_prints SET gone = true WHERE queue_item_id = 52")
+        links = conn.execute(
+            "SELECT subject, archive_id, queue_item_id, name FROM print_links ORDER BY archive_id"
+        ).fetchall()
+        sends = conn.execute(
+            "SELECT subject, queue_item_id, gone FROM print_sends ORDER BY queue_item_id"
+        ).fetchall()
+    assert links == [(f"output:{output}", 18, None, None), ("library:89", 40, 51, "cube.3mf")]
+    assert sends == [("library:89", 51, False), ("library:89", 52, True)]

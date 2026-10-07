@@ -210,3 +210,19 @@
     }
   }
 }
+
+/*
+ * #1035 — Settings is full of checkboxes, radios and disclosures, and at the browser's
+ * default 13 px they are too small to tap. 24 px each way is WCAG 2.2's target size.
+ * Unlayered, so no utility on an individual control can shrink it back.
+ */
+.sb-settings input:is([type='checkbox'], [type='radio']) {
+  width: 1.5rem;
+  height: 1.5rem;
+  /* A flex item beside a long label would otherwise shrink back under 24 px wide. */
+  flex-shrink: 0;
+}
+
+.sb-settings summary {
+  min-height: 1.5rem;
+}
