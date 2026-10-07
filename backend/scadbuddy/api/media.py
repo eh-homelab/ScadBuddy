@@ -20,6 +20,7 @@ import os
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from email.utils import parsedate
 from pathlib import Path as FilePath
 from typing import IO, Annotated, Any
 
@@ -29,6 +30,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
+from starlette.datastructures import Headers
 
 from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
 from scadbuddy.api.models import require_model_exists
@@ -334,16 +336,20 @@ def _no_item(slug: str, item_id: str) -> ApiError:
     responses={
         200: {"content": {"image/*": {}, "video/*": {}}},
         206: {"description": "The byte range asked for with `Range`"},
+        304: {"description": "Unchanged since `If-None-Match` or `If-Modified-Since`"},
     },
     summary="One media file",
     description=(
         "Serves one image or video of the template. Honours `Range`, so a video can "
         "seek. An item's id never changes its contents, so it is cached as "
-        "`immutable` -- except `thumbnail`, the legacy item, which is `no-cache`. "
+        "`immutable` -- except `thumbnail`, the legacy item, which is `no-cache` and "
+        "answers 304 to a matching `If-None-Match` or `If-Modified-Since`. "
         "404 for an unknown id and for an entry whose file is missing."
     ),
 )
-def get_media(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> FileResponse:
+def get_media(
+    slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep, request: Request
+) -> Response:
     require_model_exists(catalogue, slug)
     try:
         item, path = catalogue.media_item(slug, item_id)
@@ -352,7 +358,30 @@ def get_media(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> 
     except MediaNotFoundError:
         raise _no_item(slug, item_id) from None
     cache = LEGACY_CACHE_CONTROL if item.id == LEGACY_ID else IMMUTABLE_CACHE_CONTROL
-    return FileResponse(path, media_type=item.content_type, headers={"Cache-Control": cache})
+    headers = {"Cache-Control": cache}
+    # FileResponse sends ETag and Last-Modified but, unlike StaticFiles, never answers a
+    # conditional request with them, so `no-cache` meant a full download every load
+    # (#1042). The validators come from one stat here; the file is stat'ed again when it
+    # is sent, so one replaced in between (a thumbnail PUT) is sent whole, never cut to
+    # the old length.
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        raise _no_item(slug, item_id) from None
+    validators = FileResponse(path, stat_result=stat).headers
+    if _not_modified(request.headers, validators["etag"], validators["last-modified"]):
+        headers |= {"ETag": validators["etag"], "Last-Modified": validators["last-modified"]}
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return FileResponse(path, media_type=item.content_type, headers=headers)
+
+
+def _not_modified(request: Headers, etag: str, last_modified: str) -> bool:
+    """RFC 9110 §13.2.2: `If-None-Match` when sent, else `If-Modified-Since`."""
+    if (if_none_match := request.get("if-none-match")) is not None:
+        return _matches(if_none_match, etag)
+    since = parsedate(request.get("if-modified-since") or "")
+    modified = parsedate(last_modified)
+    return since is not None and modified is not None and since >= modified
 
 
 @router.get(

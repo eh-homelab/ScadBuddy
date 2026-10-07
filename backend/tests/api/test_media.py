@@ -563,6 +563,53 @@ def test_the_legacy_item_is_not_cached_as_immutable(
     assert served.headers["cache-control"] == "no-cache"
 
 
+def test_the_legacy_item_answers_304_to_its_validators(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#1042: `no-cache` with no 304 re-downloaded every built-in's cover on every load."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(PNG)
+    url = f"/api/v1/models/{model}/media/thumbnail"
+    first = client.get(url)
+    etag, modified = first.headers["etag"], first.headers["last-modified"]
+
+    by_etag = client.get(url, headers={"If-None-Match": f"W/{etag}"})
+    by_date = client.get(url, headers={"If-Modified-Since": modified})
+
+    for response in (by_etag, by_date):
+        assert response.status_code == 304, response.text
+        assert response.content == b""
+        assert response.headers["etag"] == etag
+        assert response.headers["cache-control"] == "no-cache"
+
+
+def test_a_replaced_legacy_item_is_sent_again(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(PNG)
+    url = f"/api/v1/models/{model}/media/thumbnail"
+    etag = client.get(url).headers["etag"]
+    legacy.write_bytes(PNG + b"\x00")
+
+    # A stale tag is answered whole even with a date that would match: the tag wins.
+    response = client.get(
+        url, headers={"If-None-Match": etag, "If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"}
+    )
+
+    assert response.status_code == 200
+    assert response.content == PNG + b"\x00"
+
+
+def test_an_item_answers_304_to_its_etag(client: TestClient, model: str) -> None:
+    item = _upload(client, model, PNG).json()["media"][0]
+    url = f"/api/v1/models/{model}/media/{item['id']}"
+    etag = client.get(url).headers["etag"]
+
+    assert client.get(url, headers={"If-None-Match": etag}).status_code == 304
+    assert client.get(url, headers={"If-None-Match": '"other"'}).content == PNG
+
+
 def test_an_unknown_item_is_a_404(client: TestClient, model: str) -> None:
     assert client.get(f"/api/v1/models/{model}/media/abcdefabcdef").status_code == 404
     assert client.delete(f"/api/v1/models/{model}/media/abcdefabcdef").status_code == 404
