@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { binary } from './binary.js'
+import { command } from './command.js'
 import { ok } from './call.js'
 import { commit, decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'
@@ -86,8 +87,8 @@ export const catalogueTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models'],
-    handler: async (body, { backend }) =>
-      json(await ok(backend.POST('/api/v1/models', { body }), `create model ${body.name}`)),
+    handler: async (body, ctx) =>
+      json(await command(ctx, `create model ${body.name}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers }))),
   }),
 
   // `outward`, although the result is reversible, because the backend fetches a
@@ -110,9 +111,11 @@ export const catalogueTools: Tool[] = [
     risk: 'outward',
     routes: ['POST /api/v1/models/import'],
     summarize: ({ url, name }) => `Fetch and import a model from ${url}${name ? ` as "${name}"` : ''}`,
-    handler: async ({ url, name, force }, { backend }) =>
+    handler: async ({ url, name, force }, ctx) =>
       json(
-        await ok(backend.POST('/api/v1/models/import', { body: { url, name: name ?? null, force } }), `import ${url}`),
+        await command(ctx, `import ${url}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/import', { body: { url, name: name ?? null, force }, headers }),
+        ),
       ),
   }),
 
@@ -122,11 +125,10 @@ export const catalogueTools: Tool[] = [
     input: z.object({ slug, name: z.string().min(1) }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/duplicate'],
-    handler: async ({ slug, name }, { backend }) =>
+    handler: async ({ slug, name }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/duplicate', { params: { path: { slug } }, body: { name } }),
-          `duplicate ${slug}`,
+        await command(ctx, `duplicate ${slug}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/duplicate', { params: { path: { slug } }, body: { name }, headers }),
         ),
       ),
   }),
@@ -142,14 +144,14 @@ export const catalogueTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}'],
-    handler: async ({ slug, name, description, tags }, { backend }) =>
+    handler: async ({ slug, name, description, tags }, ctx) =>
       json(
-        await ok(
-          backend.PATCH('/api/v1/models/{slug}', {
+        await command(ctx, `update ${slug}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/models/{slug}', {
             params: { path: { slug } },
             body: { name: name ?? null, description: description ?? null, tags: tags ?? null },
+            headers,
           }),
-          `update ${slug}`,
         ),
       ),
   }),
@@ -188,8 +190,10 @@ export const catalogueTools: Tool[] = [
     risk: 'outward',
     routes: ['DELETE /api/v1/models/{slug}'],
     summarize: ({ slug }) => `Delete the model "${slug}" and its outputs`,
-    handler: async ({ slug, force }, { backend }) => {
-      await ok(backend.DELETE('/api/v1/models/{slug}', { params: { path: { slug }, query: { force } } }), `delete ${slug}`)
+    handler: async ({ slug, force }, ctx) => {
+      await command(ctx, `delete ${slug}`, (headers) =>
+        ctx.backend.DELETE('/api/v1/models/{slug}', { params: { path: { slug }, query: { force } }, headers }),
+      )
       return json({ deleted: slug })
     },
   }),

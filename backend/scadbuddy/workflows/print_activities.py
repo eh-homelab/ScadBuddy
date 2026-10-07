@@ -102,8 +102,8 @@ def problem(error: ApiError) -> PrintRunError:
     )
 
 
-def raised_as(error: ApiError, kind: str) -> ApplicationError:
-    return ApplicationError(error.detail, problem(error), type=kind, non_retryable=True)
+def raised_as(error: ApiError, kind: str, *, non_retryable: bool = True) -> ApplicationError:
+    return ApplicationError(error.detail, problem(error), type=kind, non_retryable=non_retryable)
 
 
 async def heartbeating[T](work: Coroutine[Any, Any, T]) -> T:

@@ -1572,6 +1572,46 @@ describe('library pins as operations (#1054)', () => {
   })
 })
 
+describe("a model's lifecycle as operations (#1054)", () => {
+  const op = { id: 'op-8', kind: 'model_create', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+
+  it.each([
+    ['create_model', { name: 'W', source: 'cube(1);' }, 'post', '/api/v1/models'],
+    ['import_model', { url: 'https://example.com/w.scad' }, 'post', '/api/v1/models/import'],
+    ['duplicate_model', { slug: 'v', name: 'W' }, 'post', '/api/v1/models/v/duplicate'],
+    ['update_model_details', { slug: 'w', description: 'd' }, 'patch', '/api/v1/models/w'],
+    ['delete_model', { slug: 'w' }, 'delete', '/api/v1/models/w'],
+    ['create_from_template', { name: 'W', from: 'blank' }, 'post', '/api/v1/models'],
+    ['create_from_template', { name: 'W', from: 'v' }, 'post', '/api/v1/models/v/duplicate'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-8`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('delete_model accepts a 204 at once', async () => {
+    let key: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, { slug: 'w' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
 describe('get_output_preview (#308)', () => {
   it("embeds the output's preview mesh", async () => {
     const id = 'a'.repeat(32)

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import shutil
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -43,6 +42,7 @@ from scadbuddy.library.libraries import (
     CheckoutFetcher,
     CheckoutGate,
     CheckoutLeases,
+    InstallPermits,
     LibraryStore,
 )
 from scadbuddy.library.media_store import PostgresMediaStore
@@ -66,7 +66,6 @@ from scadbuddy.workflows.client import connect_lazily
 logger = logging.getLogger(__name__)
 
 STATE_ATTR = "scadbuddy"
-VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 OPERATION_ID_PATTERN = r"^[0-9a-f]{32}$"
@@ -95,9 +94,16 @@ class ImportPermits:
         self.limit = limit
         #: When each held permit was taken, by a token of its own.
         self._taken: dict[object, float] = {}
+        #: Set when a permit is given back, then replaced.
+        self._freed = asyncio.Event()
 
     def full(self) -> bool:
         return len(self._taken) >= self.limit
+
+    async def wait(self) -> None:
+        """Until a permit is free; take it with `hold` with no await in between."""
+        while self.full():
+            await self._freed.wait()
 
     @contextmanager
     def hold(self) -> Iterator[None]:
@@ -107,6 +113,8 @@ class ImportPermits:
             yield
         finally:
             del self._taken[token]
+            self._freed.set()
+            self._freed = asyncio.Event()
 
     def retry_after(self) -> int:
         """Seconds until the oldest held fetch reaches `IMPORT_TIMEOUT` and must have
@@ -160,17 +168,16 @@ class AppState:
     #: one: the worker's cap is its activity slots, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency + lsp_sessions.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
-    #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
-    #: thread for up to the git timeout; uncapped, a burst of installs would hold the
-    #: default executor that every other `to_thread` route shares. More than one, so
+    #: At most INSTALL_CONCURRENCY library clones at once, across every process that
+    #: shares the database (#1131). Each runs in a worker thread for up to the git
+    #: timeout; uncapped, a burst of installs would hold the default executor that
+    #: every other `to_thread` route shares. More than one, so
     #: a long clone (NopSCADlib) doesn't hold up adding another library. Nothing
     #: orders two clones of the same library: each runs in full, and the one whose
     #: commit is already checked out gives way to it (`LibraryStore._clone`); the pin
     #: itself is written under the history's write lock. A queued install waits on
     #: the loop, not in a thread.
-    installs: asyncio.Semaphore = field(
-        default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
-    )
+    installs: InstallPermits = field(default_factory=lambda: InstallPermits(INSTALL_CONCURRENCY))
     #: At most IMPORT_CONCURRENCY `POST /models/import` and `POST
     #: /models/{slug}/assets/fetch` fetches at once on this replica, together. Held for
     #: the fetch only -- an import's parse check takes `checks` like any create, an
@@ -304,7 +311,7 @@ def _build_core(settings: Settings) -> AppState:
     uploads = BambuddyUploadStore(pool)
     # Render leases in Postgres, so a removal here sees the render worker's (#872).
     checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
-    installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
+    installs = InstallPermits(INSTALL_CONCURRENCY, pool)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     assets = AssetStore(
         paths.assets,
@@ -408,27 +415,6 @@ def _build_core(settings: Settings) -> AppState:
         projection=projection,
         refs=BlobRefs(pool),
     )
-
-
-async def probe_openscad_version(config: Config) -> str | None:
-    """``openscad --version`` writes to stderr, so both streams are merged."""
-    if shutil.which(config.openscad) is None:
-        return None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            config.openscad,
-            "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=VERSION_TIMEOUT)
-    except (OSError, TimeoutError):
-        logger.exception("could not read the openscad version")
-        return None
-    if process.returncode != 0:
-        return None
-    first = stdout.decode("utf-8", "replace").strip().splitlines()
-    return first[0].strip() if first else None
 
 
 def build_previews(
@@ -554,7 +540,7 @@ def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
 
-def get_installs(state: StateDep) -> asyncio.Semaphore:
+def get_installs(state: StateDep) -> InstallPermits:
     return state.installs
 
 
@@ -587,7 +573,7 @@ EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintRunsDep = Annotated[PrintCommands, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
-InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+InstallsDep = Annotated[InstallPermits, Depends(get_installs)]
 DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]
 ImportsDep = Annotated[ImportPermits, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]

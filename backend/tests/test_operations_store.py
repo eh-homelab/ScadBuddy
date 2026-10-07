@@ -134,6 +134,47 @@ async def test_insert_prunes_operations_finished_before_the_retention(
     assert await store.get("new") is not None
 
 
+async def test_named_by_running_finds_names_only_in_running_requests(
+    store: OperationStore,
+) -> None:
+    """Review 3c 1.2: a claim a running operation names is not dropped under it."""
+    held, done, loose = "a" * 64, "b" * 64, "c" * 64
+    for op_id, name in (("x", held), ("y", done)):
+        await store.insert(
+            op_id,
+            kind="model_create",
+            subject="w",
+            operation_key=op_id,
+            request={"source": name},
+            workflow_id=f"op-model_create-{op_id}",
+            workflow_run_id="r1",
+            retention=None,
+        )
+    await store.finish("y", result={})
+    assert await store.named_by_running([held, done, loose]) == {held}
+
+
+async def test_keyed_finds_a_kind_and_subject_sent_with_that_key(
+    store: OperationStore,
+) -> None:
+    """Review #1126 1.3: whatever the body, so a keyed upload is known before it is read."""
+    await store.insert(
+        "x",
+        kind="model_create",
+        subject="w",
+        operation_key="k",
+        request={},
+        workflow_id="op-model_create-k",
+        workflow_run_id="r1",
+        retention=None,
+        idempotency_key="key",
+    )
+    assert await store.keyed("model_create", "w", "key")
+    assert not await store.keyed("model_create", "w", "other")
+    assert not await store.keyed("model_create", "v", "key")
+    assert not await store.keyed("model_patch", "w", "key")
+
+
 async def test_running_executions_names_each_running_rows_execution(
     store: OperationStore,
 ) -> None:

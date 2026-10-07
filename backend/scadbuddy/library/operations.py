@@ -68,7 +68,9 @@ if TYPE_CHECKING:
 PIN_TIMEOUT = timedelta(seconds=CLONE_TIMEOUT) + timedelta(minutes=5)
 
 
-def _answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
+def answered_as_routes[**P, R](
+    fn: Callable[P, Awaitable[R]],
+) -> Callable[P, Coroutine[Any, Any, R]]:
     """A model.json or a ``libraries`` declaration that cannot be read, or a pin whose
     checkout is gone, as the 409 every route answers it with (``api/models.py``,
     ``install_library_handlers``), rather than the operation's unexpected 500."""
@@ -265,25 +267,47 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
     return [
         OperationKind(
             "library_pin",
-            _answered(pin_check),
-            _answered(pin_run),
+            answered_as_routes(pin_check),
+            answered_as_routes(pin_run),
             queue="library",
             run_timeout=PIN_TIMEOUT,
         ),
         OperationKind(
             "library_repin",
-            _answered(repin_check),
-            _answered(repin_run),
+            answered_as_routes(repin_check),
+            answered_as_routes(repin_run),
             queue="library",
             run_timeout=PIN_TIMEOUT,
         ),
         OperationKind(
-            "library_unpin", _answered(model_check), _answered(unpin_run), queue="library"
+            "library_unpin",
+            answered_as_routes(model_check),
+            answered_as_routes(unpin_run),
+            queue="library",
         ),
         OperationKind(
-            "library_remove", _answered(remove_check), _answered(remove_run), queue="library"
+            "library_remove",
+            answered_as_routes(remove_check),
+            answered_as_routes(remove_run),
+            queue="library",
         ),
     ]
 
 
-OPERATION_KINDS: KindsBuild = library_kinds
+def _kinds(core: Core, components: Components) -> list[OperationKind]:
+    """The pins, and a model's lifecycle (``model_operations.py``). Imported here, as it
+    imports this module. Its runs are the routes' former bodies, which take the whole
+    ``AppState`` and read services the ``Core`` does not name, so any other core is
+    refused here rather than failing inside an operation (review #1126 1.2)."""
+    from scadbuddy.api.deps import AppState
+    from scadbuddy.library.model_operations import model_kinds
+
+    if not isinstance(core, AppState):
+        raise TypeError(
+            "the model operation kinds run the routes' bodies, which need the API's "
+            f"AppState, not a {type(core).__name__}"
+        )
+    return [*library_kinds(core, components), *model_kinds(core)]
+
+
+OPERATION_KINDS: KindsBuild = _kinds

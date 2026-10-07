@@ -400,23 +400,36 @@ def same_repository(first: str, second: str) -> bool:
 REMOVAL_LOCK = 0x5343_4144_4C45_4153
 #: Seconds a lease row lives unless its holder renews it; a holder renews every third.
 LEASE_TTL = 60.0
+#: Seconds between looks at the rows a removal or an install is waiting on.
+POLL_INTERVAL = 0.25
 
 
 class CheckoutLeases:
-    """The render leases in Postgres (#872), so a removal in one process sees a render
-    in another: the render worker and the API each build their own gate.
+    """The render leases (#872) and pins in flight (#1131) in Postgres, so a removal in
+    one process sees a render or a pin in another: the render worker and the API each
+    build their own gate.
 
     A row lives ``ttl`` seconds by the database's clock unless renewed, so a holder
     that crashed blocks a removal for one TTL at most. A removal holds
     :data:`REMOVAL_LOCK` exclusively while it checks and deletes, and a lease is
     inserted holding it shared: a lease is either seen by the removal's check or taken
     after the removal ends (and then finds the checkout gone, :func:`require_checkouts`).
+    A pin's hold is inserted the same way, and a removal takes the lock only at a
+    moment no hold is live.
     """
 
-    def __init__(self, pool: ConnectionPool[Any], root: Path, *, ttl: float = LEASE_TTL) -> None:
+    def __init__(
+        self,
+        pool: ConnectionPool[Any],
+        root: Path,
+        *,
+        ttl: float = LEASE_TTL,
+        poll: float = POLL_INTERVAL,
+    ) -> None:
         self.pool = pool
         self.root = root
         self.ttl = ttl
+        self.poll = poll
 
     def take(self, holder: str, checkouts: Sequence[Path]) -> uuid.UUID:
         """Record a lease for ``holder`` on ``checkouts``; waits out a removal."""
@@ -445,6 +458,31 @@ class CheckoutLeases:
         with self.pool.connection() as conn:
             conn.execute("DELETE FROM library_leases WHERE token = %s", (token,))
 
+    def take_pin(self) -> uuid.UUID:
+        """Record a pin in flight; waits out a removal."""
+        token = uuid.uuid4()
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (REMOVAL_LOCK,))
+            conn.execute("DELETE FROM library_pin_holds WHERE expires_at <= now()")
+            conn.execute(
+                "INSERT INTO library_pin_holds (token, expires_at)"
+                " VALUES (%s, now() + make_interval(secs => %s))",
+                (token, self.ttl),
+            )
+        return token
+
+    def renew_pin(self, token: uuid.UUID) -> None:
+        with self.pool.connection() as conn:
+            conn.execute(
+                "UPDATE library_pin_holds SET expires_at = now() + make_interval(secs => %s)"
+                " WHERE token = %s",
+                (self.ttl, token),
+            )
+
+    def drop_pin(self, token: uuid.UUID) -> None:
+        with self.pool.connection() as conn:
+            conn.execute("DELETE FROM library_pin_holds WHERE token = %s", (token,))
+
     def holders(self, directory: Path) -> list[str]:
         """The live holders of ``directory`` -- one checkout, or a library's directory
         of them -- in the order they took their leases."""
@@ -466,13 +504,32 @@ class CheckoutLeases:
             return [_first_column(row) for row in cur.fetchall()]
 
     @contextlib.contextmanager
-    def removing(self) -> Iterator[None]:
-        """Hold :data:`REMOVAL_LOCK` exclusively: no lease is inserted meanwhile. A
-        transaction's lock, so however the block ends it goes with the transaction and
-        never back to the pool on its connection."""
-        with self.pool.connection() as conn, conn.transaction():
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (REMOVAL_LOCK,))
-            yield
+    def removing(self, stop: threading.Event | None = None) -> Iterator[None]:
+        """Hold :data:`REMOVAL_LOCK` exclusively, at a moment no pin is live: no lease
+        or pin is inserted meanwhile. A transaction's lock, so however the block ends
+        it goes with the transaction and never back to the pool on its connection.
+
+        While a pin is live the lock is let go again before the next look: a pin's
+        holder may take a lease or pin again before it ends (a create's fetcher), and
+        Postgres queues that shared request behind an exclusive one waiting or held,
+        so holding it would leave each waiting on the other. ``stop`` set ends the
+        wait with :class:`RemovalStoppedError` (its caller was cancelled)."""
+        stop = stop or threading.Event()
+        with self.pool.connection() as conn:
+            while True:
+                with conn.transaction():
+                    conn.execute("SELECT pg_advisory_xact_lock(%s)", (REMOVAL_LOCK,))
+                    if not conn.execute(
+                        "SELECT 1 FROM library_pin_holds WHERE expires_at > now() LIMIT 1"
+                    ).fetchone():
+                        yield
+                        return
+                if stop.wait(self.poll):
+                    raise RemovalStoppedError
+
+
+class RemovalStoppedError(Exception):
+    """A removal stopped waiting for the pins in flight: its caller was cancelled."""
 
 
 def _first_column(row: Any) -> str:
@@ -480,10 +537,43 @@ def _first_column(row: Any) -> str:
     return str(next(iter(row.values())) if isinstance(row, dict) else row[0])
 
 
+async def _taken[T](
+    take: Callable[[], T],
+    undo: Callable[[T], object],
+    *,
+    cancelled: Callable[[], None] = lambda: None,
+) -> T:
+    """``take()`` off the loop. A cancel meanwhile cannot stop the thread: ``cancelled``
+    asks it to stop, and whatever it took after all is undone before the cancel goes on,
+    so a cancelled activity leaves no hold, slot or lock behind (#1131)."""
+    future = asyncio.ensure_future(asyncio.to_thread(take))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        cancelled()
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({future})
+        if future.exception() is None:
+            try:
+                await asyncio.shield(asyncio.to_thread(undo, future.result()))
+            except Exception:
+                # A row lapses at its expiry instead; a lock goes with its connection.
+                logger.exception("could not undo what a cancelled step took")
+        raise
+
+
 @contextlib.asynccontextmanager
-async def _in_thread(manager: contextlib.AbstractContextManager[None]) -> AsyncIterator[None]:
-    """A blocking context manager entered and exited off the event loop."""
-    await asyncio.to_thread(manager.__enter__)
+async def _in_thread(
+    manager: contextlib.AbstractContextManager[None],
+    *,
+    cancelled: Callable[[], None] = lambda: None,
+) -> AsyncIterator[None]:
+    """A blocking context manager entered and exited off the event loop. Cancelled
+    while it enters, it is left again once entered (:func:`_taken`)."""
+    await _taken(
+        manager.__enter__, lambda _: manager.__exit__(None, None, None), cancelled=cancelled
+    )
     try:
         yield
     except BaseException as error:
@@ -494,30 +584,144 @@ async def _in_thread(manager: contextlib.AbstractContextManager[None]) -> AsyncI
 
 
 @contextlib.asynccontextmanager
+async def _renewed(
+    ttl: float, renew: Callable[[], None], drop: Callable[[], None], what: str, holder: str
+) -> AsyncIterator[None]:
+    """A row already taken, renewed every third of its TTL until the block exits, and
+    then dropped."""
+
+    async def renewing() -> None:
+        while True:
+            await asyncio.sleep(ttl / 3)
+            try:
+                await asyncio.to_thread(renew)
+            except Exception:
+                logger.exception(f"could not renew a {what}", extra={"holder": holder})
+
+    task = asyncio.create_task(renewing())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await asyncio.to_thread(drop)
+        except Exception:
+            # It lapses at its expiry instead.
+            logger.exception(f"could not release a {what}", extra={"holder": holder})
+
+
+@contextlib.asynccontextmanager
 async def _shared_lease(
     leases: CheckoutLeases, holder: str, checkouts: Sequence[Path]
 ) -> AsyncIterator[None]:
     """A lease row held, and renewed every third of its TTL, until the block exits."""
-    token = await asyncio.to_thread(leases.take, holder, checkouts)
-
-    async def renew() -> None:
-        while True:
-            await asyncio.sleep(leases.ttl / 3)
-            try:
-                await asyncio.to_thread(leases.renew, token)
-            except Exception:
-                logger.exception("could not renew a checkout lease", extra={"holder": holder})
-
-    renewing = asyncio.create_task(renew())
-    try:
+    token = await _taken(lambda: leases.take(holder, checkouts), leases.drop)
+    async with _renewed(
+        leases.ttl,
+        lambda: leases.renew(token),
+        lambda: leases.drop(token),
+        "checkout lease",
+        holder,
+    ):
         yield
-    finally:
-        renewing.cancel()
-        try:
-            await asyncio.to_thread(leases.drop, token)
-        except Exception:
-            # It lapses at its expiry instead.
-            logger.exception("could not release a checkout lease", extra={"holder": holder})
+
+
+@contextlib.asynccontextmanager
+async def _shared_pin(leases: CheckoutLeases) -> AsyncIterator[None]:
+    """A pin's hold, renewed every third of its TTL, until the block exits."""
+    token = await _taken(leases.take_pin, leases.drop_pin)
+    async with _renewed(
+        leases.ttl,
+        lambda: leases.renew_pin(token),
+        lambda: leases.drop_pin(token),
+        "pin hold",
+        str(token),
+    ):
+        yield
+
+
+class InstallPermits:
+    """At most ``limit`` library clones at once (#1131). Each runs in a worker thread
+    for up to the git timeout; uncapped, a burst of installs would hold the default
+    executor that every other ``to_thread`` shares.
+
+    With ``pool`` the limit holds across every process sharing the database: a permit
+    is also one of ``limit`` rows of ``library_install_slots``, renewed while its clone
+    runs, so a crashed holder's lapses after one TTL. A queued install waits on the
+    loop for this process's permits, then polls for a free slot.
+    """
+
+    def __init__(
+        self,
+        limit: int,
+        pool: ConnectionPool[Any] | None = None,
+        *,
+        ttl: float = LEASE_TTL,
+        poll: float = POLL_INTERVAL,
+    ) -> None:
+        self.limit = limit
+        self.pool = pool
+        self.ttl = ttl
+        self.poll = poll
+        self._local = asyncio.Semaphore(limit)
+
+    @contextlib.asynccontextmanager
+    async def permit(self) -> AsyncIterator[None]:
+        async with self._local:
+            if self.pool is None:
+                yield
+                return
+            while (claimed := await _taken(self.claim, self._undo_claim)) is None:
+                await asyncio.sleep(self.poll)
+            slot, token = claimed
+            async with _renewed(
+                self.ttl,
+                lambda: self._renew(slot, token),
+                lambda: self._drop(slot, token),
+                "library install slot",
+                str(token),
+            ):
+                yield
+
+    def claim(self) -> tuple[int, uuid.UUID] | None:
+        """A free or lapsed slot, taken; None when all ``limit`` are held."""
+        assert self.pool is not None
+        token = uuid.uuid4()
+        with self.pool.connection() as conn:
+            for slot in range(self.limit):
+                if conn.execute(
+                    "INSERT INTO library_install_slots (slot, token, expires_at)"
+                    " VALUES (%s, %s, clock_timestamp() + make_interval(secs => %s))"
+                    " ON CONFLICT (slot) DO UPDATE"
+                    " SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at"
+                    " WHERE library_install_slots.expires_at <= clock_timestamp()"
+                    " RETURNING slot",
+                    (slot, token, self.ttl),
+                ).fetchone():
+                    return slot, token
+        return None
+
+    def _undo_claim(self, claimed: tuple[int, uuid.UUID] | None) -> None:
+        if claimed is not None:
+            self._drop(*claimed)
+
+    def _renew(self, slot: int, token: uuid.UUID) -> None:
+        assert self.pool is not None
+        with self.pool.connection() as conn:
+            conn.execute(
+                "UPDATE library_install_slots"
+                " SET expires_at = clock_timestamp() + make_interval(secs => %s)"
+                " WHERE slot = %s AND token = %s",
+                (self.ttl, slot, token),
+            )
+
+    def _drop(self, slot: int, token: uuid.UUID) -> None:
+        assert self.pool is not None
+        with self.pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM library_install_slots WHERE slot = %s AND token = %s",
+                (slot, token),
+            )
 
 
 class CheckoutGate:
@@ -537,8 +741,7 @@ class CheckoutGate:
 
     With ``leases`` the render leases are also kept in Postgres, and a removal also
     holds their removal lock, so a render in another process (the render worker,
-    #872) is seen by a removal here and the other way round. Pins stay in-process
-    (#1131).
+    #872) is seen by a removal here and the other way round, and so is a pin (#1131).
     """
 
     def __init__(self, leases: CheckoutLeases | None = None) -> None:
@@ -558,7 +761,11 @@ class CheckoutGate:
             await self._condition.wait_for(lambda: not self._removing)
             self._pins += 1
         try:
-            yield
+            if self.shared is None:
+                yield
+            else:
+                async with _shared_pin(self.shared):
+                    yield
         finally:
             async with self._condition:
                 self._pins -= 1
@@ -573,7 +780,8 @@ class CheckoutGate:
             if self.shared is None:
                 yield
             else:
-                async with _in_thread(self.shared.removing()):
+                stop = threading.Event()
+                async with _in_thread(self.shared.removing(stop), cancelled=stop.set):
                     yield
         finally:
             async with self._condition:
@@ -1074,7 +1282,7 @@ class CheckoutFetcher:
     """
 
     store: LibraryStore
-    installs: asyncio.Semaphore
+    installs: InstallPermits
     checkouts: CheckoutGate
 
     async def search_path(self, resolve: Callable[[], tuple[Path, ...]]) -> tuple[Path, ...]:
@@ -1094,7 +1302,7 @@ class CheckoutFetcher:
 
     async def fetch(self, pin: ModelLibrary) -> None:
         try:
-            async with self.checkouts.pinning(), self.installs:
+            async with self.checkouts.pinning(), self.installs.permit():
                 await asyncio.to_thread(self.store.fetch, pin)
         except LibraryError as error:
             logger.warning(
