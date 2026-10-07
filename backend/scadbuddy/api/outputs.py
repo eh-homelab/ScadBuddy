@@ -5,6 +5,7 @@ import logging
 import re
 import uuid
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
@@ -317,6 +318,11 @@ NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
 ALREADY_BACKFILLED = "already_backfilled"
 #: POST /outputs/{id}/backfill's 422 when its revision has no snapshot to render from.
 SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
+#: How long after its re-render finished a still-pending backfill is answered with that
+#: job rather than a new one. The attach runs as the job settles, so this is seconds;
+#: past it, the attach is failing, and answering the same done job forever would leave
+#: every Arrange waiting out its whole wait (#1849). Shorter than Arrange's 5 minutes.
+BACKFILL_ATTACH_GRACE = timedelta(minutes=2)
 
 
 class NeedsBackfillProblem(BaseModel):
@@ -525,6 +531,7 @@ async def backfill_output(
     # re-render is still in flight answers that one rather than queueing another.
     # So does one that lands after the re-render finished but before it was attached
     # (#1007): the attach is on its way, and another render would only be thrown away.
+    # Only just after, though: one finished longer ago is not being attached (#1849).
     pending = await asyncio.to_thread(outputs.backfill, output_id)
     if pending is not None and pending.error is None:
         try:
@@ -533,7 +540,14 @@ async def backfill_output(
             # Gone, or a row that does not validate (which the attach keeps retrying,
             # #1007): not one to answer with, so a POST re-queues instead of a 500.
             inflight = None
-        if inflight is not None and inflight.state in ("pending", "running", "done"):
+        if inflight is not None and (
+            inflight.state in ("pending", "running")
+            or (
+                inflight.state == "done"
+                and inflight.finished_at is not None
+                and datetime.now(UTC) - inflight.finished_at < BACKFILL_ATTACH_GRACE
+            )
+        ):
             return _job_status(inflight, None)
     version = meta.model_version
     if not version or not re.fullmatch(COMMIT_ID_PATTERN, version):

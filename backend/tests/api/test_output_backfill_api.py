@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.api import jobs as jobs_api
 from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.outputs import NEEDS_BACKFILL_PROBLEM
@@ -214,7 +216,7 @@ def test_a_second_post_after_the_rerender_finished_but_before_its_attach_answers
     read = store.read
 
     def finished(job_id: str) -> Job:
-        return read(job_id).model_copy(update={"state": "done"})
+        return read(job_id).model_copy(update={"state": "done", "finished_at": datetime.now(UTC)})
 
     monkeypatch.setattr(store, "read", finished)
     first = client.post(f"/api/v1/outputs/{output_id}/backfill")
@@ -227,6 +229,37 @@ def test_a_second_post_after_the_rerender_finished_but_before_its_attach_answers
     again = client.post(f"/api/v1/outputs/{output_id}/backfill")
     assert again.status_code == 202, again.text
     assert again.json()["id"] == first.json()["id"]
+
+
+def test_a_post_long_after_the_rerender_finished_unattached_queues_a_new_one(
+    client: TestClient, app: FastAPI, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1849: a re-render done well past the attach grace is not being attached (the
+    attach keeps failing). Answering it forever left every Arrange waiting out its whole
+    wait; a POST re-queues instead."""
+    monkeypatch.setattr(backfill_module, "_attach", lambda *args, **kwargs: False)
+    output_id = legacy_output(client, app)
+    store = _state(app).render.store
+    read = store.read
+    long_ago = datetime.now(UTC) - outputs_api.BACKFILL_ATTACH_GRACE - timedelta(seconds=1)
+
+    def finished(job_id: str) -> Job:
+        return read(job_id).model_copy(update={"state": "done", "finished_at": long_ago})
+
+    monkeypatch.setattr(store, "read", finished)
+    first = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert first.status_code == 202, first.text
+    submitted: list[object] = []
+    real_render = jobs_api.render_model
+
+    async def counting(*args: Any, **kwargs: Any) -> Any:
+        submitted.append(args)
+        return await real_render(*args, **kwargs)
+
+    monkeypatch.setattr(outputs_api, "render_model", counting)
+    again = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert again.status_code == 202, again.text
+    assert len(submitted) == 1  # re-queued, not answered with the stale done job
 
 
 @pytest.mark.parametrize(
