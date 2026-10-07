@@ -1293,7 +1293,10 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     for (let i = 0; i < TAB_WAITS_PER_TURN; i++) await mixed({ tool: 'browser_snapshot', toolUseId: `m${i}`, signal: never, isBack: gone })
     const mixedCap = await mixed({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })
     // Positively the cap (#1410), not merely "not a replica story": a cap that never fired would pass that.
-    expect(mixedCap).toEqual({ back: false, message: expect.stringMatching(/waited for 3 times this turn and is not attached here now/) })
+    expect(mixedCap).toEqual({
+      back: false,
+      message: expect.stringContaining(`waited for ${TAB_WAITS_PER_TURN} times this turn and is not attached here now`),
+    })
     expect(mixedCap).not.toEqual({ back: false, message: expect.stringMatching(/replica/) })
     expect(n).toBe(TAB_WAITS_PER_TURN)
   })

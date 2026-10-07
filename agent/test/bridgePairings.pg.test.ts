@@ -119,15 +119,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
       // Rejects while the lock is still held: the wait ended, the read did not.
       await expect(lookup).rejects.toThrow('the wait ended')
       expect(await waiting()).toBe(1)
-    } finally {
       unlock()
       await locked
+      // Never cancelled on the server: the read finishes once the lock goes, and the pool serves the next one.
+      await expect.poll(async () => (await admin`
+        SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM ai_browser_pairings%'`).length).toBe(0)
+      expect(await store.pairedTab(agent)).toBeUndefined()
+    } finally {
+      unlock()
+      await locked.catch(() => undefined)
+      // Closed on every path: a failed assertion must not leave this pool holding the file's teardown.
+      await admin.end({ timeout: 5 })
     }
-    // Never cancelled on the server: the read finishes once the lock goes, and the pool serves the next one.
-    await expect.poll(async () => (await admin`
-      SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM ai_browser_pairings%'`).length).toBe(0)
-    expect(await store.pairedTab(agent)).toBeUndefined()
-    await admin.end({ timeout: 5 })
   })
 
   it('pairs the principal with the tab the code was typed into, once', async () => {
