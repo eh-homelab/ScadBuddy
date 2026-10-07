@@ -122,6 +122,26 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
     )
 
 
+#: Bambuddy statuses a later attempt may not meet: a gateway's (#1144).
+TRANSIENT_STATUSES = frozenset(
+    {
+        status.HTTP_502_BAD_GATEWAY,
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        status.HTTP_504_GATEWAY_TIMEOUT,
+    }
+)
+
+
+def is_transient(error: ApiError) -> bool:
+    """Whether ``error`` is Bambuddy not answering (:func:`map_transport`) or a gateway's
+    502, 503 or 504 in front of it (:func:`map_response`): worth another attempt where
+    the effect may run again (#1144). Any other answer would only come back."""
+    if error.type != UNAVAILABLE_PROBLEM:
+        return False
+    upstream = error.extensions.get("bambuddy_status")
+    return upstream is None or upstream in TRANSIENT_STATUSES
+
+
 def map_transport(error: httpx.HTTPError, *, what: str) -> ApiError:
     code = (
         status.HTTP_504_GATEWAY_TIMEOUT

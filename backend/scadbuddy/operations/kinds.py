@@ -26,6 +26,7 @@ class OperationKind:
     check: CheckFn
     run: RunFn
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
+    #: Above 1, a transient Bambuddy failure is retried too, not only a crash (#1144).
     run_attempts: int = 1
 
     def __post_init__(self) -> None:

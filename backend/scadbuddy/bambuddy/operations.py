@@ -3,8 +3,9 @@ refusals as its kind's check, and its effect as its run, moved here unchanged.
 
 Every check and run loads the stored settings itself, off the event loop (they hold the
 Bambuddy key, which must not enter history) and takes only JSON. An effect Bambuddy
-does not dedupe runs once; the send (the inbox copy is reused) and the sidebar link (an
-upsert by name) may run again.
+does not dedupe runs once; the send (the inbox copy is reused, and an upload an attempt
+left unrecorded is taken, #1145) and the sidebar link (an upsert by name) may run
+again, after a crash or a transient Bambuddy failure (#1144).
 """
 
 from __future__ import annotations

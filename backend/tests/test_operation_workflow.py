@@ -19,8 +19,9 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows import operation_activities, print_activities
@@ -231,6 +232,64 @@ async def test_the_run_activity_takes_the_kinds_attempts(
                     timeout = scheduled.start_to_close_timeout.ToTimedelta().total_seconds()
                     attempts["check_timeout"] = int(timeout)
     assert attempts == {"run1": 1, "run3": 3, "check_timeout": 8, "run_heartbeat": 30}
+
+
+async def test_a_retryable_effect_failure_is_tried_again_and_records_the_last_problem(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """#1144: a transient Bambuddy failure of a kind that may run again is retried up to
+    the kind's attempts; when every attempt meets it, the record keeps its problem."""
+    fake.run_error = ApplicationError(BAMBUDDY_502.detail, BAMBUDDY_502, type=FAILED)
+    arg = op_input(run_attempts=2)
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error == BAMBUDDY_502
+    assert fake.calls.count("run") == 2
+
+
+#: Bambuddy's answers, as `bambuddy/errors.py` maps them.
+GATEWAY_503 = ApiError(502, "Bambuddy answered 503", type_=UNAVAILABLE_PROBLEM, bambuddy_status=503)
+NO_ANSWER = ApiError(504, "could not reach Bambuddy: ReadTimeout", type_=UNAVAILABLE_PROBLEM)
+REFUSED_CONNECT = ApiError(502, "could not reach Bambuddy: ConnectError", type_=UNAVAILABLE_PROBLEM)
+BAMBUDDY_500 = ApiError(
+    502, "Bambuddy answered 500", type_=UNAVAILABLE_PROBLEM, bambuddy_status=500
+)
+SCOPE = ApiError(409, "Bambuddy refused the API key", type_=SCOPE_PROBLEM, bambuddy_status=403)
+
+
+@pytest.mark.parametrize(
+    ("attempts", "error", "retryable"),
+    [
+        (3, GATEWAY_503, True),
+        (3, NO_ANSWER, True),
+        (3, REFUSED_CONNECT, True),
+        (3, BAMBUDDY_500, False),
+        (3, SCOPE, False),
+        (1, GATEWAY_503, False),
+        (1, NO_ANSWER, False),
+    ],
+)
+async def test_only_a_transient_bambuddy_failure_of_a_kind_that_may_run_again_is_retryable(
+    attempts: int, error: ApiError, retryable: bool
+) -> None:
+    """#1144: ``send`` and ``register_sidebar`` take 3 attempts, but every Bambuddy error
+    left the run non-retryable, so a 502/503/504 or no answer failed them at once. Only
+    a kind with more than one attempt is retried: the others' effects Bambuddy does not
+    dedupe."""
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        raise error
+
+    _, activity_run = _kind_activities(
+        OperationKind(name="k", check=check, run=run, run_attempts=attempts)
+    )
+    with pytest.raises(ApplicationError) as caught:
+        await ActivityEnvironment().run(activity_run, RunOp(request={}, checked={}))
+    assert caught.value.type == FAILED
+    assert caught.value.non_retryable is not retryable
+    assert problem_of(caught.value).status == error.status
 
 
 async def test_a_second_update_while_running_is_a_repeat_that_runs_nothing(
