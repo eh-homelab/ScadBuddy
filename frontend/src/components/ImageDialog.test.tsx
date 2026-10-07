@@ -92,7 +92,9 @@ describe('ImageDialog', () => {
     fireEvent.click(screen.getByTestId('image-plate'))
     fireEvent.click(screen.getByTestId('image-save'))
     await waitFor(() => expect(click).toHaveBeenCalled())
-    expect(captureImage).toHaveBeenLastCalledWith({ scale: 4, plate: false, transparent: false })
+    // Not the last call: unticking the plate also redraws the preview at 1× on the next
+    // animation frame, which can land after the save's own draw.
+    expect(captureImage).toHaveBeenCalledWith({ scale: 4, plate: false, transparent: false })
     click.mockRestore()
   })
 
