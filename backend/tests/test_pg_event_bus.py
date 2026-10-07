@@ -94,9 +94,8 @@ async def make_bus(pg_conninfo: str) -> AsyncIterator[BusFactory]:
     async def make(retention: EventLogRetention | None = None) -> PgNotifyEventBus:
         listener = PgListener(pg_conninfo, check_interval=1.0, backoff=0.05, max_backoff=0.2)
         bus = PgNotifyEventBus(pg_conninfo, listener=listener, retention=retention)
-        await bus.start()
+        await bus.start()  # returns once it listens
         buses.append(bus)
-        await _until(lambda: listener.backend_pid is not None)
         return bus
 
     yield make
