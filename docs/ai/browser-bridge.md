@@ -222,7 +222,8 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   typed reply, a timeout, or a reconnect to another replica it does not ask again that
   turn. Across the user's sessions at most 10 tab waits are opened in 10 minutes
   (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
-  fails at once with "The user was not asked for the tab: …".
+  fails at once with "The user was not asked for the tab: …". Every wait opened counts,
+  including ones withdrawn because their calls stopped.
   The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
   as `the tab answered <tool> with <code>: …`, with the tab's message in the
   untrusted-data envelope (#258), because it can quote the page.

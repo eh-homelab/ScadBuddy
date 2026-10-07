@@ -606,7 +606,8 @@ export class QuestionService {
 
   /** The canUseTool question gate for one turn (harness/questions.ts QuestionGate). */
   gate(context: QuestionGateContext): QuestionGate {
-    return async (request: QuestionRequest): Promise<QuestionVerdict> => {
+    // `until`: a joiner asking again on its own keeps the deadline it was first asked with.
+    const ask = async (request: QuestionRequest, until?: number): Promise<QuestionVerdict> => {
       if (context.signal.aborted) return { answered: false, message: 'The turn is stopping; the question was not asked.' }
       const id = randomUUID()
       const questions = redactQuestions(request.questions, context.secrets())
@@ -621,6 +622,8 @@ export class QuestionService {
       }
       const { sessionId, turnId } = context
       const { attention } = request
+      const startedAt = new Date()
+      const deadline = attention && attention.reason !== 'done' ? (until ?? performance.now() + attention.timeoutS * 1000) : undefined
       const asked = await this.atomically(sessionId, async (tx) => {
         const none = { asked: false, superseded: [] as Resolved[], joined: undefined as string | undefined, limited: undefined as string | undefined }
         // Still this turn's, and still the user's: after a handoff mid-turn
@@ -636,7 +639,8 @@ export class QuestionService {
         if (attention?.reason === 'tab_disconnected') {
           // #1308, #815 §5: one card per disconnected tab. The model's own request and a
           // browser_* call's wait join an open one of the other side rather than open a
-          // second; the joiner never moves that row (its timer and withdrawal are its own).
+          // second. The joiner never moves that row, and that row ending without the user
+          // (the other side's timer, withdrawal or replacement) does not end the joiner (below).
           const [open] = await tx<{ id: string }[]>`
             SELECT id FROM ai_questions
             WHERE session_id = ${sessionId} AND turn_id = ${turnId} AND kind = 'attention'
@@ -722,7 +726,7 @@ export class QuestionService {
                                         kind, attention_reason, on_timeout, expires_at)
               VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
                       'attention', ${attention.reason}, ${attention.onTimeout},
-                      now() + make_interval(secs => ${attention.timeoutS}))
+                      now() + make_interval(secs => ${until === undefined ? attention.timeoutS : Math.max(0, (until - performance.now()) / 1000)}))
               RETURNING expires_at`
             expiresAt = inserted?.expires_at ?? null
           }
@@ -781,7 +785,6 @@ export class QuestionService {
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
-      const deadline = attention ? performance.now() + attention.timeoutS * 1000 : undefined
       // The check runs beside the wait, never before it: an answer, a reconnect
       // (wake), the timer or the abort ends the wait however long the check
       // takes, and a hung check (a pool or lock wait) cannot stall the call
@@ -802,11 +805,35 @@ export class QuestionService {
       } finally {
         parked.abort()
       }
+      // The joined row is the other side's: its timer, its withdrawal or a newer request of
+      // its side ended it without the user. Only an answer or a reconnect on it ends this
+      // call; otherwise it asks again on its own (or joins a newer card), to its own deadline.
+      if (asked.joined !== undefined && waited && waited !== 'due' && (waited.outcome === 'timed_out' || waited.outcome === 'cancelled')) {
+        if (!signal.aborted) return ask(request, deadline)
+        waited = undefined
+      }
       // A joiner's own timer ends its own wait only; the row stays the other side's.
-      const timedOut = (onTimeout: OnTimeout): Promise<Row> =>
-        asked.joined === undefined
-          ? this.timeOut(sessionId, id, onTimeout)
-          : Promise.resolve({ id: waitsOn, session_id: sessionId, outcome: 'timed_out', answers: null, reason: `nobody replied in time (on_timeout: ${onTimeout})` })
+      const timedOut = async (onTimeout: OnTimeout): Promise<Row> => {
+        if (asked.joined === undefined) return this.timeOut(sessionId, id, onTimeout)
+        const reason = `nobody replied in time (on_timeout: ${onTimeout})`
+        await this.audited([
+          {
+            kind: 'question',
+            action: 'timed_out',
+            surface: 'system',
+            actor: SYSTEM_ACTOR,
+            sessionId,
+            turnId,
+            toolUseId: request.toolUseId,
+            tier: 'read',
+            outcome: 'refused',
+            detail: safeDetail(`${request.tool} attention request joined to ${waitsOn}: ${reason}`),
+            startedAt,
+            finishedAt: new Date(),
+          },
+        ])
+        return { id: waitsOn, session_id: sessionId, outcome: 'timed_out', answers: null, reason }
+      }
       const resolved = waited === 'due' && attention ? await timedOut(attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {
         // The SDK dropped this one call while the turn goes on: its card must not stay
@@ -839,5 +866,6 @@ export class QuestionService {
       })
       return { answered: true, answers }
     }
+    return (request) => ask(request)
   }
 }

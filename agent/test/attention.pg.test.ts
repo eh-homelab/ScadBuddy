@@ -1109,6 +1109,53 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect((await events(m, session.id)).filter((e) => e.type === 'question.asked')).toHaveLength(1)
   })
 
+  // A joiner's wait is its own: the joined card ending without the user (the other side's timer, or its
+  // withdrawal) does not end it. It asks on a card of its own, to its own deadline.
+  it("the other side's timer on a joined card does not end the model's request, which asks on its own card", async () => {
+    const results: unknown[] = []
+    const card = attentionCard(input())
+    let joined!: () => void
+    const parked = new Promise<void>((resolve) => (joined = resolve))
+    let tabDone!: (verdict: unknown) => void
+    const tab = new Promise<unknown>((resolve) => (tabDone = resolve))
+    const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const auto = run.questionGate!({
+          tool: 'mcp__scadbuddy__browser_snapshot',
+          questions: [attentionCard(input())],
+          toolUseId: 'toolu_s',
+          signal: new AbortController().signal,
+          attention: spec({ timeoutS: 3 }),
+        })
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        const own = run.questionGate!({
+          tool: ATTENTION_TOOL,
+          questions: [card],
+          toolUseId: 'toolu_own',
+          signal: new AbortController().signal,
+          attention: spec({ onTimeout: 'wait', timeoutS: 86_400, onParked: () => (joined(), Promise.resolve()) }),
+        })
+        tabDone(await auto)
+        results.push(await own)
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await parked
+    // Joined, before the tab wait's timer: still one row.
+    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ tool_use_id: 'toolu_s' }])
+    expect(await tab).toMatchObject({ answered: false, timedOut: true })
+    // The model's call still waits (its turn was not stopped), now on a card of its own.
+    await expect
+      .poll(async () => await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL`, { timeout: 10_000 })
+      .toEqual([{ tool_use_id: 'toolu_own' }])
+    expect(results).toEqual([])
+    await m.questions.answer(browser, answer(session.id, await pending(session.id), ["I'm here"]))
+    await turn!.done
+    expect(results).toEqual([{ answered: true, answers: { [card.question]: "I'm here" } }])
+  }, 30_000)
+
   // #1344: TAB_WAITS_PER_TURN bounds one turn; this bounds the user's sessions together.
   it(`opens at most ${TAB_WAIT_RATE_LIMIT} tab waits in ${ATTENTION_RATE_WINDOW_S / 60} minutes across sessions`, async () => {
     let wait: WaitForTab | undefined
