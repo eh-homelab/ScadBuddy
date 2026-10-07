@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { hashToken, liveTokenTiers, PostgresTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { connectDatabase, type Database } from '../src/db.js'
-import { migrate } from '../src/db/migrations.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, migrate } from './support/postgres.js'
 
 // PostgresTokenStore on `ai_mcp_tokens` (#251; db/migrations/20260928T0734Z_mcp_tokens.sql).
 

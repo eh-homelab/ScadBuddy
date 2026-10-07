@@ -2,9 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mcpAuthSettings } from '../src/auth/authenticate.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
-import { migrate } from '../src/db/migrations.js'
 import { appFetch, connect, INGRESS, testApp } from './helpers/mcp.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, migrate } from './support/postgres.js'
 
 // /api/v1/ai/mcp/auth over the real `ai_settings` rows (#526's keys), wired as
 // main.ts wires it: what Settings saves is what /mcp reads on its next request,

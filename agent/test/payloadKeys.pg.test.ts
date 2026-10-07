@@ -1,10 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
-import { migrate } from '../src/db/migrations.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { PgPayloadKeys } from '../src/temporal/payloadKeys.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, migrate } from './support/postgres.js'
 
 // ai_payload_keys (spec 2026-10-01 §6.5, plan ruling 11): one data key per subject,
 // sealed under the KEK, cached for 60 s.

@@ -10,7 +10,6 @@ import postgres from 'postgres'
 import {
   LEGACY_VERSIONS,
   loadMigrations,
-  migrate,
   MIGRATION_ID,
   MIGRATION_LOCK,
   MigrationChecksumError,
@@ -19,7 +18,7 @@ import {
   MIGRATIONS,
 } from '../src/db/migrations.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { migrate, TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const SECRET = 'sk-ant-api03-postgres-test-secret-5b5b'

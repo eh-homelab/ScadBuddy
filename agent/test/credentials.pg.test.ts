@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
 import { CredentialError, CredentialStore, credentialAad, MAX_CREDENTIALS, TOO_MANY_MESSAGE } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
-import { migrate, MIGRATIONS } from '../src/db/migrations.js'
+import { MIGRATIONS } from '../src/db/migrations.js'
 import { CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { kekFromBase64, type KekStatus, sealSecret } from '../src/secrets.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, migrate } from './support/postgres.js'
 
 // #1093: several credentials in `ai_credentials`, their order and their
 // health, against a real Postgres (the in-memory double is

@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { hashToken, PostgresTokenStore } from '../src/auth/tokens.js'
 import type { Database } from '../src/db.js'
-import { migrate } from '../src/db/migrations.js'
 import type { McpTokenList, MintedMcpToken } from '../src/routes/mcpTokens.js'
 import { appFetch, connect, INGRESS, testApp } from './helpers/mcp.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, migrate } from './support/postgres.js'
 
 // The Settings token routes (routes/mcpTokens.ts) over the real store on
 // `ai_mcp_tokens`: what Settings mints is what /mcp accepts, and a revoke from
