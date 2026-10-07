@@ -17,6 +17,7 @@ from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, follow_ag
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client, WithStartWorkflowOperation, WorkflowExecutionStatus, WorkflowHandle
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from scadbuddy_durable.inputs import Inputs, make_input_activities
@@ -309,12 +310,19 @@ class Rig:
         async def find() -> dict[str, Any]:
             n, offset = 0, from_offset
             while True:
-                async for ev in follow_agent(self.client, wid, from_offset=offset):
-                    offset = ev["offset"] + 1
-                    if ev["type"] == kind:
-                        n += 1
-                        if n == count:
-                            return ev
+                try:
+                    async for ev in follow_agent(self.client, wid, from_offset=offset):
+                        offset = ev["offset"] + 1
+                        if ev["type"] == kind:
+                            n += 1
+                            if n == count:
+                                return ev
+                except RPCError as err:
+                    # WorkflowNotReady: a workflow task failed (timed out, on a loaded
+                    # host) and is being retried; the poll is refused meanwhile.
+                    if err.status != RPCStatusCode.FAILED_PRECONDITION:
+                        raise
+                    await asyncio.sleep(0.2)
                 # The stream also ends when a poll's Update RPC times out (a loaded
                 # host; workflow_streams `subscribe` returns on
                 # WorkflowUpdateRPCTimeoutOrCancelledError): follow on while it runs.

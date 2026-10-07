@@ -391,7 +391,7 @@ async def test_continue_as_new_inside_a_turn_leaves_no_nudge_unfinished(
         assert BUSY in str(err.value.cause)
     gate.set()
     await rig.event(wid, "done", 4)
-    assert rig.snaps.latest(inp.session_id).state.runs > 1
+    assert await rig.snapshot_where(inp.session_id, lambda s: s.state.runs > 1)
     assert rig.fake.takes[1:] == queued
     assert not [w for w in recwarn if "send_message" in str(w.message)]
 
@@ -540,7 +540,7 @@ async def test_continue_as_new_keeps_the_conversation(rig: Rig) -> None:
     for n in range(1, 5):
         await rig.send(wid, inp, f"read {n}", workflow=ShortRuns)
         await rig.event(wid, "done", n)
-    assert rig.snaps.latest(inp.session_id).state.runs > 1
+    assert await rig.snapshot_where(inp.session_id, lambda s: s.state.runs > 1)
     assert [h.input["tag"] for h in rig.seen.first_for("read 4")] == ["read 1", "read 2", "read 3"]
 
 
@@ -638,7 +638,10 @@ async def test_stop_during_a_tool_hands_over_the_state_and_resumes(rig: Rig) -> 
     await rig.send(wid, inp, "read slow")
     await rig.started("get_model")
     [call_id] = rig.stubs.ids("get_model")
-    session = rig.snaps.latest(inp.session_id).state.session_id
+    # Snapshots save as the run goes, and the first has no Claude session yet: wait for the
+    # one that has this call in flight.
+    snap = await rig.snapshot_where(inp.session_id, lambda s: any(c.id == call_id for c in s.in_flight))
+    session = snap.state.session_id
     state = await cancel_result(rig, wid)
     assert state.session_id == session and state.checkpoint is not None and state.fork_next
     assert state.pending[call_id] == ToolOutcome(
@@ -819,8 +822,7 @@ async def test_restore_after_termination_during_a_tool(rig: Rig) -> None:
     await rig.event(wid, "done")
     owed = rig.seen.first_for("read after")
     assert [(h.id, h.content, h.is_error) for h in owed] == [(call_id, INTERRUPTED.format(STOPPED), True)]
-    latest = rig.snaps.latest(inp.session_id)
-    assert call_id in latest.state.recent_call_ids
+    await rig.snapshot_where(inp.session_id, lambda s: call_id in s.state.recent_call_ids)
     assert rig.stubs.ids("get_model").count(call_id) == 1
 
 
@@ -848,8 +850,7 @@ async def test_restore_never_reruns_a_finished_sibling(rig: Rig) -> None:
     await rig.event(wid, "done")
     owed = {h.id: h.content for h in rig.seen.first_for("after")}
     assert owed == {read_id: LOST, write_id: INTERRUPTED.format(STOPPED)}
-    latest = rig.snaps.latest(inp.session_id)
-    assert {read_id, write_id} <= set(latest.state.recent_call_ids)
+    await rig.snapshot_where(inp.session_id, lambda s: {read_id, write_id} <= set(s.state.recent_call_ids))
     assert rig.stubs.ids("get_model") == [read_id]
 
 
