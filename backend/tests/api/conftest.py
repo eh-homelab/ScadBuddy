@@ -14,6 +14,7 @@ import pytest
 import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import Client
 
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
@@ -23,6 +24,12 @@ from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
 from tests.conftest import TEST_ANSWER_DEADLINE, write_openscad_3mf
+from tests.support.deployment import (
+    BUILD_SERVES_MAX_POLL,
+    BUILD_SERVES_POLL,
+    BUILD_SERVES_TIMEOUT,
+    wait_until_build_serves,
+)
 from tests.support.temporal import (
     WorkflowReaper,
     temporal_available,
@@ -136,20 +143,52 @@ def app(settings: Settings) -> FastAPI:
     return create_app(settings)
 
 
-@pytest.fixture
-def client(
-    app: FastAPI, settings: Settings, workflow_reaper: WorkflowReaper
-) -> Iterator[TestClient]:
-    """The app's client, once its in-process worker's build serves the render queue: a
-    render started before then waits unrouted, and on a loaded host (the dev server's
-    SetCurrentVersion taking 10 s) outlived the submit's deadline as a 503."""
-    with TestClient(app) as test_client:
+@pytest.fixture(autouse=True)
+def _clients_wait_for_the_render_build(
+    monkeypatch: pytest.MonkeyPatch, workflow_reaper: WorkflowReaper
+) -> None:
+    """Every `TestClient` an api test enters (this module's `client`, a module's own,
+    one around `create_app`) is handed over once its app's in-process worker's build
+    serves the render queue: a render started before then waits unrouted, and on a
+    loaded host (the dev server's SetCurrentVersion taking 10 s) outlived the submit's
+    deadline as a 503. An app with no in-process worker is not waited on."""
+    enter = TestClient.__enter__
+
+    def entered(self: TestClient) -> TestClient:
+        test_client = enter(self)
+        state = getattr(getattr(self.app, "state", None), STATE_ATTR, None)
+        settings = state.settings if isinstance(state, AppState) else None
+        if settings is None or not settings.temporal_worker_inprocess:
+            return test_client
         queue, build_id = settings.temporal_task_queue_render, settings.revision
-        # A module whose app renders nowhere (`UNUSED_TEMPORAL_ADDRESS`) has no worker.
-        if settings.temporal_worker_inprocess and not workflow_reaper.wait_until_build_serves(
-            queue, build_id
-        ):
+        serving = workflow_reaper.run(
+            wait_until_build_serves(
+                _reaper_client(workflow_reaper),
+                queue,
+                build_id,
+                timeout=BUILD_SERVES_TIMEOUT,
+                poll=BUILD_SERVES_POLL,
+                max_poll=BUILD_SERVES_MAX_POLL,
+            ),
+            # Past the wait's own bound by its last check's describe.
+            timeout=BUILD_SERVES_TIMEOUT + 10,
+        )
+        if not serving:
+            self.__exit__(None, None, None)
             pytest.fail(f"build {build_id!r} never came to serve task queue {queue!r}")
+        return test_client
+
+    monkeypatch.setattr(TestClient, "__enter__", entered)
+
+
+def _reaper_client(reaper: WorkflowReaper) -> Client:
+    assert reaper.client is not None, "use the reaper as a context manager"
+    return reaper.client
+
+
+@pytest.fixture
+def client(app: FastAPI) -> Iterator[TestClient]:
+    with TestClient(app) as test_client:
         yield test_client
 
 

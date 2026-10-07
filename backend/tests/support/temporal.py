@@ -18,17 +18,12 @@ from typing import Any
 
 from google.protobuf.any_pb2 import Any as Any_
 from temporalio.api.common.v1 import GrpcStatus
-from temporalio.api.deployment.v1 import WorkerDeploymentVersion
-from temporalio.api.enums.v1 import TaskQueueType
 from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
-from temporalio.api.workflowservice.v1 import DescribeWorkerDeploymentVersionRequest
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
-
-from scadbuddy.workflows.client import DEPLOYMENT_NAME, is_current
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +41,6 @@ MAX_TASK_QUEUES_PER_VERSION = 100_000
 #: cannot fall inside a run (or a jump of this host's wall clock) is one whose first
 #: tick after 1970 is decades away. Only a trigger then starts a run.
 NO_TICK = 100 * 365 * 86400.0
-#: How long a test's app may take to have its render build serve its queue: the
-#: worker's own `MAKE_CURRENT_DEADLINE`, with room for the describes.
-BUILD_SERVES_TIMEOUT = 75.0
-#: The first wait between two checks of whether it does, doubled after each up to
-#: `BUILD_SERVES_MAX_POLL`: the dev server rate-limits Worker Deployment calls ("too
-#: many requests issued to Worker Deployment"), and the worker's `make_current` needs
-#: them more than this wait does.
-BUILD_SERVES_POLL = 0.25
-BUILD_SERVES_MAX_POLL = 2.0
 
 
 def namespace_not_found_error() -> RPCError:
@@ -187,59 +173,6 @@ async def delete_schedules(client: Client, *schedule_ids: str) -> None:
                 raise
 
 
-async def build_serves(client: Client, task_queue: str, build_id: str) -> bool:
-    """Whether the render deployment routes ``task_queue``'s new workflows to
-    ``build_id``: the build is the deployment's current version, and the queue is one of
-    its version's (a worker of it polled the queue). Until then a render started on the
-    queue waits unrouted. Any `RPCError` (no such deployment or version yet, or
-    RESOURCE_EXHAUSTED from the rate limit) is a no, asked again later."""
-    rpc_timeout = timedelta(seconds=5)
-    try:
-        if not await is_current(client, namespace=client.namespace, build_id=build_id):
-            return False
-        described = await client.workflow_service.describe_worker_deployment_version(
-            DescribeWorkerDeploymentVersionRequest(
-                namespace=client.namespace,
-                deployment_version=WorkerDeploymentVersion(
-                    deployment_name=DEPLOYMENT_NAME, build_id=build_id
-                ),
-            ),
-            timeout=rpc_timeout,
-        )
-    except RPCError:
-        return False
-    return any(
-        info.name == task_queue and info.type == TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW
-        for info in described.worker_deployment_version_info.task_queue_infos
-    )
-
-
-async def wait_until_build_serves(
-    client: Client,
-    task_queue: str,
-    build_id: str,
-    *,
-    timeout: float,
-    poll: float,
-    max_poll: float,
-) -> bool:
-    """Ask `build_serves` until it holds (True) or ``timeout`` seconds have passed
-    (False), ``poll`` seconds apart at first, doubling up to ``max_poll``. The time
-    waited is summed on the loop's monotonic clock, each step clamped at zero: this
-    host's monotonic clock has stepped back too."""
-    loop = asyncio.get_running_loop()
-    waited, last = 0.0, loop.time()
-    while not await build_serves(client, task_queue, build_id):
-        if waited >= timeout:
-            return False
-        await asyncio.sleep(poll)
-        poll = min(poll * 2, max_poll)
-        now = loop.time()
-        waited += max(0.0, now - last)
-        last = now
-    return True
-
-
 class WorkflowReaper:
     """Terminates what a test left open, for a whole session on ONE client: a
     temporalio `Client` has no close, so one per teardown would leak a connection per
@@ -256,7 +189,7 @@ class WorkflowReaper:
 
     def __enter__(self) -> WorkflowReaper:
         self._thread.start()
-        self.client = self._run(Client.connect(self._address, namespace=self._namespace))
+        self.client = self.run(Client.connect(self._address, namespace=self._namespace))
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -266,29 +199,14 @@ class WorkflowReaper:
 
     def terminate(self, task_queue: str) -> None:
         assert self.client is not None, "use the reaper as a context manager"
-        self._run(terminate_open_workflows(self.client, task_queue))
+        self.run(terminate_open_workflows(self.client, task_queue))
 
     def delete_schedules(self, *schedule_ids: str) -> None:
         assert self.client is not None, "use the reaper as a context manager"
-        self._run(delete_schedules(self.client, *schedule_ids))
+        self.run(delete_schedules(self.client, *schedule_ids))
 
-    def wait_until_build_serves(self, task_queue: str, build_id: str) -> bool:
-        """`wait_until_build_serves` on the reaper's client."""
-        assert self.client is not None, "use the reaper as a context manager"
-        return self._run(
-            wait_until_build_serves(
-                self.client,
-                task_queue,
-                build_id,
-                timeout=BUILD_SERVES_TIMEOUT,
-                poll=BUILD_SERVES_POLL,
-                max_poll=BUILD_SERVES_MAX_POLL,
-            ),
-            # Past the wait's own bound by its last check's two describes.
-            timeout=BUILD_SERVES_TIMEOUT + 15,
-        )
-
-    def _run[T](self, coro: Coroutine[object, object, T], *, timeout: float = 60) -> T:
+    def run[T](self, coro: Coroutine[object, object, T], *, timeout: float = 60) -> T:
+        """Run ``coro`` on the reaper's loop (where its client lives), from a sync caller."""
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
 
 

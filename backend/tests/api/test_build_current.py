@@ -1,6 +1,7 @@
-"""The api `client` fixture hands a test its client only once the in-process worker's
+"""An api test's `TestClient` is handed over only once its app's in-process worker's
 build serves the test's task queue: before that, a render waits unrouted and outlives
-the submit's deadline (a 503 the test never expected)."""
+the submit's deadline (a 503 the test never expected). Each case delays the worker's
+SetWorkerDeploymentCurrentVersion past that deadline, as a loaded dev server did."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
 from scadbuddy.render.submit import SUBMIT_DEADLINE
 from scadbuddy.workflows.client import make_current
 
@@ -25,7 +27,6 @@ def settings(settings: Settings) -> Settings:
     return settings.model_copy(update={"revision": f"slow-{uuid.uuid4().hex[:8]}"})
 
 
-@pytest.fixture(autouse=True)
 def _slow_set_current(monkeypatch: pytest.MonkeyPatch) -> None:
     async def slow(*args: Any, **kwargs: Any) -> None:
         await asyncio.sleep(SLOW_SET_CURRENT)
@@ -34,8 +35,14 @@ def _slow_set_current(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("scadbuddy.worker.make_current", slow)
 
 
-def test_the_first_render_is_accepted_when_the_build_was_slow_to_become_current(
-    client: TestClient, model: str
-) -> None:
+def _render(client: TestClient, model: str) -> None:
     response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     assert response.status_code == 202, response.json()
+
+
+def test_the_first_render_is_accepted_when_the_build_was_slow_to_become_current(
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _slow_set_current(monkeypatch)
+    with TestClient(create_app(settings)) as client:
+        _render(client, model)
