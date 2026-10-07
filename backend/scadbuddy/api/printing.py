@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.api.deps import (
+    AppState,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
@@ -31,6 +32,7 @@ from scadbuddy.api.deps import (
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.operations import (
@@ -53,7 +55,7 @@ from scadbuddy.bambuddy.print_run import (
     check_for_output,
     filament_options_for_output,
 )
-from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
     ProjectAttach,
@@ -583,6 +585,24 @@ async def get_choices(
         )
 
 
+async def _failed_before_queueing(state: AppState, output_id: str) -> str | None:
+    """Why the output's newest run failed, when it failed before it queued anything
+    (#1049); else ``None``. A run that may have queued recorded what it queued, so its
+    print's own progress says more. Without a database, or with one that does not
+    answer, there are no runs to read, and the progress is read as it was before."""
+    runs = state.print_runs.store
+    if not runs.available:
+        return None
+    try:
+        latest = await runs.latest_for_output(output_id)
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; progress read without them")
+        return None
+    if latest is None or latest.status != "failed" or latest.may_have_queued:
+        return None
+    return latest.error.detail if latest.error is not None else None
+
+
 @router.get(
     "/outputs/{output_id}/progress",
     response_model=PrintProgress | None,
@@ -596,19 +616,29 @@ async def get_progress(
     store: SettingsStoreDep,
     observer: PrintProgressDep,
     follows: FollowsDep,
+    state: StateDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
     ``null`` means this output has never been printed — that is an answer, not an
     error, and the send bar shows nothing rather than a failure.
 
+    When the output's newest run failed before it queued anything, that failure is the
+    progress (``route: "run"``, #1049): such a run leaves no slice job or queue item to
+    follow, and read as never printed once the dialog that started it was gone.
+
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
+    failed = await _failed_before_queueing(state, meta.id)
+    progress: PrintProgress | None
     async with client_for(store.load()) as client:
-        progress = await progress_for(
-            client, meta, uploads=uploads, links=links if links.available else None
-        )
+        if failed is not None:
+            progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
+        else:
+            progress = await progress_for(
+                client, meta, uploads=uploads, links=links if links.available else None
+            )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

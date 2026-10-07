@@ -202,6 +202,11 @@ class PrintRunStore:
     async def get(self, run_id: str) -> PrintRun | None:
         return await asyncio.to_thread(self._get, run_id)
 
+    async def latest_for_output(self, output_id: str) -> PrintRun | None:
+        """The output's newest run, for as long as retention keeps it (#1049): the one
+        place a run that failed before it queued anything is recorded."""
+        return await asyncio.to_thread(self._latest_for_output, output_id)
+
     async def insert_accepted(
         self,
         run_id: str,
@@ -291,6 +296,15 @@ class PrintRunStore:
             args = (key, self.repeat_window)
         with self._require().connection() as conn:
             row = conn.execute(query, args).fetchone()
+        return PrintRun.model_validate(row) if row else None
+
+    def _latest_for_output(self, output_id: str) -> PrintRun | None:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s"
+                " ORDER BY created_at DESC LIMIT 1",
+                (output_id,),
+            ).fetchone()
         return PrintRun.model_validate(row) if row else None
 
     def _get(self, run_id: str) -> PrintRun | None:
