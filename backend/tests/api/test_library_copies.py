@@ -483,7 +483,7 @@ def test_deleting_a_model_forgets_its_outputs_upload_records(
     store = upload_store(client)
     assert asyncio.run(store.for_outputs([output_id, other])) != {output_id: [], other: []}
 
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
     assert asyncio.run(store.for_outputs([output_id, other])) == {output_id: [], other: []}
     assert not delete.called
