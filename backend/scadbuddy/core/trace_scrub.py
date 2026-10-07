@@ -97,7 +97,9 @@ def _code_roots() -> tuple[str, ...]:
 
 #: ``open``, bound at import as `tokenize` binds it: Temporal's workflow sandbox
 #: replaces ``builtins.open`` on the workflow thread, and a failed workflow's
-#: ``CompleteWorkflow`` span is exported there by a synchronous span processor (#1712).
+#: ``CompleteWorkflow`` span is ended there. Production's `BatchSpanProcessor`
+#: (`core/tracing.py`) exports it later on its own thread; a synchronous processor,
+#: as the tests' `SimpleSpanProcessor`, exports it on the workflow thread (#1712).
 _open: Final = open
 
 #: A frame is checked against its file only under these, so a path in a message (a

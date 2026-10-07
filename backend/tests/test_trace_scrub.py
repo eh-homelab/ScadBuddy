@@ -420,4 +420,6 @@ async def test_a_failed_workflows_completion_span_survives_the_sandbox(
     completed = [s for s in spans.get_finished_spans() if s.name == "CompleteWorkflow:_Fails"]
     assert len(completed) == 1
     (event,) = [e for e in completed[0].events if e.name == "exception"]
-    assert 'File "' in str(cast(dict[str, object], event.attributes)["exception.stacktrace"])
+    stacktrace = str(cast(dict[str, object], event.attributes)["exception.stacktrace"])
+    # A frame of this file: its source was read on the workflow thread.
+    assert "test_trace_scrub.py" in stacktrace
