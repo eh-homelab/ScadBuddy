@@ -321,4 +321,24 @@ describe('ProjectPicker', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(detail)
   })
+
+  it('offers a Retry after a failed read, which loads the list and the last project (#1045)', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/print/projects', () => {
+        calls += 1
+        if (calls === 1) return new HttpResponse('upstream request timeout', { status: 504 })
+        return HttpResponse.json({ projects: fixtures.projectViews, last_project_id: 1 })
+      }),
+    )
+    const { user } = mount()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('HTTP 504')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await listed()
+    expect(select()).toHaveValue('1')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(calls).toBe(2)
+  })
 })

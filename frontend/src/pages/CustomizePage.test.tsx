@@ -1614,6 +1614,29 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(ran).toHaveLength(1))
     expect(await ran[0]).toHaveProperty('project_id', null)
   })
+
+  it('leaves project_id out of a run while the list is unknown (#1045)', async () => {
+    // The server then files it under the remembered project, not "No project".
+    server.use(
+      http.get(
+        '/api/v1/print/projects',
+        () => new HttpResponse('upstream request timeout', { status: 504 }),
+      ),
+    )
+    const ran = watchBodies('POST', /\/print\/outputs\/[^/]+\/run$/)
+    const { user } = render()
+    await generate(user)
+
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    const print = await within(dialog).findByTestId('run-print')
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+
+    await waitFor(() => expect(ran).toHaveLength(1))
+    expect(await ran[0]).not.toHaveProperty('project_id')
+  })
 })
 
 describe('template inputs (spec 2026-09-27 §4.3)', () => {

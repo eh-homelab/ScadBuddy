@@ -13,6 +13,12 @@ export interface ProjectList {
    */
   reload: () => Promise<void>
   /**
+   * #1045 — reads the list again after a failed read. Until one read has succeeded it
+   * also reports `last_project_id`, as the first read would have, since the parent never
+   * got it; after that it is {@link reload}.
+   */
+  retry: () => void
+  /**
    * Re-reads the list because `projectId` is not in it, once per id for every picker
    * sharing the list, so two pickers noticing the same missing project (together, or
    * one mounted later) fetch it once, and a project deleted in Bambuddy does not
@@ -46,6 +52,8 @@ export function useProjectList(
     report.current = onLoaded
   })
 
+  /** Whether a read has succeeded, so `last_project_id` has been reported. */
+  const loaded = useRef(false)
   const fetchList = useCallback(async (seed: boolean) => {
     if (seed) setLoading(true)
     setError(null)
@@ -53,6 +61,7 @@ export function useProjectList(
       const next = await api.getProjects()
       setChoices(next)
       if (seed) report.current?.(next.last_project_id ?? null)
+      loaded.current = true
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Could not list the projects.')
     } finally {
@@ -72,6 +81,10 @@ export function useProjectList(
     })
     return inFlight.current
   }, [fetchList])
+  const retry = useCallback(() => {
+    if (loaded.current) void reload()
+    else void fetchList(true)
+  }, [fetchList, reload])
   const reread = useRef(new Set<number>())
   const rereadFor = useCallback(
     (projectId: number) => {
@@ -90,7 +103,7 @@ export function useProjectList(
   }, [])
 
   return useMemo(
-    () => ({ choices, loading, error, reload, rereadFor, add }),
-    [choices, loading, error, reload, rereadFor, add],
+    () => ({ choices, loading, error, reload, retry, rereadFor, add }),
+    [choices, loading, error, reload, retry, rereadFor, add],
   )
 }
