@@ -841,6 +841,12 @@ jobs:
   #   cd backend && uv run --frozen pytest -n auto --store-durations
   # (from the image, as CI runs it, for CI's own timings) and commit the result.
   #
+  # The file is mounted at pytest-split's default path, `.test_durations` beside
+  # pyproject.toml, so no `--durations-path` is passed: pytest reads its rootdir
+  # from the command line before plugins add their options, so
+  # `--durations-path /durations.json` made `/` the rootdir, dropped
+  # pyproject.toml's settings (asyncio_mode=auto among them) and broke the run.
+  #
   # Each shard also counts what it selected and what the whole suite collects,
   # and `backend-pytest-split` checks the four counts add up to the whole, so no
   # test can fall between the shards unnoticed.
@@ -888,10 +894,9 @@ jobs:
       - name: Count this shard's tests
         run: |
           set -euo pipefail
-          line=$(docker run --rm -v "$PWD/backend/.test_durations:/durations.json:ro" \
+          line=$(docker run --rm -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
-            --collect-only -q --splits 4 --group ${{ matrix.group }} \
-            --durations-path /durations.json | grep -E '^[0-9]+/[0-9]+ tests collected')
+            --collect-only -q --splits 4 --group ${{ matrix.group }} | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
           selected=${line%%/*}
           rest=${line#*/}
@@ -922,10 +927,10 @@ jobs:
       - name: pytest
         run: >-
           docker run --rm --network host --shm-size=1g
-          -v "$PWD/backend/.test_durations:/durations.json:ro"
+          -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 4 --group ${{ matrix.group }} --durations-path /durations.json
+          --splits 4 --group ${{ matrix.group }}
           --durations=20
 
   # The shards between them ran every test: each one's selection adds up to the
