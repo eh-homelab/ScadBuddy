@@ -73,7 +73,8 @@ export type ServerEvent = V &
     | { type: 'user.turn'; sessionId: string; turnId: string; text: string; author: Owner }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }
-    | { type: 'tool.call'; sessionId: string; id: string; name: string; input: Record<string, unknown>; risk: Risk }
+    /** `parent`: a subagent's call (#1108), the id of the session's `Agent` call that spawned it. */
+    | { type: 'tool.call'; sessionId: string; id: string; name: string; input: Record<string, unknown>; risk: Risk; parent?: string }
     | { type: 'tool.result'; sessionId: string; id: string; ok: boolean; summary: string }
     /** `tool` is the tool.call id the approval gates; only outward calls wait (spec §8.2). */
     | { type: 'approval.required'; sessionId: string; id: string; tool: string; summary: string; risk: 'outward' }
@@ -92,7 +93,8 @@ export type ServerEvent = V &
         reason?: string
       }
     /**
-     * The agent asks the user (#940): `tool` is the AskUserQuestion (or a subagent's ask_user) tool_use id.
+     * The agent asks the user (#940): `tool` is the AskUserQuestion (or a subagent's ask_user) tool_use id,
+     * a `tool.call` in the feed (a subagent's since #1108).
      * The turn waits (`waiting_input`) until `question.resolved`.
      */
     | {
