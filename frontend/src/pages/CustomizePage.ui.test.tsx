@@ -466,6 +466,40 @@ describe('the page slot', () => {
     Reflect.deleteProperty(document, 'fullscreenEnabled')
   })
 
+  it('shows a reopened output\'s inputs read-only when they cannot be migrated (#917)', async () => {
+    const outputId = 'c'.repeat(32)
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    server.use(
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: UI_DEMO_SLUG,
+          name: 'Old',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPage(<CustomizePage />, { route: `/m/${UI_DEMO_SLUG}?from=${outputId}`, path: '/m/:slug' })
+    expect(
+      await screen.findByText(/could not be brought up to this template version: defines no migrate/, undefined, {
+        timeout: 5000,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    expect(within(screen.getByTestId('workspace')).getByRole('alert')).toHaveTextContent('defines no migrate')
+    // The template's page still mounts, on the current (default) values.
+    await waitFor(() => expect(shadowText()).toMatch(/^custom /))
+  })
+
   it('covers the frame in full screen where the Fullscreen API is refused, with no flyout button', async () => {
     Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false })
     setUiModuleLoader(async () => ({

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
@@ -217,6 +218,15 @@ assert get_args(Goal) == GOALS
 #: Arrange's refusal of outputs saved before manifests (#902): the UI offers to
 #: re-render them (`output_ids`) and arranges once they have one.
 NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
+#: POST /outputs/{id}/backfill's 409: the output records its objects already.
+ALREADY_BACKFILLED = "already_backfilled"
+#: POST /outputs/{id}/backfill's 422 when its revision has no snapshot to render from.
+SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
+#: How long after its re-render finished a still-pending backfill is answered with that
+#: job rather than a new one. The attach runs as the job settles, so this is seconds;
+#: past it, the attach is failing, and answering the same done job forever would leave
+#: every Arrange waiting out its whole wait (#1849). Shorter than Arrange's 5 minutes.
+BACKFILL_ATTACH_GRACE = timedelta(minutes=2)
 
 
 class NeedsBackfillProblem(BaseModel):
@@ -410,7 +420,12 @@ async def backfill_output(
 ) -> JobStatus:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
     if await asyncio.to_thread(outputs.manifest, output_id):
-        raise ApiError(status.HTTP_409_CONFLICT, f"output {output_id} already records its objects")
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"output {output_id} already records its objects",
+            # Arrange's needs_backfill is a 409 too: the code is what tells them apart (#1007).
+            code=ALREADY_BACKFILLED,
+        )
     if await asyncio.to_thread(outputs.arranged_from, output_id):
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -418,13 +433,25 @@ async def backfill_output(
         )
     # A second POST (History and Print both offer it, and double clicks) while the
     # re-render is still in flight answers that one rather than queueing another.
+    # So does one that lands after the re-render finished but before it was attached
+    # (#1007): the attach is on its way, and another render would only be thrown away.
+    # Only just after, though: one finished longer ago is not being attached (#1849).
     pending = await asyncio.to_thread(outputs.backfill, output_id)
     if pending is not None and pending.error is None:
         try:
             inflight = await asyncio.to_thread(render.store.read, pending.job_id)
-        except JobNotFoundError:
+        except (JobNotFoundError, ValueError):
+            # Gone, or a row that does not validate (which the attach keeps retrying,
+            # #1007): not one to answer with, so a POST re-queues instead of a 500.
             inflight = None
-        if inflight is not None and inflight.state in ("pending", "running"):
+        if inflight is not None and (
+            inflight.state in ("pending", "running")
+            or (
+                inflight.state == "done"
+                and inflight.finished_at is not None
+                and datetime.now(UTC) - inflight.finished_at < BACKFILL_ATTACH_GRACE
+            )
+        ):
             return _job_status(inflight, None)
     version = meta.model_version
     if not version or not re.fullmatch(COMMIT_ID_PATTERN, version):
@@ -449,13 +476,24 @@ async def backfill_output(
             fonts,
         )
     except ApiError as error:
+        # The only 409 `render_model` answers is `submit_problems`' SnapshotUnavailableError;
+        # a new one on that path would be relabelled here, so check this if one is added.
+        if error.status == status.HTTP_409_CONFLICT:
+            # No snapshot of that revision and no history to make one from: as permanent
+            # as a missing revision, and a 409 here means "already recorded" (#1007).
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"output {output_id} cannot be rendered again: {error.detail}",
+                code=SNAPSHOT_UNAVAILABLE,
+            ) from None
         if error.status != status.HTTP_404_NOT_FOUND:
             raise
-        # The template, or that revision of it, is gone: this output cannot be made again.
+        # The template, that revision of it, or something it needs is gone: this output
+        # cannot be made again. The detail says which (#1007).
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"output {output_id} cannot be rendered again: revision {version} of"
-            f" {meta.slug} is no longer in the template's history ({error.detail})",
+            f"output {output_id} cannot be rendered again from {meta.slug}@{version[:12]}:"
+            f" {error.detail}",
         ) from None
     await asyncio.to_thread(outputs.start_backfill, output_id, accepted.job_id)
     job = await asyncio.to_thread(require_job, render, accepted.job_id)

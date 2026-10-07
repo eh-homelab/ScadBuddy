@@ -22,6 +22,7 @@ import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import assets, health, libraries, media, metrics, models, outputs, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
+from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
@@ -997,6 +998,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         public_url=lambda: state.settings_store.load().public_url,
         allowed_origins=lambda: state.settings.allowed_origin_list,
     )
+    # Outside every route and gate, so their answers go out gzipped too (#1033).
+    app.add_middleware(Compression)
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth
     # counting. It reads no body, so wrapping the gate costs the gate nothing.

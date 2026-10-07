@@ -341,7 +341,9 @@ describe('HistoryPage', () => {
     // Reagan still arranges; the dialog closes, and History says Workshop was skipped.
     expect(await screen.findByText('Arranged from 1 output', {}, { timeout: 5000 })).toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: 'Arrange' })).not.toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent('Workshop could not be re-rendered: revision abc is gone.')
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Workshop could not be re-rendered: revision abc is gone. It was left out of the arrange.',
+    )
   })
 
   it('drops a deleted output from the selection', async () => {

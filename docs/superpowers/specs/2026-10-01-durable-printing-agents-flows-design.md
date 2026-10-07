@@ -130,7 +130,8 @@ Non-goals
   - `live_output=True` publishes events through Workflow Streams, and `follow_agent`
     reads them. Every subscriber poll is an Update, so the README recommends one
     subscriber in the backend that fans the events out.
-  - It requires Claude Code ≥ 2.1.273. ScadBuddy pins 2.1.283. It needs an API key,
+  - It requires Claude Code ≥ 2.1.273. ScadBuddy's pinned SDK (0.3.287) bundles 2.1.287.
+    It needs an API key,
     Bedrock/Vertex/Foundry, or `CLAUDE_CODE_OAUTH_TOKEN`; an app login cannot
     refresh on resume.
   - Subagents run in the foreground and cannot call durable tools.

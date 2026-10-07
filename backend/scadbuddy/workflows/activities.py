@@ -475,17 +475,22 @@ class RenderActivities:
             # It is safe because every lease re-checks its checkouts (`require_checkouts`),
             # so a removal between two activities fails the next one fast and, once the
             # fetcher restores the pin, its retry renders.
+            # #867 — as `render_main`'s: a cancel (a timeout) returns once the stage has.
             async with library_lease(d.checkouts, f"piece:{req.piece_key}", source.library_path):
-                result = await finish_piece_stage(
-                    source,
-                    req.params,
-                    work,
-                    _process_output(main),
-                    config=self._config(prepared),
-                    paths=d.paths,
-                    slug=req.slug,
-                    thumbnail_executor=d.thumbnail_executor,
-                    stage=timed_stage(d.metrics),
+                result = await _heartbeating(
+                    asyncio.create_task(
+                        finish_piece_stage(
+                            source,
+                            req.params,
+                            work,
+                            _process_output(main),
+                            config=self._config(prepared),
+                            paths=d.paths,
+                            slug=req.slug,
+                            thumbnail_executor=d.thumbnail_executor,
+                            stage=timed_stage(d.metrics),
+                        )
+                    )
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
@@ -622,6 +627,8 @@ class RenderActivities:
             try:
                 job = await asyncio.to_thread(p.read, projection.job_id)
             except JobNotFoundError:
+                # Gone (pruned): nothing to render into. Unlike the writes below, where
+                # a missing row lets the pipeline carry on, here False stops it.
                 return False
             return job.state == "running"
         if projection.state is None:

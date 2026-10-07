@@ -208,6 +208,7 @@ export const handlers = [
     const now = new Date().toISOString()
     const run: PrintRun = {
       id: `run-${nextNumber()}`,
+      subject: `library:${fileId}`,
       output_id: `library:${fileId}`,
       status: 'succeeded',
       created_at: now,

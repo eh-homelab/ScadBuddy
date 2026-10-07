@@ -527,7 +527,34 @@ describe('useRenderJob', () => {
         await vi.advanceTimersByTimeAsync(2_000)
       })
       expect(result.current.error).toBeUndefined()
-      expect(read.mock.calls.length).toBeLessThan(READ_RETRIES)
+      // At 0, then the backoff's 400 and 1200 ms: no 400 ms poll in between.
+      expect(read).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not read past a pending retry for events that came during the failed read (#1040)', async () => {
+      const read = vi.mocked(api.getJob)
+      mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      let fail!: (cause: Error) => void
+      read.mockImplementationOnce(
+        () =>
+          new Promise<Job>((_, reject) => {
+            fail = reject
+          }),
+      )
+      await realtime.signal(`job:${JOB_A}`)
+      await realtime.signal(`job:${JOB_A}`)
+      const before = read.mock.calls.length
+      await act(async () => {
+        fail(new ApiError(502, 'Bad Gateway'))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      // The event that came during the failed read waits for its backoff.
+      expect(read.mock.calls.length - before).toBe(0)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400)
+      })
+      expect(read.mock.calls.length - before).toBe(1)
     })
 
     it('gives up at once on a job that is gone, and offers try again (#1040)', async () => {

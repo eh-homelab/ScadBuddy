@@ -5,7 +5,7 @@
 A set of flat drink coasters with a pattern inlaid flush in a second colour:
 a geometric pattern, a monogram letter (a different one on each coaster if you
 like), a line of text, or your own SVG or PNG picture. An optional border ring
-takes a third colour. The set is laid out on one plate, with an optional
+takes a third colour. The set is laid out on one plate or more, with an optional
 recess underneath for a cork or felt pad and an optional holder the stack
 drops into.
 
@@ -21,19 +21,34 @@ the same file works unchanged on MakerWorld and in ScadBuddy.
 ## Print layout
 
 Coasters are laid out in a grid with `gap` mm between them, as many as fit the
-H2C plate (300 × 320 mm with both nozzles), in the squarest arrangement. If
-`count` coasters do not fit, the model places as many as do and logs
-`NOTE: only N coasters of M fit on the plate`; print the rest as a second
-plate. The holder, when on, does not take a grid cell: the coasters keep
+H2C plate (300 × 320 mm with both nozzles), in the squarest arrangement. A
+plate with more than one colour also leaves room for the prime tower:
+ScadBuddy reserves it against one edge (the 60 mm tower, its 3 mm brim each
+side, 5 mm to the parts and 2 mm to the edge), so the parts stay within
+227 × 320 or 300 × 247 mm (#1048). Six 95 mm coasters fit a plate with the
+tower, nine without it. Alternating colours count as a second colour even with
+no pattern, since every other body prints in the pattern colour. The tower is
+decided once for all the plates after the first, so a last plate holding a
+single unswapped coaster may still leave the strip free.
+
+If `count` coasters do not fit one plate, the rest go on more plates of the
+same 3MF (ScadBuddy's plate convention): the model echoes `plates = N`, and
+ScadBuddy renders plate k with `$plate = k`. Plate 1 takes as many as fit
+(with the holder, when on); each later plate takes as many as fit on their
+own. The log says `NOTE: 6 of 12 coasters fit on plate 1 with the prime
+tower; the rest are on plate 2`. Drawn all at once (`$plate = 0`, as in
+OpenSCAD itself), the later plates stand to the right of the bed.
+
+The holder, when on, does not take a grid cell: the coasters keep
 cells of their own size, and the holder (a few mm larger) goes beside the
 grid, below it, or in the empty end of the last row, whichever fits and is
-squarest. Eight 95 mm coasters with a holder fit seven on the plate (six in
-two rows of three, the seventh in a third row beside the holder); twelve
-70 mm coasters all fit, with the holder in a row below. When even one coaster
+squarest. Eight 95 mm coasters with a holder put five on plate 1 (two rows of
+two, the fifth in a third row beside the holder) and three on plate 2; twelve
+70 mm coasters put eleven on plate 1 the same way. When even one coaster
 and the holder do not fit side by side or one above the other with the gap (a
 150 mm coaster with a `gap` of 20: 150 + 20 + 156.8 mm is deeper than the
 plate, and side by side is wider), the one coaster sits above the holder with
-the gap cut to fit (`NOTE: gap reduced`).
+the gap cut to fit (`NOTE: gap reduced`), and the rest go on later plates.
 
 A Text pattern with empty `text`, or a Monogram with blank `letters`, gives
 plain coasters and logs a `NOTE:` saying so.
@@ -109,7 +124,7 @@ it cannot open the file and the coasters render without the picture.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `count` | `4` | Number of coasters, 1–12 (fewer if they do not fit the plate). |
+| `count` | `4` | Number of coasters, 1–12; those that do not fit plate 1 go on more plates. |
 | `gap` | `5` | Gap between parts on the plate, mm. |
 | `underside` | `plain` | `plain`, or `recess` for a cork or felt pad (prints face down). |
 | `recess_depth` | `2` | Recess depth, mm: 2 for 2 mm cork, 1 for felt. Capped so at least 1.2 mm is left above the inlay; when it is reduced (or, on a thin coaster with a deep inlay, dropped) the log says `NOTE: recess reduced ...`. |
@@ -156,14 +171,15 @@ one part and one filament. The defaults print in three colours.
 ./verify.sh
 ```
 
-Renders the defaults and 41 variations: every pattern (read from the
+Renders the defaults and 44 variations: every pattern (read from the
 dropdown, so a new one is tested automatically) cycling through the shapes, a
 cork recess on every shape, face-down text, per-coaster monograms with a
 holder and alternating colours, SVG and PNG overlays (including a `.PNG`
 upper-case extension picked up by `auto`, a forced threshold, the pre-#318 `image_threshold`
 value, inverted and face down), a missing overlay file, five refused `overlay_file` values
-(`../`, absolute, a subdirectory, a dotfile, a backslash), a set too large for
-the plate, twelve small coasters with a holder, eight 95 mm and twelve 70 mm
+(`../`, absolute, a subdirectory, a dotfile, a backslash), sets split across
+plates (twelve 150 mm coasters, twelve and seven at the defaults, twelve in one
+colour with no prime tower), twelve small coasters with a holder, eight 95 mm and twelve 70 mm
 coasters with a holder (#411), a recess reduced and a recess dropped because the
 coaster is too thin, and the finest pattern on the largest coaster. Each 3MF is
 checked for: no geometry on the `Default` material; exactly the expected
@@ -171,8 +187,10 @@ colour parts, each rendered closed on its own and summing to the whole (no
 overlaps); the plate split into its connected pieces, without re-deriving
 the grid (#422): one piece per coaster of a coaster's size and thickness,
 plus the holder, no two footprints closer than the gap (or the reduced gap
-the log gives), all inside the 300 × 320 plate on z = 0, and how many
-coasters fit for the #411 cases; every inlay
+the log gives), all inside the 300 × 320 plate on z = 0, leaving the prime
+tower's strip free on a multi-colour plate, and how many
+coasters fit for the #411 cases; each plate of a multi-plate set rendered with
+`$plate = k` as ScadBuddy renders it, and every coaster on exactly one plate; every inlay
 exactly `inlay_depth` deep and flush with the decorated face; the solid volume
 equal to outline × thickness minus the recess; refused overlay names never
 reaching `import()`/`surface()`; no OpenSCAD warnings or errors; the legacy `overlay_type="image_threshold"`

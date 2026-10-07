@@ -490,11 +490,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     // see the tool and cannot attempt it." (spec §3.1, permissions). Measured
     // for a plugin server's tools too (test/headlessBrowser.e2e.test.ts).
     options.disallowedTools = [...remote.disallowedTools, ...disallowedBrowserTools()]
-    // Measured on Claude Code 2.1.283: with `strictMcpConfig` a plugin's MCP
-    // servers are not started at all (the init message lists the plugin but no
-    // server). The option exists to ignore MCP configs from settings files,
-    // and `settingSources: []` already loads none: the e2e test plants a
-    // project `.mcp.json` in the session's cwd and asserts it is not started.
+    // Measured on Claude Code 2.1.283 and 2.1.287: with `strictMcpConfig` a
+    // plugin's MCP servers are not started at all (the init message lists the
+    // plugin but no server). The option exists to ignore MCP configs from
+    // settings files, and `settingSources: []` already loads none: the e2e test
+    // plants a project `.mcp.json` in the session's cwd and asserts it is not
+    // started.
     options.strictMcpConfig = false
   }
   if (run.systemPromptAppend !== undefined) {
