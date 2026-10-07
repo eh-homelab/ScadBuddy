@@ -7,7 +7,7 @@ import { bambuddyFrame } from './bambuddyFrame'
  * after the first paint), `traceparent` goes on the page's own requests and never on a
  * request to another origin (Bambuddy, Google Fonts). The mocked relay answers "off"
  * (`src/mocks/features/telemetry.ts`), which makes the page undo its instrumentation, so
- * each test holds the relay at `200` while it checks `traceparent`: otherwise the first
+ * each test answers the relay itself, tracing on (`answerRelay`): otherwise the first
  * export (about 5 s after the document-load span) could switch tracing off mid-assertion
  * and a cross-origin request would lack `traceparent` for that reason alone.
  */
@@ -17,7 +17,14 @@ test.describe('tracing', () => {
   // so the test lifts it to see what the instrumentation would have put on one.
   test.use({ bypassCSP: true })
 
-  const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
+  /** A `fetch` outside any action is a parentless CLIENT span: propagated, unsampled (spec §6). */
+  const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-00$/
+
+  interface RelayPost {
+    url: string
+    method: string
+    contentType: string | null
+  }
 
   /** The `traceparent` that `where`'s own `fetch(url)` was sent with (undefined: none). */
   async function sentWith(page: Page, where: Page | Frame, url: string): Promise<string | undefined> {
@@ -28,21 +35,37 @@ test.describe('tracing', () => {
   }
 
   /**
-   * Holds every post to the relay unanswered, so no off signal arrives, until
-   * `release()`; then they go on to the mocked relay. Call before the page loads.
+   * Answers every post to the relay in the page itself, at once, with a `204` and tracing
+   * on, and records it in `__relayPosts`. Not `page.route`: the msw service worker answers
+   * the relay (off) before a route sees it. Not left unanswered either: `RelayExporter`
+   * aborts a request after 10 s. Call before the page loads; it covers every frame.
    */
-  async function holdRelay(page: Page): Promise<() => void> {
-    let release: () => void = () => undefined
-    const released = new Promise<void>((resolve) => (release = resolve))
-    await page.route('**/telemetry/v1/traces', async (route) => {
-      await released
-      await route.fallback()
-    })
-    return release
+  async function answerRelay(page: Page): Promise<void> {
+    await page.addInitScript((path) => {
+      const posts: RelayPost[] = []
+      ;(globalThis as unknown as { __relayPosts: RelayPost[] }).__relayPosts = posts
+      const original = globalThis.fetch
+      // The page's `location`; this file is typed for Node, which has none.
+      const base = (globalThis as unknown as { location: URL }).location.href
+      globalThis.fetch = (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), base)
+        if (url.pathname !== path) return original(input, init)
+        posts.push({
+          url: url.href,
+          method: init?.method ?? (input instanceof Request ? input.method : 'GET'),
+          contentType: new Headers(init?.headers).get('content-type'),
+        })
+        return Promise.resolve(new Response(null, { status: 204 }))
+      }
+    }, '/telemetry/v1/traces')
+  }
+
+  function relayPosts(where: Page | Frame): Promise<RelayPost[]> {
+    return where.evaluate(() => (globalThis as unknown as { __relayPosts: RelayPost[] }).__relayPosts)
   }
 
   test('puts traceparent on same-origin requests only', async ({ page }) => {
-    await holdRelay(page)
+    await answerRelay(page)
     await page.goto('/')
     await expect(page.getByRole('heading', { name: 'Models' })).toBeVisible()
 
@@ -55,8 +78,7 @@ test.describe('tracing', () => {
 
   test("traces inside Bambuddy's sandboxed frame and exports to ScadBuddy's own origin", async ({ page, baseURL }) => {
     const origin = new URL('/', baseURL).origin
-    const release = await holdRelay(page)
-    const relay = page.waitForRequest((r) => r.url() === `${origin}/telemetry/v1/traces`, { timeout: 20_000 })
+    await answerRelay(page)
     const frame = await bambuddyFrame(page, baseURL, '/')
     await expect(frame.getByRole('heading', { name: 'Models' })).toBeVisible()
     const app = page.frames().find((f) => f.url().startsWith(origin))
@@ -68,12 +90,9 @@ test.describe('tracing', () => {
     expect(await sentWith(page, app, 'https://other-origin.test/x')).toBeUndefined()
     // And again on the frame's own origin, so the absence above is the origin's doing.
     expect(await sentWith(page, app, '/api/v1/models')).toMatch(TRACEPARENT)
-    // Now let the relay answer as the mock does, off.
-    release()
     // The document-load span's batch, flushed on the processor's schedule.
-    const posted = await relay
-    expect(posted.method()).toBe('POST')
-    expect(posted.headers()['content-type']).toBe('application/json')
-    expect((await posted.response())?.headers()['x-scadbuddy-tracing']).toBe('off')
+    await expect.poll(() => relayPosts(app).then((posts) => posts.length), { timeout: 20_000 }).toBeGreaterThan(0)
+    const [posted] = await relayPosts(app)
+    expect(posted).toEqual({ url: `${origin}/telemetry/v1/traces`, method: 'POST', contentType: 'application/json' })
   })
 })

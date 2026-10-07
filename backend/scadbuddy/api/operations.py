@@ -13,7 +13,10 @@ within the deadline.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
@@ -24,6 +27,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
+from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation, OperationAccepted
@@ -188,6 +192,16 @@ def _unavailable_detail(error: TemporalUnavailableError) -> str:
     return OPERATION_DOWN_DETAIL
 
 
+def _problem(
+    status_code: int, detail: str, title: str | None, type_: str, extensions: dict[str, Any]
+) -> ApiError:
+    """A recorded problem as the route raised it. Only its body is recorded, so a
+    ``retry_after`` it carries is its Retry-After header again."""
+    retry_after = extensions.get("retry_after")
+    headers = {"Retry-After": str(retry_after)} if isinstance(retry_after, int) else None
+    return ApiError(status_code, detail, title=title, type_=type_, headers=headers, **extensions)
+
+
 def _answer(
     op: Operation, response: Response, *, repeated: bool
 ) -> dict[str, Any] | OperationAccepted:
@@ -197,17 +211,60 @@ def _answer(
     if op.status == "failed":
         assert op.error is not None  # a failed operation records its problem
         error = op.error
-        raise ApiError(
-            error.status, error.detail, title=error.title, type_=error.type, **error.extensions
-        )
+        raise _problem(error.status, error.detail, error.title, error.type, error.extensions)
     response.status_code = status.HTTP_202_ACCEPTED
     return OperationAccepted(**op.model_dump(), repeated=repeated)
+
+
+#: The most an operation's request may carry inline: well under Temporal's 512 KB
+#: payload warning, since it is repeated in the start, check, insert and run inputs.
+MAX_REQUEST_BYTES = 128 * 1024
 
 
 def _author() -> OperationAuthor | None:
     """The request's agent author, for the run's commits (#252)."""
     author = current_author()
     return None if author is None else OperationAuthor(**vars(author))
+
+
+@dataclass(frozen=True)
+class Claimed:
+    """The claims a request wrote (``operations/claims.py``), released once its answer
+    is final (review 3c 1.2)."""
+
+    store: ClaimStore
+    held: list[Held]
+
+
+async def _release(ops: OperationCommands, claimed: Claimed) -> None:
+    """Release ``claimed``: what this request's puts created and nothing has put since,
+    and no operation still running names (another request holding the same bytes)."""
+    created = [held for held in claimed.held if held.created]
+    if not created:
+        return
+    running = await ops.store.named_by_running([held.name for held in created])
+    for held in created:
+        if held.name not in running:
+            await asyncio.to_thread(claimed.store.release, held)
+
+
+async def recorded(
+    ops: OperationCommands,
+    *,
+    kind: OperationKind,
+    subject: str,
+    request: BaseModel | dict[str, Any],
+    idempotency_key: str | None,
+) -> Operation | None:
+    """The operation a keyed request already started, which ``run_operation`` answers
+    from; None without a client key, since each such request is its own command."""
+    if idempotency_key is None:
+        return None
+    return await ops.store.find(operation_key(kind.name, subject, _body(request), idempotency_key))
+
+
+def _body(request: BaseModel | dict[str, Any]) -> dict[str, Any]:
+    return request.model_dump(mode="json") if isinstance(request, BaseModel) else request
 
 
 async def run_operation(
@@ -218,14 +275,55 @@ async def run_operation(
     subject: str,
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
+    claimed: Claimed | None = None,
 ) -> dict[str, Any] | OperationAccepted:
     """Run ``kind`` as an operation; its result body, or 202 with the operation.
-    A refusal or a recorded failure is raised as the problem the route answers with."""
+    A refusal or a recorded failure is raised as the problem the route answers with.
+    ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
+    the operation may still run."""
+    try:
+        result = await _run_operation(
+            ops,
+            response,
+            kind=kind,
+            subject=subject,
+            request=request,
+            idempotency_key=idempotency_key,
+        )
+    except ApiError as error:
+        if claimed is not None and error.status != status.HTTP_503_SERVICE_UNAVAILABLE:
+            await _release(ops, claimed)
+        raise
+    if claimed is not None and not (
+        isinstance(result, OperationAccepted) and result.status == "running"
+    ):
+        await _release(ops, claimed)
+    return result
+
+
+async def _run_operation(
+    ops: OperationCommands,
+    response: Response,
+    *,
+    kind: OperationKind,
+    subject: str,
+    request: BaseModel | dict[str, Any],
+    idempotency_key: str | None,
+) -> dict[str, Any] | OperationAccepted:
     if not idempotency_key:
         raise ApiError(
             status.HTTP_428_PRECONDITION_REQUIRED, KEY_REQUIRED_DETAIL, type_=KEY_REQUIRED_PROBLEM
         )
-    body = request.model_dump(mode="json") if isinstance(request, BaseModel) else request
+    body = _body(request)
+    size = len(json.dumps(body, separators=(",", ":")).encode())
+    if size > MAX_REQUEST_BYTES:
+        # The request rides in every input of the operation's history; past this it
+        # nears Temporal's payload limit, which would answer as a 503 every retry
+        # repeats (review 3c I2). Large bytes travel by claim instead.
+        raise ApiError(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"This request is {size} bytes; at most {MAX_REQUEST_BYTES} are accepted here.",
+        )
     key = operation_key(kind.name, subject, body, idempotency_key)
     recorded = await ops.store.find(key)
     if recorded is not None:
@@ -239,6 +337,7 @@ async def run_operation(
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
         author=_author(),
+        idempotency_key=idempotency_key,
     )
     try:
         answer = await start_command(
@@ -285,12 +384,8 @@ async def run_operation(
         ) from None
     if answer.refusal is not None:
         refusal = answer.refusal
-        raise ApiError(
-            refusal.status,
-            refusal.detail,
-            title=refusal.title,
-            type_=refusal.type,
-            **refusal.extensions,
+        raise _problem(
+            refusal.status, refusal.detail, refusal.title, refusal.type, refusal.extensions
         )
     assert answer.operation is not None  # the Update answers one or the other
     return _answer(answer.operation, response, repeated=answer.repeated)
@@ -308,6 +403,10 @@ def operation_answer[M: BaseModel](
 #: What a route that runs an operation documents beside its own answer.
 OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {"model": OperationAccepted, "description": "Still running: follow GET /operations/{id}"},
+    413: {
+        "description": f"The request, less what goes by claim, is past {MAX_REQUEST_BYTES} "
+        "bytes; nothing was started"
+    },
     428: {
         "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
         "description": f'`{KEY_REQUIRED_PROBLEM}`: "{KEY_REQUIRED_DETAIL}"',

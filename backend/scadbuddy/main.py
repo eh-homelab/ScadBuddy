@@ -41,6 +41,7 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
@@ -337,7 +338,15 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A crashed duplicate's staging otherwise waits for the next boot (#397).
         await _heartbeating(_sweep_duplicate_staging_logged(state, reraise=True))
 
-    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging]
+    @activity.defn(name=SWEEPS[4])
+    async def sweep_claims() -> None:
+        try:
+            await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
+        except Exception:
+            logger.exception("could not sweep operation claims")
+            raise
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims]
 
 
 async def _prepare_catalogue(state: AppState) -> None:

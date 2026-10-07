@@ -67,6 +67,7 @@ def operation_activities(
             workflow_id=info.workflow_id,
             workflow_run_id=info.workflow_run_id,
             retention=timedelta(seconds=retention) if retention is not None else None,
+            idempotency_key=op.idempotency_key,
         )
 
     @activity.defn(name=FINISH_ACTIVITY)

@@ -119,11 +119,11 @@ class ProjectingActivities(FakeActivities):
         await self._real.render_claims(job_id, claims)
 
     @activity.defn(name="project")
-    async def project(self, projection: Projection) -> None:
+    async def project(self, projection: Projection) -> bool:
         if projection.state == "running" and self.hold_running is not None:
             await self.hold_running.wait()
         await super().project(projection)
-        await self._real.project(projection)
+        return await self._real.project(projection)
 
 
 def _sample(metrics: Metrics, name: str) -> float:
@@ -555,7 +555,8 @@ async def test_a_refused_submit_supersedes_nothing(
             await _settled(projection, first.id)
         await service.aclose()
 
-    assert refused.value.depth == 1 and refused.value.retry_after >= 1
+    # No render has finished yet: the initial estimate (#603).
+    assert refused.value.depth == 1 and refused.value.retry_after == 10
     assert waiting.state == "pending" and waiting.claims == 1
     assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total") == 1
 
@@ -704,12 +705,14 @@ class FakePreview:
     def __init__(self) -> None:
         self.calls = 0
         self.revisions: list[str | None] = []
+        self.priorities: list[int | None] = []
         self.release = asyncio.Event()
 
     @activity.defn(name="render_preview_png")
     async def render_preview_png(self, slug: str, revision: str | None = None) -> bytes:
         self.calls += 1
         self.revisions.append(revision)
+        self.priorities.append(activity.info().priority.priority_key)
         await self.release.wait()
         return PNG + slug.encode()
 
@@ -748,6 +751,10 @@ async def test_a_preview_renders_on_the_worker_and_one_slug_runs_once(
 
     assert list(pngs) == [PNG + SLUG.encode()] * 2
     assert fake.calls == 1
+    # #603 (M5): previews share the render queue, so a boot-time pass of them must not
+    # hold user renders back. They run at a lower priority than a render's default.
+    assert fake.priorities == [submit_module.PREVIEW_PRIORITY]
+    assert submit_module.PREVIEW_PRIORITY > 3  # Temporal's default; higher numbers wait
 
 
 async def test_a_local_preview_after_a_source_edit_does_not_join_the_older_run(
@@ -1108,10 +1115,11 @@ class _HeldDone(ProjectingActivities):
         self.release = release
 
     @activity.defn(name="project")
-    async def project(self, projection: Projection) -> None:
-        await super().project(projection)
+    async def project(self, projection: Projection) -> bool:
+        open_row = await super().project(projection)
         if projection.state == "done":
             await self.release.wait()
+        return open_row
 
 
 async def test_a_release_after_the_render_finished_cancels_nothing(
@@ -1914,3 +1922,19 @@ async def test_a_start_still_accepting_counts_as_pending_not_as_an_error(
     sample = service.metrics.registry.get_sample_value
     assert sample("scadbuddy_render_store_errors_total", {"operation": "start_workflow"}) == 0
     assert sample("scadbuddy_render_accept_pending_total") == 1
+
+
+async def test_retry_after_is_how_long_renders_take_now(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#603: a full queue's `Retry-After` follows the recent renders' median, rounded up,
+    and falls back to the initial estimate until one has finished."""
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        monkeypatch.setattr(projection, "recent_render_seconds", lambda: None)
+        assert await service.retry_after() == 10
+        monkeypatch.setattr(projection, "recent_render_seconds", lambda: 42.2)
+        assert await service.retry_after() == 43
+        monkeypatch.setattr(projection, "recent_render_seconds", lambda: 0.2)
+        assert await service.retry_after() == 1
+        await service.aclose()

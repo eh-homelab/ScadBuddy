@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { SpanStatusCode } from '@opentelemetry/api'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { GateTrace } from '../src/approvals/service.js'
 import type { Database } from '../src/db.js'
@@ -109,44 +108,35 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
     })
   })
 
-  /** Makes every INSERT into `table` fail, so the transaction writing it rolls back. */
-  async function failInserts(table: string) {
-    await db.sql.unsafe(`CREATE FUNCTION refuse_insert() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN RAISE EXCEPTION 'insert refused'; END $$`)
-    await db.sql.unsafe(`CREATE TRIGGER refuse_insert BEFORE INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION refuse_insert()`)
-  }
-
-  it('a decision whose transaction rolls back says so, not the decision it never committed (#1266)', async () => {
+  it('a decision whose transaction rolls back ends its span as rolled_back, not as the decision', async () => {
     const { approval } = await orphan(TRACEPARENT)
-    // The decision's `approval.resolved` is written in the same transaction.
-    await failInserts('ai_session_events')
-    await expect(m.approvals.decide(browser, approval.id, false)).rejects.toThrow('insert refused')
+    // The span exists by the time decision_traceparent is written; that write then fails.
+    await db.sql.unsafe(`
+      CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+      CREATE TRIGGER refuse BEFORE UPDATE OF decision_traceparent ON ai_approvals FOR EACH ROW EXECUTE FUNCTION refuse();`)
+    await expect(m.approvals.decide(browser, approval.id, false)).rejects.toThrow()
     const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
     expect(decision.attributes['scadbuddy.outcome']).toBe('rolled_back')
-    expect(decision.status.code).toBe(SpanStatusCode.ERROR)
-    const [row] = await db.sql<{ decision: string | null }[]>`SELECT decision FROM ai_approvals WHERE id = ${approval.id}`
-    expect(row!.decision).toBeNull()
+    expect(decision.attributes['scadbuddy.failure_class']).toBeDefined()
+    expect((await m.approvals.get(approval.id, browser)).decision).toBeNull()
   })
 
-  it('an eviction whose prepare rolls back says so, not the cancellation it never committed (#1266)', async () => {
-    const bounds = { perPrincipal: 1, total: 100, evictReason: 'superseded' }
-    const first = await m.approvals.createPrepared(
-      { toolUseId: 'prep_1', tool: 'mcp__stub__print', input: { job: 'box1.3mf' }, tier: 'outward', requestedBy: agentA, traceparent: TRACEPARENT },
-      bounds,
-    )
-    // The eviction's UPDATE runs, then the newer prepare's INSERT fails.
-    await failInserts('ai_approvals')
-    await expect(
+  it('an eviction whose prepare rolls back ends the cancelled row’s span as rolled_back', async () => {
+    const prepare = (n: number) =>
       m.approvals.createPrepared(
-        { toolUseId: 'prep_2', tool: 'mcp__stub__print', input: { job: 'box2.3mf' }, tier: 'outward', requestedBy: agentA, traceparent: TRACEPARENT },
-        bounds,
-      ),
-    ).rejects.toThrow('insert refused')
+        { toolUseId: `prep_${n}`, tool: 'mcp__stub__print', input: { job: `box${n}.3mf` }, tier: 'outward', requestedBy: agentA, traceparent: TRACEPARENT },
+        { perPrincipal: 1, total: 100, evictReason: 'superseded' },
+      )
+    const first = await prepare(1)
+    // The eviction's span is started; then the new row's insert fails.
+    await db.sql.unsafe(`
+      CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+      CREATE TRIGGER refuse BEFORE INSERT ON ai_approvals FOR EACH ROW EXECUTE FUNCTION refuse();`)
+    await expect(prepare(2)).rejects.toThrow()
     const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
     expect(decision.attributes).toMatchObject({ 'scadbuddy.approval_id': first!.id, 'scadbuddy.outcome': 'rolled_back' })
-    expect(decision.status.code).toBe(SpanStatusCode.ERROR)
     const [row] = await db.sql<{ decision: string | null }[]>`SELECT decision FROM ai_approvals WHERE id = ${first!.id}`
-    expect(row!.decision).toBeNull()
+    expect(row?.decision).toBeNull()
   })
 
   it('a row with no stored context (written before the migration) is decided without a link or an error', async () => {

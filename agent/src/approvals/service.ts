@@ -449,12 +449,6 @@ export type RevokeFilter = {
 }
 
 /**
- * `scadbuddy.outcome` of a decision span whose transaction rolled back: the
- * outcome it was started with was never committed (#1266).
- */
-const ROLLED_BACK = 'rolled_back'
-
-/**
  * The decision's own trace (spec 2026-10-01 §5.4): a principal's decision is a
  * child of the request that made it; an expiry or a cancellation, which no one
  * asked for, is a root. Either way it links to the parked call's span.
@@ -709,8 +703,7 @@ export class ApprovalService {
     // `running`) before the event that reports it is in the log.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
     // Started only once the UPDATE has won, so a lost race leaves no span.
-    const traced: { span?: Span } = {}
-    let committed = false
+    const traced: { span?: Span; committed?: boolean } = {}
     try {
       const approval = await this.deps.sql.begin(async (tx) => {
         const [row] = await tx.unsafe<Row[]>(
@@ -746,7 +739,7 @@ export class ApprovalService {
         }
         return settled
       })
-      committed = true
+      traced.committed = true
       if (!approval) return undefined
       // Committed: wake followers, and announce it on the bus (#300).
       if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
@@ -756,8 +749,8 @@ export class ApprovalService {
     } catch (err) {
       if (traced.span) {
         recordFailure(traced.span, err)
-        // The span was started with the decision; a rollback undid it (#1266).
-        if (!committed) traced.span.setAttribute('scadbuddy.outcome', ROLLED_BACK)
+        // The span says the decision; a rollback means nothing was decided.
+        if (!traced.committed) traced.span.setAttribute('scadbuddy.outcome', 'rolled_back')
       }
       throw err
     } finally {
@@ -1106,10 +1099,10 @@ export class ApprovalService {
       })
       return row ? record(row) : undefined
     } catch (err) {
-      // The transaction rolled back, cancellations and all (#1266).
+      // Only the transaction can throw here, and it rolled the cancellations back.
       for (const span of evicted) {
         recordFailure(span, err)
-        span.setAttribute('scadbuddy.outcome', ROLLED_BACK)
+        span.setAttribute('scadbuddy.outcome', 'rolled_back')
       }
       throw err
     } finally {
