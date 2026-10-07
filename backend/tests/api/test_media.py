@@ -218,6 +218,47 @@ def test_a_thumbnail_is_a_small_copy_of_the_image(client: TestClient, model: str
         assert small.size == (192, 144)
 
 
+def test_a_card_thumbnail_is_larger_but_still_bounded(client: TestClient, model: str) -> None:
+    """#1034: a catalogue card's cover, not the 6651x4988 original."""
+    original = _real_image((3000, 2000), "PNG")
+    item = _upload(client, model, original).json()["media"][0]
+
+    card = client.get(_thumbnail_url(model, item["id"]) + "&size=card")
+    strip = client.get(_thumbnail_url(model, item["id"]) + "&size=strip")
+
+    assert card.status_code == strip.status_code == 200, card.text
+    assert card.headers["content-type"] == "image/webp"
+    assert "immutable" in card.headers["cache-control"]
+    with Image.open(io.BytesIO(card.content)) as large:
+        assert large.size == (800, 533)
+    with Image.open(io.BytesIO(strip.content)) as small:
+        assert small.size == (192, 128)
+
+
+def test_a_card_and_a_strip_thumbnail_are_kept_apart(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((1600, 1200), "PNG"))
+    url = _thumbnail_url(model, "thumbnail")
+
+    strip = client.get(url)
+    card = client.get(url + "&size=card")
+    # The strip's tag does not stand for the card's copy.
+    again = client.get(url + "&size=card", headers={"If-None-Match": strip.headers["etag"]})
+
+    assert strip.headers["etag"] != card.headers["etag"]
+    assert again.status_code == 200
+    with Image.open(io.BytesIO(again.content)) as large:
+        assert large.size == (800, 600)
+
+
+def test_an_unknown_thumbnail_size_is_refused(client: TestClient, model: str) -> None:
+    item = _upload(client, model, PNG).json()["media"][0]
+
+    assert client.get(_thumbnail_url(model, item["id"]) + "&size=huge").status_code == 422
+
+
 def test_a_videos_thumbnail_is_its_poster_shrunk(client: TestClient, model: str) -> None:
     item = _upload(client, model, WEBM, poster=_real_image((800, 600), "JPEG")).json()["media"][0]
 
@@ -388,12 +429,12 @@ def test_the_legacy_etag_is_of_the_file_served_when_it_is_replaced_mid_request(
     old = media_api._legacy_etag(legacy.stat())
     real = media_api._thumbnail_of
 
-    def replaced_first(path: Path, content_type: str) -> Any:
+    def replaced_first(path: Path, content_type: str, side: int) -> Any:
         # As a thumbnail PUT does: a new file renamed over the old one.
         staged = legacy.with_name("thumbnail.png.tmp")
         staged.write_bytes(_real_image((300, 400), "PNG"))
         os.replace(staged, legacy)
-        return real(path, content_type)
+        return real(path, content_type, side)
 
     monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", replaced_first)
     response = client.get(_thumbnail_url(model, "thumbnail"))
@@ -412,9 +453,9 @@ def test_a_legacy_file_deleted_mid_request_is_a_404(
     legacy.write_bytes(_real_image((400, 300), "PNG"))
     real = media_api._thumbnail_of
 
-    def deleted_first(path: Path, content_type: str) -> Any:
+    def deleted_first(path: Path, content_type: str, side: int) -> Any:
         legacy.unlink()
-        return real(path, content_type)
+        return real(path, content_type, side)
 
     monkeypatch.setattr("scadbuddy.api.media._thumbnail_of", deleted_first)
     response = client.get(_thumbnail_url(model, "thumbnail"))
@@ -430,7 +471,7 @@ def test_a_file_deleted_after_it_is_opened_is_still_served_whole(
     original = _real_image((400, 300), "PNG")
     legacy.write_bytes(original)
 
-    def deleted_undecoded(file: IO[bytes]) -> bytes | None:
+    def deleted_undecoded(file: IO[bytes], side: int) -> bytes | None:
         legacy.unlink()
         return None
 
@@ -450,7 +491,7 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
     running = 0
     most = 0
 
-    def slow(file: IO[bytes]) -> bytes | None:
+    def slow(file: IO[bytes], side: int) -> bytes | None:
         nonlocal running, most
         with lock:
             running += 1
@@ -475,9 +516,9 @@ def _counting_decodes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     real = media_api._shrink
     decoded = [0]
 
-    def counting(file: IO[bytes]) -> bytes | None:
+    def counting(file: IO[bytes], side: int) -> bytes | None:
         decoded[0] += 1
-        return real(file)
+        return real(file, side)
 
     monkeypatch.setattr("scadbuddy.api.media._shrink", counting)
     return decoded
@@ -527,7 +568,7 @@ def test_a_thumbnail_served_as_it_is_is_not_kept(
     item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
     decoded = 0
 
-    def undecodable(file: IO[bytes]) -> bytes | None:
+    def undecodable(file: IO[bytes], side: int) -> bytes | None:
         nonlocal decoded
         decoded += 1
         return None
