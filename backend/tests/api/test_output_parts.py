@@ -22,6 +22,7 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import ArrangeInputs, PackItem, PlateSize
 from tests.support.arrange import finished_job
+from tests.support.operations import press
 from tests.support.store import store_pool
 
 Pool = ConnectionPool[Connection[DictRow]]
@@ -101,7 +102,7 @@ def test_deleting_the_model_releases_every_output_s_parts(
     job_id, _ = finished(app, tmp_path)
     first, second = save(client, job_id), save(client, job_id)
     assert {holder for _, holder in held(pool)} == {first, second}
-    assert client.delete("/api/v1/models/demo").status_code == 204
+    assert client.delete("/api/v1/models/demo", headers=press()).status_code == 204
     assert held(pool) == set()
 
 
