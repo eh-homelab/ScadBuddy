@@ -346,5 +346,6 @@ async def update_accepted(
             return
         if time.monotonic() >= deadline:
             pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
             raise AssertionError("the Update was never accepted")
         await asyncio.sleep(0.05)
