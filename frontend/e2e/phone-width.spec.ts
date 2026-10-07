@@ -106,6 +106,10 @@ test.describe('model lists at 390 px (#1036)', () => {
     expect(await sidewaysScrollers(page)).toEqual([])
     expect((await versions.boundingBox())!.width).toBeLessThanOrEqual(390)
     await expect(versions.getByText('current', { exact: true })).toBeInViewport({ ratio: 1 })
+    // Its options are whole commit messages, so the Compare select is as wide as the longest.
+    const changes = (await page.locator('section', { has: page.getByRole('heading', { name: 'Changes' }) }).boundingBox())!
+    const compare = (await page.getByLabel('Compare with').boundingBox())!
+    expect(compare.x + compare.width).toBeLessThanOrEqual(changes.x + changes.width + 0.5)
   })
 
   test('History keeps a changed value beside its long caption on screen', async ({ page }) => {
