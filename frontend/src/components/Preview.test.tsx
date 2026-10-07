@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Job } from '../api/types'
+import type { Diagnostic, Job, Plate } from '../api/types'
 import { CANCELLED_ERROR, JOB_WARNINGS, TEMPLATE_NOTES } from '../mocks/fixtures'
 import { Preview, type PreviewCapture } from './Preview'
 
@@ -250,5 +250,107 @@ describe('Preview', () => {
       />,
     )
     expect(screen.queryByTestId('render-warnings')).not.toBeInTheDocument()
+  })
+})
+
+const H2C = { model: 'H2C', name: 'H2C', size: [330, 320], height: 325 } as unknown as Plate
+const OPENSCAD_WARNING: Diagnostic = {
+  severity: 'warning',
+  message: 'module cube() does not support child modules',
+  file: 'model.scad',
+  line: 6,
+}
+
+/** jsdom lays nothing out: every box reads as `width` × `height`, as a preview that size would. */
+function previewSized(width: number, height: number) {
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(
+    DOMRect.fromRect({ x: 0, y: 0, width, height }),
+  )
+}
+
+describe('Preview overlays on a short preview (#1743, #1744)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('keeps the full readouts on a preview with room for them', () => {
+    previewSized(1080, 582)
+    render(<Preview job={job({})} rendering={false} plate={H2C} />)
+    expect(screen.getByTestId('preview')).toHaveClass('overflow-hidden')
+    expect(screen.getByTestId('plate-badge')).toHaveTextContent('H2C · 330 × 320 mm plate')
+    expect(within(screen.getByTestId('bbox-readout')).getByText('Bounding box')).toBeVisible()
+  })
+
+  it('shrinks the plate badge and the bounding box to one-line chips below 200 px tall', () => {
+    previewSized(390, 120)
+    render(<Preview job={job({ plates: [{}, {}] as Job['plates'] })} rendering={false} plate={H2C} />)
+    expect(screen.getByTestId('plate-badge')).toHaveTextContent(/^330 × 320 mm$/)
+    const bbox = screen.getByTestId('bbox-readout')
+    expect(bbox).toHaveTextContent('10.0 × 10.0 × 5.0 mm')
+    expect(bbox).toHaveTextContent('2 plates')
+    // Named for a screen reader, but not drawn as a heading.
+    expect(bbox).toHaveAccessibleName('Bounding box')
+    expect(within(bbox).queryByText('Bounding box')).not.toBeInTheDocument()
+  })
+
+  it('compacts a preview narrower than 360 px, however tall', () => {
+    previewSized(340, 600)
+    render(<Preview job={job({})} rendering={false} plate={H2C} />)
+    expect(screen.getByTestId('plate-badge')).toHaveTextContent(/^330 × 320 mm$/)
+  })
+
+  it('folds the notes and warnings into one chip on a short preview, which opens them', () => {
+    previewSized(390, 120)
+    render(
+      <Preview
+        job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS, diagnostics: [OPENSCAD_WARNING] })}
+        rendering={false}
+        sourceLink={<a href="/m/name-puzzle/source">Edit source</a>}
+      />,
+    )
+    expect(screen.queryByRole('region', { name: 'Notes from the template' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Render warnings' })).not.toBeInTheDocument()
+
+    const chip = screen.getByRole('button', { name: '2 warnings · 2 notes' })
+    expect(chip).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(chip)
+    expect(chip).toHaveAttribute('aria-expanded', 'true')
+
+    const notes = screen.getByRole('region', { name: 'Notes from the template' })
+    expect(within(notes).getAllByRole('listitem').map((item) => item.textContent)).toEqual(TEMPLATE_NOTES)
+    expect(screen.getByRole('region', { name: 'Render warnings' })).toHaveTextContent(JOB_WARNINGS[0]!)
+    const openscad = screen.getByRole('region', { name: 'OpenSCAD warnings' })
+    expect(within(openscad).getByRole('link', { name: 'Edit source' })).toHaveAttribute(
+      'href',
+      '/m/name-puzzle/source',
+    )
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(chip).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('region', { name: 'Notes from the template' })).not.toBeInTheDocument()
+    expect(chip).toHaveFocus()
+  })
+
+  it('names a chip of notes alone by its notes', () => {
+    previewSized(390, 120)
+    render(<Preview job={job({ notes: TEMPLATE_NOTES.slice(0, 1) })} rendering={false} />)
+    expect(screen.getByRole('button', { name: '1 note' })).toBeInTheDocument()
+  })
+
+  it('folds the panels into the chip when together they would take over a third of the preview', () => {
+    previewSized(920, 385)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(180)
+    render(<Preview job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS })} rendering={false} />)
+    expect(screen.queryByRole('region', { name: 'Notes from the template' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '1 warning · 2 notes' })).toBeInTheDocument()
+  })
+
+  it('leaves the panels open when they fit, and lets a drag over them reach the scene', () => {
+    previewSized(1080, 582)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(120)
+    render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
+    const notes = screen.getByRole('region', { name: 'Notes from the template' })
+    expect(notes).toHaveClass('pointer-events-none')
+    expect(screen.queryByRole('button', { name: /notes?$/ })).not.toBeInTheDocument()
   })
 })

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import shutil
 import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest import mock
 
 import pytest
@@ -15,6 +16,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from trimesh.creation import box
 
+from scadbuddy.bambuddy.client import DEFAULT_UPLOAD_TIMEOUT
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.assets import AssetStore
@@ -40,6 +42,7 @@ from scadbuddy.store.snapshots import (
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PieceRequest, piece_key
 from tests.conftest import write_openscad_3mf
+from tests.support.openscad import install_fake_openscad
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
@@ -106,7 +109,8 @@ async def test_prepare_on_a_worker_without_history_uses_the_materialized_snapsho
     await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
     worker_paths = DataPaths(tmp_path / "worker")
     deps = WorkerDeps(
-        config=Config(data_dir=tmp_path / "worker"),
+        # `prepare` derives the schema (phase 4): the fake openscad answers for it.
+        config=install_fake_openscad(tmp_path, worker_paths),
         paths=worker_paths,
         assets=AssetStore(tmp_path / "worker" / "assets"),
         blobs=LocalBlobStore(tmp_path / "worker" / "blobs"),
@@ -428,7 +432,7 @@ async def test_a_slow_first_pin_stops_the_request_waiting_and_stores_behind_it(
 
 
 async def test_a_store_done_as_the_pin_times_out_reports_its_own_outcome(
-    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, content: ContentStore
 ) -> None:
     """#1419 review: `wait_for` can time out after the store finished. A store that
     succeeded is the revision, not a 503; one that failed is its own error (a full
@@ -442,8 +446,7 @@ async def test_a_store_done_as_the_pin_times_out_reports_its_own_outcome(
         await real_wait_for(awaitable, 5)  # the store finishes...
         raise TimeoutError  # ...and the wait reports a timeout anyway
 
-    monkeypatch.setattr(snapshots_module, "_wait", late)
-    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1)
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1, wait=late)
     assert await api.pin("demo", rev) == rev
 
     async def full(*args: object, **kwargs: object) -> object:
@@ -453,6 +456,105 @@ async def test_a_store_done_as_the_pin_times_out_reports_its_own_outcome(
     _export(api_paths, "b2" * 20)
     with pytest.raises(StoreFullError):
         await api.pin("demo", "b2" * 20)
+
+
+async def _gives_up(awaitable: Any, timeout: float | None) -> Any:
+    """A pin's wait that runs out at once, as `wait_for` does: the shield is cancelled."""
+    asyncio.ensure_future(awaitable).cancel()
+    raise TimeoutError
+
+
+async def test_pins_of_a_revision_still_storing_join_its_one_store(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1435: each timed-out pin used to start one more store, queued on the key's lock
+    behind the stalled one. A retry joins the store already running instead."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "c3" * 20
+    _export(api_paths, rev)
+    gate = _gated(content)
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up)
+    for _ in range(3):
+        with pytest.raises(SnapshotPendingError):
+            await api.pin("demo", rev)
+    behind = set(api._storing)
+    assert len(behind) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*behind), 5)
+    assert content.index.get(snapshot_key("demo", rev)) is not None
+
+
+async def test_retry_after_grows_with_the_time_a_store_has_taken(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1436: an upload can take far longer than `pin_timeout`, so a fixed hint sends
+    the client back for one 503 after another. The hint is as long as the store has
+    run, at least `pin_timeout` and at most the upload's own timeout."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "d4" * 20
+    _export(api_paths, rev)
+    gate = _gated(content)
+    now = [1000.0]
+    api = SnapshotStore(
+        content, api_paths, history=None, pin_timeout=30, wait=_gives_up, clock=lambda: now[0]
+    )
+    hints = []
+    for later in (0, 100, 10_000):
+        now[0] = 1000.0 + later
+        with pytest.raises(SnapshotPendingError) as raised:
+            await api.pin("demo", rev)
+        hints.append(raised.value.retry_after)
+    assert hints == [30, 100, math.ceil(DEFAULT_UPLOAD_TIMEOUT)]
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing), 5)
+
+
+async def test_stores_of_different_revisions_run_a_few_at_a_time(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1436: a pin that stops waiting leaves its store running, so the preview pass
+    could otherwise have every template uploading to Bambuddy at once."""
+    api_paths = DataPaths(tmp_path / "api")
+    revs = ["e5" * 20, "f6" * 20]
+    for rev in revs:
+        _export(api_paths, rev)
+    put = content.put
+    gate = asyncio.Event()
+    entered: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+    uploading = 0
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        nonlocal uploading
+        entered[uploading].set()
+        uploading += 1
+        await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up, max_stores=1)
+    queued = asyncio.Event()
+    acquire = api._stores.acquire
+
+    async def acquiring() -> Literal[True]:
+        if api._stores.locked():
+            queued.set()  # this store waits its turn
+        return await acquire()
+
+    api._stores.acquire = acquiring  # type: ignore[method-assign]
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", revs[0])
+    await asyncio.wait_for(entered[0].wait(), 5)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", revs[1])
+    second = asyncio.ensure_future(entered[1].wait())
+    turn = asyncio.ensure_future(queued.wait())
+    await asyncio.wait_for(asyncio.wait({second, turn}, return_when="FIRST_COMPLETED"), 5)
+    assert queued.is_set()
+    assert not entered[1].is_set()
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing), 5)
+    second.cancel()
+    assert all(content.index.get(snapshot_key("demo", rev)) is not None for rev in revs)
 
 
 async def test_a_caller_gone_mid_pin_leaves_the_store_running(

@@ -31,9 +31,9 @@ interface Props {
    */
   rendered?: { colors: string[]; params: ParamValues }
   /**
-   * #971 — on a short stacked window the page scrolls, so the list takes its full
-   * height rather than scrolling in a box. Off where the panel has a height of its own
-   * (the full-screen flyout).
+   * #971 — on a short stacked window (and #1741 at a phone's width) the page scrolls, so
+   * the list takes its full height rather than scrolling in a box. Off where the panel
+   * has a height of its own (the full-screen flyout).
    */
   growsWithPage?: boolean
 }
@@ -151,7 +151,7 @@ export function ParameterPanel({
         })}
       </div>
 
-      <div className={`min-h-0 flex-1 overflow-y-auto ${growsWithPage ? 'short:flex-none' : ''}`}>
+      <div className={`min-h-0 flex-1 overflow-y-auto ${growsWithPage ? 'short:flex-none phone:flex-none' : ''}`}>
         {globalGroup && (
           <div className="border-b border-line bg-surface-2/40">
             <ul className="divide-y divide-line/60">

@@ -1,6 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  ArrangeRequest,
   Asset,
+  BackfillState,
   AssetUsage,
   RenderAccepted,
   StoreUsage,
@@ -15,7 +17,9 @@ import type {
   LastProject,
   CatalogueLibrary,
   InvalidLibraryEntry,
+  ManifestObject,
   MediaView,
+  NeedsBackfillProblem,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -111,6 +115,12 @@ const state = {
   headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
+  /** spec 2026-09-27 §7 — what each arrange job was built from, read when it is saved. */
+  arranged: new Map<string, { sources: string[]; manifest: ManifestObject[] }>(),
+  /** #902 — finished re-renders a read has seen once: the next read attaches them. */
+  backfillsSeen: new Set<string>(),
+  /** The last `POST /outputs/arrange` body, for tests to read back. */
+  lastArrange: null as ArrangeRequest | null,
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
   /** #313 — per library-file choices, the store's `library_print_choices`. */
@@ -134,6 +144,8 @@ const state = {
   mergeFiles: {} as Record<string, MergeFiles>,
   /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
   plates: {} as Record<string, NonNullable<Job['plates']>>,
+  /** A template pipeline's outputs on every finished render of a slug; none unless set. */
+  jobOutputs: {} as Record<string, NonNullable<Job['outputs']>>,
   renderColors: {} as Record<string, string[]>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
@@ -210,19 +222,42 @@ function runJob(jobId: string): void {
       job.bbox_mm = bboxOf(job.params ?? {})
       job.colors = state.renderColors[job.slug] ?? colorsOf(job.slug, job.params ?? {})
       job.plates = state.plates[job.slug] ?? []
+      if (state.jobOutputs[job.slug]) job.outputs = state.jobOutputs[job.slug]
       job.preview_url = `${base}/jobs/${job.id}/preview.glb`
       job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
-      job.notes =
-        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME
-          ? fixtures.TEMPLATE_NOTES
-          : []
-      job.warnings =
-        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME
-          ? fixtures.JOB_WARNINGS
-          : []
+      const name = String(job.params?.['name'] ?? '').toLowerCase()
+      const crowded = name === fixtures.CROWDED_NAME
+      job.notes = name === fixtures.NOTED_NAME || crowded ? fixtures.TEMPLATE_NOTES : []
+      job.warnings = name === fixtures.WARNED_NAME || crowded ? fixtures.JOB_WARNINGS : []
+      job.diagnostics = crowded ? fixtures.CROWDED_DIAGNOSTICS : []
       announce('job.done')
     }, MOCK_JOB_STEP_MS)
   }, MOCK_JOB_STEP_MS)
+}
+
+/** Arrange's refusal of outputs saved before it existed (`api/outputs.py`). */
+const NEEDS_BACKFILL_PROBLEM = 'https://scadbuddy.dev/problems/needs-backfill'
+
+/**
+ * #902 — a read of an output whose re-render has ended: done (from the second read on),
+ * it gains the objects the render recorded and drops the marker; failed or cancelled, the marker says why.
+ */
+function settleBackfill(output: Output): Output {
+  const pending = output.backfill
+  if (!pending || pending.error) return output
+  const job = state.jobs.get(pending.job_id)
+  if (!job) {
+    output.backfill = { ...pending, error: `the re-render ${pending.job_id} is gone` }
+  } else if (job.status === 'done' && !state.backfillsSeen.has(job.id)) {
+    // The API attaches on its next reconcile pass, not as the job ends: one read waits.
+    state.backfillsSeen.add(job.id)
+  } else if (job.status === 'done') {
+    output.manifest = fixtures.backfilledManifest(output.slug, output.colors ?? [])
+    output.backfill = null
+  } else if (job.status === 'failed' || job.status === 'cancelled') {
+    output.backfill = { ...pending, error: job.error ?? `the re-render was ${job.status}` }
+  }
+  return output
 }
 
 /** Reset every mutable fixture. Call between tests. */
@@ -243,6 +278,9 @@ export function resetMockState(): void {
   state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
+  state.arranged.clear()
+  state.backfillsSeen.clear()
+  state.lastArrange = null
   state.modelChoices = {}
   state.libraryChoices = {}
   state.printerBedTypes = {}
@@ -257,6 +295,7 @@ export function resetMockState(): void {
   state.assets.clear()
   state.mergeFiles = {}
   state.plates = {}
+  state.jobOutputs = {}
   state.renderColors = {}
   state.mediaFiles.clear()
   state.pulledTimelapses.clear()
@@ -318,6 +357,11 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
   state.plates[slug] = plates
 }
 
+/** Every finished render of `slug` reports these outputs, as a template's pipeline does. */
+export function setMockJobOutputs(slug: string, outputs: NonNullable<Job['outputs']>): void {
+  state.jobOutputs[slug] = outputs
+}
+
 /**
  * #938 — the colours every finished render of `slug` reports, in extruder order, as a
  * template whose geometry leaves a colour parameter unused (or hard-codes one) would.
@@ -375,6 +419,11 @@ export function mockOutput(id: string): Output | undefined {
 
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
+}
+
+/** The body of the last `POST /outputs/arrange`, or null when none was sent. */
+export function lastArrangeRequest(): ArrangeRequest | null {
+  return state.lastArrange
 }
 
 function initialSourceAt(): Record<string, string> {
@@ -2491,6 +2540,75 @@ export const handlers = [
     return HttpResponse.arrayBuffer(bytes.buffer, { headers: { 'Content-Type': sample.type } })
   }),
 
+  // spec 2026-09-27 §7 / §10 — Arrange refuses what the API refuses, then finishes at
+  // once. Its plates are what the writer reports: `plates` lists every plate of the
+  // new file and is empty when there is one. The mock's packer: more than four copies
+  // take a second plate.
+  http.post(`${base}/outputs/arrange`, async ({ request }) => {
+    const body = (await request.json()) as ArrangeRequest
+    state.lastArrange = body
+    // #902 — every output saved before Arrange, named at once, as the API does.
+    const chosen = [...new Set(body.objects.map((o) => o.output_id))]
+    const missing = chosen.find((id) => !state.outputs.some((o) => o.id === id))
+    if (missing) return problem(404, 'Not Found', `no output with id '${missing}'`)
+    const unrecorded = chosen.filter(
+      (id) => (state.outputs.find((o) => o.id === id)?.manifest ?? []).length === 0,
+    )
+    if (unrecorded.length > 0) {
+      return HttpResponse.json(
+        {
+          type: NEEDS_BACKFILL_PROBLEM,
+          title: 'Conflict',
+          status: 409,
+          detail: `${unrecorded.length} output(s) were saved before Arrange existed, so nothing records their objects; re-render them (POST /outputs/{id}/backfill) to arrange them`,
+          instance: null,
+          code: 'needs_backfill',
+          output_ids: unrecorded,
+        } satisfies NeedsBackfillProblem,
+        { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    }
+    const manifest: ManifestObject[] = []
+    for (const object of body.objects) {
+      const source = state.outputs.find((o) => o.id === object.output_id)
+      if (!source) return problem(404, 'Not Found', `no output with id '${object.output_id}'`)
+      const entry = (source.manifest ?? []).find((m) => m.part === object.part)
+      if (!entry) {
+        return problem(422, 'Unprocessable Content', `output ${source.id} has no object ${object.part}`)
+      }
+      if (object.count > 0) {
+        manifest.push({ ...entry, count: object.count, source_output: entry.source_output ?? source.id })
+      }
+    }
+    if (manifest.length === 0) {
+      return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
+    }
+    const first = state.outputs.find((o) => o.id === body.objects[0]?.output_id)
+    if (!first?.bbox_mm) return problem(409, 'Conflict', 'the output has no dimensions')
+    const colors = body.colours ?? first.colors ?? []
+    const copies = manifest.reduce((sum, m) => sum + m.count, 0)
+    const bbox = first.bbox_mm
+    const jobId = nextHexId()
+    const job: Job = {
+      id: jobId,
+      slug: first.slug,
+      status: 'done',
+      created_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      params: {},
+      log_tail: [],
+      bbox_mm: bbox,
+      colors,
+      plates: copies > 4 ? [1, 2].map((index) => ({ index, bbox_mm: bbox, colors })) : [],
+    }
+    state.jobs.set(jobId, job)
+    state.arranged.set(jobId, {
+      sources: [...new Set(body.objects.map((o) => o.output_id))],
+      manifest,
+    })
+    return HttpResponse.json(job, { status: 202 })
+  }),
+
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
@@ -2545,19 +2663,64 @@ export const handlers = [
       colors: job.colors ?? [],
       parts: [],
       warnings: [],
+      // An arranged output keeps its objects and where they came from (§7); a render's
+      // output has no manifest in the mock.
+      manifest: state.arranged.get(job.id)?.manifest ?? [],
+      arranged_from: state.arranged.get(job.id)?.sources ?? [],
+      bom: [],
+      files: [],
+      record: null,
     }
     state.outputs = [output, ...state.outputs]
     await delay(120)
     return HttpResponse.json(output, { status: 201 })
   }),
 
+  // Inputs migration (spec 2026-09-27 §8.2): the mock templates have no `migrate`, so
+  // the inputs come back as they are, at the version they carry.
+  http.post(`${base}/models/:slug/inputs/migrate`, async ({ request }) => {
+    const body = (await request.json()) as { inputs: Record<string, unknown> }
+    const v = typeof body.inputs.v === 'number' ? body.inputs.v : 0
+    return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
+  }),
+
   http.get(`${base}/models/:slug/outputs`, ({ params }) =>
-    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug'])),
+    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug']).map(settleBackfill)),
   ),
 
   http.get(`${base}/outputs/:id`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
-    return output ? HttpResponse.json(output) : problem(404, 'Output not found')
+    return output ? HttpResponse.json(settleBackfill(output)) : problem(404, 'Output not found')
+  }),
+
+  // #902 — an ordinary render of the output's own params; the output gains its objects
+  // when a read finds the job done (the API attaches on the job's event), or records why it failed.
+  http.post(`${base}/outputs/:id/backfill`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    if ((output.manifest ?? []).length > 0) {
+      return problem(409, 'Conflict', `output ${output.id} already records its objects`)
+    }
+    if ((output.arranged_from ?? []).length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `output ${output.id} was arranged, not rendered: there is nothing to render again`,
+      )
+    }
+    const jobId = nextHexId()
+    const job: Job = {
+      id: jobId,
+      slug: output.slug,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      params: output.params ?? {},
+      log_tail: [],
+    }
+    state.jobs.set(jobId, job)
+    runJob(jobId)
+    output.backfill = { job_id: jobId, error: null } satisfies BackfillState
+    return HttpResponse.json(job, { status: 202 })
   }),
 
   http.get(`${base}/outputs/:id/edit`, ({ params }) => {
@@ -2571,6 +2734,7 @@ export const handlers = [
       inputs: output.inputs ?? { params: output.params, v: 0 },
       model_version: output.model_version ?? null,
       source: 'record',
+      arranged_from: output.arranged_from ?? [],
     })
   }),
 

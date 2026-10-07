@@ -7,10 +7,10 @@ import {
   httpInstrumentation,
   SERVICE_NAME,
   spanProcessors,
-  traceListener,
   tracingDisabled,
   untracedIncoming,
 } from '../src/telemetry/setup.js'
+import { traceListener } from '../src/telemetry/runtime.js'
 
 describe('telemetry setup', () => {
   it('names the service, its build and its host', () => {

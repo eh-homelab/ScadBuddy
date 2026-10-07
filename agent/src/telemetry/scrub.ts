@@ -13,14 +13,17 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 //   - `exception.stacktrace` keeps only its V8 frame lines, after the
 //     message is cut out of the stack's head (a message can imitate a frame);
 //   - a non-empty status description becomes the exception's type, or `error`;
-//   - `url.query` and user agents are dropped; URLs lose their query;
+//   - `url.query` and user agents are dropped;
 //   - the Host header (`http.host`, `http.server_name`, `server.address`), the
 //     client's address (`http.client_ip`, `client.*`, `net.peer.*`,
 //     `net.sock.peer.*`, `network.peer.*`) and captured headers are dropped,
 //     as the backend's scrub drops them;
-//   - on a server span the request's URL and path are data (a `/p/<token>`
-//     forwarder path, a session id) and its host is the Host header: only
-//     `http.route` stays, as on the backend's server spans;
+//   - a request's path is data on every span (a `/p/<token>` forwarder path,
+//     a session id): `url.path` and `http.target` are dropped, and `url.full`
+//     and `http.url` keep only their `scheme://host[:port]` (dropped when they
+//     have none); `http.route` or `url.template` stands in for the path;
+//   - on a server span the host is the Host header, so its URL goes too, and
+//     its host names: only the route stays, as on the backend's server spans;
 //   - every event and link passes through the same attribute scrub.
 
 const DROPPED: ReadonlySet<string> = new Set([
@@ -42,16 +45,13 @@ const DROPPED_PREFIXES: readonly string[] = [
   'http.request.header.',
   'http.response.header.',
 ]
-const URLS: ReadonlySet<string> = new Set(['url.full', 'http.url', 'http.target'])
-/** What a server span drops on top of `DROPPED`: the request's URL, path and host. */
-const SERVER_DROPPED: ReadonlySet<string> = new Set([
-  'url.full',
-  'http.url',
-  'http.target',
-  'url.path',
-  'net.host.name',
-  'host.name',
-])
+const PATHS: ReadonlySet<string> = new Set(['http.target', 'url.path'])
+/** Kept as their origin only, as the backend's `_WITH_ORIGIN`. */
+const URLS: ReadonlySet<string> = new Set(['url.full', 'http.url'])
+/** What a server span drops on top of the rest: the request's URL and host. */
+const SERVER_DROPPED: ReadonlySet<string> = new Set(['url.full', 'http.url', 'net.host.name', 'host.name'])
+/** An absolute URL's `scheme://host[:port]`. */
+const ORIGIN = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/
 
 const FRAME_NEXT = /^\n\s+at \S/
 
@@ -85,9 +85,14 @@ export function framesOnly(stacktrace: string, message?: string): string {
 export function scrubAttributes(attributes: Attributes, kind?: SpanKind): Attributes {
   const out: Attributes = {}
   for (const [key, value] of Object.entries(attributes)) {
-    if (DROPPED.has(key) || DROPPED_PREFIXES.some((prefix) => key.startsWith(prefix))) continue
+    if (DROPPED.has(key) || PATHS.has(key) || DROPPED_PREFIXES.some((prefix) => key.startsWith(prefix))) continue
     if (kind === SpanKind.SERVER && SERVER_DROPPED.has(key)) continue
-    out[key] = URLS.has(key) && typeof value === 'string' ? (value.split('?')[0] ?? '') : value
+    if (URLS.has(key)) {
+      const origin = typeof value === 'string' ? ORIGIN.exec(value)?.[0] : undefined
+      if (origin !== undefined) out[key] = origin
+      continue
+    }
+    out[key] = value
   }
   return out
 }

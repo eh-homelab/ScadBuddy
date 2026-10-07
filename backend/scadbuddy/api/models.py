@@ -9,6 +9,7 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import psycopg
 from fastapi import (
@@ -28,28 +29,28 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from scadbuddy.api.deps import (
     IMPORT_CONCURRENCY,
-    AssetsDep,
+    AppState,
     CatalogueDep,
-    CheckoutsDep,
     ChecksDep,
     ConfigDep,
     EventsDep,
     FetcherDep,
-    FontsDep,
     HistoryDep,
+    ImportPermits,
     ImportsDep,
-    InstallsDep,
-    LibrariesDep,
-    OutputsDep,
     PathsDep,
-    PresetsDep,
-    PrintLinksDep,
-    RenderDep,
     SlugPath,
-    UploadsDep,
 )
-from scadbuddy.api.library_pins import pinned_at_create, require_library_names
+from scadbuddy.api.library_pins import require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    Claimed,
+    IdempotencyKey,
+    operation_answer,
+    recorded,
+    run_operation,
+)
 from scadbuddy.api.params import require_valid_presets
 from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
@@ -58,7 +59,11 @@ from scadbuddy.core.paths import DataPaths, is_builtin
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.assets import with_samples
 from scadbuddy.library.catalogue import (
+    MAX_DESCRIPTION_CHARS,
+    MAX_TAG_CHARS,
+    MAX_TAGS,
     Catalogue,
+    Description,
     InvalidModelMetaError,
     ModelExistsError,
     ModelMeta,
@@ -68,6 +73,7 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
     SidecarNotFoundError,
     StaleVersionError,
+    Tags,
     meta_from_raw,
 )
 from scadbuddy.library.history import (
@@ -86,7 +92,7 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
-from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.outputs import OutputStore, release_parts
 from scadbuddy.library.patch import (
     MAX_EDITS,
     PatchError,
@@ -122,7 +128,13 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     ResolverBusyError,
     fetch_model,
+    parse_import_url,
+    resolver_busy,
+    shown_url,
 )
+from scadbuddy.operations.claims import ClaimStore, Held
+from scadbuddy.operations.component import OperationCommands, OperationsDep
+from scadbuddy.operations.store import Operation
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
@@ -234,8 +246,16 @@ def _parse_tags(raw: str | None) -> list[str] | None:
         decoded = _client_json(text, "tags is not valid JSON")
         if not isinstance(decoded, list):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "tags must be a list")
-        return [str(tag) for tag in decoded]
-    return [tag.strip() for tag in text.split(",") if tag.strip()]
+        parsed = [str(tag) for tag in decoded]
+    else:
+        parsed = [tag.strip() for tag in text.split(",") if tag.strip()]
+    # The caps `PastedSource` and `ModelPatch` hold them to (review #1126 1.4).
+    if len(parsed) > MAX_TAGS or any(len(tag) > MAX_TAG_CHARS for tag in parsed):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"tags may be at most {MAX_TAGS}, each at most {MAX_TAG_CHARS} characters",
+        )
+    return parsed
 
 
 @router.get("/models", response_model=list[ModelRecord], summary="List models")
@@ -248,8 +268,8 @@ class PastedSource(BaseModel):
 
     name: str = Field(description="Display name; its slug is derived from it")
     source: str = Field(max_length=MAX_SOURCE_CHARS, description="The OpenSCAD source")
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
+    description: Description = ""
+    tags: Tags = Field(default_factory=list)
     force: bool = Field(default=False, description="Save even when the parse check fails")
     libraries: list[Annotated[str, Field(pattern=NAME_PATTERN)]] = Field(
         default_factory=list,
@@ -414,6 +434,7 @@ async def _guard_source(
     "/models",
     response_model=ModelRecord,
     status_code=status.HTTP_201_CREATED,
+    responses=OPERATION_RESPONSES,
     summary="Add a model",
     description=(
         "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` "
@@ -438,14 +459,10 @@ async def _guard_source(
 )
 async def create_model(
     request: Request,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
     catalogue: CatalogueDep,
-    config: ConfigDep,
-    checks: ChecksDep,
-    events: EventsDep,
-    fetcher: FetcherDep,
-    libraries: LibrariesDep,
-    installs: InstallsDep,
-    checkouts: CheckoutsDep,
     file: Annotated[
         UploadFile | None,
         File(description=f"The .scad source, at most {MAX_SOURCE_CHARS:,} characters"),
@@ -465,7 +482,7 @@ async def create_model(
         ),
     ] = None,
     name: Annotated[str | None, Form()] = None,
-    description: Annotated[str | None, Form()] = None,
+    description: Annotated[str | None, Form(max_length=MAX_DESCRIPTION_CHARS)] = None,
     tags: Annotated[str | None, Form(description="JSON array or comma-separated")] = None,
     library_names: Annotated[
         list[str] | None,
@@ -479,7 +496,9 @@ async def create_model(
         str | None, Header(alias="X-Model-Name", description="Name for a text/plain paste")
     ] = None,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
-) -> ModelRecord:
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    create = partial(_create_command, ops, response, paths, catalogue, idempotency_key)
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
 
     if content_type == "application/json":
@@ -503,28 +522,19 @@ async def create_model(
             raise problem from None
         except _BAD_JSON as error:
             raise _malformed_body(error) from None
-        # Everything that can fail without the network, before any library is cloned.
-        pasted_slug = _slug_from_name(pasted.name)
-        _require_new(catalogue, pasted_slug)
+        # Everything that can fail without the network, before any library is cloned:
+        # here, and the taken slug in the operation's check.
         _refuse_binary(pasted.source)
-        async with pinned_at_create(
-            pasted.libraries,
-            ModelMeta(name=pasted.name, description=pasted.description, tags=list(pasted.tags)),
-            libraries=libraries,
-            installs=installs,
-            checkouts=checkouts,
-        ) as pasted_meta:
-            return await _create(
-                catalogue,
-                config,
-                checks,
-                events,
-                slug=pasted_slug,
-                source=pasted.source,
-                meta=pasted_meta,
-                # Either spelling forces, as the design and the OpenAPI both promise.
-                force=force or pasted.force,
-            )
+        return await create(
+            slug=_slug_from_name(pasted.name),
+            source=pasted.source,
+            meta=ModelMeta(
+                name=pasted.name, description=pasted.description, tags=list(pasted.tags)
+            ),
+            libraries=pasted.libraries,
+            # Either spelling forces, as the design and the OpenAPI both promise.
+            force=force or pasted.force,
+        )
 
     if content_type == "text/plain":
         if not model_name:
@@ -539,14 +549,11 @@ async def create_model(
         # This branch never reaches `PastedSource`, so the cap the other two get from
         # pydantic has to be applied here by hand.
         _require_within_cap(pasted_text, "the paste")
-        return await _create(
-            catalogue,
-            config,
-            checks,
-            events,
+        return await create(
             slug=_slug_from_name(model_name),
             source=pasted_text,
             meta=ModelMeta(name=model_name),
+            libraries=[],
             force=force,
         )
 
@@ -565,8 +572,17 @@ async def create_model(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the upload needs a filename that yields a slug: {exc}",
         ) from None
-    # Before the parts are read, and so before any library is cloned (#436).
-    _require_new(catalogue, slug)
+    # Before the parts are read, and so before any library is cloned (#436). The
+    # operation's check makes it again: this one spares a taken slug the reads. Not
+    # for a keyed re-send whose slug its own first send may have taken (review 3c I1):
+    # its key needs the parts, and `_create_command` refuses it before they are
+    # claimed. The browser keys every upload, so only a key a create of this slug is
+    # on record for counts as a re-send (review #1126 1.3).
+    if catalogue.exists(slug) and (
+        idempotency_key is None
+        or not await ops.store.keyed(ops.kinds["model_create"].name, slug, idempotency_key)
+    ):
+        _require_new(catalogue, slug)
 
     try:
         source = decode_source(await file.read())
@@ -609,26 +625,88 @@ async def create_model(
             "upstream": None,
         }
     )
-    async with pinned_at_create(
-        library_names or [],
-        uploaded,
-        libraries=libraries,
-        installs=installs,
-        checkouts=checkouts,
-    ) as uploaded_meta:
-        return await _create(
-            catalogue,
-            config,
-            checks,
-            events,
-            slug=slug,
-            source=source,
-            meta=uploaded_meta,
-            force=force,
-            thumbnail=thumbnail_bytes,
-            readme=readme_text,
-            fetcher=fetcher,
+    return await create(
+        slug=slug,
+        source=source,
+        meta=uploaded,
+        libraries=library_names or [],
+        force=force,
+        thumbnail=thumbnail_bytes,
+        readme=readme_text,
+        fetch=True,
+    )
+
+
+def _meta_request(meta: ModelMeta) -> dict[str, Any]:
+    """``meta`` as JSON that reads back as itself: a ``ui`` that could not be read goes
+    as written, so the run's read reports it again rather than dropping it."""
+    dumped: dict[str, Any] = meta.model_dump(mode="json")
+    if meta.unread_ui is not None:
+        dumped["ui"] = meta.unread_ui
+    return dumped
+
+
+async def _create_command(
+    ops: OperationCommands,
+    response: Response,
+    paths: DataPaths,
+    catalogue: Catalogue,
+    idempotency_key: str | None,
+    *,
+    slug: str,
+    source: str,
+    meta: ModelMeta,
+    libraries: list[str],
+    force: bool,
+    thumbnail: bytes | None = None,
+    readme: str | None = None,
+    fetch: bool = False,
+) -> ModelRecord | JSONResponse:
+    """A create as the ``model_create`` operation (#1054). The source, thumbnail and
+    README go by claim check: together they may be far past a workflow payload's
+    limit, and the claim's name is their digest, so a re-send reaches the same key.
+    Nothing is claimed for a request refused for a taken slug, or answered from its
+    record (review 3c 1.2, 1.3)."""
+    parts = {
+        "source": source.encode(),
+        "thumbnail": thumbnail,
+        "readme": None if readme is None else readme.encode(),
+    }
+    named = {
+        part: None if data is None else hashlib.sha256(data).hexdigest()
+        for part, data in parts.items()
+    }
+    request = {
+        "slug": slug,
+        **named,
+        "meta": _meta_request(meta),
+        "libraries": libraries,
+        "force": force,
+        "fetch": fetch,
+    }
+    kind = ops.kinds["model_create"]
+    claims = ClaimStore(paths.claims)
+    held: list[Held] = []
+    if (
+        await recorded(
+            ops, kind=kind, subject=slug, request=request, idempotency_key=idempotency_key
         )
+        is None
+    ):
+        _require_new(catalogue, slug)
+        for data in parts.values():
+            if data is not None:
+                held.append(await asyncio.to_thread(claims.hold, data))
+    result = await run_operation(
+        ops,
+        response,
+        kind=kind,
+        subject=slug,
+        request=request,
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, held),
+    )
+    return operation_answer(result, ModelRecord)
 
 
 def _first_name(*candidates: str | None) -> str:
@@ -791,6 +869,8 @@ async def _create(
 #: lookup (#631). A full import budget says instead when its oldest fetch must end
 #: (`ImportPermits.retry_after`).
 RESOLVER_RETRY_AFTER = math.ceil(RESOLVE_TIMEOUT)
+#: How often an import's run looks again for a free resolver thread.
+RESOLVER_POLL = 0.5
 
 
 def fetch_busy(why: str, retry_after: int) -> ApiError:
@@ -821,29 +901,66 @@ class UrlImport(BaseModel):
         "Fetches the source on the server -- https only, from public internet addresses "
         f"only, at most {MAX_TEXT_BODY_BYTES} bytes, within {IMPORT_TIMEOUT:.0f} seconds "
         "-- then creates the model exactly as a paste does, recording the URL as "
-        "`origin_url`. A direct link to the file works; a MakerWorld model page is "
+        "`origin_url` (its scheme, host, port and path; never a query, fragment or "
+        "userinfo). A direct link to the file works; a MakerWorld model page is "
         "refused, because MakerWorld only serves files to a signed-in account. Every "
         "refusal is a 422, and an address that is not public reads the same as one that "
         "did not answer."
     ),
     responses={
+        **OPERATION_RESPONSES,
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 f"{IMPORT_CONCURRENCY} imports are already fetching on this replica, or "
                 "its resolver threads are all busy (library installs share them); retry "
                 "after `Retry-After` seconds"
             )
-        }
+        },
     },
 )
 async def import_model(
     body: UrlImport,
-    catalogue: CatalogueDep,
-    config: ConfigDep,
-    checks: ChecksDep,
+    response: Response,
+    ops: OperationsDep,
     imports: ImportsDep,
-    events: EventsDep,
-) -> ModelRecord:
+    paths: PathsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    # Here, so a full budget or busy resolver threads answer with Retry-After and start
+    # no operation; the run waits for either on its own replica.
+    _require_import_permit(imports)
+    if resolver_busy():
+        # Library installs vet clone URLs on the same resolver threads. None free says
+        # nothing about the host: the same retry as a full import budget.
+        raise fetch_busy("every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER)
+    try:
+        # Refusals that quote the URL whole: here, so no operation records them.
+        parse_import_url(body.url)
+    except ImportRefusedError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    # The URL by claim, so its query, which may carry a token, is in neither the
+    # operation's record nor its history; they hold it without (review 3c 1.5).
+    claims = ClaimStore(paths.claims)
+    url = await asyncio.to_thread(claims.hold, body.url.encode())
+    parts = urlsplit(body.url)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_import"],
+        # The host, never the URL: the subject is a search attribute (review 3c M6).
+        subject=parts.hostname or "url",
+        request={
+            **body.model_dump(mode="json"),
+            "url": url.name,
+            "shown": shown_url(body.url),
+        },
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [url]),
+    )
+    return operation_answer(result, ModelRecord)
+
+
+def _require_import_permit(imports: ImportPermits) -> None:
     # No await between the check and the acquire, so nothing can take the permit in
     # between (as in `api/lsp.py`). Refused rather than queued: a queued fetch would
     # spend its wait against the client's patience, not the import's deadline.
@@ -852,28 +969,39 @@ async def import_model(
             f"{IMPORT_CONCURRENCY} imports are already fetching on this replica",
             imports.retry_after(),
         )
+
+
+async def import_url(body: UrlImport, state: AppState) -> ModelRecord:
+    """The ``model_import`` operation's run (#1054): the fetch, then the create.
+
+    The route refused a full budget or busy resolver threads on its own replica; here,
+    on whichever replica's worker runs it, they are waited out instead (review #1126
+    1.1): a 503 recorded as the operation's answer would be replayed to every re-send
+    of its key. The run's own timeout bounds the wait."""
+    imports = state.imports
+    await imports.wait()
     with imports.hold():
-        try:
-            imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
-        except ImportRefusedError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        except ResolverBusyError:
-            # Library installs vet clone URLs on the same resolver threads. None free
-            # is decided before the host is looked up, so it says nothing about the
-            # host: the same retry as a full import budget, not the refusal.
-            raise fetch_busy(
-                "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
-            ) from None
+        while True:
+            try:
+                imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
+                break
+            except ImportRefusedError as error:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+            except ResolverBusyError:
+                # Library installs vet clone URLs on the same resolver threads, and
+                # give no signal when one is free.
+                await asyncio.sleep(RESOLVER_POLL)
     _require_within_cap(imported.source, "the imported file")
     name = body.name or imported.name
     return await _create(
-        catalogue,
-        config,
-        checks,
-        events,
+        state.catalogue,
+        state.config,
+        state.checks,
+        state.events,
         slug=_slug_from_name(name),
         source=imported.source,
-        meta=ModelMeta(name=name, origin_url=imported.origin_url),
+        # Never the URL as given: its query may carry a token (review 3c 1.5).
+        meta=ModelMeta(name=name, origin_url=shown_url(imported.origin_url)),
         force=body.force,
     )
 
@@ -934,21 +1062,42 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
         "and every preset is written with its key as `id`, so reordering or renaming it "
         "later keeps it the same preset."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def patch_model(
     slug: SlugPath,
     patch: ModelPatch,
-    catalogue: CatalogueDep,
+    response: Response,
+    ops: OperationsDep,
     paths: PathsDep,
-    history: HistoryDep,
-    config: ConfigDep,
-    events: EventsDep,
-    assets: AssetsDep,
-    presets: PresetsDep,
-    fetcher: FetcherDep,
-    fonts: FontsDep,
-) -> ModelRecord:
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
+    # Unset is not null: a field left out is left alone.
+    fields = patch.model_dump(mode="json", exclude_unset=True)
+    # The presets by claim: a full list of them is past the inline cap (review 3c 1.1).
+    claims = ClaimStore(paths.claims)
+    presets = fields.pop("presets", None)
+    held = (
+        None
+        if presets is None
+        else await asyncio.to_thread(claims.hold, json.dumps(presets).encode())
+    )
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_patch"],
+        subject=slug,
+        request={"slug": slug, "patch": fields, "presets": None if held is None else held.name},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [] if held is None else [held]),
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def patch_template(slug: str, patch: ModelPatch, state: AppState) -> ModelRecord:
+    """The ``model_patch`` operation's run (#1054)."""
+    catalogue = state.catalogue
     # The record, not only existence: a model.json that no longer reads as metadata is
     # refused (409) before anything is written into it. Off the loop: a `git log`.
     await asyncio.to_thread(require_model, catalogue, slug)
@@ -956,12 +1105,12 @@ async def patch_model(
         await require_valid_presets(
             slug,
             [preset.params for preset in patch.presets],
-            paths=paths,
-            history=history,
-            config=config,
-            assets=assets,
-            fetcher=fetcher,
-            fonts=fonts,
+            paths=state.paths,
+            history=state.history,
+            config=state.config,
+            assets=state.assets,
+            fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
+            fonts=state.fonts,
         )
         patch.presets = with_keys(patch.presets)
     update = partial(catalogue.update, slug, patch)
@@ -974,7 +1123,7 @@ async def patch_model(
             # the template's list refuses a saved one's -- checked and written under the
             # preset store's lock, as a save is.
             names = [preset.name for preset in patch.presets]
-            record = await asyncio.to_thread(presets.with_names_free, slug, names, update)
+            record = await asyncio.to_thread(state.presets.with_names_free, slug, names, update)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
@@ -992,7 +1141,7 @@ async def patch_model(
             f"another model ({other!r}) is already named {name!r}",
             name=name,
         ) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    emit(state.events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
 
@@ -1012,18 +1161,33 @@ class DuplicateRequest(BaseModel):
         "revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, "
         "outputs, revisions) are not copied; the presets saved on it are."
     ),
+    responses=OPERATION_RESPONSES,
 )
-def duplicate_model(
+async def duplicate_model(
     slug: SlugPath,
     body: DuplicateRequest,
-    catalogue: CatalogueDep,
-    presets: PresetsDep,
-    events: EventsDep,
-) -> ModelRecord:
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_duplicate"],
+        subject=slug,
+        request={"slug": slug, "name": body.name},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+def duplicate_template(slug: str, name: str, state: AppState) -> ModelRecord:
+    """The ``model_duplicate`` operation's run (#1054)."""
+    catalogue = state.catalogue
     require_model_exists(catalogue, slug)
-    new_slug = _slug_from_name(body.name)
+    new_slug = _slug_from_name(name)
     try:
-        record = catalogue.duplicate(slug, new_slug, body.name)
+        record = catalogue.duplicate(slug, new_slug, name)
     except ModelExistsError:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"a model named {new_slug!r} already exists"
@@ -1036,12 +1200,12 @@ def duplicate_model(
         # Reading the upstream at `base` failed; as every other route that reads
         # the history maps it. Nothing of the duplicate is left behind.
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    emit(events, ModelEvent(kind="model.created", slug=new_slug))
+    emit(state.events, ModelEvent(kind="model.created", slug=new_slug))
     # The presets saved on the upstream come along. Best effort: the duplicate
     # exists by now, and failing it over its presets would report a copy that was
     # made as one that was not.
     try:
-        presets.copy(slug, new_slug)
+        state.presets.copy(slug, new_slug)
     except (OSError, ValueError):
         logger.exception("could not copy presets to a duplicate", extra={"slug": new_slug})
     return record
@@ -1056,20 +1220,36 @@ def duplicate_model(
         "`duplicates` (and which, as `slugs`); `?force=true` deletes it anyway, and "
         "they report their upstream as `gone`."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def delete_model(
     slug: SlugPath,
-    catalogue: CatalogueDep,
-    render: RenderDep,
-    outputs: OutputsDep,
-    uploads: UploadsDep,
-    links: PrintLinksDep,
-    events: EventsDep,
+    response: Response,
+    ops: OperationsDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
+    idempotency_key: IdempotencyKey = None,
 ) -> Response:
-    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, render, outputs, force)
+    require_mine(slug)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_delete"],
+        subject=slug,
+        request={"slug": slug, "force": force},
+        idempotency_key=idempotency_key,
+    )
+    if isinstance(result, Operation):
+        return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def delete_template(slug: str, force: bool, state: AppState) -> None:
+    """The ``model_delete`` operation's run (#1054)."""
+    output_ids = await asyncio.to_thread(
+        _delete_model, slug, state.catalogue, state.render, state.outputs, force
+    )
     # Its outputs went with it; so do their Bambuddy upload records (#455) and print
     # links (#306). Bambuddy's own files and archives are left alone, as a single
     # output's delete leaves them unless asked. Best effort, like the rest of the
@@ -1077,24 +1257,30 @@ async def delete_model(
     # Each on its own, so a failed upload cleanup cannot leave links serving archives.
     if output_ids:
         try:
-            await uploads.delete_outputs(output_ids)
+            await state.uploads.delete_outputs(output_ids)
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception(
                 "could not forget a deleted model's Bambuddy uploads", extra={"slug": slug}
             )
         try:
-            await links.delete_outputs(output_ids)
+            await state.print_links.delete_outputs(output_ids)
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
-    emit(events, ModelEvent(kind="model.deleted", slug=slug))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+        # Their Parts go with them, or no sweep ever removes them (blob_refs, spec §7).
+        # Best effort, like the records above: the model is gone either way.
+        try:
+            for output_id in output_ids:
+                await asyncio.to_thread(release_parts, state.refs, output_id)
+        except psycopg.Error:
+            logger.exception(
+                "could not release a deleted model's output Parts", extra={"slug": slug}
+            )
+    emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 
-def _delete_model(
-    slug: str, catalogue: Catalogue, render: RenderService, outputs: OutputStore, force: bool
-) -> list[str]:
-    """The blocking part of :func:`delete_model`; returns the ids of the outputs it
-    removed, read before their directories go."""
+def refuse_delete(slug: str, catalogue: Catalogue, render: RenderService, force: bool) -> None:
+    """Why ``slug`` may not be deleted now: the operation's check, and its run again
+    just before the delete."""
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if not force:
@@ -1113,6 +1299,14 @@ def _delete_model(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )
+
+
+def _delete_model(
+    slug: str, catalogue: Catalogue, render: RenderService, outputs: OutputStore, force: bool
+) -> list[str]:
+    """The blocking part of :func:`delete_template`; returns the ids of the outputs it
+    removed, read before their directories go."""
+    refuse_delete(slug, catalogue, render, force)
     output_ids = outputs.ids_for(slug)
     try:
         catalogue.delete(slug)

@@ -76,6 +76,20 @@ describe('multi-plate fit (#289)', () => {
     expect(fitTargets(done({ status: 'running', bbox_mm: null }))).toEqual([])
   })
 
+  it('counts only the colours a part prints, pairing them by extruder', () => {
+    // An arranged output keeps a planned slot no part uses (#428): `colors` names it,
+    // `parts` does not, and a slot no part prints needs no prime tower.
+    const part = (extruder: number, colour: string) => ({ name: 'wall', colour, extruder, watertight: true })
+    expect(
+      fitTargets(done({ colors: ['#123456', '#111111'], parts: [part(2, '#111111')] })),
+    ).toEqual([{ plate: null, size: [498, 248, 8.5], colours: 1 }])
+    expect(
+      fitTargets(
+        done({ colors: ['#111111', '#222222', '#333333'], parts: [part(1, '#111111'), part(3, '#333333')] }),
+      ),
+    ).toEqual([{ plate: null, size: [498, 248, 8.5], colours: 2 }])
+  })
+
   it('checks each plate with its own box and colours, not the preview of them all', () => {
     const job = done({
       colors: ['#111111', '#222222', '#FFFFFF'],
