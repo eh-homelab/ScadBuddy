@@ -1174,7 +1174,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     })
     const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
     await turn!.done
-    expect(extrasSeen).toEqual({})
+    expect(extrasSeen).toEqual({ turnContext: expect.any(Function) })
   })
 })
 

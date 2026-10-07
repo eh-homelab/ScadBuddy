@@ -7,7 +7,6 @@ model routes cannot import the library routes back.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import re
 from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
@@ -20,6 +19,7 @@ from scadbuddy.library.catalogue import ModelMeta
 from scadbuddy.library.libraries import (
     NAME_PATTERN,
     CheckoutGate,
+    InstallPermits,
     LibraryError,
     LibraryFetchError,
     LibraryNotFoundError,
@@ -67,14 +67,14 @@ async def resolve_pin(
     url: str | None,
     ref: str | None,
     libraries: LibraryStore,
-    installs: asyncio.Semaphore,
+    installs: InstallPermits,
 ) -> ModelLibrary:
     """Clone ``name`` at ``ref`` and return the pin. The caller holds
     :meth:`CheckoutGate.pinning` until the pin is recorded."""
     with _pin_refusals():
         # A clone is a network fetch; off the loop, and a bounded number at a time.
         # A cancel waits for the clone, so the slot and the caller's gate stay held.
-        async with installs:
+        async with installs.permit():
             return await to_thread_to_end(partial(libraries.resolve, name, url=url, ref=ref))
 
 
@@ -100,7 +100,7 @@ async def pinned_at_create(
     meta: ModelMeta,
     *,
     libraries: LibraryStore,
-    installs: asyncio.Semaphore,
+    installs: InstallPermits,
     checkouts: CheckoutGate,
 ) -> AsyncIterator[ModelMeta]:
     """``meta`` with the curated ``names`` pinned at the catalogue's ref, for a create
