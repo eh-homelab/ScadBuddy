@@ -180,6 +180,13 @@ async def test_a_turn_on_the_real_engine(
                 list(claude_ids),
             )
             assert entries
+            # Every line carries its session, for forget-subject (store.py).
+            owners = await rows(
+                pool,
+                "SELECT DISTINCT owner_session_id::text FROM ai_session_entries WHERE session_id = ANY(%s)",
+                list(claude_ids),
+            )
+            assert owners == [(sid,)]
             transcript = "\n".join(r[0] for r in entries)
             assert "Read my settings" in transcript and "Settings read." in transcript
 

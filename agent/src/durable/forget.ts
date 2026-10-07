@@ -126,11 +126,16 @@ export async function forgetSubject(subject: string, deps: ForgetDeps): Promise<
   try {
     const rows = await deps.sql.begin(async (tx) => {
       let count = 0
-      // ai_session_entries is keyed by the Claude session id, not ours: one per segment attempt.
+      // ai_session_entries is keyed by the Claude session id, not ours: one per segment attempt
+      // that recorded itself in ai_durable_segments, and, for one that failed or crashed
+      // before it could, by the owning session agent-durable's store writes on each line.
       const claudeIds = await tx<{ claude_session_id: string }[]>`
         SELECT DISTINCT claude_session_id FROM ai_durable_segments WHERE session_id = ${sessionId}`
       const ids = claudeIds.map((row) => row.claude_session_id)
-      if (ids.length > 0) count += (await tx`DELETE FROM ai_session_entries WHERE session_id = ANY(${ids})`).count
+      count += (
+        await tx`DELETE FROM ai_session_entries WHERE owner_session_id = ${sessionId} OR session_id = ANY(${ids})`
+      ).count
+      count += (await tx`DELETE FROM ai_durable_inputs WHERE session_id = ${sessionId}`).count
       count += (await tx`DELETE FROM ai_durable_segments WHERE session_id = ${sessionId}`).count
       count += (await tx`DELETE FROM ai_durable_streams WHERE session_id = ${sessionId}`).count
       count += (await tx`DELETE FROM ai_durable_snapshots WHERE session_id = ${sessionId}`).count

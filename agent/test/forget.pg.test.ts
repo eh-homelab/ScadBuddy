@@ -87,6 +87,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await forgetSubject(subject, { sql: db.sql, keys })).toEqual({ keyDeleted: false, workflow: 'absent', rows: 0 })
     })
 
+    it("deletes the transcripts of a segment that failed before recording itself, and the session's messages", async () => {
+      // A failed or crashed segment never reached ai_durable_segments; its lines carry the
+      // owning session (agent-durable store.py), and so do the committed messages.
+      const other = randomUUID()
+      await seed(id, [])
+      await seed(other, [])
+      await db.sql`
+        INSERT INTO ai_session_entries (project_key, session_id, entry, owner_session_id)
+        VALUES ('p', 'claude-crashed', '{"secret":1}', ${id}), ('p', 'claude-crashed', '{}', ${id}),
+               ('p', 'claude-other', '{}', ${other})`
+      await db.sql`INSERT INTO ai_durable_inputs (id, session_id, text) VALUES (${randomUUID()}, ${id}, 'my words')`
+      const result = await forgetSubject(subject, { sql: db.sql, keys })
+      // 2 entries, 1 message, stream, snapshot, event, session
+      expect(result.rows).toBe(2 + 1 + 1 + 1 + 1 + 1)
+      expect(await db.sql`SELECT session_id FROM ai_session_entries`).toEqual([{ session_id: 'claude-other' }])
+      expect(await count('ai_durable_inputs')).toBe(0)
+    })
+
     it.each([`flow-${randomUUID()}`, 'session-x', `session-${randomUUID()}-x`, 'render-1', `SESSION-${randomUUID()}`])(
       'refuses %s before deleting anything',
       async (bad) => {
@@ -146,7 +164,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         env.client.workflow.start(DURABLE_WORKFLOW, {
           workflowId: subject,
           taskQueue: DURABLE_TASK_QUEUE,
-          args: [{ session_id: id }, null, null],
+          args: [{ session_id: id }, null],
         })
 
       async function gone(): Promise<boolean> {

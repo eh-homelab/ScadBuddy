@@ -12,6 +12,9 @@ same encoding, so each store reads what the other wrote:
     Entries without a uuid are appended without dedup.
   - the main transcript is subpath ''.
   - `list_sessions` returns `mtime` as integer epoch milliseconds.
+  - `owner_session_id` is the `ai_sessions` id whose segment wrote the line (the
+    activity's `session-<uuid>` workflow id), so forget-subject finds a failed segment's
+    lines, whose Claude session id never reached `ai_durable_segments`.
 
 Derived from the SDK's reference adapter (claude-agent-sdk-python v0.2.160,
 examples/session_stores/postgres_session_store.py).
@@ -25,6 +28,7 @@ contract and its Postgres example do; only this store reads durable transcripts.
 from __future__ import annotations
 
 import json
+import re
 
 from claude_agent_sdk import (
     SessionKey,
@@ -34,6 +38,17 @@ from claude_agent_sdk import (
     SessionStoreListEntry,
 )
 from psycopg_pool import AsyncConnectionPool
+from temporalio import activity
+
+_SESSION_WORKFLOW = re.compile(r"session-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+
+
+def _owning_session() -> str | None:
+    """The `ai_sessions` id of the session activity this runs in, if it runs in one."""
+    if not activity.in_activity():
+        return None
+    match = _SESSION_WORKFLOW.fullmatch(activity.info().workflow_id or "")
+    return match.group(1) if match else None
 
 
 class PostgresSessionStore(SessionStore):
@@ -48,6 +63,7 @@ class PostgresSessionStore(SessionStore):
         if not entries:
             return
         subpath = key.get("subpath") or ""
+        owner = _owning_session()
         rows = [
             (
                 key["project_key"],
@@ -55,14 +71,16 @@ class PostgresSessionStore(SessionStore):
                 subpath,
                 entry["uuid"] if isinstance(entry.get("uuid"), str) else None,
                 json.dumps(entry, separators=(",", ":"), ensure_ascii=False),
+                owner,
             )
             for entry in entries
         ]
         async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             # One transaction, rows inserted in array order: ids follow the batch.
             await cur.executemany(
-                "INSERT INTO ai_session_entries (project_key, session_id, subpath, uuid, entry)"
-                " VALUES (%s, %s, %s, %s, %s)"
+                "INSERT INTO ai_session_entries"
+                " (project_key, session_id, subpath, uuid, entry, owner_session_id)"
+                " VALUES (%s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING",
                 rows,
             )

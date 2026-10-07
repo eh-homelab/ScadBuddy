@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import cast
 
@@ -9,6 +11,7 @@ import pytest_asyncio
 from claude_agent_sdk import SessionKey, SessionStoreEntry
 from claude_agent_sdk.testing.session_store_conformance import run_session_store_conformance
 from psycopg_pool import AsyncConnectionPool
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy_durable.store import PostgresSessionStore
 
@@ -69,3 +72,23 @@ async def test_delete_of_the_main_key_removes_subpaths(pool: AsyncConnectionPool
     assert await store.list_subkeys({"project_key": "p", "session_id": "s"}) == ["subagents/x"]
     await store.delete(main)
     assert await store.load(sub) is None
+
+
+async def test_append_in_a_session_activity_records_the_owning_session(pool: AsyncConnectionPool) -> None:
+    """forget-subject finds a failed segment's lines by it (its Claude id never reached
+    ai_durable_segments)."""
+    sid = str(uuid.uuid4())
+    store = PostgresSessionStore(pool)
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, workflow_id=f"session-{sid}")
+    await env.run(store.append, {"project_key": "p", "session_id": "claude-1"}, [_entry("u1", "hi")])
+    # Outside a session's activity (another workflow, or none): no owner.
+    env.info = dataclasses.replace(env.info, workflow_id="render-1")
+    await env.run(store.append, {"project_key": "p", "session_id": "claude-2"}, [_entry("u2", "hi")])
+    await store.append({"project_key": "p", "session_id": "claude-3"}, [_entry("u3", "hi")])
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT session_id, owner_session_id::text FROM ai_session_entries ORDER BY id"
+        )
+        rows = await cur.fetchall()
+    assert rows == [("claude-1", sid), ("claude-2", None), ("claude-3", None)]
