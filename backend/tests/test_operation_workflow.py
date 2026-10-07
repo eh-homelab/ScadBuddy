@@ -23,7 +23,7 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
 from scadbuddy.operations.store import Operation
-from scadbuddy.workflows import operation_activities, print_activities
+from scadbuddy.workflows import operation_activities
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import _kind_activities
@@ -334,7 +334,7 @@ async def test_the_run_activity_heartbeats_while_the_effect_runs(
 ) -> None:
     """Review #1063 (second) 2: a run on a worker that died is retired after the
     heartbeat timeout, not after the whole ``RUN_TIMEOUT``."""
-    monkeypatch.setattr(print_activities, "HEARTBEAT_EVERY", 0.01)
+    monkeypatch.setattr(operation_activities, "HEARTBEAT_EVERY", 0.01)
 
     async def check(request: dict[str, Any]) -> dict[str, Any]:
         return {}
