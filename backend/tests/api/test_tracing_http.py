@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.telemetry import _runtime as fastapi_runtime
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 
+from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
 from tests.conftest import http_server_span, wait_for_span
 
 #: Every attribute a server span carries today (instrumentation 0.66b0, the default
@@ -120,3 +123,28 @@ def test_a_garbage_traceparent_starts_a_fresh_trace(
     assert response.status_code == 200
     server = wait_for_span(spans, http_server_span)
     assert server.parent is None
+
+
+def test_fastapi_adds_no_exporter_of_its_own(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FastAPI 0.142 exports traces, metrics and logs to ``OTEL_EXPORTER_OTLP_ENDPOINT``
+    by itself unless told not to: spans past the scrub (`core/trace_scrub.py` wraps only
+    our own exporter), and every log line. Only `core/tracing.py` exports. Its flush on
+    every shutdown also waited out an unreachable collector, about 10 s, in CI (#1167)."""
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid:4318")
+    # FastAPI configures once per process; start it afresh. `_configured` and `_owned`
+    # are FastAPI 0.142's private record of what it set up (`fastapi/telemetry/_runtime.py`):
+    # no public call says whether it added an exporter, and the global tracer provider is
+    # the test session's own. If a FastAPI bump moves them, re-read that module.
+    for name in ("_configured", "_owned"):
+        if not isinstance(getattr(fastapi_runtime, name, None), list):
+            pytest.fail(f"fastapi.telemetry._runtime.{name} is gone: re-read FastAPI's telemetry")
+    monkeypatch.setattr(fastapi_runtime, "_configured", [])
+    monkeypatch.setattr(fastapi_runtime, "_owned", [])
+
+    with TestClient(create_app(settings)):
+        pass
+
+    assert fastapi_runtime._owned == []

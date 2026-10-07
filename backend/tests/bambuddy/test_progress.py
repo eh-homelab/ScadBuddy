@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.progress import (
     progress_for,
 )
 from scadbuddy.bambuddy.stages import stage_of
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
@@ -541,15 +542,15 @@ class FakeLinks(PrintLinkStore):
         self.fail = fail
         self.recorded: list[PrintLink] = []
 
-    async def record(self, output_id: str, link: PrintLink) -> None:
+    async def record(self, subject: PrintSubject, link: PrintLink) -> None:
         if self.fail:
             raise psycopg.OperationalError("the database went away")
         self.recorded.append(link)
 
-    async def for_output(self, output_id: str) -> list[PrintLink]:
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
         return list(self.recorded)
 
-    async def linked_queue_items(self, output_id: str) -> set[int]:
+    async def linked_queue_items(self, subject: PrintSubject) -> set[int]:
         return {link.queue_item_id for link in self.recorded if link.queue_item_id is not None}
 
 

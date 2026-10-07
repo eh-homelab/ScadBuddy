@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -23,9 +24,12 @@ from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
 from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
+    WorkflowFailureError,
+    WorkflowHandle,
     WorkflowUpdateFailedError,
 )
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, TimeoutType
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
@@ -46,7 +50,7 @@ from scadbuddy.render.job_models import (
     now,
     render_key,
 )
-from scadbuddy.render.jobs import SnapshotUnavailableError
+from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, SnapshotUnavailableError
 from scadbuddy.render.projection import (
     CLOSED_ERROR,
     LEGACY_UNSTARTED_ERROR,
@@ -56,7 +60,7 @@ from scadbuddy.render.projection import (
     workflow_id_for_key,
 )
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RenderService
+from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RPC_TIMEOUT, RenderService
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import commands as commands_module
@@ -75,6 +79,8 @@ from scadbuddy.workflows.models import (
     RELEASE_UPDATE,
     RENDER_UNSTARTABLE,
     AcceptRender,
+    MigrateRequest,
+    MigrateResult,
     Projection,
     ReleaseAnswer,
     RenderAnswer,
@@ -82,18 +88,24 @@ from scadbuddy.workflows.models import (
 from scadbuddy.workflows.pipelines import (
     ACCEPT_RETRY,
     KIND,
+    MIGRATE_EXECUTION_TIMEOUT,
     STATUS,
     SUBJECT,
+    RenderPiece,
     RenderPreview,
     TemplatePipeline,
 )
+from tests.support.pipelines import FakeWorld
 from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
+from tests.test_template_pipeline import NEVER_YIELDS
 from tests.test_workflows import FakeActivities, _worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
 SLUG = "demo"
+#: How long a submit that should return at once may take before the test calls it hung.
+SUBMIT_HANG_BOUND = 120
 
 
 class ProjectingActivities(FakeActivities):
@@ -126,8 +138,12 @@ class ProjectingActivities(FakeActivities):
         return await self._real.project(projection)
 
 
-def _sample(metrics: Metrics, name: str) -> float:
-    return metrics.registry.get_sample_value(name) or 0.0
+#: The render series of a counter labelled by job kind.
+RENDER = {"kind": "render"}
+
+
+def _sample(metrics: Metrics, name: str, labels: dict[str, str] | None = None) -> float:
+    return metrics.registry.get_sample_value(name, labels) or 0.0
 
 
 def _settle_failed(metrics: Metrics, settle_pass: str) -> float:
@@ -230,7 +246,7 @@ async def test_a_submit_runs_as_render_of_its_key(
     assert done.state == "done", done.error
     assert done.result is not None
     assert done.workflow_id == workflow_id_for_key(key) and done.workflow_run_id
-    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total", RENDER) == 1
 
 
 async def test_an_identical_submit_joins_the_running_job_with_a_claim(
@@ -255,7 +271,7 @@ async def test_an_identical_submit_joins_the_running_job_with_a_claim(
     assert second.id == first.id
     assert second.claims == 2 and claims == 2
     assert acts.accepts == 1
-    assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total", RENDER) == 1
 
 
 async def test_a_submit_that_coalesces_keeps_the_first_submitters_inputs(
@@ -308,7 +324,7 @@ async def test_superseding_releases_the_old_execution_after_the_new_one_starts(
     assert cancelled.state == "cancelled" and cancelled.error == SUPERSEDED_ERROR
     assert closed == WorkflowExecutionStatus.COMPLETED
     assert done.state == "done", done.error
-    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total") == 2
+    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total", RENDER) == 2
 
 
 async def test_a_resent_supersede_releases_the_old_job_once(
@@ -343,35 +359,52 @@ async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The last release waits in the workflow for the cancelled job's projection. Held
-    there, the submit still answers with the new job inside its bound, below Envoy's 15 s
-    route timeout (review #1066 (8) 1). `rpc_timeout` bounds each poll, not the Update
-    (the SDK polls again), so a long one stands in for a server that keeps answering
-    polls with no outcome."""
-    monkeypatch.setattr(submit_module, "RPC_TIMEOUT", timedelta(seconds=60))
+    """A release whose Update never answers -- a server that keeps answering polls
+    with no outcome -- does not hold the submit: past `RELEASE_BOUND` it answers with
+    the new job while the release still waits (review #1066 (8) 1), not only when the
+    whole submit's deadline runs out, which is made too long to count here. Without
+    the bound it would wait for good: no clock in the assertions, so a loaded host
+    cannot fail it."""
     monkeypatch.setattr(submit_module, "RELEASE_BOUND", 1.0, raising=False)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 3600.0)
+    waiting, abandoned = asyncio.Event(), asyncio.Event()
+    execute_update = WorkflowHandle.execute_update
+
+    async def unanswered(self: WorkflowHandle[Any, Any], update: Any, *args: Any, **kw: Any) -> Any:
+        if update != RELEASE_UPDATE:
+            return await execute_update(self, update, *args, **kw)
+        waiting.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
+        raise AssertionError("unreachable")
+
+    # Only the release goes through `execute_update`: a submit's own start and join are
+    # update-with-start (`_accepted`), which this does not touch.
+    monkeypatch.setattr(WorkflowHandle, "execute_update", unanswered)
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        gate, held = asyncio.Event(), asyncio.Event()
-        acts = ProjectingActivities(deps, block_main=gate, block_cancelled=held)
+        gate = asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate)
         async with _worker(client, queue, acts):
             old = await service.submit(SLUG, {"width": _w()})
-            began = time.monotonic()
-            async with asyncio.timeout(30):
+            # Only a hang stops here, however slow the host.
+            async with asyncio.timeout(SUBMIT_HANG_BOUND):
                 new = await service.submit(
                     SLUG, {"width": _w()}, supersedes=old.id, request_id=uuid.uuid4().hex
                 )
-            took = time.monotonic() - began
-            held.set()
+            gave_up = abandoned.is_set()
             gate.set()
             await _settled(projection, old.id)
             await _settled(projection, new.id)
         await service.aclose()
 
     assert new.id != old.id
-    print("TOOK", took)
-    assert took < 5
+    # It answered once it gave up on the release, still waiting on its Update.
+    assert waiting.is_set() and gave_up
 
 
 def _classified(error: RPCError, id: str) -> NoReturn:
@@ -556,9 +589,10 @@ async def test_a_refused_submit_supersedes_nothing(
         await service.aclose()
 
     # No render has finished yet: the initial estimate (#603).
-    assert refused.value.depth == 1 and refused.value.retry_after == 10
+    assert refused.value.depth == 1
+    assert refused.value.retry_after == math.ceil(INITIAL_RENDER_ESTIMATE)
     assert waiting.state == "pending" and waiting.claims == 1
-    assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total", RENDER) == 1
 
 
 async def test_a_supersede_never_needs_a_slot_held_by_the_job_it_replaces(
@@ -586,7 +620,7 @@ async def test_a_supersede_never_needs_a_slot_held_by_the_job_it_replaces(
 
     assert (dropped.state, dropped.error) == ("cancelled", SUPERSEDED_ERROR)
     assert done.state == "done", done.error
-    assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total") == 0
+    assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total", RENDER) == 0
 
 
 async def test_a_request_answered_closing_and_resent_after_the_close_gets_a_fresh_job(
@@ -1924,6 +1958,163 @@ async def test_a_start_still_accepting_counts_as_pending_not_as_an_error(
     assert sample("scadbuddy_render_accept_pending_total") == 1
 
 
+class _ProjectingWorld(FakeWorld):
+    """FakeWorld, but `project` writes the row, as `ProjectingActivities` does: without
+    it the row never leaves `pending` and `settle_closed` never sees it."""
+
+    def __init__(self, source: str, deps: WorkerDeps) -> None:
+        super().__init__(source)
+        self._real = RenderActivities(deps)
+
+    @activity.defn(name="project")
+    async def project(self, projection: Projection) -> bool:
+        await super().project(projection)
+        return await self._real.project(projection)
+
+    @activity.defn(name=ACCEPT_ACTIVITY)
+    async def render_accept(self, accept: AcceptRender) -> Job:
+        return await self._real.render_accept(accept)
+
+    @activity.defn(name=CLAIMS_ACTIVITY)
+    async def render_claims(self, job_id: str, claims: int) -> None:
+        await self._real.render_claims(job_id, claims)
+
+    def activities(self) -> list[Callable[..., Any]]:
+        return [*super().activities(), self.render_accept, self.render_claims]
+
+
+async def test_a_timed_out_pipeline_is_failed_by_the_settle_pass(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pipeline that never yields times out (`pipeline_timeout`), and the pass that
+    fails rows whose run closed without settling them fails its row."""
+    monkeypatch.setattr(submit_module, "VISIBILITY_GRACE", timedelta(0))
+    world = _ProjectingWorld(NEVER_YIELDS, deps)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(
+            client, queue, config=replace(deps.config, template_activity_max_timeout=2.0)
+        )
+        assert service.config.pipeline_timeout == 8.0
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+        ):
+            job = await service.submit(
+                "demo", {}, model_version=None, supersedes=None, inputs={"params": {}, "v": 0}
+            )
+            async with asyncio.timeout(60):
+                while (await asyncio.to_thread(projection.read, job.id)).state not in (
+                    "done",
+                    "failed",
+                ):
+                    await service.settle_closed()
+                    await asyncio.sleep(1)
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert stored.state == "failed"
+    # The settle pass's message; the only other way to fail is the pipeline's own
+    # raise, should a machine ever finish the loop inside 8 s (N3).
+    assert stored.error == CLOSED_ERROR or (stored.error or "").startswith("pipeline/pipeline.py:")
+
+
+class _MigrationClient:
+    """A client whose `execute_workflow` records its calls and answers or raises."""
+
+    def __init__(self, outcome: BaseException | None = None) -> None:
+        self.outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute_workflow(self, _run: object, req: MigrateRequest, **kwargs: Any) -> Any:
+        self.calls.append({"req": req, **kwargs})
+        if self.outcome is not None:
+            raise self.outcome
+        return MigrateResult(inputs=req.inputs, from_version=0, to_version=0)
+
+
+class _RecordingSnapshots:
+    def __init__(self) -> None:
+        self.pinned: list[tuple[str, str | None]] = []
+
+    async def pin(self, slug: str, revision: str | None) -> str:
+        self.pinned.append((slug, revision))
+        return revision or "f" * 40
+
+
+@pytest.mark.parametrize("version", ["a" * 40, None])
+async def test_a_migration_on_the_bambuddy_store_pins_its_revision(
+    make_service: ServiceFactory, version: str | None
+) -> None:
+    client = _MigrationClient()
+    service = make_service(client, "q")
+    snapshots = _RecordingSnapshots()
+    service.snapshots = snapshots  # type: ignore[assignment]
+    try:
+        await service.migrate_inputs(SLUG, {"params": {}, "v": 0}, version=version)
+    finally:
+        await service.aclose()
+    assert snapshots.pinned == [(SLUG, version)]
+    assert client.calls[0]["req"].revision == (version or "f" * 40)
+    assert client.calls[0]["rpc_timeout"] == RPC_TIMEOUT
+    assert client.calls[0]["execution_timeout"] == MIGRATE_EXECUTION_TIMEOUT
+
+
+async def test_inputs_too_large_to_migrate_are_refused_before_any_workflow(
+    make_service: ServiceFactory,
+) -> None:
+    client = _MigrationClient()
+    service = make_service(client, "q")
+    # On the bambuddy store: refused before a snapshot is uploaded for it.
+    snapshots = _RecordingSnapshots()
+    service.snapshots = snapshots  # type: ignore[assignment]
+    try:
+        with pytest.raises(ApiError) as raised:
+            await service.migrate_inputs(
+                SLUG, {"blob": "x" * (MAX_WORKFLOW_INPUT_BYTES + 1)}, version=None
+            )
+    finally:
+        await service.aclose()
+    assert raised.value.status == 413
+    assert client.calls == []
+    assert snapshots.pinned == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "message"),
+    [
+        (
+            RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b""),
+            503,
+            "the render service is unavailable",
+        ),
+        (
+            WorkflowFailureError(
+                cause=TemporalTimeoutError(
+                    "timed out", type=TimeoutType.START_TO_CLOSE, last_heartbeat_details=[]
+                )
+            ),
+            504,
+            "migrating the inputs timed out",
+        ),
+    ],
+)
+async def test_a_migration_the_service_cannot_finish_is_a_server_error(
+    make_service: ServiceFactory, outcome: BaseException, status: int, message: str
+) -> None:
+    service = make_service(_MigrationClient(outcome), "q")
+    try:
+        with pytest.raises(ApiError) as raised:
+            await service.migrate_inputs(SLUG, {"params": {}, "v": 0}, version=None)
+    finally:
+        await service.aclose()
+    assert raised.value.status == status
+    assert message in str(raised.value.detail)
+
+
 async def test_retry_after_is_how_long_renders_take_now(
     make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1932,7 +2123,7 @@ async def test_retry_after_is_how_long_renders_take_now(
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: None)
-        assert await service.retry_after() == 10
+        assert await service.retry_after() == math.ceil(INITIAL_RENDER_ESTIMATE)
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 42.2)
         assert await service.retry_after() == 43
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 0.2)

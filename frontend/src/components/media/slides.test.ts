@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { MediaView } from '../../api/types'
 import { GALLERY_SLUG, media } from '../../mocks/fixtures'
-import { carouselOptions, toLightboxSlides, toSlides } from './slides'
+import { carouselOptions, namedSlides, toLightboxSlides, toSlides } from './slides'
 
 describe('toSlides (#275)', () => {
   it('turns media into slides, in order, with their URLs', () => {
@@ -43,6 +43,31 @@ describe('toSlides (#275)', () => {
     const slides = toSlides(GALLERY_SLUG, items)
     expect(slides.map((slide) => slide.key)).toEqual(['b2c3d4e5f6a1', 'c3d4e5f6a1b2', 'd4e5f6a1b2c3'])
     expect(slides[1]?.alt).toBe('Image 2 of 3')
+  })
+})
+
+describe('namedSlides', () => {
+  it("gives the catalogue's slides a card-sized copy, and keeps the original (#1034)", () => {
+    const slides = namedSlides({ slug: GALLERY_SLUG, name: 'Crème Coaster', media: media[GALLERY_SLUG]! })
+    expect(slides[0]).toMatchObject({
+      src: '/api/v1/models/creme-coaster/media/a1b2c3d4e5f6',
+      card: '/api/v1/models/creme-coaster/media/a1b2c3d4e5f6/thumbnail?v=1&size=card',
+    })
+  })
+
+  it('pairs each card copy with its own item when one is missing', () => {
+    const items: MediaView[] = media[GALLERY_SLUG]!.map((item, index) =>
+      index === 0 ? { ...item, missing: true, size: null } : item,
+    )
+    const slides = namedSlides({ slug: GALLERY_SLUG, name: 'Crème Coaster', media: items })
+    expect(slides.map((slide) => slide.card)).toEqual(
+      slides.map((slide) => `/api/v1/models/creme-coaster/media/${slide.key}/thumbnail?v=1&size=card`),
+    )
+  })
+
+  it('gives a video with no poster no card copy', () => {
+    const items: MediaView[] = media[GALLERY_SLUG]!.map((item) => ({ ...item, poster: null }))
+    expect(namedSlides({ slug: GALLERY_SLUG, name: 'C', media: items })[3]?.card).toBeUndefined()
   })
 })
 

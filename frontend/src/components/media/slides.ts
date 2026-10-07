@@ -13,6 +13,11 @@ export type Slide = {
   poster?: string
   /** A small copy of the image or poster, for a strip of thumbnails (#624). */
   thumbnail?: string
+  /**
+   * A card-sized copy of the image or poster (#1034). Set only on the catalogue's
+   * slides: a carousel shows it in place of the original, which the lightbox keeps.
+   */
+  card?: string
   alt: string
   caption?: string
   /** The file's MIME type: a video's `<source type>` needs it. */
@@ -46,9 +51,11 @@ export function toSlides(slug: string, media: MediaView[]): Slide[] {
  * image 1 of 4", or the bare name for a single item) rather than just "Image 1 of 4".
  */
 export function namedSlides(model: { slug: string; name: string; media?: MediaView[] | null }): Slide[] {
-  const all = toSlides(model.slug, model.media ?? [])
+  const shown = (model.media ?? []).filter((item) => !item.missing)
+  const all = toSlides(model.slug, shown)
   return all.map((slide, index) => ({
     ...slide,
+    card: api.mediaThumbnailUrl(model.slug, shown[index]!, 'card'),
     alt:
       slide.caption ??
       (all.length === 1 ? model.name : `${model.name}, ${slide.kind} ${index + 1} of ${all.length}`),

@@ -156,7 +156,8 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(result.subtype).toBe('success')
     expect(decisions).toEqual([['mcp__scadbuddy__list_models', 'allow']])
     expect(lastContent(fake.messageCalls().at(-1)!)).toContain('keychain')
-    // Claude Code's own built-in ones only (`agents-md@builtin` on 2.1.283).
+    // Claude Code's own built-in ones only (`agents-md@builtin` on 2.1.283;
+    // `cc-plugin-agents-md@builtin` and `cc-plugin-plugin-authoring@builtin` on 2.1.287).
     expect(init.plugins.filter((p) => p.path !== 'builtin')).toEqual([])
     expect(init.skills.filter((s) => s.startsWith('scadbuddy:'))).toEqual([])
     expect(init.mcp_servers.map((s) => [s.name, s.status])).toEqual([['scadbuddy', 'connected']])

@@ -100,8 +100,10 @@ dependency of `agent/`.
   the last transcript entries (`last-prompt`, `cost-state`) are appended after the
   `result` message and before the iterator ends; a resumed query's `total_cost_usd`
   includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
-- Read and measured in #297 on SDK 0.3.283 (`agent/test/plugins.e2e.test.ts`, the real
-  bundled CLI against a local `@modelcontextprotocol/sdk` 1.30.1 Streamable HTTP server):
+- Read and measured in #297 on SDK 0.3.283, and again in #1540 on 0.3.287 except the
+  `${VAR}` expansion below, which no test measures since the forwarder replaced it
+  (`agent/test/plugins.e2e.test.ts`, the real bundled CLI against a local
+  `@modelcontextprotocol/sdk` Streamable HTTP server, 1.30.1 then 1.31.0):
   the SDK passes every non-SDK MCP server to Claude Code as `--mcp-config <json>` on its
   argv (`sdk.mjs`), so a header value written there would be on the command line; a
   header written as `${VAR}` with the value in the query's `env` is expanded by Claude
@@ -111,10 +113,13 @@ dependency of `agent/`.
   `disallowedTools: ['mcp__my-memory__forget']` removes that tool from the request;
   `alwaysLoad: true` ("never deferred behind tool search ... blocks startup until the
   server is connected (capped at the standard 5s connect timeout)", `sdk.d.ts`) puts the
-  tools in the first turn. The permission seam applies to them as to in-process tools: a
-  `read` tool runs, an unlisted one is denied as needing approval and never reaches the
-  server.
-- Read and measured in the #464 review, on the bundled Claude Code 2.1.283:
+  tools in the first turn. Since 0.3.287 that is "except a tool the server itself lists
+  with _meta anthropic/alwaysLoad set to false" (`sdk.d.ts`), and the forwarder passes a
+  plugin's `tools/list` `_meta` on, so a plugin can defer its own tools. The permission
+  seam applies to them as to in-process tools: a `read` tool runs, an unlisted one is
+  denied as needing approval and never reaches the server.
+- Read and measured in the #464 review, on the bundled Claude Code 2.1.283, and re-read
+  and re-probed in #1540 on 2.1.287:
   - **Tool-name normalisation.** Claude Code names an MCP tool
     `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
     (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe; the same code, under
@@ -213,7 +218,8 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
   headers to be sent with every request. Defaults to none." [Playwright
   `browser.newContext`][pw-extra-headers]
 - **Measured in #349** on `@playwright/mcp` 0.0.82, Claude Code 2.1.283 (SDK 0.3.283)
-  and `chromium_headless_shell-1246`, by `agent/test/headlessBrowser.server.test.ts`
+  and `chromium_headless_shell-1246` (the Claude Code items again in #1540 on 2.1.287),
+  by `agent/test/headlessBrowser.server.test.ts`
   (the server over stdio), `agent/test/headlessBrowser.e2e.test.ts` (the real SDK and
   CLI against the fake endpoint) and a run inside the `agent` image
   (`docs/ai/headless-browser.md`, "Measured"):
@@ -425,7 +431,7 @@ projection, bound to the session owner's principal, and a `tierOf` that maps
 `mcp__scadbuddy__<name>` to each tool's `risk` for the permission seam (§8.1). An
 outward call that the seam approved runs at once, because the harness projection tells
 `runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
-prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
+prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validated
 arguments with its own bundled zod 4.4.3, which refused any call that left out a
 `.default()` field of our zod 4.6.5 ("expected nonoptional"), so the harness projection
 passed a whole `z.object` instead of the raw shape. Measured on SDK 0.3.287 (#1540): its
@@ -813,8 +819,9 @@ including `disabled`. Where it is enforced:
   (`agent/test/harnessWiring.test.ts`). Its call has no timeout short of the turn's end
   (`ASK_USER_TIMEOUT_MS`, measured). `ai_questions.tool` records which tool asked. Each
   answer is an audit row of kind `question`, naming that tool and holding a keyed hash of
-  the answers, never their text (#1075). A subagent's calls are not yet in the panel feed
-  or the `tool_call` rows (#1108), and the card does not yet say who asked (#1109). Expiry and notifications
+  the answers, never their text (#1075). A subagent's calls are in the panel feed, tagged
+  with the `Agent` call that spawned it (`parent`), and have `tool_call` rows (#1108); the
+  card does not yet say who asked (#1109). Expiry and notifications
   belong to the attention requests of #815. The code is `agent/src/harness/questions.ts`
   and `agent/src/questions/service.ts`; the panel's card is `QuestionCard` in
   `frontend/src/components/assistant/FeedItemView.tsx`.

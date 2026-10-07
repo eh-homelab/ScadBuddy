@@ -1,5 +1,5 @@
 // Coaster set — flat coasters with a pattern, letter, text or picture inlaid
-// flush in a second colour, laid out as a set on one plate, with an optional
+// flush in a second colour, laid out on one plate or more, with an optional
 // border ring in a third colour, an optional recess underneath for a cork or
 // felt pad, and an optional holder that the stack drops into.
 //
@@ -145,9 +145,16 @@ holder_color = "#1E3A5F"; // color
 /* [Hidden] */
 
 $fn = 96;
+// ScadBuddy's plate convention: 0 draws every plate, N only plate N.
+$plate = 0;
 
 BED_X = 300;          // H2C plate with both nozzles
 BED_Y = 320;
+// A multi-colour plate needs room for the prime tower (#1048). ScadBuddy
+// reserves it against one edge of the plate (backend render/plate.py): the
+// 60 mm tower, its 3 mm brim each side, 5 mm to the parts and 2 mm to the edge.
+// So the parts must leave this much free across the plate's width or its depth.
+TOWER = 60 + 2 * 3 + 5 + 2;
 
 d = inlay_depth;
 face_down = face == "down" || underside == "recess";
@@ -398,42 +405,81 @@ px = ext_x + gap;
 py = ext_y + gap;
 HOLDER_MODES = ["beside", "below", "row end"];
 
-// n coasters in c columns, the holder (if any) placed by mode m:
+// n coasters in c columns, the holder (when hd) placed by mode m:
 // [plate width, plate height, holder corner x, y, grid x] from the top left,
 // or undef where the mode does not apply (no empty end in a full last row).
 // Below the grid, the narrower of grid and holder is centred on the other.
-function arrange(c, n, m) =
+function arrange(c, n, m, hd) =
     let (R = ceil(n / c), k = n - (R - 1) * c, gw = c * px - gap, gh = R * py - gap,
          bw = max(gw, h_ext_x))
-    !holder ? [gw, gh, 0, 0, 0]
+    !hd ? [gw, gh, 0, 0, 0]
     : m == 0 ? [c * px + h_ext_x, max(gh, h_ext_y), c * px, 0, 0]
     : m == 1 ? [bw, R * py + h_ext_y, (bw - h_ext_x) / 2, R * py, (bw - gw) / 2]
     : k < c ? [max(gw, k * px + h_ext_x), (R - 1) * py + h_ext_y, k * px, (R - 1) * py, 0]
     : undef;
-function fits(a) = is_list(a) && a[0] <= BED_X && a[1] <= BED_Y;
+// A plate of w x h fits the bed, and with tower (a multi-colour plate) leaves
+// the prime tower's strip free along one edge.
+function fits_bed(w, h, tower) =
+    tower ? (w <= BED_X - TOWER && h <= BED_Y) || (w <= BED_X && h <= BED_Y - TOWER)
+          : w <= BED_X && h <= BED_Y;
+function fits(a, tower) = is_list(a) && fits_bed(a[0], a[1], tower);
 // Every arrangement of n that fits, as [c, m, W, H, hx, hy, gx].
-function options(n) = [for (c = [1 : n], m = holder ? [0 : 2] : [0])
-                       let (a = arrange(c, n, m)) if (fits(a)) concat([c, m], a)];
-// Most coasters that fit (up to count), then the squarest arrangement.
-function best(n) =
-    let (o = options(n), sc = [for (a = o) max(a[2], a[3])])
+function options(n, hd, tower) = [for (c = [1 : n], m = hd ? [0 : 2] : [0])
+                                  let (a = arrange(c, n, m, hd)) if (fits(a, tower)) concat([c, m], a)];
+// The squarest arrangement of n that fits, or undef.
+function best(n, hd, tower) =
+    let (o = options(n, hd, tower), sc = [for (a = o) max(a[2], a[3])])
     len(o) == 0 ? undef : o[search(min(sc), sc)[0]];
-function layout(n) = (!is_undef(best(n)) || n == 1) ? [n, best(n)] : layout(n - 1);
-LAYOUT = layout(count);
+// Most coasters that fit one plate (up to n), and their arrangement.
+function layout(n, hd, tower) =
+    (!is_undef(best(n, hd, tower)) || n == 1) ? [n, best(n, hd, tower)] : layout(n - 1, hd, tower);
+
+// Which plates are multi-colour, so need the tower: equal colours merge into
+// one part and one filament, so it is the distinct colours that count. The
+// holder is on plate 1 only.
+function count_distinct(v, i = 0, seen = []) =
+    i == len(v) ? len(seen)
+    : count_distinct(v, i + 1, len([for (s = seen) if (s == v[i]) 1]) > 0 ? seen : concat(seen, [v[i]]));
+function multi(colours) = count_distinct([for (c = colours) lower(c)]) > 1;
+// The colours coaster(i) draws: with alternate_colors, every other body is
+// pattern_color even with no pattern (#1842 review), so it counts whenever a
+// second coaster exists. A plate whose coasters are all unswapped may still
+// reserve the strip: conservative, never refused.
+COASTER_COLOURS = concat([coaster_color],
+                         pattern != "none" || (alternate_colors && count > 1) ? [pattern_color] : [],
+                         has_border ? [border_color] : [], OVERLAY_ON ? [overlay_color] : []);
+TOWER_1 = multi(concat(COASTER_COLOURS, holder ? [holder_color] : []));
+TOWER_N = multi(COASTER_COLOURS);
+
+// Plate 1 takes as many coasters as fit beside the holder; the rest go on
+// plates of their own, as many to a plate as fit, the last one squarest for
+// what is left. ScadBuddy renders each plate with $plate = 1 .. PLATES.
+LAYOUT = layout(count, holder, TOWER_1);
 N = LAYOUT[0];
-if (N < count)
-    echo(str("NOTE: only ", N, N == 1 ? " coaster" : " coasters", " of ", count, N == 1 ? " fits" : " fit",
-             " on the plate; print the rest as a second plate"));
+REST = count - N;
+PER = REST > 0 ? layout(REST, false, TOWER_N)[0] : 1;
+PLATES = 1 + ceil(REST / PER);
+// First coaster index and coaster count of plate k (1-based).
+function plate_first(k) = k == 1 ? 0 : N + (k - 2) * PER;
+function plate_n(k) = k == 1 ? N : min(PER, count - plate_first(k));
+if (PLATES > 1)
+    echo(str("NOTE: ", N, " of ", count, " coasters fit on plate 1",
+             TOWER_1 ? " with the prime tower" : "", "; the rest are on plate",
+             PLATES == 2 ? " 2" : str("s 2 to ", PLATES)));
+echo(plates = PLATES);
 
 // A big coaster and its holder can be too big to sit side by side or one
 // above the other even alone (150 mm round with a 20 mm gap: 150 + 20 +
 // 156.8 is deeper than the plate, side by side wider). Then the one coaster
 // sits above the holder, with the gap cut to fit.
-STACKED = holder && is_undef(best(1));
+STACKED = holder && is_undef(best(1, true, TOWER_1));
 s_gap = min(gap, BED_Y - ext_y - h_ext_y);
 // 150 mm + a 3 mm clearance holder leaves 9.2 mm; a wider size or clearance
 // range must fail here, not overlap the coaster and the holder.
 assert(!STACKED || s_gap >= 0, str("a ", size, " mm coaster and its holder do not fit the plate"));
+// Stacked, the plate uses the bed's full depth, so the tower goes beside it.
+assert(!STACKED || fits_bed(max(ext_x, h_ext_x), ext_y + s_gap + h_ext_y, TOWER_1),
+       str("a ", size, " mm coaster and its holder leave no room for the prime tower"));
 if (STACKED && s_gap < gap)
     echo(str("NOTE: gap reduced from ", gap, " to ", s_gap, " mm to fit the coaster and the holder on the plate"));
 
@@ -445,14 +491,26 @@ ROWS = STACKED ? 1 : ceil(N / COLS);         // rows of coasters; the holder is 
 W = STACKED ? max(ext_x, h_ext_x) : BEST[2];
 assert(!STACKED || W <= BED_X, str("a ", size, " mm coaster's holder is wider than the plate"));
 H = STACKED ? ext_y + s_gap + h_ext_y : BEST[3];
-function pos(i) = STACKED ? [0, H / 2 - ext_y / 2]
-                : [-W / 2 + BEST[6] + ext_x / 2 + (i % COLS) * px, H / 2 - ext_y / 2 - floor(i / COLS) * py];
+// Coaster j of plate 1, from its centre.
+function pos(j) = STACKED ? [0, H / 2 - ext_y / 2]
+                : [-W / 2 + BEST[6] + ext_x / 2 + (j % COLS) * px, H / 2 - ext_y / 2 - floor(j / COLS) * py];
 h_pos = STACKED ? [0, -H / 2 + h_ext_y / 2]
       : holder ? [-W / 2 + BEST[4] + h_ext_x / 2, H / 2 - BEST[5] - h_ext_y / 2] : [0, 0];
 if (holder)
     echo(HOLDER = STACKED ? "stacked" : HOLDER_MODES[BEST[1]]);
 
-// Holder: stack height is the coasters that fit, 70% of it is walled.
+// Plates 2 on: coasters only, [columns, rows, width, height] of plate k.
+// best() is defined here because PER was chosen under the same TOWER_N, and a
+// plate holds at most PER coasters; change one and the other must follow.
+function grid(k) = let (b = best(plate_n(k), false, TOWER_N), c = b[0])
+                   [c, ceil(plate_n(k) / c), b[2], b[3]];
+function grid_pos(k, j) = let (g = grid(k))
+    [-g[2] / 2 + ext_x / 2 + (j % g[0]) * px, g[3] / 2 - ext_y / 2 - floor(j / g[0]) * py];
+// Drawing every plate ($plate = 0), plates 2 on stand to the right, off the bed.
+function plate_shift(k) = $plate == 0 ? [(k - 1) * (BED_X + 2 * gap), 0] : [0, 0];
+function on_plate(k) = $plate == 0 || $plate == k;
+
+// Holder: it holds the whole set, 70% of the stack is walled.
 stack = count * thickness;
 h_height = h_base + max(10, 0.7 * stack);
 slot_w = min(0.4 * size, 40);
@@ -465,11 +523,17 @@ module holder_part() {
     }
 }
 
-echo(COASTERS = [N, COLS, ROWS, W, H, face_down, recess_d]);
+// The plate drawn (plate 1 when drawing every plate): [coasters, columns,
+// rows, width, height, face down, recess].
+SHOWN = max(1, $plate);
+echo(COASTERS = SHOWN == 1 ? [N, COLS, ROWS, W, H, face_down, recess_d]
+                           : concat([plate_n(SHOWN)], grid(SHOWN), [face_down, recess_d]));
 
 function swapped(i) = alternate_colors && i % 2 == 1;
 
-for (i = [0 : N - 1]) translate(pos(i)) {
+// Coaster i of the set: the index keeps monogram letters and alternating
+// colours running on across the plates.
+module coaster(i) {
     color(swapped(i) ? pattern_color : coaster_color) body(i);
     if (pattern != "none")
         color(swapped(i) ? coaster_color : pattern_color) inlay() face_2d() pattern_2d(i);
@@ -477,4 +541,10 @@ for (i = [0 : N - 1]) translate(pos(i)) {
     if (OVERLAY_ON) color(overlay_color) inlay() face_2d() overlay_2d();
 }
 
-if (holder) color(holder_color) translate(h_pos) holder_part();
+if (on_plate(1)) {
+    for (j = [0 : N - 1]) translate(pos(j)) coaster(j);
+    if (holder) color(holder_color) translate(h_pos) holder_part();
+}
+if (PLATES > 1) for (k = [2 : PLATES]) if (on_plate(k))
+    translate(plate_shift(k)) for (j = [0 : plate_n(k) - 1])
+        translate(grid_pos(k, j)) coaster(plate_first(k) + j);
