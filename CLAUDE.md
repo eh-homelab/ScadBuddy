@@ -245,8 +245,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
   the action's trace only inside its `within`. `traceparent` goes on same-origin
   requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
-  a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk
-  reload; any other chunk's error still does.
+  a blocked one (an error naming `tracing-<hash>.js`, or Safari's naming no URL while it
+  loads) does not trigger the stale-chunk reload; any other chunk's error still does.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
   inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
   reports a failure through `onFailure`; the Customize page then falls back to the generated form

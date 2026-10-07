@@ -9,6 +9,8 @@ import { TRACER_NAME, messageTraceparent, traceAction } from './traceAction'
 import { startTracing } from './tracing'
 
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
+/** Spec §6: a request outside an action is a parentless CLIENT span, propagated unsampled. */
+const UNSAMPLED = /^00-[0-9a-f]{32}-[0-9a-f]{16}-00$/
 const CROSS_ORIGIN = 'https://fonts.googleapis.com/css2'
 
 /** The `traceparent` each request to `url` arrived with (null: none). */
@@ -33,17 +35,27 @@ describe('startTracing', () => {
   it('injects traceparent into a same-origin request', async () => {
     const seen = capture('/api/v1/models')
     stop = startTracing()
-    await fetch('/api/v1/models')
+    await traceAction('generate', {}, () => fetch('/api/v1/models'))
     expect(seen).toHaveLength(1)
     expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('sends a request outside any action (a poll) unsampled, so the backend drops it too', async () => {
+    const seen = capture('/api/v1/jobs/x')
+    stop = startTracing()
+    await fetch('/api/v1/jobs/x')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(UNSAMPLED)
   })
 
   it('never injects traceparent into a cross-origin request', async () => {
     const foreign = capture(CROSS_ORIGIN)
     const own = capture('/api/v1/models')
     stop = startTracing()
-    await fetch(CROSS_ORIGIN)
-    await fetch('/api/v1/models')
+    await traceAction('generate', {}, async (within) => {
+      await within(() => fetch(CROSS_ORIGIN))
+      await within(() => fetch('/api/v1/models'))
+    })
     expect(foreign).toEqual([null])
     // The same page, the same moment, its own origin: injected, so the absence is the origin's doing.
     expect(own[0]).toMatch(TRACEPARENT)

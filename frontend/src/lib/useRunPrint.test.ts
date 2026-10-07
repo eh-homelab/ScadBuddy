@@ -165,6 +165,30 @@ describe('useRunPrint, traced', () => {
     }
   })
 
+  it('marks a run left by closing the dialog as abandoned, not an error', async () => {
+    const tracing = installTestTracing()
+    try {
+      vi.spyOn(api, 'runPrint').mockImplementation(
+        (_output, _body, signal) =>
+          new Promise((_, reject) =>
+            signal?.addEventListener('abort', () => reject(new DOMException('closed', 'AbortError'))),
+          ),
+      )
+      vi.spyOn(api, 'putModelChoices').mockResolvedValue(undefined as never)
+      vi.spyOn(api, 'putPrinterBedType').mockResolvedValue(undefined as never)
+      const { result, unmount } = renderHook(() => useRunPrint(input()))
+      void act(() => void result.current.run())
+      await waitFor(() => expect(api.runPrint).toHaveBeenCalled())
+      unmount()
+      await waitFor(() => expect(tracing.exporter.getFinishedSpans()).toHaveLength(1))
+      const [span] = tracing.exporter.getFinishedSpans()
+      expect(span?.status.code).not.toBe(SpanStatusCode.ERROR)
+      expect(span?.attributes['scadbuddy.outcome']).toBe('abandoned')
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
   it('marks a refused run as an error with its problem type', async () => {
     const tracing = installTestTracing()
     try {
