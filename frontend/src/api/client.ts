@@ -761,11 +761,12 @@ export const api = {
    * #624 — a small copy of an image or of a video's poster, for a strip of
    * thumbnails; undefined for a video with no poster, which has none. It is
    * cached as `immutable`, so the URL carries the thumbnail version (#1424).
+   * `card` asks for a larger copy, sized for a catalogue card's cover (#1034).
    */
-  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>, size?: 'card') =>
     item.kind === 'video' && !item.poster
       ? undefined
-      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}`,
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}${size ? `&size=${size}` : ''}`,
 
   /**
    * #274 — adds an image or video as the template's last item. XHR rather than
