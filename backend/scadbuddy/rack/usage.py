@@ -61,6 +61,12 @@ RACK_SETTLE_FALLBACK = "could not record a rack nozzle's print"
 #: Logged when the follow cuts a settle off (#1113): it is not retried (spec §4), so
 #: this names, by id, the archives it had not recorded. Not a fallback: it re-raises.
 RACK_SETTLE_CUT_OFF = "a rack settle was cut off with archives unrecorded"
+#: Logged when a settle's settings read fails or is cut off at ``SETTINGS_READ_TIMEOUT``
+#: (#1262): that settle records nothing, and nothing retries it. Not a fallback: it
+#: re-raises.
+RACK_SETTLE_SETTINGS_DROPPED = (
+    "a rack settle could not read the settings; its usage is not recorded"
+)
 RACK_STORE_FALLBACKS = frozenset(
     {RACK_SEEN_FALLBACK, RACK_PICKS_FALLBACK, RACK_SETTLE_READ_FALLBACK, RACK_SETTLE_FALLBACK}
 )
@@ -485,7 +491,15 @@ def settle_hook(
         # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
         # stuck on a slow Postgres gives its thread back to the shared executor rather
         # than holding it until Postgres answers.
-        settings = await asyncio.to_thread(load, SETTINGS_READ_TIMEOUT)
+        try:
+            settings = await asyncio.to_thread(load, SETTINGS_READ_TIMEOUT)
+        except Exception as exc:
+            # Type only, as every rack log (spec §7).
+            logger.warning(
+                RACK_SETTLE_SETTINGS_DROPPED,
+                extra={"output_id": meta.id, "error": type(exc).__name__},
+            )
+            raise
         async with client_for(settings) as client:
             await record_settled(meta.id, client=client, links=links, store=store)
 

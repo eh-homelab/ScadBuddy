@@ -14,6 +14,10 @@ once; one task posts the queue to the collector, so the browser never waits on i
   only past it. Each later post's timeout is whatever remains of that budget, the first post that
   fails ends the drain (an unreachable collector would fail every later post the same
   way), and the rest is dropped as ``shutdown``.
+  A shutdown whose own wait is cancelled (a second SIGTERM) cancels the post in flight
+  and counts what is left as ``shutdown`` too.
+- **A dead task** (an error outside a post) is logged when it dies, and from then on the
+  route answers 503 and counts the batch ``failed`` rather than letting the queue fill.
 - **Visibility:** every outcome is counted in ``scadbuddy_trace_relay_batches_total``,
   and failures log one warning a minute at most, naming the status or the error class.
 
@@ -25,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
@@ -34,12 +39,13 @@ from typing import Final
 import httpx
 
 from scadbuddy.core.metrics import Metrics, TraceRelayOutcome
+from scadbuddy.telemetry.payload import MAX_PREPARED_BYTES
 
 logger = logging.getLogger(__name__)
 
-#: 64 batches of at most 256 KiB each (the route's body limit).
+#: 64 batches of at most `payload.prepare`'s cap each, what is queued (#1137).
 MAX_QUEUED_BATCHES: Final = 64
-MAX_QUEUED_BYTES: Final = 16 * 1024 * 1024
+MAX_QUEUED_BYTES: Final = MAX_QUEUED_BATCHES * MAX_PREPARED_BYTES
 FORWARD_TIMEOUT: Final = 5.0
 DRAIN_SECONDS: Final = 5.0
 WARNING_INTERVAL: Final = 60.0
@@ -52,6 +58,7 @@ class TraceForwarder:
         metrics: Metrics,
         target: tuple[str, dict[str, str]] | None,
         transport: httpx.AsyncBaseTransport | None = None,
+        verify: ssl.SSLContext | bool = True,
         clock: Callable[[], float] = time.monotonic,
         forward_timeout: float = FORWARD_TIMEOUT,
         drain_seconds: float = DRAIN_SECONDS,
@@ -59,11 +66,14 @@ class TraceForwarder:
         self.metrics = metrics
         self.target = target
         self._transport = transport
+        self._verify = verify
         self._clock = clock
         self._forward_timeout = forward_timeout
         self._drain_seconds = drain_seconds
         #: Set once shutdown has begun: the route answers 503 from then on.
         self.closing = False
+        #: Set when the forwarding task died: the route answers 503 from then on.
+        self.dead = False
         self._pending: deque[bytes] = deque()
         self._pending_bytes = 0
         #: Set when a batch is queued; made per run, so it is bound to that run's loop.
@@ -95,13 +105,16 @@ class TraceForwarder:
         if self.off:
             return
         if self.closing:
-            self._count("shutdown")
+            self.count("shutdown")
+            return
+        if self.dead:
+            self.count("failed")
             return
         if (
             len(self._pending) >= MAX_QUEUED_BATCHES
             or self._pending_bytes + len(batch) > MAX_QUEUED_BYTES
         ):
-            self._count("queue_full")
+            self.count("queue_full")
             return
         self._pending.append(batch)
         self._pending_bytes += len(batch)
@@ -115,9 +128,13 @@ class TraceForwarder:
             yield
             return
         self.closing = False
+        self.dead = False
         self._wake = asyncio.Event()
-        self._client = httpx.AsyncClient(transport=self._transport, timeout=self._forward_timeout)
+        self._client = httpx.AsyncClient(
+            transport=self._transport, timeout=self._forward_timeout, verify=self._verify
+        )
         task = asyncio.create_task(self._forward(self._wake))
+        task.add_done_callback(self._died)
         try:
             yield
         finally:
@@ -132,14 +149,30 @@ class TraceForwarder:
                     task.cancel()
                     await asyncio.wait({task})
                 await self._drain(deadline)
+            except asyncio.CancelledError:
+                # This wait was cut short: end the post in flight (`_post` counts it
+                # ``shutdown``), count what is still queued, and go.
+                task.cancel()
+                await asyncio.wait({task})
+                self._drop_pending()
+                raise
             finally:
                 await self._client.aclose()
                 self._client = None
                 self._wake = None
             failure = None if task.cancelled() else task.exception()
             if failure is not None:
-                logger.error("the browser trace forwarder died", exc_info=failure)
                 raise failure
+
+    def _died(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled() or task.exception() is None:
+            return
+        self.dead = True
+        logger.error(
+            "the browser trace forwarder died; the relay refuses batches until the process"
+            " restarts",
+            exc_info=task.exception(),
+        )
 
     def _pop(self) -> bytes:
         batch = self._pending.popleft()
@@ -162,9 +195,12 @@ class TraceForwarder:
             remaining = deadline - self._clock()
             if remaining <= 0 or not await self._post(self._pop(), remaining):
                 break
+        self._drop_pending()
+
+    def _drop_pending(self) -> None:
         while self._pending:
             self._pop()
-            self._count("shutdown")
+            self.count("shutdown")
 
     async def _post(self, batch: bytes, timeout: float) -> bool:
         """One post, bounded by ``timeout`` whatever the transport does; True when the
@@ -172,15 +208,15 @@ class TraceForwarder:
         client = self._client
         if client is None:
             raise RuntimeError("the forwarder is not running")
+        # Case-insensitive, so a ``content-type`` among the variable's headers is
+        # replaced rather than sent beside this one.
+        headers = httpx.Headers(self.headers)
+        headers["Content-Type"] = "application/json"
         try:
             async with asyncio.timeout(timeout):
-                response = await client.post(
-                    self.url,
-                    content=batch,
-                    headers={**self.headers, "Content-Type": "application/json"},
-                )
+                response = await client.post(self.url, content=batch, headers=headers)
         except asyncio.CancelledError:
-            self._count("shutdown")
+            self.count("shutdown")
             raise
         except Exception as error:
             # Anything else a transport raises too: one bad post must not end the task,
@@ -190,14 +226,14 @@ class TraceForwarder:
         if not response.is_success:
             self._failed(f"http-{response.status_code}")
             return False
-        self._count("forwarded")
+        self.count("forwarded")
         return True
 
-    def _count(self, outcome: TraceRelayOutcome) -> None:
+    def count(self, outcome: TraceRelayOutcome) -> None:
         self.metrics.trace_relay_batches.labels(outcome).inc()
 
     def _failed(self, reason: str) -> None:
-        self._count("failed")
+        self.count("failed")
         now = self._clock()
         if self._warned_at is None or now - self._warned_at >= WARNING_INTERVAL:
             self._warned_at = now

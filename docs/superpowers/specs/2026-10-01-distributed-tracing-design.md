@@ -290,9 +290,17 @@ path except `/api/v1/ai/*` to the backend.
 - **Forwarding** happens in the background, so the browser never waits on the
   collector. It must not lose spans silently:
   - An accepted batch goes on a bounded in-memory queue: 64 batches,
-    16 MiB at most, given the 256 KiB cap.
+    16 MiB at most. What is queued is the rewritten batch, which can be
+    several times the body it came from (every default field filled in,
+    non-ASCII escaped), so the rewrite is capped at 256 KiB too and a batch
+    past it is a 413 (#1137).
   - One forwarding task, started and stopped in the app's lifespan, posts
-    the queue to the endpoint with httpx, with a 5 s timeout.
+    the queue to the endpoint with httpx, with a 5 s timeout (or
+    `OTEL_EXPORTER_OTLP_(TRACES_)TIMEOUT`), and the CA and client certificate
+    the SDK's exporter reads (`OTEL_EXPORTER_OTLP_(TRACES_)CERTIFICATE`,
+    `…CLIENT_CERTIFICATE`, `…CLIENT_KEY`, #1160).
+  - If that task dies, it is logged at once, and the route answers 503 and
+    counts each batch `failed` until the process restarts (#1176).
   - **No retries in the app.** A failed post (unreachable, timeout, any
     non-2xx) drops its batch. Retrying and buffering are alloy's job, and
     the browser is already gone.
@@ -305,13 +313,17 @@ path except `/api/v1/ai/*` to the backend.
       budget, not a fresh 5 s.
     - The first post that fails or times out ends the drain at once: an
       unreachable collector would fail every later post the same way.
-    - The rest is dropped and counted as `shutdown`.
+    - The rest is dropped and counted as `shutdown`, as is everything still
+      queued when the drain's own wait is cancelled (#1151).
     - This is an accepted trade-off. When the collector is down at shutdown,
       the queued browser batches are lost either way. The only choice is
       whether the pod waits out its grace period first, and it should not.
   - **Visibility:** every outcome is counted in
     `scadbuddy_trace_relay_batches_total{outcome}`, with the outcomes
-    `forwarded`, `failed`, `queue_full` and `shutdown`. The counter goes in
+    `forwarded`, `failed`, `queue_full` and `shutdown`, and for a batch the
+    route refused `rate_limited` (429) and `rejected` (400, 413, 415; a
+    request from another origin is not the page's and is not counted;
+    #1161). Every outcome but `forwarded` is a lost batch. The counter goes in
     `core/metrics.py` beside the others and is pre-created at zero, so its
     first increase alerts. Failures also log one warning a minute at most,
     naming the status or the error class. This one counter is the only
@@ -361,15 +373,17 @@ its caller, so it cannot see the relay's off signal.
   - the provider batches at most 64 spans (`maxExportBatchSize`);
   - `RelayExporter` splits any serialised batch over 48 KiB into several
     requests;
-  - it sends one request at a time, so in-flight `keepalive` bytes stay
-    under the cap;
+  - a batch's requests go one after another, and another batch's start
+    beside them only while the bodies in flight stay within 64 KiB, so the
+    small batch flushed on page hide is not stuck behind one in flight;
   - a single span over 48 KiB after the SDK limits (§5.2) is dropped and
-    counted.
+    counted, and the count goes out as `scadbuddy.dropped_spans` on the
+    first span of the next batch.
 
   The relay's 256 KiB ceiling only bounds non-browser callers; the browser
   never comes near it. A `fetch` that rejects (offline, the page torn down
-  mid-send) drops its batch. Unit tests cover the split and the one-at-a-time
-  send.
+  mid-send) drops its batch. Unit tests cover the split and the in-flight
+  byte budget.
 - On `X-ScadBuddy-Tracing: off` it switches itself off and returns success for
   every later batch without sending.
 - On 413 or 429 it drops the batch. Unit tests cover all three cases.
@@ -533,8 +547,9 @@ loops (the reconciler's poll every 5 s, the event bus, the pool's checks)
 have no parent span. Without the rule each query would be a trace of its
 own, and Tempo would fill with them. A query made while handling a request
 or running an activity has a parent and is kept. `OTEL_TRACES_SAMPLER`, when
-set, replaces this default entirely. The backend and agent honour the
-browser's decision.
+set, replaces this default entirely. The browser's provider has the same
+rule, so a poll's `fetch` outside any user action goes with an unsampled
+`traceparent` (`-00`). The backend and agent honour the browser's decision.
 
 **Errors:** `ERROR` status, with the exception's type and where it was raised,
 **never its message**. Our own spans add `scadbuddy.failure_class`:

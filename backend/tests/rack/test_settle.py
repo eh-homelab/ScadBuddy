@@ -30,6 +30,7 @@ from scadbuddy.rack import usage
 from scadbuddy.rack.usage import (
     RACK_SETTLE_CUT_OFF,
     RACK_SETTLE_FALLBACK,
+    RACK_SETTLE_SETTINGS_DROPPED,
     SETTINGS_READ_TIMEOUT,
     PickedHotend,
     RackUsageStore,
@@ -441,6 +442,24 @@ async def test_the_hook_passes_its_read_timeout(store: RackUsageStore, pool: PgP
         await hook(OutputMeta.model_construct(id=OUTPUT))
     assert asked == [SETTINGS_READ_TIMEOUT]
     assert SETTINGS_READ_TIMEOUT < SETTLE_TIMEOUT
+
+
+async def test_a_failed_settings_read_says_the_settles_usage_was_dropped(
+    store: RackUsageStore, pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1262: a read cut off at its bound records nothing for that settle, and nothing
+    retries it; the warning names that loss, by the error's type only."""
+
+    def load(timeout: float) -> StoredSettings:
+        raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    hook = settle_hook(store, PrintLinkStore(pool), load)
+    with caplog.at_level(logging.DEBUG), pytest.raises(psycopg.errors.QueryCanceled):
+        await hook(OutputMeta.model_construct(id=OUTPUT))
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_SETTINGS_DROPPED]
+    assert record.levelno == logging.WARNING
+    assert (record.output_id, record.error) == (OUTPUT, "QueryCanceled")  # type: ignore[attr-defined]
+    assert "statement timeout" not in str(record.__dict__)
 
 
 async def test_a_real_stuck_settings_read_gives_its_thread_back(

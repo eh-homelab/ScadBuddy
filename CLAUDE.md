@@ -178,13 +178,22 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   feature registers its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
   `scadbuddy/<feature>/operations.py`, found like components, never by editing a list.
   Each worker serves only its queue's kinds: the Bambuddy kinds are
-  `bambuddy/operations.py` (queue `bambuddy`), the library pins `library/operations.py`
-  (queue `library`, #1054). A kind reads the state when it runs, never a route
-  dependency, so a test replaces a store on the state (`state.libraries = store`).
-  `api/operations.py` `run_operation` is how a route runs a kind (`Idempotency-Key`
-  header; 202 with the operation past the deadline) and serves `GET /operations/{id}`.
-  The browser's `command()` (`frontend/src/api/client.ts`) and the agent's
-  (`agent/src/tools/command.ts`) send the
+  `bambuddy/operations.py` (queue `bambuddy`); `library/operations.py` (queue
+  `library`, #1054) exports the library pins with a model's lifecycle
+  (`library/model_operations.py` `model_kinds`). Request bytes too large for a workflow
+  payload (a create's source, thumbnail, README, a patch's presets, an import's URL) go
+  by claim check: `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by
+  sha256 so a re-send keeps its key. `run_operation(..., claimed=)` releases them once
+  the answer is final: only what its own `hold` created, unless a later put rewrote it
+  or a running operation names the digest; the rest go to the
+  `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
+  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
+  with 413. A kind reads the state when it runs, never a route dependency, so a test
+  replaces a store on the state (`state.libraries = store`). `api/operations.py`
+  `run_operation` is how a route runs a kind (`Idempotency-Key` header; 202 with the
+  operation past the deadline) and serves `GET /operations/{id}`. The browser's
+  `command()` (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`)
+  send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
@@ -249,8 +258,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
   the action's trace only inside its `within`. `traceparent` goes on same-origin
   requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
-  a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk
-  reload; any other chunk's error still does.
+  a blocked one (an error naming `tracing-<hash>.js`, or Safari's naming no URL while it
+  loads) does not trigger the stale-chunk reload; any other chunk's error still does.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
   inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
   reports a failure through `onFailure`; the Customize page then falls back to the generated form
@@ -301,7 +310,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
   `pnpm start`) that registers the OTel ESM hook, then `src/telemetry/setup.ts` starts
-  the SDK (standard `OTEL_*` variables only; incoming HTTP only).
+  the SDK (standard `OTEL_*` variables only; incoming HTTP only). `main.ts` imports
+  only the SDK-free `src/telemetry/runtime.ts`, so with `OTEL_SDK_DISABLED=true` no SDK
+  package is loaded (#1351).
   `src/telemetry/scrub.ts` strips exception messages, query strings and user agents
   before export; `src/telemetry/turn.ts` (`TurnTrace`) ends a turn's spans at every
   park and opens `agent.turn.resume` under the decision (`ai_approvals.traceparent`,

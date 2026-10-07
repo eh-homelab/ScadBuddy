@@ -583,7 +583,7 @@ export const api = {
     if (extras.meta) body.append('meta', extras.meta)
     if (extras.thumbnail) body.append('thumbnail', extras.thumbnail)
     if (extras.readme) body.append('readme', extras.readme)
-    return request<ModelSummary>('/models', { method: 'POST', body })
+    return command<ModelSummary>('/models', { method: 'POST', body })
   },
 
   /** Multipart with a `file` part, like the output thumbnail PUT. */
@@ -646,11 +646,11 @@ export const api = {
 
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
-    request<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
 
   /** #153 — fetched on the server, then created through the same path as a paste. */
   importModel: (body: UrlImport) =>
-    request<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
 
   getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
 
@@ -683,18 +683,18 @@ export const api = {
 
   /** Metadata: name, description, tags. Libraries have their own routes below. */
   updateModel: (slug: string, patch: ModelPatch) =>
-    request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    command<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   /** #156 — a new template of mine copied from `slug`, recording it as `upstream`. */
   duplicateModel: (slug: string, name: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
+    command<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
   /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
   deleteModel: (slug: string, force = false) =>
-    request<void>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+    command<unknown>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }).then(() => undefined),
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
   getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),

@@ -1044,6 +1044,72 @@ describe('library pins are commands (#1054)', () => {
   })
 })
 
+describe("a model's lifecycle is commands (#1054)", () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
+  const operation = { id: 'op-9', kind: 'model_create', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+
+  it.each([
+    ['createModelFromSource', () => api.createModelFromSource({ name: 'W', source: 'cube(1);', description: '', force: false }), 'post', '/api/v1/models'],
+    ['importModel', () => api.importModel({ url: 'https://example.com/w.scad', force: false }), 'post', '/api/v1/models/import'],
+    ['updateModel', () => api.updateModel('w', { description: 'd' }), 'patch', '/api/v1/models/w'],
+    ['duplicateModel', () => api.duplicateModel('v', 'W'), 'post', '/api/v1/models/v/duplicate'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to the model', async (_name, call, method, path) => {
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () => HttpResponse.json({ ...operation, status: 'succeeded', result: model })),
+    )
+    await expect(call()).resolves.toEqual(model)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('uploadModel sends an Idempotency-Key and follows a 202 to the model', async () => {
+    // Stubbed below msw: jsdom's File cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-9')
+        ? Response.json({ ...operation, status: 'succeeded', result: model })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(api.uploadModel(new File(['cube(1);'], 'w.scad'))).resolves.toEqual(model)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('deleteModel sends an Idempotency-Key and follows a 202 to its end', async () => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http.delete('/api/v1/models/w', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () => HttpResponse.json({ ...operation, status: 'succeeded', result: {} })),
+    )
+    await expect(api.deleteModel('w')).resolves.toBeUndefined()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('deleteModel answers a 204 at once', async () => {
+    server.use(http.delete('/api/v1/models/w', () => new HttpResponse(null, { status: 204 })))
+    await expect(api.deleteModel('w')).resolves.toBeUndefined()
+  })
+})
+
 describe('render (#1053)', () => {
   const defaults = { ...printRunPoll }
   afterEach(() => {
