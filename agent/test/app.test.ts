@@ -330,11 +330,11 @@ describe('/healthz is bounded (review of #354, finding 3)', () => {
   const never = () => new Promise<boolean>(() => {})
 
   it('reports a hung migration step as unavailable instead of hanging', async () => {
-    const started = Date.now()
+    const started = performance.now()
     const { status, body } = await health(createApp(deps({ database: { ping: up, ready: never }, healthTimeoutMs: 50 })))
     expect(status).toBe(200)
     expect(body).toMatchObject({ ai: 'unavailable (database timed out)', credential: 'unknown' })
-    expect(Date.now() - started).toBeLessThan(1500)
+    expect(performance.now() - started).toBeLessThan(1500)
   })
 
   it('reports a hung credential read as unavailable instead of hanging', async () => {

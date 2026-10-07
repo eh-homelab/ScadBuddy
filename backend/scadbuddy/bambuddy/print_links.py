@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from psycopg import Connection
@@ -162,10 +162,11 @@ class PrintLinkStore:
             self._record_library, library_file_id, queue_item_id, plate_id, printer_id
         )
 
-    async def pending_library(self, limit: int) -> list[PendingLibraryPrint]:
+    async def pending_library(self, limit: int, *, max_age: timedelta) -> list[PendingLibraryPrint]:
         """The library files' queue items whose archive is not known yet and that are
-        not gone, newest first, at most ``limit``."""
-        return await asyncio.to_thread(self._pending_library, limit)
+        not gone, newest first, at most ``limit``. An item recorded more than
+        ``max_age`` ago is marked gone first, so it is not returned again (#1703)."""
+        return await asyncio.to_thread(self._pending_library, limit, max_age)
 
     async def link_library(self, queue_item_id: int, archive_id: int, name: str | None) -> None:
         """The archive a library file's queue item reported."""
@@ -257,8 +258,13 @@ class PrintLinkStore:
                 (queue_item_id, library_file_id, plate_id, printer_id),
             )
 
-    def _pending_library(self, limit: int) -> list[PendingLibraryPrint]:
+    def _pending_library(self, limit: int, max_age: timedelta) -> list[PendingLibraryPrint]:
         with self._require().connection() as conn:
+            conn.execute(
+                "UPDATE library_bambuddy_prints SET gone = true"
+                " WHERE archive_id IS NULL AND NOT gone AND first_seen < now() - %s",
+                (max_age,),
+            )
             rows = conn.execute(
                 "SELECT queue_item_id, library_file_id FROM library_bambuddy_prints"
                 " WHERE archive_id IS NULL AND NOT gone"
