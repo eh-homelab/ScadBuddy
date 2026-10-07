@@ -192,7 +192,7 @@ export const TAB_WAIT_S = 300
 export const TAB_WAITS_PER_TURN = 3
 const CARRY_ON = 'Carry on without the tab'
 
-export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
+export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (questionId: string) => Promise<unknown>): WaitForTab {
   let open: { wait: Promise<TabWait>; waiters: number; stop: AbortController } | undefined
   // Once the user said to carry on, typed a reply of their own, or nobody came
   // back in time, the rest of the turn does not ask again: each later call that
@@ -261,12 +261,13 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           ...spec,
           // The tab may have come back between the failed call and the row: the
           // hub saw nothing to resolve then, so look once now that there is one.
-          // A check that outlives the wait does nothing: reconnected() ends every
-          // open tab wait of the session, which by then may be a later one. The
-          // check gets the same signal, so one that hangs (#1352) is cancelled
+          // A check that outlives the wait does nothing. The one that passes that
+          // test can still be held up (a lock, the pool) until a later wait has
+          // opened, so it resolves only this wait's row, never the session's (#1360).
+          // The check gets the same signal, so one that hangs (#1352) is cancelled
           // with the wait rather than held for the life of the process.
-          onParked: async (parked) => {
-            if ((await isBack(parked)) && !parked.aborted) await reconnected()
+          onParked: async (parked, questionId) => {
+            if ((await isBack(parked)) && !parked.aborted) await reconnected(questionId)
           },
         },
       })
@@ -1358,7 +1359,7 @@ export class SessionManager {
                         session,
                         principal,
                         questionGate
-                          ? { waitForTab: waitForTab(questionGate, controller.signal, () => this.questions.reconnected(id)) }
+                          ? { waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })) }
                           : {},
                       )
                     : {}),

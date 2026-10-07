@@ -2,6 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { useRef, useState, type ReactNode } from 'react'
 import { Link, Route, Routes } from 'react-router'
 import { bridge } from '../../agent/bridge'
+import { respond } from '../../agent/respond'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
@@ -324,6 +325,15 @@ describe('assistant panel', () => {
     const button = await screen.findByRole('button', { name: 'Assistant, 1 waiting for you' })
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
     expect(document.title).toBe('ScadBuddy')
+  })
+
+  // #1538: the mocked agent says how a no-longer-pending entry ended, as the real one does (#1400).
+  it('a second response to an entry that already ended is refused with how it ended', async () => {
+    const { user } = await openAndSend()
+    await user.click(screen.getByRole('button', { name: 'Approve' }))
+    await screen.findByText('Approved by You.')
+    const [approved] = respondRequests()
+    await expect(respond(approved!.id, { kind: 'approval', decision: 'deny' })).rejects.toMatchObject({ status: 409, reason: 'it was already approved' })
   })
 
   it('Stop interrupts the turn', async () => {

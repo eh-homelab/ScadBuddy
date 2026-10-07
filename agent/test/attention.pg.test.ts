@@ -1034,13 +1034,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(results).toEqual([{ answered: false, reconnected: true, message: expect.any(String) }, { back: true, why: 'reconnected' }])
   })
 
-  /** A turn that runs `body` with its waitForTab, then ends; `m` is its manager. */
-  async function withTabWait(body: (wait: WaitForTab) => Promise<void>) {
+  /** A turn that runs `body` with its waitForTab, its manager and its session id, then ends. */
+  async function withTabWait(body: (wait: WaitForTab, turn: { m: SessionManager; sessionId: string }) => Promise<void>) {
     let wait: WaitForTab | undefined
     const run = (r: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        await body(wait!)
+        await body(wait!, { m, sessionId: (r.sessionId ?? r.resume)! })
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
       })()
     const m = manager({
@@ -1085,29 +1085,78 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(results).toEqual([{ back: true, why: 'reconnected' }])
   })
 
+  /** Resolves on the next `wake` of question `id` after it is called: an event, not a sleep. */
+  function nextWake(m: SessionManager, id: string): () => Promise<void> {
+    const questions = m.questions as unknown as { wake(id: string): void }
+    const wake = questions.wake.bind(questions)
+    let woken: (() => void) | undefined
+    vi.spyOn(questions, 'wake').mockImplementation((woke) => {
+      wake(woke)
+      if (woke === id) woken?.()
+    })
+    return () => new Promise<void>((resolve) => (woken = resolve))
+  }
+
+  const openRows = async () => db.sql`SELECT tool_use_id FROM ai_questions WHERE outcome IS NULL`
+
   // #1352: a reconnect check that outlives its wait must not end the wait opened after it.
   it("a reconnect check that returns after its wait ended does not end a later wait's request", async () => {
     let late: (back: boolean) => void = () => undefined
     const first = new AbortController()
     const results: TabWait[] = []
-    const started: { m?: SessionManager; sessionId?: string } = {}
-    const { m, session, turn } = await withTabWait(async (wait) => {
+    const { turn } = await withTabWait(async (wait, { m, sessionId }) => {
       const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (late = resolve)) })
-      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      const [rowA] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE tool_use_id = 'toolu_a'`
       first.abort()
       results.push(await a)
-      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(0)
+      await expect.poll(async () => (await openRows()).length).toBe(0)
       const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
-      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      // The first wait's check settling wakes its row (questions/service.ts gate): wait for that, not a clock.
+      const settled = nextWake(m, rowA!.id)()
       late(true)
-      await new Promise((resolve) => setTimeout(resolve, 300))
-      expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE outcome IS NULL`).toEqual([{ tool_use_id: 'toolu_b' }])
-      await expect.poll(() => started.m).toBeDefined()
-      await started.m!.questions.reconnected(started.sessionId!)
+      await settled
+      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_b' }])
+      await m.questions.reconnected(sessionId)
       results.push(await b)
     })
-    started.m = m
-    started.sessionId = session.id
+    await turn.done
+    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }, { back: true, why: 'reconnected' }])
+  })
+
+  // #1360: the check passed `parked.aborted` but its reconnect was held up (a lock, the pool) until a later wait opened.
+  it("a reconnect check held up past its wait's end resolves only its own row, never a later wait's", async () => {
+    let back: (back: boolean) => void = () => undefined
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const first = new AbortController()
+    const results: TabWait[] = []
+    const { turn } = await withTabWait(async (wait, { m, sessionId }) => {
+      const reconnected = m.questions.reconnected.bind(m.questions)
+      let entered: () => void = () => undefined
+      const reconnecting = new Promise<void>((resolve) => (entered = resolve))
+      let finished: Promise<number> | undefined
+      vi.spyOn(m.questions, 'reconnected').mockImplementationOnce((...args) => {
+        entered()
+        finished = held.then(() => reconnected(...args))
+        return finished
+      })
+      const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (back = resolve)) })
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      back(true)
+      await reconnecting
+      first.abort()
+      results.push(await a)
+      await expect.poll(async () => (await openRows()).length).toBe(0)
+      const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      release()
+      expect(await finished).toBe(0)
+      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_b' }])
+      await m.questions.reconnected(sessionId)
+      results.push(await b)
+    })
     await turn.done
     expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }, { back: true, why: 'reconnected' }])
   })
@@ -1302,7 +1351,7 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
       const parked = new AbortController()
       const attention = request.attention!
       if (attention.reason === 'done') throw new Error('a tab wait is never a done summary')
-      void attention.onParked!(parked.signal)
+      void attention.onParked!(parked.signal, 'question-1')
       parked.abort()
       return { answered: false, timedOut: true, message: 'x' }
     }

@@ -10,8 +10,9 @@ import { mockAgentSessions } from '../agent'
  * socket, not this read.
  *
  * Its respond route (`POST /api/v1/ai/pending-input/{id}`, `src/agent/respond.ts`)
- * answers what the open scripted agent is parked on; every request is kept for tests
- * (`respondRequests`).
+ * answers what the open scripted agent is parked on, and refuses one it is no longer
+ * parked on with a 409 that says how it ended (`reason`), as the agent does; every
+ * request is kept for tests (`respondRequests`).
  */
 
 const state = { approvals: 0, questions: 0, attention: 0, done: 0 }
@@ -91,7 +92,10 @@ export const handlers = [
     if (!agent) return HttpResponse.json({ detail: 'the assistant is not connected' }, { status: 503 })
     const result = agent.respond(id, body)
     if ('error' in result) {
-      return HttpResponse.json({ detail: result.error, ...(result.status === 404 ? { stale: true } : {}) }, { status: result.status })
+      return HttpResponse.json(
+        { detail: result.error, ...(result.reason === undefined ? {} : { reason: result.reason }), ...(result.status === 404 ? { stale: true } : {}) },
+        { status: result.status },
+      )
     }
     return HttpResponse.json({ id, kind: body.kind, outcome: body.kind === 'answer' ? 'answered' : body.decision === 'approve' ? 'approved' : 'denied' })
   }),

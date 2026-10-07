@@ -446,14 +446,19 @@ export class QuestionService {
    * `reconnected` by the system, never as an answer. Returns how many. Called on
    * whichever replica saw the tab; a turn parked on another replica sees the row
    * on its next poll.
+   *
+   * `questionId` limits it to that one request: a wait's own early check
+   * (sessions/manager.ts) passes it, so a check held up past its wait's end
+   * cannot resolve a later wait's request (#1360). The hub ends them all.
    */
-  async reconnected(sessionId: string): Promise<number> {
+  async reconnected(sessionId: string, options: { questionId?: string } = {}): Promise<number> {
     const reason = 'the ScadBuddy tab is connected again'
+    const questionId = options.questionId ?? null
     const rows = await this.atomically(sessionId, async (tx) => {
       const resolved = await tx<Resolved[]>`
         UPDATE ai_questions SET outcome = 'reconnected', reason = ${reason}, resolved_at = now()
         WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = 'tab_disconnected'
-          AND outcome IS NULL
+          AND outcome IS NULL AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: resolved,
@@ -749,7 +754,7 @@ export class QuestionService {
       // timer to end. A settled check wakes the wait, which re-reads its row.
       const parked = new AbortController()
       if (attention?.onParked) {
-        attention.onParked(parked.signal).then(
+        attention.onParked(parked.signal, id).then(
           () => this.wake(id),
           () => this.wake(id),
         )

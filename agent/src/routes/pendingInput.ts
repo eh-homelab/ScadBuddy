@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { ApprovalError } from '../approvals/service.js'
+import { BACK_REPLIES } from '../harness/attention.js'
 import { ANSWER_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { QuestionError } from '../questions/service.js'
@@ -231,7 +232,11 @@ export async function respond(
     throw new RespondError(400, `${requestId} asks for an answer: respond with {"kind": "answer", …}`)
   }
   const ended = (now: NonNullable<typeof entry>) => new RespondError(409, `${requestId} is no longer waiting for an answer`, endedReason(now))
-  if (!entry.pending) throw ended(entry)
+  // #815 §2: "I'm back" to a request the tab's return already ended is the service's
+  // no-op success, not a conflict: let it through for answer() to take (#1538).
+  const backAfterReconnect =
+    entry.kind === 'attention' && entry.outcome === 'reconnected' && BACK_REPLIES.includes(body.choice ?? body.text ?? '')
+  if (!entry.pending && !backAfterReconnect) throw ended(entry)
   let answers: string[]
   if (entry.kind === 'attention') {
     if (body.answers !== undefined || (body.choice === undefined) === (body.text === undefined)) {

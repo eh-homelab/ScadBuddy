@@ -69,9 +69,14 @@ export interface TabLinkOptions {
   tabId?: string
   url?: string
   WebSocketImpl?: typeof WebSocket
-  /** Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`. */
+  /**
+   * Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`, then scaled by a random
+   * half to all of it, so tabs an agent restart dropped together do not return in lockstep.
+   */
   baseMs?: number
   maxMs?: number
+  /** The jitter's source, in [0, 1); tests fix it. */
+  random?: () => number
 }
 
 export function createTabLink({
@@ -81,6 +86,7 @@ export function createTabLink({
   WebSocketImpl = WebSocket,
   baseMs = 500,
   maxMs = 15_000,
+  random = Math.random,
 }: TabLinkOptions): TabLink {
   let socket: WebSocket | undefined
   let closed = false
@@ -113,7 +119,16 @@ export function createTabLink({
   }
 
   const run = async (id: string, tool: string, args: Record<string, unknown>) => {
-    const outcome = await bridge.call(tool, args)
+    let outcome: unknown
+    try {
+      outcome = await bridge.call(tool, args)
+    } catch (err) {
+      // bridge.call answers with a typed result, but its catalogue import can still reject
+      // (a stale chunk after a deploy): answer it as failed now rather than leave the
+      // agent waiting out its call timeout (#747).
+      const why = err instanceof Error ? err.message : String(err)
+      outcome = { ok: false, error: { code: 'failed', message: `This tab could not run "${tool}": ${why}` } }
+    }
     let frame = JSON.stringify(tabFrame({ type: 'result', id, outcome }))
     const bytes = new TextEncoder().encode(frame).byteLength
     if (bytes > MAX_RESULT_BYTES) {
@@ -179,7 +194,7 @@ export function createTabLink({
       socket = undefined
       // What was pending may have been answered elsewhere; the next connection says again.
       setState({ connected: false, pending: [], paired: [] })
-      const delay = Math.min(maxMs, baseMs * 2 ** attempt)
+      const delay = Math.min(maxMs, baseMs * 2 ** attempt) * (0.5 + random() / 2)
       attempt += 1
       timer = setTimeout(open, delay)
     }

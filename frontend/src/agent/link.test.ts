@@ -113,6 +113,20 @@ describe('createTabLink', () => {
     expect(ws().sent.at(-1)!.length).toBeLessThan(1000)
   })
 
+  // #747: a call that throws (the catalogue chunk failing to load after a deploy) still gets its result frame.
+  it('answers a call whose bridge throws with a failed result, not silence', async () => {
+    const bridge = new AgentBridge()
+    vi.spyOn(bridge, 'call').mockRejectedValue(new Error('Failed to fetch dynamically imported module'))
+    const { ws } = linked(bridge)
+    ws().open()
+    ws().deliver({ type: 'call', id: 'c1', tool: 'get_form', args: {} })
+    await vi.waitFor(() => expect(ws().frames().some((f) => f.type === 'result')).toBe(true))
+    expect(ws().frames().find((f) => f.type === 'result')).toMatchObject({
+      id: 'c1',
+      outcome: { ok: false, error: { code: 'failed', message: expect.stringMatching(/get_form.*Failed to fetch dynamically imported module/) } },
+    })
+  })
+
   it('counts a result in bytes, so non-ASCII text under the limit in characters is still refused (#731 review)', async () => {
     const bridge = new AgentBridge()
     // 3 bytes each in UTF-8, one UTF-16 unit each: half the limit in characters, 1.5x in bytes.
@@ -157,6 +171,27 @@ describe('createTabLink', () => {
     ws().deliver({ type: 'call', id: 'c', tool: 'navigate' })
     expect(link.getState()).toMatchObject({ pending: [], paired: [] })
     expect(ws().frames()).toHaveLength(1)
+  })
+
+  // #747: tabs dropped together by an agent restart must not all come back in lockstep.
+  it('spreads each reconnect over half to all of its back-off, so dropped tabs do not return together', () => {
+    vi.useFakeTimers()
+    for (const [random, delay] of [
+      [0, 50],
+      [0.5, 75],
+      [0.98, 99],
+    ] as const) {
+      FakeSocket.instances = []
+      const bridge = new AgentBridge()
+      const link = createTabLink({ bridge, WebSocketImpl: Impl, baseMs: 100, maxMs: 1000, random: () => random })
+      link.connect()
+      FakeSocket.instances[0]!.drop()
+      vi.advanceTimersByTime(delay - 1)
+      expect(FakeSocket.instances).toHaveLength(1)
+      vi.advanceTimersByTime(1)
+      expect(FakeSocket.instances).toHaveLength(2)
+      link.close()
+    }
   })
 
   it('reconnects with back-off as the same tab, and stops after close()', () => {

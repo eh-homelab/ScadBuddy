@@ -61,7 +61,7 @@ export interface MockAgentSessions {
    * #815 — `POST /api/v1/ai/pending-input/{id}`: answers the approval or question a
    * session's script is parked on, or the error to answer with.
    */
-  respond(requestId: string, body: RespondBody): { ok: true } | { error: string; status: number }
+  respond(requestId: string, body: RespondBody): { ok: true } | { error: string; status: number; reason?: string }
 }
 
 let openAgent: MockAgentSessions | null = null
@@ -100,6 +100,8 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
   let handlers: TransportHandlers | null = null
   const sent: ClientMessage[] = []
   const sessions = new Map<string, MockSession>()
+  /** How each entry the scripts parked on ended, by request id: a 409's `reason`, as the agent says it (#1400). */
+  const ended = new Map<string, string>()
   let counter = 0
   const nextId = (prefix: string) => `${prefix}-${++counter}`
 
@@ -261,6 +263,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     const asking = s.asking
     if (!asking) return
     s.asking = undefined
+    ended.set(`question:${asking.id}`, 'it was already answered')
     emit({ type: 'question.resolved', sessionId: s.sessionId, id: asking.id, answered: true, answers, by: BROWSER_USER })
     setStatus(s, 'running')
     const answer = answers[0] ?? ''
@@ -280,6 +283,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     const pending = s.pending
     if (!pending) return
     s.pending = undefined
+    ended.set(`approval:${pending.id}`, approve ? 'it was already approved' : 'it was already denied')
     emit({ type: 'approval.resolved', sessionId: s.sessionId, id: pending.id, approved: approve, decision: approve ? 'approved' : 'denied', by: BROWSER_USER })
     setStatus(s, 'running')
     play(s, [
@@ -395,10 +399,12 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         }
         if (s.pending) {
           emit({ type: 'approval.resolved', sessionId: s.sessionId, id: s.pending.id, approved: false, decision: 'cancelled', reason: 'interrupted by You' })
+          ended.set(`approval:${s.pending.id}`, 'interrupted by You')
           s.pending = undefined
         }
         if (s.asking) {
           emit({ type: 'question.resolved', sessionId: s.sessionId, id: s.asking.id, answered: false, reason: 'interrupted by You' })
+          ended.set(`question:${s.asking.id}`, 'interrupted by You')
           s.asking = undefined
         }
         setStatus(s, 'idle')
@@ -461,6 +467,8 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           return { ok: true }
         }
       }
+      const reason = ended.get(requestId)
+      if (reason) return { error: `${requestId} is no longer waiting for a response`, status: 409, reason }
       return { error: `no pending input ${requestId}: it is stale or was never asked`, status: 404 }
     },
     raise(sessionId, addUsd) {
