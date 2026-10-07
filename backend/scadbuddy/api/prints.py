@@ -111,11 +111,15 @@ async def _proxy(
         return Response(status_code=upstream.status_code, headers=headers)
 
     async def body() -> AsyncIterator[bytes]:
+        # The stack is closed with the failure, so `BambuddyClient.stream` sees a read
+        # that failed midway and fails its span (#1192).
         try:
             async for chunk in upstream.aiter_raw():
                 yield chunk
-        finally:
-            await stack.aclose()
+        except BaseException as error:
+            await stack.__aexit__(type(error), error, error.__traceback__)
+            raise
+        await stack.aclose()
 
     return StreamingResponse(body(), status_code=upstream.status_code, headers=headers)
 
