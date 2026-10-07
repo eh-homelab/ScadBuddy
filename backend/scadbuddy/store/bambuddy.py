@@ -249,13 +249,15 @@ class BambuddyContentBackend:
 
     async def remove(self, backend_id: str) -> None:
         async with self._client() as (client, inbox):
+            # #1272: the file's folder is the last thing read before the DELETE, so a
+            # move in Bambuddy's UI has one round trip to slip through, not two reads.
+            work = await asyncio.to_thread(self._work_folders, inbox)
             try:
                 file = await client.library_file(int(backend_id))
             except ApiError as error:
                 if error.status == 404:
                     return
                 raise
-            work = await asyncio.to_thread(self._work_folders, inbox)
             if file.folder_id not in work:
                 raise RefusedDeleteError(
                     f"library file {backend_id} is in folder {file.folder_id}, not a ScadBuddy"
