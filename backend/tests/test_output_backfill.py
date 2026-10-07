@@ -468,15 +468,17 @@ async def test_the_reaper_stops_on_a_directory_it_cannot_list(
 async def test_the_reaper_follows_symlinks_as_the_store_does(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
-    """#1806 review: an output reached through a symlinked slug directory is served by the
-    store, so the reaper must count it live, not release its Parts."""
-    store, old, _, written = await _legacy_output(tmp_path)
+    """#1806 review: an output reached through a symlinked directory is served by the
+    store, so the reaper must count it live, not release its Parts. A second, plain
+    output keeps the no-outputs guard out of the way."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.create(job.model_copy(update={"outputs": [], "id": "plain"}), name="plain")
     part = written.manifest[0].part
-    slug_dir = store.directory(old.id).parent
-    moved = tmp_path / "elsewhere" / slug_dir.name
+    out_dir = store.directory(old.id)
+    moved = tmp_path / "elsewhere" / out_dir.name
     moved.parent.mkdir()
-    shutil.move(slug_dir, moved)
-    slug_dir.symlink_to(moved, target_is_directory=True)
+    shutil.move(out_dir, moved)
+    out_dir.symlink_to(moved, target_is_directory=True)
     assert store.get(old.id).id == old.id  # the store still serves it
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
