@@ -61,7 +61,7 @@ describe('ScrubbingSpanExporter', () => {
     expect(everything(spans)).not.toContain(SENTINEL)
   })
 
-  it('drops query strings and user agents from HTTP attributes', async () => {
+  it('drops query strings, paths and user agents from HTTP attributes, keeping a URL\'s origin', async () => {
     const spans = await exported((span) =>
       span.setAttributes({
         'url.full': `https://scadbuddy.test/mcp?token=${SENTINEL}`,
@@ -74,11 +74,37 @@ describe('ScrubbingSpanExporter', () => {
     )
     expect(everything(spans)).not.toContain(SENTINEL)
     expect(spans.getFinishedSpans()[0]!.attributes).toEqual({
-      'url.full': 'https://scadbuddy.test/mcp',
-      'http.target': '/mcp',
-      'url.path': '/mcp',
+      'url.full': 'https://scadbuddy.test',
       'http.request.method': 'POST',
     })
+  })
+
+  it.each([SpanKind.CLIENT, SpanKind.INTERNAL])('on a non-server span (kind %i) keeps only scheme://host of a URL and no path', async (kind) => {
+    const inner = new InMemorySpanExporter()
+    const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter: new ScrubbingSpanExporter(inner) })] })
+    const span = provider.getTracer('t').startSpan('POST', { kind })
+    span.setAttributes({
+      'url.full': `http://127.0.0.1:41234/p/${SENTINEL}#${SENTINEL}`,
+      'http.url': `https://plugin.test:8443/sessions/${SENTINEL}/`,
+      'http.target': `/p/${SENTINEL}`,
+      'url.path': `/p/${SENTINEL}`,
+      'url.template': '/p/{token}',
+      'http.request.method': 'POST',
+    })
+    span.end()
+    await provider.forceFlush()
+    expect(everything(inner)).not.toContain(SENTINEL)
+    expect(inner.getFinishedSpans()[0]!.attributes).toEqual({
+      'url.full': 'http://127.0.0.1:41234',
+      'http.url': 'https://plugin.test:8443',
+      'url.template': '/p/{token}',
+      'http.request.method': 'POST',
+    })
+  })
+
+  it('drops a URL attribute with no origin to keep', async () => {
+    const spans = await exported((span) => span.setAttributes({ 'url.full': `/relative/${SENTINEL}`, 'http.url': 42 }))
+    expect(spans.getFinishedSpans()[0]!.attributes).toEqual({})
   })
 
   it("drops the Host header, the client's address and captured headers, keeping the server's port", async () => {

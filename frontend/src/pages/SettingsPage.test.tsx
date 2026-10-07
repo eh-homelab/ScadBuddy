@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import type { UserEvent } from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { resetAiAvailability } from '../agent/chat/availability'
@@ -11,7 +12,24 @@ import { SettingsPage } from './SettingsPage'
 
 /** Bambuddy's "Test connection", as against a plugin endpoint's (RemotePluginsPanel). */
 const bambuddyTest = () =>
-  within(screen.getByRole('region', { name: 'Connection' })).getByRole('button', { name: 'Test connection' })
+  within(region('Connection')).getByRole('button', { name: 'Test connection' })
+
+/** `text` in `field` as one paste: each keystroke re-renders all of Settings (#1485). */
+async function enter(user: UserEvent, field: HTMLElement, text: string) {
+  await user.click(field)
+  await user.paste(text)
+}
+
+/**
+ * A section, by its heading. A role query over all of Settings (~1000 elements) runs
+ * jsdom's getComputedStyle on each of them, ~0.5 s after every change, and these tests
+ * ran into their 5 s under load (#1485); so buttons are looked for in their section.
+ */
+function region(name: string): HTMLElement {
+  const section = screen.getByText(name, { selector: 'h2' }).closest('section')
+  if (!section) throw new Error(`no section headed ${name}`)
+  return section
+}
 
 /** The form seeds itself from the server, so wait for the URL to arrive. */
 async function seeded() {
@@ -45,7 +63,7 @@ describe('SettingsPage', () => {
     // of requests, and a role query re-run on every change while the page loads costs
     // ~0.4 s each in jsdom (getComputedStyle per element), which held the page past the
     // wait (#1485).
-    await screen.findByText('Let AI sessions use ScadBuddy in a headless browser', {}, { timeout: 3000 })
+    await screen.findByText('Let AI sessions use ScadBuddy in a headless browser', {}, { timeout: 10_000 })
     expect(screen.getByRole('checkbox', { name: 'Let AI sessions use ScadBuddy in a headless browser' })).not.toBeChecked()
   })
 
@@ -101,7 +119,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.selectOptions(screen.getByLabelText('Printer'), '')
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toEqual({ printer_id: null })
     put.mockRestore()
@@ -114,13 +132,13 @@ describe('SettingsPage', () => {
 
     const url = screen.getByLabelText('Bambuddy URL')
     await user.type(url, '/')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).not.toHaveProperty('bambuddy_api_key')
     await waitFor(() => expect(screen.getByText(/Saved at/)).toBeInTheDocument())
 
-    await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, screen.getByLabelText('API key'), 'secret')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
     expect(put.mock.calls[1]?.[0]).toEqual({ bambuddy_api_key: 'secret' })
     put.mockRestore()
@@ -130,8 +148,8 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, screen.getByLabelText('API key'), 'secret')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(screen.getByLabelText('API key')).toHaveValue(''))
     expect(screen.getByText(/Saved at/)).toBeInTheDocument()
   })
@@ -144,7 +162,7 @@ describe('SettingsPage', () => {
     const select = screen.getByLabelText('Default plate')
     await waitFor(() => expect(screen.getByRole('option', { name: /A1 mini/ })).toBeInTheDocument())
     await user.selectOptions(select, 'A1 mini')
-    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ default_plate: 'A1 mini' })
     expect(await api.getPlate(null)).toMatchObject({ name: 'A1 mini' })
@@ -161,14 +179,14 @@ describe('SettingsPage', () => {
     expect(days).toHaveAttribute('placeholder', 'Forever')
 
     await user.type(days, '7')
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ print_run_retention_seconds: 604800 })
     expect((await api.getSettings()).print_run_retention_seconds).toBe(604800)
 
     await user.clear(days)
     // The button is disabled while the first save is in flight.
-    const save = screen.getByRole('button', { name: 'Save Printing defaults' })
+    const save = within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' })
     await waitFor(() => expect(save).toBeEnabled())
     await user.click(save)
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
@@ -185,13 +203,13 @@ describe('SettingsPage', () => {
     expect(days).toHaveAttribute('placeholder', 'Forever')
     expect(screen.getByText(/at least as long as Temporal's namespace retention/)).toBeInTheDocument()
     await user.type(days, '2')
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ operation_retention_seconds: 172800 })
 
     await user.clear(days)
     // The button is disabled while the first save is in flight.
-    const save = screen.getByRole('button', { name: 'Save Printing defaults' })
+    const save = within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' })
     await waitFor(() => expect(save).toBeEnabled())
     await user.click(save)
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
@@ -219,7 +237,7 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     await user.type(screen.getByLabelText('Keep finished Bambuddy operations for (days)'), '2')
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     expect(await screen.findByText(msg)).toBeInTheDocument()
     // Beside the field, in place of its help.
     expect(screen.queryByText(/at least as long as Temporal's namespace retention/)).not.toBeInTheDocument()
@@ -231,7 +249,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '0.5')
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     expect(await screen.findByText(/at least 1 day/)).toBeInTheDocument()
     expect(put).not.toHaveBeenCalled()
     put.mockRestore()
@@ -251,7 +269,7 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('option', { name: '10.08 × 10.08 in' })).toBeInTheDocument()
     expect(getDisplayUnit()).toBe('mm')
 
-    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(getDisplayUnit()).toBe('in'))
     expect(put.mock.calls[0]?.[0]).toMatchObject({ display_unit: 'in' })
     expect((await api.getSettings()).display_unit).toBe('in')
@@ -314,7 +332,7 @@ describe('SettingsPage, live (#269)', () => {
     // Seeded from the stored settings first; editing before that would be overwritten.
     await waitFor(() => expect(field).not.toHaveValue(''))
     await user.clear(field)
-    await user.type(field, 'https://mine.test')
+    await enter(user, field, 'https://mine.test')
 
     await api.putSettings({ public_url: OTHER })
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })
@@ -330,7 +348,7 @@ describe('SettingsPage, live (#269)', () => {
     const field = await screen.findByLabelText(/ScadBuddy.s own URL/)
     await waitFor(() => expect(field).not.toHaveValue(''))
     await user.clear(field)
-    await user.type(field, 'https://tested.test')
+    await enter(user, field, 'https://tested.test')
     await user.click(bambuddyTest())
     await findStatus('3DP-31B-598')
 

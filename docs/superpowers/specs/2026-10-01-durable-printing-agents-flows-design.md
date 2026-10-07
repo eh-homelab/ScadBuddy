@@ -256,6 +256,9 @@ The same for every kind:
        onto one job (§4.5).
      - A kind declares which key it uses. Every command with a physical or external
        effect (prints, sends, Bambuddy writes, git commits) uses `request_id`.
+     - An operation (a Bambuddy write) sent with no `Idempotency-Key` is refused with
+       428 before anything starts (#1143): its retry could not be told from a second
+       press, so a proxy's re-send after a lost answer would do it twice.
 2. **Update-with-start.** The route calls `execute_update_with_start_workflow` with the
    Update `accepted`.
 3. **First activity: validate and record.** Refusals (422, 404, 409, as each route

@@ -43,7 +43,9 @@ async function open(route = '/m/name-keychain') {
     </Shell>,
     { route, path: '/m/:slug' },
   )
-  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 4000 })
+  // The first render goes through the whole mocked pipeline; on a loaded host it took
+  // over 4 s to show (#1485).
+  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 10_000 })
   return view
 }
 

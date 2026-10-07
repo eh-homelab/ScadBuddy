@@ -373,15 +373,17 @@ its caller, so it cannot see the relay's off signal.
   - the provider batches at most 64 spans (`maxExportBatchSize`);
   - `RelayExporter` splits any serialised batch over 48 KiB into several
     requests;
-  - it sends one request at a time, so in-flight `keepalive` bytes stay
-    under the cap;
+  - a batch's requests go one after another, and another batch's start
+    beside them only while the bodies in flight stay within 64 KiB, so the
+    small batch flushed on page hide is not stuck behind one in flight;
   - a single span over 48 KiB after the SDK limits (§5.2) is dropped and
-    counted.
+    counted, and the count goes out as `scadbuddy.dropped_spans` on the
+    first span of the next batch.
 
   The relay's 256 KiB ceiling only bounds non-browser callers; the browser
   never comes near it. A `fetch` that rejects (offline, the page torn down
-  mid-send) drops its batch. Unit tests cover the split and the one-at-a-time
-  send.
+  mid-send) drops its batch. Unit tests cover the split and the in-flight
+  byte budget.
 - On `X-ScadBuddy-Tracing: off` it switches itself off and returns success for
   every later batch without sending.
 - On 413 or 429 it drops the batch. Unit tests cover all three cases.
@@ -466,7 +468,9 @@ the whole wait. That is the failure §4 rejects session-long traces for. So:
 - When the call goes ahead, the rest of the turn is traced as
   `agent.turn.resume`, a child of the decision span: the tool's execution, its
   backend calls, and the turn's remaining tool calls. An expired approval
-  records `agent.approval` with `outcome=expired` and the same link.
+  records `agent.approval` with `outcome=expired` and the same link. A decision
+  whose transaction rolls back ends its span with `outcome=rolled_back` and an
+  error status, never the decision it did not commit (#1266).
 - **A turn can park any number of times.** Each park ends the segment that is
   open (`agent.turn` the first time, the current `agent.turn.resume` after
   that), together with its tool span, with `outcome=parked`. Each decision is
@@ -545,8 +549,9 @@ loops (the reconciler's poll every 5 s, the event bus, the pool's checks)
 have no parent span. Without the rule each query would be a trace of its
 own, and Tempo would fill with them. A query made while handling a request
 or running an activity has a parent and is kept. `OTEL_TRACES_SAMPLER`, when
-set, replaces this default entirely. The backend and agent honour the
-browser's decision.
+set, replaces this default entirely. The browser's provider has the same
+rule, so a poll's `fetch` outside any user action goes with an unsampled
+`traceparent` (`-00`). The backend and agent honour the browser's decision.
 
 **Errors:** `ERROR` status, with the exception's type and where it was raised,
 **never its message**. Our own spans add `scadbuddy.failure_class`:
