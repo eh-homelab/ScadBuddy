@@ -13,6 +13,11 @@
 #     two footprints closer than the gap (or the reduced gap the log gives);
 #     all inside the 300 x 320 H2C plate, on z=0. The grid is not
 #     re-derived; a few cases pin how many coasters fit (#411)
+#   - ScadBuddy's plate convention (spec §6.4) and the prime tower (#1048):
+#     the model echoes `plates = N`; rendered with -D '$plate=k' as ScadBuddy
+#     renders each plate, every plate is checked as above, a multi-colour one
+#     also leaves the prime tower's strip free along one edge, and the plates
+#     together hold every coaster asked for, none twice
 #   - inlays flush with the decorated face, on top (face up) or on the bed
 #     (face down), and the solid volume equals the coasters' outline times
 #     thickness minus the recess (so the inlays fill their pockets exactly)
@@ -103,6 +108,12 @@ CASES+=(
     'overlay-refused-dotfile|overlay_file=".gitignore";count=1'
     'overlay-refused-backslash|overlay_file="..\\sample-overlay.svg";count=1'
     'too-many-for-plate|count=12;size=150'
+    # #1048: 7-12 default coasters used to fill the bed and leave no room for
+    # the prime tower; now 6 go on plate 1 and the rest on plate 2.
+    'twelve-defaults|count=12'
+    'seven-defaults|count=7'
+    # One colour needs no tower, so the whole bed is used.
+    'twelve-one-colour|count=12;border_width=0;pattern="none"'
     'twelve-small-holder|count=12;size=60;holder=true;pattern="sunburst";holder_color="#8D6E63"'
     # #411: coaster cells are coaster-sized and the holder goes beside, below or
     # at the end of the last row; with holder-sized cells these fitted 5 and 8.
@@ -133,6 +144,16 @@ for c in "${CASES[@]}"; do
     ms=$(( ($(date +%s%N) - start) / 1000000 ))
     printf '%s\t%s\t%s\n' "$name" "$ms" "${c#*|}" >> "$OUT/cases.txt"
     printf '==> %-28s %6d ms\n' "$name" "$ms"
+
+    # Each plate on its own, the way ScadBuddy renders a multi-plate template.
+    plates=$(sed -n 's/^ECHO: plates = \([0-9]*\)$/\1/p' "$OUT/$name.log")
+    rm -f "$OUT/$name".p*.3mf "$OUT/$name".p*.log
+    if [ "${plates:-1}" -gt 1 ]; then
+        for k in $(seq 1 "$plates"); do
+            scad "${defs[@]}" -D "\$plate=$k" -o "$OUT/$name.p$k.3mf" model.scad >"$OUT/$name.p$k.log" 2>&1 \
+                || { tail -20 "$OUT/$name.p$k.log"; echo "FAIL: $name plate $k did not render"; exit 1; }
+        done
+    fi
 
     # Every colour on its own, closed (ScadBuddy's per-colour wrapper, §6.3).
     colours=$(python3 - "$OUT/$name.3mf" <<'PY'
@@ -236,20 +257,32 @@ def is_box(b, w, h, top):
             and abs(b[4]) <= 1e-4 and abs(b[5] - top) <= 0.02)
 
 
-# Cases that pin how many coasters fit. A holder used to size every grid cell
-# for itself (#411): 95 mm coasters fitted 5 with it, 70 mm ones 8.
-EXPECT_FIT = {"holder-95-eight": 7, "holder-70-twelve": 12, "holder-biggest-stacked": 1}
+# Cases that pin how many coasters fit on plate 1. A holder used to size every
+# grid cell for itself (#411): 95 mm coasters fitted 5 with it, 70 mm ones 8.
+# Room for the prime tower (#1048) takes 73 mm off one side of the plate:
+# 95 mm coasters fitted 7 with the holder before it, 70 mm ones all 12.
+EXPECT_FIT = {"holder-95-eight": 5, "holder-70-twelve": 11, "holder-biggest-stacked": 1}
 
-# Where each holder case's holder goes, and the coaster grid (columns, rows)
-# around it. Every holder case must be listed, so a tie between modes that
-# resolves differently after an edit (twelve-small-holder: 3 columns with the
-# holder beside and 4 with it below are equally square) cannot pass silently.
+# Coasters on each plate (#1048), for the cases that split.
+EXPECT_PLATES = {
+    "twelve-defaults": [6, 6],
+    "seven-defaults": [6, 1],
+    "twelve-one-colour": [9, 3],
+    "too-many-for-plate": [2, 2, 2, 2, 2, 2],
+    "holder-95-eight": [5, 3],
+    "holder-70-twelve": [11, 1],
+    "holder-biggest-stacked": [1, 2, 1],
+}
+
+# Where each holder case's holder goes on plate 1, and the coaster grid
+# (columns, rows) around it. Every holder case must be listed, so a tie between
+# modes that resolves differently after an edit cannot pass silently.
 EXPECT_HOLDER = {
     "monograms-holder-alternate": ("below", 2, 2),
-    "holder-round-6": ("below", 3, 2),
-    "twelve-small-holder": ("beside", 3, 4),
-    "holder-95-eight": ("row end", 3, 3),
-    "holder-70-twelve": ("below", 4, 3),
+    "holder-round-6": ("row end", 2, 3),
+    "twelve-small-holder": ("row end", 3, 4),
+    "holder-95-eight": ("row end", 2, 3),
+    "holder-70-twelve": ("row end", 3, 4),
     "holder-biggest-stacked": ("stacked", 1, 1),
 }
 
@@ -267,6 +300,82 @@ def holder_mode(hb, cs):
             and all(c in same_row or c[2] >= hb[3] for c in cs)):
         return "row end"
     return "elsewhere"
+
+
+# A multi-colour plate needs the prime tower's strip free along one edge:
+# ScadBuddy reserves the 60 mm tower, its 3 mm brim each side, 5 mm to the
+# parts and 2 mm to the edge (backend render/plate.py). Mirrors TOWER in the model.
+TOWER = 60 + 2 * 3 + 5 + 2
+
+
+def fits_bed(w, h, tower):
+    if tower:
+        return (w <= BED_X - TOWER + 1e-3 and h <= BED_Y + 1e-3) or (w <= BED_X + 1e-3 and h <= BED_Y - TOWER + 1e-3)
+    return w <= BED_X + 1e-3 and h <= BED_Y + 1e-3
+
+
+def plate_checks(name, k, p, log, mats, V, T, hold, ext_x, ext_y, grow_x, grow, th, h_height):
+    """The layout checks of one plate (k > 0) or of a one-plate render (k = 0).
+    Returns how many coasters it holds."""
+    where = "plate %d: " % k if k else ""
+    counts = Counter(t[3] for t in T)
+    colours = {mats[i][1] for i, (nm, _) in enumerate(mats) if nm != "Default" and counts.get(i)}
+    xs, ys, zs = zip(*V)
+    dx, dy, dz = max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
+    top = max(th, h_height if hold else 0)
+    # The plate, split into its separate printed pieces (#422): every
+    # coaster is one piece (its inlays touch it and are part of the same
+    # solid), the holder another. Pieces that overlapped would have merged,
+    # so the count of coaster-sized pieces is the number of coasters that
+    # really sit apart on the plate.
+    pieces = [piece_box(V, comp) for comp in components(T)]
+    coasters = [b for b in pieces if is_box(b, ext_x, ext_y, th)]
+    holders = [b for b in pieces if hold and is_box(b, ext_x + grow_x, ext_y + grow, h_height)]
+    n = len(coasters)
+    odd = len(pieces) - n - len(holders)
+    check(name, odd == 0 and len(holders) == (1 if hold else 0),
+          "%s%d separate pieces: %d coaster(s) of %.1f x %.1f%s%s"
+          % (where, len(pieces), n, ext_x, ext_y, " + %d holder(s)" % len(holders) if hold else "",
+             ", %d of another size (merged by an overlap?)" % odd if odd else ""))
+    if k <= 1 and name in EXPECT_FIT:
+        check(name, n == EXPECT_FIT[name], "%s%d coaster(s) on the plate (want %d)" % (where, n, EXPECT_FIT[name]))
+    m = re.search(r"ECHO: COASTERS = \[(\d+), (\d+), (\d+), ([-\d.e]+), ([-\d.e]+)", log)
+    check(name, m is not None and int(m.group(1)) == n, "%sthe model reports the %d coaster(s) it placed" % (where, n))
+    # Columns and rows of coasters, counted from the pieces' centres (the
+    # holder is not a row or column of its own), against what the model reports.
+    gcols = len({round((c[0] + c[1]) / 2, 1) for c in coasters})
+    grows = len({round((c[2] + c[3]) / 2, 1) for c in coasters})
+    check(name, m is not None and (int(m.group(2)), int(m.group(3))) == (gcols, grows),
+          "%scoasters in %d column(s) x %d row(s), as the model reports" % (where, gcols, grows))
+    if hold:
+        h = re.search(r'ECHO: HOLDER = "([a-z ]+)"', log)
+        want = EXPECT_HOLDER.get(name)
+        check(name, want is not None, "the holder case pins its layout in EXPECT_HOLDER")
+        if want and len(holders) == 1:
+            got = holder_mode(holders[0], coasters)
+            check(name, h is not None and h.group(1) == want[0] and got == want[0],
+                  "%sholder %s (model says %s, the pieces show %s)" % (where, want[0], h and h.group(1), got))
+            check(name, (gcols, grows) == want[1:], "%sgrid %d x %d (want %d x %d)" % ((where, gcols, grows) + want[1:]))
+    # No two pieces' footprints overlap: every pair is at least the gap apart
+    # along x or y, or the reduced gap the log admits to.
+    g = re.search(r"NOTE: gap reduced from [\d.]+ to ([\d.]+) mm", log)
+    min_gap = float(g.group(1)) if g else p["gap"]
+    if g:
+        check(name, min_gap < p["gap"], "%sthe log says the gap was cut to %.1f mm" % (where, min_gap))
+    seps = [max(a[0] - b[1], b[0] - a[1], a[2] - b[3], b[2] - a[3])
+            for i, a in enumerate(pieces) for b in pieces[i + 1:]]
+    check(name, all(s >= min_gap - 1e-3 for s in seps),
+          "%sno two footprints overlap: pieces at least %.1f mm apart (closest %s)"
+          % (where, min_gap, "%.2f" % min(seps) if seps else "-"))
+    check(name, abs(min(zs)) <= 1e-4, "%ssits on z=0 (min z %.4f)" % (where, min(zs)))
+    check(name, m is not None and abs(dx - float(m.group(4))) <= 0.02 and abs(dy - float(m.group(5))) <= 0.02,
+          "%splate %.2f x %.2f is the size the model reports" % (where, dx, dy))
+    check(name, abs(dz - top) <= 0.02, "%sheight %.2f == %.2f" % (where, dz, top))
+    tower = len(colours) > 1
+    check(name, fits_bed(dx, dy, tower),
+          "%s%.1f x %.1f fits the %dx%d plate%s" % (where, dx, dy, BED_X, BED_Y,
+                                                   " with the %d mm prime tower strip" % TOWER if tower else ""))
+    return n
 
 
 def area(shape, size, cr, o):
@@ -303,7 +412,6 @@ for line in open(os.path.join(OUT, "cases.txt")):
     recess_max = max(0.0, th - d - 1.2)
     recess = min(p["recess_depth"], recess_max) if p["underside"] == "recess" else 0
     h_height = 2.4 + max(10, 0.7 * p["count"] * th)
-    top = max(th, h_height if hold else 0)
 
     f = p["overlay_file"]
     safe = f != "" and "/" not in f and "\\" not in f and not f.startswith(".")
@@ -313,8 +421,6 @@ for line in open(os.path.join(OUT, "cases.txt")):
     counts = Counter(t[3] for t in T)
     named = [i for i, (nm, _) in enumerate(mats) if nm != "Default" and counts.get(i)]
     by_col = {mats[i][1]: i for i in named}
-    xs, ys, zs = zip(*V)
-    dx, dy, dz = max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
 
     cols_expected = {p["coaster_color"].upper()}
     blank = (p["pattern"] == "monogram" and p["letters"].strip() == "") or (p["pattern"] == "text" and p["text"] == "")
@@ -331,62 +437,33 @@ for line in open(os.path.join(OUT, "cases.txt")):
     check(name, counts.get(0, 0) == 0, "Default material carries no geometry (%d triangles)" % counts.get(0, 0))
     check(name, set(by_col) == cols_expected,
           "colour parts %s (got %s)" % (sorted(cols_expected), sorted(by_col)))
-    # The plate, split into its separate printed pieces (#422): every
-    # coaster is one piece (its inlays touch it and are part of the same
-    # solid), the holder another. Pieces that overlapped would have merged,
-    # so the count of coaster-sized pieces is the number of coasters that
-    # really sit apart on the plate.
-    pieces = [piece_box(V, comp) for comp in components(T)]
-    coasters = [b for b in pieces if is_box(b, ext_x, ext_y, th)]
-    holders = [b for b in pieces if hold and is_box(b, ext_x + grow_x, ext_y + grow, h_height)]
-    n = len(coasters)
-    odd = len(pieces) - n - len(holders)
-    check(name, odd == 0 and len(holders) == (1 if hold else 0),
-          "%d separate pieces: %d coaster(s) of %.1f x %.1f%s%s"
-          % (len(pieces), n, ext_x, ext_y, " + %d holder(s)" % len(holders) if hold else "",
-             ", %d of another size (merged by an overlap?)" % odd if odd else ""))
-    if name in EXPECT_FIT:
-        check(name, n == EXPECT_FIT[name], "%d coaster(s) on the plate (want %d)" % (n, EXPECT_FIT[name]))
-    m = re.search(r"ECHO: COASTERS = \[(\d+), (\d+), (\d+), ([-\d.e]+), ([-\d.e]+)", log)
-    check(name, m is not None and int(m.group(1)) == n, "the model reports the %d coaster(s) it placed" % n)
-    # Columns and rows of coasters, counted from the pieces' centres (the
-    # holder is not a row or column of its own), against what the model reports.
-    gcols = len({round((c[0] + c[1]) / 2, 1) for c in coasters})
-    grows = len({round((c[2] + c[3]) / 2, 1) for c in coasters})
-    check(name, m is not None and (int(m.group(2)), int(m.group(3))) == (gcols, grows),
-          "coasters in %d column(s) x %d row(s), as the model reports" % (gcols, grows))
-    if hold:
-        h = re.search(r'ECHO: HOLDER = "([a-z ]+)"', log)
-        want = EXPECT_HOLDER.get(name)
-        check(name, want is not None, "the holder case pins its layout in EXPECT_HOLDER")
-        if want and len(holders) == 1:
-            got = holder_mode(holders[0], coasters)
-            check(name, h is not None and h.group(1) == want[0] and got == want[0],
-                  "holder %s (model says %s, the pieces show %s)" % (want[0], h and h.group(1), got))
-            check(name, (gcols, grows) == want[1:], "grid %d x %d (want %d x %d)" % ((gcols, grows) + want[1:]))
+
+    # The plates (spec §6.4): the all-plates render above carries every colour;
+    # the layout is checked on each plate as ScadBuddy renders it.
+    pm = re.search(r"^ECHO: plates = (\d+)$", log, re.M)
+    plates = int(pm.group(1)) if pm else 0
+    check(name, plates >= 1, "the model echoes plates = %d" % plates)
+    renders = [(1, log, mats, V, T)]
+    if plates > 1:
+        renders = [(k, open(os.path.join(OUT, "%s.p%d.log" % (name, k))).read())
+                   + load(os.path.join(OUT, "%s.p%d.3mf" % (name, k))) for k in range(1, plates + 1)]
+    per_plate = [plate_checks(name, k if plates > 1 else 0, p, plog, pmats, PV, PT,
+                              hold and k == 1, ext_x, ext_y, grow_x, grow, th, h_height)
+                 for k, plog, pmats, PV, PT in renders]
+    n = sum(per_plate)
+    check(name, n == p["count"] and all(per_plate),
+          "all %d coasters placed, %s" % (p["count"], " + ".join(map(str, per_plate))))
+    if name in EXPECT_PLATES:
+        check(name, per_plate == EXPECT_PLATES[name],
+              "coasters per plate %s (want %s)" % (per_plate, EXPECT_PLATES[name]))
+    if plates > 1:
+        check(name, "NOTE: %d of %d coasters fit on plate 1" % (per_plate[0], p["count"]) in log,
+              "the log says how many fit on plate 1")
+    else:
+        check(name, "fit on plate 1" not in log, "no note of a second plate")
     if p["underside"] == "recess" and p["recess_depth"] > recess_max + 1e-9:
         check(name, "NOTE: recess reduced" in log and (recess > 0 or "no recess cut" in log),
               "the log says the recess was reduced to %.2f mm" % recess)
-    if n < p["count"]:
-        check(name, "NOTE: only %d coaster%s of" % (n, "" if n == 1 else "s") in log, "the log says how many fit")
-    else:
-        check(name, n == p["count"] and "NOTE: only" not in log, "all %d coasters placed" % p["count"])
-    # No two pieces' footprints overlap: every pair is at least the gap apart
-    # along x or y, or the reduced gap the log admits to.
-    g = re.search(r"NOTE: gap reduced from [\d.]+ to ([\d.]+) mm", log)
-    min_gap = float(g.group(1)) if g else gap
-    if g:
-        check(name, min_gap < gap, "the log says the gap was cut to %.1f mm" % min_gap)
-    seps = [max(a[0] - b[1], b[0] - a[1], a[2] - b[3], b[2] - a[3])
-            for i, a in enumerate(pieces) for b in pieces[i + 1:]]
-    check(name, all(s >= min_gap - 1e-3 for s in seps),
-          "no two footprints overlap: pieces at least %.1f mm apart (closest %s)"
-          % (min_gap, "%.2f" % min(seps) if seps else "-"))
-    check(name, abs(min(zs)) <= 1e-4, "sits on z=0 (min z %.4f)" % min(zs))
-    check(name, m is not None and abs(dx - float(m.group(4))) <= 0.02 and abs(dy - float(m.group(5))) <= 0.02,
-          "plate %.2f x %.2f is the size the model reports" % (dx, dy))
-    check(name, abs(dz - top) <= 0.02, "height %.2f == %.2f" % (dz, top))
-    check(name, dx <= BED_X + 1e-3 and dy <= BED_Y + 1e-3, "all pieces inside the %dx%d plate" % (BED_X, BED_Y))
 
     # Volume: every coaster is outline x thickness minus its recess.
     whole = sum(tetvol(V[t[0]], V[t[1]], V[t[2]]) for t in T)
