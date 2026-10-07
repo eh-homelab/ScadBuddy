@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
-import { declaredConfigs, isInside, pluginProblems } from '../../harness/plugins.js'
+import { declaredConfigs, hookEvents, isInside, pluginProblems } from '../../harness/plugins.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
 // Vetting a plugin PACKAGE (issue #297, "Review before enable"), on top of the
@@ -268,7 +268,7 @@ function checkMarkdown(rel: string, text: string, problems: string[]): void {
 }
 
 function hookHandlers(config: unknown): { event: string; handler: unknown }[] {
-  const events = isRecord(config) && isRecord(config.hooks) ? config.hooks : config
+  const { events } = hookEvents(config)
   if (!isRecord(events)) return []
   const out: { event: string; handler: unknown }[] = []
   for (const [event, groups] of Object.entries(events)) {

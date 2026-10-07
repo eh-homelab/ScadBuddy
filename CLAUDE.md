@@ -349,7 +349,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
-    Code 2.1.287) is refused, because it would inherit the credential env.
+    Code 2.1.287, and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` no longer turns it off) is
+    refused, because it would inherit the credential env. A hooks file may set only
+    `$schema`, `description` and `hooks` besides, so a new loader key is refused too.
   - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
     `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
     plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback

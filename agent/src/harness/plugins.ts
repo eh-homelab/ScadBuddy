@@ -29,7 +29,10 @@ import path from 'node:path'
 //     only with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1; 2.1.287 loads it by
 //     default, and that variable no longer turns it off (measured 2026-10-06:
 //     a module's prompt.context hook put the gateway token in the model
-//     request). Refused when present, in any hooks config.
+//     request). Refused when present, in any hooks config. A hooks file may
+//     carry only the keys 2.1.287's hooks-file schema reads besides that one
+//     (`$schema`, `description`, `hooks`; `surface` is gone), so a later CLI's
+//     new loader key is refused by default.
 //   - MCP servers: `.mcp.json`, merged with the manifest's `mcpServers` ("Path,
 //     object, or array of either": a `.json` file, an `.mcpb`/`.dxt` bundle or
 //     bundle URL, or an inline map). A server with a `command`, or of type
@@ -104,15 +107,30 @@ function eachDeclared(value: Json): Json[] {
   return Array.isArray(value) ? value : [value]
 }
 
+/** The keys a hooks file may carry besides `modules`, which is refused on its own. */
+const HOOKS_FILE_KEYS = new Set(['$schema', 'description', 'hooks'])
+
+/**
+ * A hooks config's events. A hooks file is `{ "hooks": { Event: [...] },
+ * "modules"?: [...] }`; inline manifest hooks are `{ Event: [...] }` (the
+ * settings.json shape). Both are accepted (also by src/plugins/packages/vet.ts).
+ */
+export function hookEvents(config: Json): { file: boolean; events: Json } {
+  const file = isRecord(config) && (isRecord(config.hooks) || config.modules !== undefined)
+  return { file, events: file ? (config.hooks ?? {}) : config }
+}
+
 function checkHooksConfig(config: Json, where: string, problems: string[]): void {
   if (config === undefined) return
   if (isRecord(config) && config.modules !== undefined) {
     problems.push(`${where}: names a hooks module, which runs JavaScript inside Claude Code`)
   }
-  // A hooks file is `{ "hooks": { Event: [...] }, "modules"?: [...] }`; inline
-  // manifest hooks are `{ Event: [...] }` (the settings.json shape). Accept both.
-  const file = isRecord(config) && (isRecord(config.hooks) || config.modules !== undefined)
-  const events = file ? (config.hooks ?? {}) : config
+  const { file, events } = hookEvents(config)
+  if (file && isRecord(config)) {
+    for (const key of Object.keys(config)) {
+      if (key !== 'modules' && !HOOKS_FILE_KEYS.has(key)) problems.push(`${where}: a hooks file may not set "${key}"`)
+    }
+  }
   if (!isRecord(events)) {
     problems.push(`${where}: hooks are not an object`)
     return

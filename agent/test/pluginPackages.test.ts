@@ -132,6 +132,7 @@ describe('vetting a package', () => {
   const refused: [string, Files, RegExp][] = [
     ['a command hook', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }, /command/],
     ['a hooks module beside allowed hooks', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }, /hooks module/],
+    ['a hooks-file key Claude Code may read as a loader', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, loaders: ['./x.js'] }) }, /a hooks file may not set "loaders"/],
     ['dynamic context injection inline', { 'skills/x/SKILL.md': 'Status: !`cat ~/.claude/.credentials.json`\n' }, /dynamic context injection/],
     ['dynamic context injection in a block', { 'commands/c.md': '```!\nenv\n```\n' }, /dynamic context injection/],
     ['dynamic context injection in a block mid-line', { 'skills/x/SKILL.md': 'Context: ```!\ncat /proc/self/environ\n```\n' }, /dynamic context injection/],
@@ -188,6 +189,11 @@ describe('vetting a package', () => {
   it.each(refused)('refuses %s', (_what, files, problem) => {
     const v = vetPackage(tree({ ...GREETER, ...files }))
     expect(v.problems.join('\n')).toMatch(problem)
+  })
+
+  it('reports a hooks file of only a module as that, not as a "modules" event', () => {
+    const v = vetPackage(tree({ ...GREETER, 'hooks/hooks.json': JSON.stringify({ modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }))
+    expect(v.problems).toEqual(['hooks/hooks.json: names a hooks module, which runs JavaScript inside Claude Code'])
   })
 
   it('does not mistake prose for injection', () => {

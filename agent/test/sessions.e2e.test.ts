@@ -337,10 +337,20 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   it('a gateway that refuses thinking.display costs one refused request a turn, and no fallback (#1101)', async () => {
     const TOKEN_A = 'gw-sessions-strict-aaaa'
     const TOKEN_B = 'gw-sessions-strict-bbbb'
-    script = (r) =>
-      !displayUpdates(r)
-        ? { text: 'a box' }
-        : { error: { status: 400, type: 'invalid_request_error', message: 'thinking.display: Extra inputs are not permitted' } }
+    // The second turn makes two tool calls, so it has more than one request after the refused one.
+    script = (r) => {
+      if (displayUpdates(r)) {
+        return { error: { status: 400, type: 'invalid_request_error', message: 'thinking.display: Extra inputs are not permitted' } }
+      }
+      const said = conversation(r)
+      if (said.includes('and a lid') && said.split('tool_result').length - 1 < 2) {
+        return { toolUse: { name: 'mcp__stub__lookup', input: { q: 'lid' } } }
+      }
+      return { text: 'a box' }
+    }
+    const lookup = tool('lookup', 'Look something up', { q: z.string() }, (args) =>
+      Promise.resolve({ content: [{ type: 'text' as const, text: `found ${args.q}` }] }),
+    )
     const pooled = (id: string, secret: string) => ({
       id,
       epoch: 0,
@@ -357,6 +367,8 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
         },
       },
       probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+      mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [lookup] }) }),
+      tierOf: (name) => (name === 'mcp__stub__lookup' ? 'read' : undefined),
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
@@ -368,13 +380,18 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     ])
     expect(reports).toEqual(['a: ok'])
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
-    // The next turn is a new Claude Code process, which sends the field again.
+    // The next turn is a new Claude Code process, which sends the field again,
+    // once: after the refusal it drops it for the rest of the process, so the
+    // two tool calls' follow-up requests go without it.
     expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(asked(fake.messageCalls().slice(2))).toEqual([
       [`Bearer ${TOKEN_A}`, true],
       [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
     ])
-    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 2 })
+    // Three answered round trips this time, and the refused request is none of them.
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 4 })
   }, 60_000)
 
   it('a refusal after a tool call keeps what the turn did and counts the round trip that finished (#1101)', async () => {

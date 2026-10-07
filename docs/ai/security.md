@@ -502,6 +502,8 @@ plugin** if it declares any of the following:
   itself, with process, network and environment access. Claude Code 2.1.287 loads one by
   default (2.1.283 only with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, which no longer turns
   it off), and a measured module put the gateway token into the model request (#1540);
+- a hooks-file key other than `$schema`, `description`, `hooks` and `modules`, so a later
+  CLI's new loader key is refused by default;
 - an MCP server that is not `type: "http"`/`"sse"` with a `url` and no `command`, or any
   `.mcpb`/`.dxt`/URL bundle;
 - LSP servers;

@@ -40,9 +40,13 @@ function sources(dir: string): string[] {
   })
 }
 
-/** Whether a file can call the SDK's `query()`: a value import of it, a namespace import, or a dynamic import. */
+/**
+ * Whether a file can call the SDK's `query()`, or hand it to one that could: a
+ * value import or re-export of it, a namespace import, `export *`, or a
+ * dynamic import.
+ */
 function reachesQuery(text: string): boolean {
-  for (const [, names = ''] of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*'@anthropic-ai\/claude-agent-sdk'/g)) {
+  for (const [, names = ''] of text.matchAll(/(?:import|export)\s*\{([^}]*)\}\s*from\s*'@anthropic-ai\/claude-agent-sdk'/g)) {
     const values = names
       .split(',')
       .map((name) => name.trim())
@@ -51,6 +55,7 @@ function reachesQuery(text: string): boolean {
   }
   return (
     /import\s+\*\s+as\s+\w+\s+from\s*'@anthropic-ai\/claude-agent-sdk'/.test(text) ||
+    /export\s*\*\s*(?:as\s+\w+\s+)?from\s*'@anthropic-ai\/claude-agent-sdk'/.test(text) ||
     text.includes(`import('${SDK}')`)
   )
 }
