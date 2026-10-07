@@ -18,6 +18,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
+from tests.support.operations import press
 
 BASE = "https://bambuddy.test"
 API = f"{BASE}/api/v1"
@@ -92,7 +93,9 @@ def test_links_point_at_the_first_web_url_not_the_api_url(client: TestClient, mo
     output_id = make_output(client, model)
     upload_route()
 
-    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+    body = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).json()
 
     assert body["bambuddy_url"] == "https://bambuddy.sso.test/library"
 
@@ -109,7 +112,9 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     output_id = make_output(client, model)
     route = upload_route()
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -144,14 +149,16 @@ def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
     output_id = make_output(client, model)
     upload = upload_route()
     delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press())
 
     respx.get(f"{API}/library/files/41").mock(
         return_value=httpx.Response(
             200, json={"id": 41, "filename": "renamed-in-bambuddy.3mf", "folder_id": 2}
         )
     )
-    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+    body = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).json()
 
     assert body["library_file_id"] == 41
     # Reused, not uploaded: the agent records it as changed rather than new (#931).
@@ -170,14 +177,16 @@ def test_a_re_send_survives_the_file_having_been_deleted_in_bambuddy(
     configure(client)
     output_id = make_output(client, model)
     upload = upload_route()
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press())
 
     respx.get(f"{API}/library/files/41").mock(
         return_value=httpx.Response(404, json={"detail": "Not found"})
     )
     upload_route(42)
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.status_code == 200
     assert response.json()["library_file_id"] == 42
@@ -187,14 +196,18 @@ def test_a_re_send_survives_the_file_having_been_deleted_in_bambuddy(
 def test_sending_without_a_url_configured_is_a_conflict(client: TestClient, model: str) -> None:
     output_id = make_output(client, model)
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
 
 
 def test_sending_an_unknown_output_is_a_404(client: TestClient) -> None:
-    response = client.post(f"/api/v1/outputs/{'0' * 32}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{'0' * 32}/send", json={"mode": "library"}, headers=press()
+    )
     assert response.status_code == 404
 
 
@@ -209,7 +222,9 @@ def test_queue_mode_is_refused_and_nothing_is_uploaded(client: TestClient, model
     output_id = make_output(client, model)
     upload = upload_route()
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": 2})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": 2}, headers=press()
+    )
 
     assert response.status_code == 422
     assert not upload.called
@@ -226,6 +241,7 @@ def test_an_old_clients_extra_fields_are_ignored(client: TestClient, model: str)
     response = client.post(
         f"/api/v1/outputs/{output_id}/send",
         json={"mode": "library", "options": {"timelapse": False}},
+        headers=press(),
     )
 
     assert response.status_code == 200
@@ -242,7 +258,9 @@ def test_a_stored_pipeline_is_never_read_by_the_send(client: TestClient, model: 
     output_id = make_output(client, model)
     upload_route()
 
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+    assert client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).is_success
     assert all("slicer-pipelines" not in str(call.request.url) for call in respx.calls)
 
 
@@ -253,7 +271,7 @@ def test_a_send_starts_no_print(client: TestClient, model: str) -> None:
     output_id = make_output(client, model)
     upload_route()
 
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press())
 
     assert client.get(f"/api/v1/print/outputs/{output_id}/progress").json() is None
     record = client.get(f"/api/v1/outputs/{output_id}").json()
@@ -275,7 +293,9 @@ def test_the_upload_is_laid_out_for_the_settings_printers_plate(
     output_id = make_output(client, model)
     upload = upload_route()
 
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+    assert client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).is_success
 
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         root = ET.fromstring(archive.read("3D/3dmodel.model"))
@@ -295,7 +315,9 @@ def test_an_unknown_printer_model_still_uploads_on_the_default_plate(
     output_id = make_output(client, model)
     upload = upload_route()
 
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).status_code
+    assert client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).status_code
 
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         root = ET.fromstring(archive.read("3D/3dmodel.model"))
@@ -321,7 +343,9 @@ def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
     )
     upload = upload_route()
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
@@ -349,7 +373,9 @@ def test_the_send_bar_upload_keeps_the_placeholder_nozzle(client: TestClient, mo
     output_id = make_output(client, model)
     upload = upload_route()
 
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+    assert client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).is_success
 
     assert _uploaded_nozzle(upload) == ["0.4"]
 
@@ -395,9 +421,9 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
     output_id = make_output(client, model)
     upload_route()
     assert (
-        client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()[
-            "library_file_id"
-        ]
+        client.post(
+            f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+        ).json()["library_file_id"]
         == 41
     )
 
@@ -411,7 +437,9 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
     )
     configure(client, printer_id=2)
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.status_code == 409
     assert not delete.called, "the old file was removed before the refusal"
@@ -444,7 +472,9 @@ def test_the_edit_link_is_attached_to_the_uploaded_file(
     upload_route()
     annotate = annotate_route()
 
-    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+    body = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).json()
 
     edit_url = f"https://scad.test/edit/{output_id}"
     assert body["edit_url"] == edit_url
@@ -464,7 +494,9 @@ def test_nothing_is_attached_when_no_public_url_is_configured(
     upload_route()
     annotate = annotate_route()
 
-    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+    body = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).json()
 
     assert body["edit_url"] is None
     assert not annotate.called
@@ -482,7 +514,9 @@ def test_a_failed_annotation_still_returns_the_upload(client: TestClient, model:
         return_value=httpx.Response(500, json={"detail": "boom"})
     )
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -502,7 +536,7 @@ def test_the_annotation_runs_after_the_upload(client: TestClient, model: str) ->
     upload_route()
     annotate_route()
 
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press())
 
     order = [(call.request.method, call.request.url.path) for call in respx.calls]
     assert order.index(("POST", "/api/v1/library/files")) < order.index(
@@ -520,7 +554,7 @@ def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, m
     upload_route()
     annotate = annotate_route()
 
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press())
 
     assert json.loads(annotate.calls.last.request.content) == {
         "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
@@ -540,7 +574,7 @@ def test_a_note_someone_typed_in_bambuddy_is_not_overwritten(
         notes="PLA only — the black spool\nEdit in ScadBuddy: https://old/edit/x"
     )
 
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press())
 
     assert json.loads(annotate.calls.last.request.content) == {
         "notes": (

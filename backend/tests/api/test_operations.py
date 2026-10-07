@@ -93,7 +93,8 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
 
 
 def post(client: TestClient, body: dict[str, Any], key: str | None = None) -> Any:
-    headers = {"Idempotency-Key": key} if key else {}
+    """One press: ``key``, or a fresh one."""
+    headers = {"Idempotency-Key": key or uuid.uuid4().hex}
     return client.post("/api/v1/test-op", json=body, headers=headers)
 
 
@@ -121,32 +122,24 @@ def test_a_retry_with_the_same_key_answers_the_record_and_runs_nothing(
     assert counts.runs == 1
 
 
-def test_without_a_key_each_request_is_its_own_operation(
-    client: TestClient, counts: Counts
+def test_a_request_without_a_key_is_refused_and_runs_nothing(
+    client: TestClient, counts: Counts, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    post(client, {"a": 1})
-    post(client, {"a": 1})
-    assert counts.runs == 2
+    """#1143: a keyless write cannot be told from its own retry, so a proxy's re-send
+    after a lost answer would upload, enqueue or create twice. It is refused (428) before
+    anything starts."""
 
+    async def no_start(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a keyless request must not reach Temporal")
 
-def test_only_a_request_with_a_key_reads_the_record_first(
-    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review #1063 fourth review 3: a keyless request's key is new, so no record can
-    match it; reading one would only spend the answer's deadline."""
-    store = getattr(app.state, STATE_ATTR).components.get(OPERATIONS).store
-    real = type(store).find
-    reads: list[str] = []
-
-    async def find(self: Any, key: str) -> Any:
-        reads.append(key)
-        return await real(self, key)
-
-    monkeypatch.setattr(type(store), "find", find)
-    assert post(client, {"a": 1}).status_code == 200
-    assert reads == []
-    assert post(client, {"a": 1}, key=PRESS_7).status_code == 200
-    assert len(reads) == 1
+    monkeypatch.setattr(operations_api, "start_command", no_start)
+    response = client.post("/api/v1/test-op", json={"a": 1})
+    assert response.status_code == 428, response.text
+    assert response.json()["type"] == operations_api.KEY_REQUIRED_PROBLEM
+    assert "Idempotency-Key" in response.json()["detail"]
+    assert counts.runs == 0
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
 
 
 def test_a_refusal_answers_the_routes_problem_and_writes_nothing(
@@ -321,5 +314,6 @@ def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
         assert detail in responses["503"]["description"]
     assert "may_have_started" in responses["503"]["description"]
     assert operations_api.RECORD_GONE_PROBLEM in responses["default"]["description"]
+    assert operations_api.KEY_REQUIRED_PROBLEM in responses["428"]["description"]
     schema = responses["503"]["content"]["application/problem+json"]["schema"]
     assert "may_have_started" in schema["properties"]

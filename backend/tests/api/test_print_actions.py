@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from tests.api.test_print_history import link, mock_archive
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -39,7 +40,7 @@ def test_print_again_queues_the_archive_on_its_printer_and_plate(
     mock_archive(35, printer_id=3, plate_id=2)
     queue = mock_enqueue(51)
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 201
     assert response.json() == {
@@ -80,7 +81,7 @@ def test_print_again_queues_with_the_remembered_print_options(
     for body in remember:
         assert client.put(options, json=body).status_code == 200
 
-    assert client.post("/api/v1/prints/35/reprint").status_code == 201
+    assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
 
     sent = json.loads(queue.calls.last.request.content)
     assert sent["manual_start"] is True
@@ -102,7 +103,7 @@ def test_print_again_falls_back_to_the_links_printer_and_plate(
     mock_archive(35, printer_id=None, plate_id=None)
     queue = mock_enqueue()
 
-    assert client.post("/api/v1/prints/35/reprint").status_code == 201
+    assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
 
     sent = json.loads(queue.calls.last.request.content)
     assert sent["printer_id"] == 4
@@ -117,7 +118,7 @@ def test_print_again_without_a_printer_is_refused(client: TestClient, model: str
     mock_archive(35, printer_id=None)
     queue = mock_enqueue()
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 409
     assert "printer" in response.json()["detail"]
@@ -134,7 +135,7 @@ def test_a_print_deleted_in_bambuddy_cannot_be_printed_again(
     respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
     queue = mock_enqueue()
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 409
     assert "deleted" in response.json()["detail"]
@@ -149,7 +150,7 @@ def test_a_refused_queue_names_the_scope(client: TestClient, model: str) -> None
     mock_archive(35)
     respx.post(f"{API}/queue/").mock(return_value=httpx.Response(403))
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 409
     assert response.json()["required_scope"] == "Manage Queue"
@@ -162,7 +163,7 @@ def test_an_archive_no_output_printed_cannot_be_printed_again(client: TestClient
     archive = mock_archive(36)
     queue = mock_enqueue()
 
-    assert client.post("/api/v1/prints/36/reprint").status_code == 404
+    assert client.post("/api/v1/prints/36/reprint", headers=press()).status_code == 404
     assert not archive.called and not queue.called
 
 
@@ -181,7 +182,9 @@ def test_pull_timelapse_attaches_the_named_file(client: TestClient, model: str) 
         return_value=httpx.Response(200, json={"status": "attached", "filename": TIMELAPSE})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 204
     assert select.calls.last.request.url.params["filename"] == TIMELAPSE
@@ -201,7 +204,7 @@ def test_pull_timelapse_drops_the_cached_archive(client: TestClient, model: str)
         return_value=httpx.Response(200, json={"status": "attached", "filename": TIMELAPSE})
     )
 
-    client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press())
     client.get("/api/v1/prints/35")
 
     assert before.call_count == 2, "the detail after a pull reads the archive again"
@@ -219,7 +222,9 @@ def test_a_print_deleted_in_bambuddy_cannot_pull_a_timelapse(
         return_value=httpx.Response(200, json={})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 409
     assert "deleted" in response.json()["detail"]
@@ -234,7 +239,9 @@ def test_pull_timelapse_takes_a_bare_file_name(
     output_id = make_output(client, model)
     link(client, output_id, 35)
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": filename})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": filename}, headers=press()
+    )
 
     assert response.status_code == 422
 
@@ -249,7 +256,9 @@ def test_a_timelapse_not_on_the_printer_is_bambuddys_404(client: TestClient, mod
         return_value=httpx.Response(404, json={"detail": "Timelapse 'x.mp4' not found on printer"})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": "x.mp4"})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": "x.mp4"}, headers=press()
+    )
 
     assert response.status_code == 404
 
@@ -261,7 +270,9 @@ def test_an_archive_no_output_printed_cannot_pull_a_timelapse(client: TestClient
         return_value=httpx.Response(200, json={})
     )
 
-    response = client.post("/api/v1/prints/36/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/36/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 404
     assert not select.called
@@ -282,7 +293,9 @@ def test_a_pull_refused_at_the_archive_read_names_read_status(
         return_value=httpx.Response(200, json={})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 409
     assert response.json()["required_scope"] == "Read Status"
@@ -297,7 +310,9 @@ def test_a_pull_refused_at_the_attach_names_manage_archives(client: TestClient, 
     mock_archive(35)
     respx.post(f"{API}/archives/35/timelapse/select").mock(return_value=httpx.Response(403))
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 409
     assert response.json()["required_scope"] == "Manage Archives"

@@ -14,6 +14,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 
 API = f"{BASE}/api/v1"
 
@@ -62,7 +63,9 @@ def test_creating_a_project_pairs_it_with_a_folder(client: TestClient, model: st
             200, json={"id": 9, "name": "Reagan keychains", "project_id": 7}
         )
     )
-    body = client.post("/api/v1/print/projects", json={"name": "Reagan keychains"}).json()
+    body = client.post(
+        "/api/v1/print/projects", json={"name": "Reagan keychains"}, headers=press()
+    ).json()
     assert (body["id"], body["folder_id"]) == (7, 9)
     assert json.loads(folder.calls.last.request.content)["project_id"] == 7
 
@@ -178,6 +181,7 @@ def test_filing_the_results_attaches_the_entries_and_their_archives(
     body = client.post(
         f"/api/v1/print/outputs/{output_id}/project",
         json={"project_id": 7, "queue_item_ids": [71]},
+        headers=press(),
     ).json()
     assert body == {"project_id": 7, "queue_item_ids": [71], "archive_ids": [88]}
     assert queue.called and archives.called
@@ -186,6 +190,6 @@ def test_filing_the_results_attaches_the_entries_and_their_archives(
 def test_filing_an_output_with_no_project_says_so(client: TestClient, model: str) -> None:
     configure(client)
     output_id = make_output(client, model)
-    response = client.post(f"/api/v1/print/outputs/{output_id}/project", json={})
+    response = client.post(f"/api/v1/print/outputs/{output_id}/project", json={}, headers=press())
     assert response.status_code == 409
     assert "no project" in response.json()["detail"]

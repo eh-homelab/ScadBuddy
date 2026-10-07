@@ -25,6 +25,7 @@ from scadbuddy.render.plate import DEFAULT_PLATE
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import allow_reprints, body, run_print, run_routes
 from tests.api.test_send import BASE, configure, make_output
+from tests.support.operations import press
 
 # Every test here reads or writes an output's upload records, which live in Postgres.
 pytestmark = pytest.mark.requires_postgres
@@ -276,10 +277,10 @@ def test_a_send_still_fails_on_a_failing_existence_check(client: TestClient, mod
     output_id = set_up(client, model)
     uploads(41)
     send = f"/api/v1/outputs/{output_id}/send"
-    assert client.post(send, json={"mode": "library"}).status_code == 200
+    assert client.post(send, json={"mode": "library"}, headers=press()).status_code == 200
 
     respx.get(f"{API}/library/files/41").mock(return_value=httpx.Response(500, json={}))
-    response = client.post(send, json={"mode": "library"})
+    response = client.post(send, json={"mode": "library"}, headers=press())
 
     assert response.status_code >= 500
 
@@ -384,7 +385,9 @@ def test_an_old_records_copy_is_not_reused_and_the_next_send_uploads_afresh(
     path.write_text(json.dumps(meta), encoding="utf-8")
     upload = uploads(42)
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.json()["library_file_id"] == 42
     assert upload.call_count == 1

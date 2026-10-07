@@ -16,6 +16,7 @@ from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
 from tests.api.test_send import BASE, configure
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -422,7 +423,7 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     assert [item["archive_id"] for item in client.get("/api/v1/prints").json()["items"]] == [90]
 
     # And it prints again, on the printer and plate it printed on.
-    reprint = client.post("/api/v1/prints/90/reprint")
+    reprint = client.post("/api/v1/prints/90/reprint", headers=press())
     assert reprint.status_code == 201, reprint.text
     sent = json.loads(queued_again.calls.last.request.content)
     assert sent["archive_id"] == 90 and sent["printer_id"] == 1
