@@ -137,8 +137,19 @@ def app(settings: Settings) -> FastAPI:
 
 
 @pytest.fixture
-def client(app: FastAPI) -> Iterator[TestClient]:
+def client(
+    app: FastAPI, settings: Settings, workflow_reaper: WorkflowReaper
+) -> Iterator[TestClient]:
+    """The app's client, once its in-process worker's build serves the render queue: a
+    render started before then waits unrouted, and on a loaded host (the dev server's
+    SetCurrentVersion taking 10 s) outlived the submit's deadline as a 503."""
     with TestClient(app) as test_client:
+        queue, build_id = settings.temporal_task_queue_render, settings.revision
+        # A module whose app renders nowhere (`UNUSED_TEMPORAL_ADDRESS`) has no worker.
+        if settings.temporal_worker_inprocess and not workflow_reaper.wait_until_build_serves(
+            queue, build_id
+        ):
+            pytest.fail(f"build {build_id!r} never came to serve task queue {queue!r}")
         yield test_client
 
 
