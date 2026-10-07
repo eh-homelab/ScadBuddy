@@ -153,6 +153,9 @@ export class ApiError extends Error {
   }
 }
 
+
+/** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
+let settingsInFlight: Promise<Settings> | undefined
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -1339,10 +1342,26 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  getSettings: () => request<Settings>('/settings'),
+  /**
+   * #1039 — callers that ask at once share one request: the shell's unit and link
+   * loaders and the page all read it on the same load. Nothing is kept once it
+   * answers, so a later call always reads afresh, and a save stops later callers
+   * joining a read that started before it. Each caller gets its own copy.
+   */
+  getSettings: (): Promise<Settings> => {
+    if (!settingsInFlight) {
+      const read = request<Settings>('/settings').finally(() => {
+        if (settingsInFlight === read) settingsInFlight = undefined
+      })
+      settingsInFlight = read
+    }
+    return settingsInFlight.then((settings) => structuredClone(settings))
+  },
 
-  putSettings: (body: SettingsUpdate) =>
-    request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  putSettings: (body: SettingsUpdate) => {
+    settingsInFlight = undefined
+    return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
+  },
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 

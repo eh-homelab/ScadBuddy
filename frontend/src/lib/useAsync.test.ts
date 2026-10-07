@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRealtime, resetRealtime, type RealtimeSignal } from './realtime'
-import { useAsync } from './useAsync'
+import { RESYNC_WAIT_MS, useAsync } from './useAsync'
 
 let signals: ((signal: RealtimeSignal) => void)[] = []
 
@@ -202,4 +202,92 @@ it('tells every caller merged into one read that it failed', async () => {
   })
   await waitFor(() => expect(second).toHaveBeenCalledOnce())
   expect(first).toHaveBeenCalledOnce()
+})
+
+describe('with the socket already open (#1039)', () => {
+  beforeEach(() => {
+    vi.spyOn(getRealtime(), 'willResync', 'get').mockReturnValue(true)
+  })
+
+  it("leaves the first read to the subscription's resync, reading once", async () => {
+    let reads = 0
+    const { result } = renderHook(() => useAsync(() => Promise.resolve(++reads), [], ['models']))
+    expect(result.current.loading).toBe(true)
+    await act(async () => {})
+    expect(reads).toBe(0)
+
+    act(() => signals[0]?.('resync'))
+
+    await waitFor(() => expect(result.current).toMatchObject({ data: 1, loading: false }))
+    expect(reads).toBe(1)
+  })
+
+  it('reads anyway when the resync does not come', async () => {
+    vi.useFakeTimers()
+    try {
+      let reads = 0
+      const { result } = renderHook(() => useAsync(() => Promise.resolve(++reads), [], ['models']))
+      await act(async () => vi.advanceTimersByTimeAsync(RESYNC_WAIT_MS - 1))
+      expect(reads).toBe(0)
+      await act(async () => vi.advanceTimersByTimeAsync(1))
+      expect(reads).toBe(1)
+      expect(result.current.data).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never reads again at the fallback once the resync has read', async () => {
+    vi.useFakeTimers()
+    try {
+      let reads = 0
+      renderHook(() => useAsync(() => Promise.resolve(++reads), [], ['models']))
+      await act(async () => {
+        signals[0]?.('resync')
+        await vi.advanceTimersByTimeAsync(RESYNC_WAIT_MS * 2)
+      })
+      expect(reads).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads at once when only the deps change, since nothing is subscribed anew', async () => {
+    let reads = 0
+    const { result, rerender } = renderHook(
+      ({ id }) => useAsync(() => Promise.resolve(`${id}:${++reads}`), [id], ['models']),
+      { initialProps: { id: 'a' } },
+    )
+    act(() => signals[0]?.('resync'))
+    await waitFor(() => expect(result.current.data).toBe('a:1'))
+
+    rerender({ id: 'b' })
+
+    await waitFor(() => expect(result.current.data).toBe('b:2'))
+    expect(signals).toHaveLength(1)
+  })
+
+  it('reads once when the deps and the topic change together', async () => {
+    let reads = 0
+    const { result, rerender } = renderHook(
+      ({ id }) => useAsync(() => Promise.resolve(`${id}:${++reads}`), [id], [`model:${id}`]),
+      { initialProps: { id: 'a' } },
+    )
+    act(() => signals[0]?.('resync'))
+    await waitFor(() => expect(result.current.data).toBe('a:1'))
+
+    rerender({ id: 'b' })
+    await act(async () => {})
+    expect(reads).toBe(1)
+    act(() => signals[1]?.('resync'))
+
+    await waitFor(() => expect(result.current.data).toBe('b:2'))
+    expect(reads).toBe(2)
+  })
+
+  it('reads at once with no topics', async () => {
+    let reads = 0
+    const { result } = renderHook(() => useAsync(() => Promise.resolve(++reads), []))
+    await waitFor(() => expect(result.current.data).toBe(1))
+  })
 })
