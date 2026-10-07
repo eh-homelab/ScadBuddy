@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from temporalio import activity
 from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, follow_agent
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
-from temporalio.client import Client, WithStartWorkflowOperation, WorkflowHandle
+from temporalio.client import Client, WithStartWorkflowOperation, WorkflowExecutionStatus, WorkflowHandle
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.worker import Worker
 
@@ -307,13 +307,20 @@ class Rig:
         """The `count`-th live event of `kind` from `from_offset` (the run's events)."""
 
         async def find() -> dict[str, Any]:
-            n = 0
-            async for ev in follow_agent(self.client, wid, from_offset=from_offset):
-                if ev["type"] == kind:
-                    n += 1
-                    if n == count:
-                        return ev
-            raise AssertionError(f"{wid} closed before {count} {kind} event(s)")
+            n, offset = 0, from_offset
+            while True:
+                async for ev in follow_agent(self.client, wid, from_offset=offset):
+                    offset = ev["offset"] + 1
+                    if ev["type"] == kind:
+                        n += 1
+                        if n == count:
+                            return ev
+                # The stream also ends when a poll's Update RPC times out (a loaded
+                # host; workflow_streams `subscribe` returns on
+                # WorkflowUpdateRPCTimeoutOrCancelledError): follow on while it runs.
+                described = await self.client.get_workflow_handle(wid).describe()
+                if described.status != WorkflowExecutionStatus.RUNNING:
+                    raise AssertionError(f"{wid} closed before {count} {kind} event(s)")
 
         return await asyncio.wait_for(find(), WAIT)
 
