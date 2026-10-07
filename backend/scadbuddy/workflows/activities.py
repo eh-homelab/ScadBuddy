@@ -543,8 +543,11 @@ class RenderActivities:
         await asyncio.to_thread(self.deps.projection.set_claims, job_id, claims)
 
     @activity.defn(name="project")
-    async def project(self, projection: Projection) -> None:
-        """Move the row forward; a no-op when it is already past this state or gone."""
+    async def project(self, projection: Projection) -> bool:
+        """Move the row forward; a no-op when it is already past this state or gone.
+        For ``running``, whether the row is still open: an older build's API commits
+        the row before it starts the run, so a release may have settled it first, and
+        the run then renders nothing (#603). Every other state answers True."""
         p = self.deps.projection
         if projection.state == "running":
             started = await asyncio.to_thread(p.mark_started, projection.job_id)
@@ -553,15 +556,21 @@ class RenderActivities:
                 self.deps.metrics.queue_wait.observe(
                     max(0.0, (started.started_at - started.created_at).total_seconds())
                 )
-            return
+            if started is not None:
+                return True
+            try:
+                job = await asyncio.to_thread(p.read, projection.job_id)
+            except JobNotFoundError:
+                return False
+            return job.state == "running"
         if projection.state is None:
             if projection.steps is not None:
                 await asyncio.to_thread(p.set_steps, projection.job_id, projection.steps)
-            return
+            return True
         try:
             job = await asyncio.to_thread(p.read, projection.job_id)
         except JobNotFoundError:
-            return
+            return True
         # The API cancelled it first: its error says why, the workflow's does not.
         keep_error = projection.state == "cancelled" and job.state == "cancelled"
         job.state = projection.state
@@ -591,6 +600,7 @@ class RenderActivities:
                 "job already settled; projection ignored",
                 extra={"job_id": job.id, "state": projection.state},
             )
-            return
+            return True
         if self.deps.metrics is not None and job.state in ("done", "failed"):
             _observe_settled(self.deps.metrics, job)
+        return True

@@ -56,6 +56,7 @@ from scadbuddy.library.libraries import (
     CatalogueLibrary,
     CheckoutGate,
     CheckoutLeases,
+    InstallPermits,
     LibraryDeclarationError,
     LibraryNotInstalledError,
     LibraryStore,
@@ -1301,7 +1302,9 @@ def test_a_pin_refused_before_its_clone_leaves_no_operation(
     assert private.status_code == 422, private.text
     assert "public" in private.json()["detail"]
     with psycopg.connect(pg_conninfo) as conn:
-        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM operations WHERE kind = 'library_pin'"
+        ).fetchone() == (0,)
 
 
 def test_a_checkout_the_render_worker_is_reading_is_not_removed(
@@ -1853,6 +1856,62 @@ def test_a_slow_pin_answers_202_and_its_operation_ends_with_the_model(
         op = lib_client.get(f"/api/v1/operations/{op['id']}").json()
     assert op["status"] == "succeeded", op
     assert [entry["name"] for entry in op["result"]["libraries"]] == ["BOSL2"]
+
+
+def test_a_pin_on_the_library_worker_holds_off_another_processs_removal(
+    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1131: the pin runs on this app's library worker; a removal runs the library
+    queue's activity in another process, with a gate and permits of its own over the
+    same database. Cloned but not yet recorded, the pin keeps that removal waiting, and
+    the removal then finds it pinned, rather than deleting the checkout under it."""
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    assert state.checkouts.shared is not None
+    pool = state.checkouts.shared.pool
+    elsewhere = replace(
+        state,
+        checkouts=CheckoutGate(CheckoutLeases(pool, state.paths.libraries)),
+        installs=InstallPermits(INSTALL_CONCURRENCY, pool),
+    )
+    resolve = library_pins.resolve_pin
+    cloned, record = threading.Event(), threading.Event()
+
+    async def held_after_the_clone(*args: Any, **kwargs: Any) -> Any:
+        found = await resolve(*args, **kwargs)
+        cloned.set()
+        await asyncio.to_thread(record.wait, 60)
+        return found
+
+    monkeypatch.setattr(library_operations, "resolve_pin", held_after_the_clone)
+    removal: list[BaseException | None] = []
+
+    def remove_elsewhere() -> None:
+        kinds = library_operations.library_kinds(elsewhere, _NO_COMPONENTS)
+        run = next(kind for kind in kinds if kind.name == "library_remove").run
+        try:
+            asyncio.run(run({"name": "BOSL2", "commit": None}, {}))
+        except BaseException as error:
+            removal.append(error)
+        else:
+            removal.append(None)
+
+    with ThreadPoolExecutor(2) as threads:
+        pinned = threads.submit(lib_client.put, f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+        assert cloned.wait(60)
+        checkouts = list((state.paths.libraries / "BOSL2").iterdir())
+        assert checkouts
+        removing = threads.submit(remove_elsewhere)
+        time.sleep(1.5)
+        assert not removing.done()
+
+        record.set()
+        assert pinned.result(timeout=120).status_code in (200, 202)
+        removing.result(timeout=60)
+
+    assert isinstance(removal[0], ApiError), removal
+    assert (removal[0].status, removal[0].extensions.get("models")) == (409, [SLUG])
+    assert all(checkout.is_dir() for checkout in checkouts)
 
 
 def test_a_pin_on_a_broken_model_json_is_its_409_not_an_unexpected_500(

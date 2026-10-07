@@ -1,4 +1,5 @@
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import type { Context } from '@opentelemetry/api'
 import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
 import type { TierResolver } from '../harness/permissions.js'
 import type { TurnPrincipal } from '../sessions/manager.js'
@@ -31,7 +32,7 @@ export type HarnessTools = {
   mcpServers: (
     session: { id?: string; owner: Owner },
     turn?: TurnPrincipal,
-    extras?: { waitForTab?: WaitForTab },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context },
   ) => Record<string, McpSdkServerConfigWithInstance>
 }
 
@@ -53,7 +54,8 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
             }
           : services
       // The session id too, so its commits name it (authorship.ts, #252).
-      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id) }
+      // The turn's context, for a call whose span is not found (telemetry/trace.ts toolContextFor).
+      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext) }
     },
   }
 }

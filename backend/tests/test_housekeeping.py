@@ -95,9 +95,12 @@ async def test_the_prune_is_short_and_the_long_sweeps_heartbeat(client: Client) 
         await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    assert fake.timeouts[SWEEPS[0]] == (PRUNE_TIMEOUT, None)
-    for sweep in SWEEPS[1:]:
-        assert fake.timeouts[sweep] == (SWEEP_TIMEOUT, HEARTBEAT_TIMEOUT)
+    # The prune and the claims sweep (review 3c M1) are short, so they share a timeout.
+    for sweep in SWEEPS:
+        expected = (
+            (PRUNE_TIMEOUT, None) if sweep in PRUNE_SWEEPS else (SWEEP_TIMEOUT, HEARTBEAT_TIMEOUT)
+        )
+        assert fake.timeouts[sweep] == expected
 
 
 async def test_a_sweep_in_flight_finishes_before_the_worker_stops(client: Client) -> None:
@@ -205,6 +208,11 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         await prune.delete()
         await terminate_open_workflows(client, queue)
     assert described.schedule.spec.intervals[0].every == timedelta(seconds=300)
+    # Review 3c M1: claims are swept even with the sweeps off, or they pile up for good.
+    action = described.schedule.action
+    assert isinstance(action, ScheduleActionStartWorkflow)
+    (sweeps,) = await client.data_converter.decode(action.args)
+    assert list(sweeps) == ["housekeeping_prune_jobs", "housekeeping_sweep_claims"]
 
 
 async def _actions(client: Client, schedule_id: str, count: int) -> int:

@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { UserEvent } from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { BrowserRouter, MemoryRouter, Link, Route, Routes, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
@@ -20,8 +21,21 @@ async function seeded() {
   )
 }
 
-function region(name: string) {
-  return screen.getByRole('region', { name })
+/** `text` in `field` as one paste: each keystroke re-renders all of Settings (#1485). */
+async function enter(user: UserEvent, field: HTMLElement, text: string) {
+  await user.click(field)
+  await user.paste(text)
+}
+
+/**
+ * A section, by its heading. A role query over all of Settings (~1000 elements) runs
+ * jsdom's getComputedStyle on each of them, ~0.5 s after every change, and these tests
+ * ran into their 5 s under load (#1485); so buttons are looked for in their section.
+ */
+function region(name: string): HTMLElement {
+  const section = screen.getByText(name, { selector: 'h2' }).closest('section')
+  if (!section) throw new Error(`no section headed ${name}`)
+  return section
 }
 
 describe('SettingsPage sources (#322)', () => {
@@ -67,7 +81,7 @@ describe('SettingsPage sources (#322)', () => {
   it('resets a cleared key so the deployment one applies again', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.click(screen.getByRole('button', { name: 'Reset google_fonts_api_key to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-google_fonts_api_key')).getByRole('button', { name: 'Reset google_fonts_api_key to the deployment value' }))
     await waitFor(() =>
       expect(screen.getByTestId('source-google_fonts_api_key')).toHaveTextContent('From SCADBUDDY_GOOGLE_FONTS_API_KEY'),
     )
@@ -84,7 +98,7 @@ describe('SettingsPage sources (#322)', () => {
     const field = screen.getByLabelText('Renders at once')
     await user.clear(field)
     await user.type(field, '4')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() =>
       expect(screen.getByTestId('source-render_concurrency')).toHaveTextContent('Saved; restart ScadBuddy to apply'),
     )
@@ -106,7 +120,7 @@ describe('SettingsPage sections (#322)', () => {
     expect(within(region('Preview')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
 
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     // Only what changed in that section: the rest of the page is not posted back.
     expect(put.mock.calls[0]?.[0]).toEqual({ render_timeout: 45 })
@@ -134,7 +148,7 @@ describe('SettingsPage sections (#322)', () => {
     const timeout = screen.getByLabelText('Render timeout')
     await user.clear(timeout)
     await user.type(timeout, '45')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     await user.clear(timeout)
     await user.type(timeout, '50')
@@ -163,12 +177,12 @@ describe('SettingsPage sections (#322)', () => {
     const timeout = screen.getByLabelText('Render timeout')
     await user.clear(timeout)
     await user.type(timeout, '45')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     await user.clear(timeout)
     await user.type(timeout, '50')
     await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
-    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(within(region('Preview')).queryByText('Unsaved')).toBeNull())
 
     await act(async () => release())
@@ -189,10 +203,10 @@ describe('SettingsPage sections (#322)', () => {
     await user.clear(timeout)
     await user.type(timeout, '45')
 
-    await user.click(screen.getByRole('button', { name: 'Discard Fonts changes' }))
+    await user.click(within(region('Fonts')).getByRole('button', { name: 'Discard Fonts changes' }))
     expect(ttl).toHaveValue(86400)
     expect(within(region('Fonts')).queryByText('Unsaved')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Save Fonts' })).toBeDisabled()
+    expect(within(region('Fonts')).getByRole('button', { name: 'Save Fonts' })).toBeDisabled()
     expect(timeout).toHaveValue(45)
     expect(put).not.toHaveBeenCalled()
     put.mockRestore()
@@ -228,7 +242,7 @@ describe('SettingsPage sections (#322)', () => {
     expect(limit).toHaveValue(1073.742)
     await user.clear(limit)
     await user.type(limit, '500')
-    await user.click(screen.getByRole('button', { name: 'Save Uploads' }))
+    await user.click(within(region('Uploads')).getByRole('button', { name: 'Save Uploads' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toEqual({ media_upload_max_bytes: 500_000_000 })
     put.mockRestore()
@@ -381,7 +395,7 @@ describe('SettingsPage secrets (#322)', () => {
     // Emptied again, the field is back to leaving the stored key alone.
     await user.clear(key)
     expect(key).toHaveAttribute('placeholder', 'A key is stored. Paste a new one to replace it.')
-    expect(screen.getByRole('button', { name: 'Save Connection' })).toBeDisabled()
+    expect(within(region('Connection')).getByRole('button', { name: 'Save Connection' })).toBeDisabled()
     expect(put).not.toHaveBeenCalled()
     put.mockRestore()
   })
@@ -531,8 +545,8 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, has_render_api_key: false, render_key_fallback: true })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.type(screen.getByLabelText('Render key'), 'narrow')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, screen.getByLabelText('Render key'), 'narrow')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_render_api_key: 'narrow' })
     await waitFor(() => expect(screen.queryByTestId('render-key-fallback')).toBeNull())
@@ -548,7 +562,7 @@ describe('SettingsPage blob store (#426)', () => {
     expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeEnabled()
     await user.selectOptions(store, 'bambuddy')
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Save Projects & files' }))
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ store_backend: 'bambuddy' })
   })
@@ -560,8 +574,8 @@ describe('SettingsPage blob store (#426)', () => {
     await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
     const own = screen.getByLabelText(/ScadBuddy.s own URL/)
     await user.clear(own)
-    await user.type(own, 'https://scadbuddy.test')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, own, 'https://scadbuddy.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('store_backend')
     expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
@@ -576,7 +590,7 @@ describe('SettingsPage blob store (#426)', () => {
     await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
     expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
     expect(store).toHaveValue('local')
-    await user.click(screen.getByRole('button', { name: 'Save Projects & files' }))
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: null, store_backend: 'local' })
   })
@@ -589,7 +603,7 @@ describe('SettingsPage blob store (#426)', () => {
     await user.clear(screen.getByLabelText('Bambuddy URL'))
     // The choice follows the saved URL, so it moves once Connection is saved.
     expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
     await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('local'))
@@ -600,7 +614,7 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
-    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
   })
@@ -609,7 +623,7 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve(stored)
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
   })
@@ -622,8 +636,8 @@ describe('SettingsPage blob store (#426)', () => {
     await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
     const own = screen.getByLabelText('ScadBuddy’s own URL')
     await user.clear(own)
-    await user.type(own, 'https://mine.test')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, own, 'https://mine.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ public_url: 'https://mine.test' })
   })
@@ -635,7 +649,7 @@ describe('SettingsPage blob store (#426)', () => {
     await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
     await user.selectOptions(screen.getByLabelText(/Inbox folder/), '3')
-    await user.click(screen.getByRole('button', { name: 'Save Projects & files' }))
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: 3 })
   })
@@ -647,7 +661,7 @@ describe('SettingsPage blob store (#426)', () => {
     const row = screen.getByLabelText('Render key').closest('div') as HTMLElement
     await user.click(within(row).getByRole('button', { name: 'Remove key' }))
     expect(screen.getByLabelText('Render key')).toHaveAttribute('placeholder', 'Cleared when you save.')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_render_api_key: '' })
   })
@@ -658,16 +672,16 @@ describe('SettingsPage blob store (#426)', () => {
     // Saved: an inbox folder, no Bambuddy URL.
     const url = await screen.findByLabelText('Bambuddy URL')
     await waitFor(() => expect(screen.getByTestId('source-store_backend')).toBeInTheDocument())
-    await user.type(url, 'https://bambuddy.new.test')
+    await enter(user, url, 'https://bambuddy.new.test')
     const option = screen.getByRole('option', { name: /Bambuddy library/ })
     expect(option).toBeDisabled()
     expect(screen.getByTestId('store-backend-hint')).toHaveTextContent('Bambuddy URL is not saved yet')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(option).toBeEnabled())
     expect(screen.queryByTestId('store-backend-hint')).toBeNull()
     await user.selectOptions(screen.getByLabelText('Blob store'), 'bambuddy')
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
+    expect(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
   })
 
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
@@ -729,8 +743,8 @@ describe('SettingsPage Administration (#668)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const administration = region('Administration')
-    await user.type(within(administration).getByLabelText('Temporal UI URL'), 'https://temporal.lan')
-    await user.click(screen.getByRole('button', { name: 'Save Administration' }))
+    await enter(user, within(administration).getByLabelText('Temporal UI URL'), 'https://temporal.lan')
+    await user.click(within(region('Administration')).getByRole('button', { name: 'Save Administration' }))
     const link = await within(administration).findByRole('link', { name: /Temporal UI/ })
     expect(link).toHaveAttribute('href', 'https://temporal.lan')
     // A page that is not ScadBuddy's: a new tab, which also escapes Bambuddy's sandbox.

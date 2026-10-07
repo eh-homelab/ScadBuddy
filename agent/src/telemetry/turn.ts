@@ -34,6 +34,12 @@ import { bindToolContext, recordFailure, spanContextFrom, tracer, traceparentOf,
 //     the new segment when its decision opened one, else under its own
 //     decision (a root linked to its parked span when the decision has no
 //     trace context). Denied and expired calls run nothing.
+//   - Nothing starts in a segment that has ended. A call that starts after
+//     its segment parked (a read of the same message whose tool.call arrives
+//     late) opens the next segment early, as the ended one's child; the
+//     segment's decisions are then links of it, and the last one runs its
+//     call there instead of opening another. A turn that ends while parked
+//     records its outcome, cost and tokens on such a closing segment.
 //
 // Tool spans start at whichever comes first of the PreToolUse hook, the
 // mapped `tool.call` event and a park, and end at PostToolUse(Failure) or the
@@ -57,7 +63,16 @@ export type TurnTraceOptions = {
   tierOf: (toolName: string) => RiskTier
 }
 
-type Segment = { span: Span; index: number; ended: boolean; undecided: number; decisions: SpanContext[]; tools: number }
+type Segment = {
+  span: Span
+  index: number
+  ended: boolean
+  undecided: number
+  decisions: SpanContext[]
+  tools: number
+  /** The segment opened after this one ended, before its decisions came (see the header). */
+  next?: Segment
+}
 type Call = { name: string; span: Span; ended: boolean; segment: Segment; parkedIn?: Segment }
 
 function outcomeOf(outcome: TurnOutcome): string {
@@ -135,10 +150,20 @@ export class TurnTrace implements GateTrace {
     return span
   }
 
+  /** The open segment, after opening the next one if it has ended (see the header). */
+  #openSegment(): Segment {
+    const ended = this.#segment
+    if (!ended.ended) return ended
+    const next = this.#open(RESUME_SPAN, ended.index + 1, trace.setSpan(ROOT_CONTEXT, ended.span), [])
+    if (ended.undecided > 0) ended.next = next
+    this.#segment = next
+    return next
+  }
+
   #call(toolUseId: string, name: string): Call {
     const known = this.#calls.get(toolUseId)
     if (known) return known
-    const segment = this.#segment
+    const segment = this.#openSegment()
     segment.tools += 1
     const span = this.#startTool(toolUseId, name, trace.setSpan(ROOT_CONTEXT, segment.span))
     const call: Call = { name, ended: false, span, segment }
@@ -265,12 +290,18 @@ export class TurnTrace implements GateTrace {
     call.parkedIn = undefined
     segment.undecided -= 1
     const decision = spanContextFrom(approval.decisionTraceparent)
-    if (decision) segment.decisions.push(decision)
+    if (decision) {
+      segment.decisions.push(decision)
+      segment.next?.span.addLink({ context: decision })
+    }
     const decisionContext = decision ? trace.setSpanContext(ROOT_CONTEXT, decision) : ROOT_CONTEXT
     let parent = decisionContext
     let links: Link[] = []
     if (segment.undecided === 0 && segment === this.#segment) {
       this.#resume(segment, decision, decisionContext)
+      parent = this.context()
+    } else if (segment.undecided === 0 && segment.next === this.#segment && !this.#segment.ended) {
+      // Opened early by a late call: the harness continues in it.
       parent = this.context()
     }
     if (!runs) return
@@ -288,7 +319,7 @@ export class TurnTrace implements GateTrace {
 
   /**
    * Ends whatever is still open: tool spans as `unfinished`, the open segment
-   * with the turn's outcome, cost and tokens. Only a `failed` outcome is an
+   * (a closing one if the turn ended parked) with the turn's outcome, cost and tokens. Only a `failed` outcome is an
    * ERROR: an interrupt, a lost claim or a result subtype such as
    * `error_max_turns` is the turn ending, not the agent failing.
    */
@@ -296,8 +327,8 @@ export class TurnTrace implements GateTrace {
     if (this.#finished) return
     this.#finished = true
     for (const [toolUseId, call] of this.#calls) if (!call.ended) this.#endCall(toolUseId, call, 'unfinished')
-    const segment = this.#segment
-    if (!segment.ended && outcome.kind === 'failed') {
+    const segment = this.#openSegment()
+    if (outcome.kind === 'failed') {
       if (this.#failure) recordFailure(segment.span, this.#failure.err)
       else segment.span.setStatus({ code: SpanStatusCode.ERROR })
     }
