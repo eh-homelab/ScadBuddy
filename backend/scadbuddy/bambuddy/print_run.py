@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from fastapi import status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
@@ -748,7 +748,18 @@ class PreparedPlates(BaseModel):
 
     plate_ids: list[int]
     printer_id: int
+    #: Without the rack's serials: this crosses the history, and a hotend's serial goes
+    #: only into the database (spec 2026-10-01 §7, #1032). Nothing after the check
+    #: needs one: the enqueue ranks the rack on a status it reads itself.
     printer_status: PrinterStatus | None = None
+
+    @field_validator("printer_status", mode="after")
+    @classmethod
+    def _without_serials(cls, status: PrinterStatus | None) -> PrinterStatus | None:
+        if status is None or not any(slot.serial_number for slot in status.nozzle_rack):
+            return status
+        rack = [slot.model_copy(update={"serial_number": ""}) for slot in status.nozzle_rack]
+        return status.model_copy(update={"nozzle_rack": rack})
 
     @classmethod
     def of(cls, prepared: PreparedRun) -> PreparedPlates:

@@ -13,6 +13,7 @@ import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from google.protobuf import text_format
 from psycopg_pool import PoolTimeout
 
 from scadbuddy.api.components import getter_for
@@ -37,6 +38,7 @@ from tests.api.test_send import configure, upload_route
 from tests.bambuddy.conftest import recording
 from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
 from tests.support.rack_guard import foreign_rack_errors
+from tests.support.temporal import WorkflowReaper
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -274,6 +276,47 @@ def test_the_picks_are_recorded_against_the_queue_item(client: TestClient, model
     # Spec §5/§7: the result reports the picks sent, by position, never by serial.
     assert response.json()["rack_picks"] == [{"plate_id": 1, "group_id": 0, "position": 4}]
     assert serial(19) not in response.text
+
+
+@respx.mock
+def test_no_serial_enters_the_runs_workflow_history(
+    client: TestClient, model: str, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """Spec 2026-10-01 §7 (#1032): the pick runs inside the enqueue activity, and only
+    positions cross into history, where every activity's input and result is kept. So
+    neither the run's history nor its children's (FollowPrint) names a hotend."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(nozzles=[{"size": "0.4"}], tier="standard"))
+    assert response.status_code == 200, response.text
+    assert asyncio.run(rack_usage(client).picked_items([51])) == {51}
+
+    with psycopg.connect(pg_conninfo) as conn:
+        rows = conn.execute("SELECT workflow_id FROM print_runs").fetchall()
+    assert len(rows) == 1
+    assert workflow_reaper.client is not None
+    pending, positions = [rows[0][0]], 0
+    while pending:
+        handle = workflow_reaper.client.get_workflow_handle(pending.pop())
+        history = workflow_reaper._run(handle.fetch_history())
+        # Payloads are bytes; the text format prints their ASCII as it is.
+        text = "\n".join(text_format.MessageToString(event) for event in history.events)
+        positions += text.count('\\"position\\"')
+        for invented in INVENTED_SERIALS:
+            assert invented not in text, f"{invented} in {handle.id}'s history"
+        pending += [
+            event.start_child_workflow_execution_initiated_event_attributes.workflow_id
+            for event in history.events
+            if event.HasField("start_child_workflow_execution_initiated_event_attributes")
+        ]
+    # The pick's position did cross, so the check above read the payloads.
+    assert positions >= 1
 
 
 @respx.mock
