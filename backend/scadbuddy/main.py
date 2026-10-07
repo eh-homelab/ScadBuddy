@@ -40,6 +40,7 @@ from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.operations.claims import ClaimStore
@@ -68,6 +69,7 @@ from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     BACKFILL_SWEEP,
     HEARTBEAT_TIMEOUT,
+    REAP_SWEEP,
     SWEEPS,
     ensure_schedules,
     library_worker,
@@ -355,7 +357,23 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # process heard (the API was down, the listener reconnecting).
         await _heartbeating(_attach_backfills_logged(state))
 
-    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims, sweep_backfills]
+    @activity.defn(name=REAP_SWEEP)
+    async def reap_output_holds() -> None:
+        try:
+            await asyncio.to_thread(reap_orphan_holds, state.refs, state.outputs)
+        except Exception:
+            logger.exception("could not reap orphaned output holds")
+            raise
+
+    return [
+        prune_jobs,
+        sweep_assets,
+        sweep_blobs,
+        sweep_staging,
+        sweep_claims,
+        sweep_backfills,
+        reap_output_holds,
+    ]
 
 
 async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:

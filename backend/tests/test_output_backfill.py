@@ -24,7 +24,14 @@ from scadbuddy.library.backfill import (
     choose_output,
     follow_backfills,
 )
-from scadbuddy.library.outputs import OUTPUT_HOLDER, BackfillState, OutputStore, release_parts
+from scadbuddy.library.outputs import (
+    OUTPUT_HOLDER,
+    BackfillState,
+    OutputStore,
+    hold_parts,
+    reap_orphan_holds,
+    release_parts,
+)
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.housekeeping import BACKFILL_SWEEP, SWEEPS
@@ -377,3 +384,51 @@ async def test_the_backstop_sweep_attaches_a_backfill_whose_event_was_missed(
 def test_the_api_runs_no_attach_loop() -> None:
     assert not hasattr(main, "_attach_backfills_forever")
     assert not hasattr(main, "BACKFILL_ATTACH_INTERVAL")
+
+
+def _age_holds(refs: BlobRefs, output_id: str, hours: int) -> None:
+    with refs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE blob_refs SET created_at = now() - make_interval(hours => %s)"
+            " WHERE holder_kind = %s AND holder_id = %s",
+            (hours, OUTPUT_HOLDER, output_id),
+        )
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_releases_old_holds_of_outputs_with_no_record(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1007: a delete racing a write can leave Parts held by an output with no
+    meta.json; the reaper releases them, and only them."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    part = written.manifest[0].part
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest)  # a live output
+        hold_parts(refs, "gone", written.manifest)  # its record deleted under it
+        hold_parts(refs, "saving", written.manifest)  # held, meta.json not written yet
+        _age_holds(refs, old.id, 2)
+        _age_holds(refs, "gone", 2)
+        assert reap_orphan_holds(refs, store) == 1
+        holders = _holders(refs, part)
+        assert (OUTPUT_HOLDER, "gone") not in holders
+        assert (OUTPUT_HOLDER, old.id) in holders
+        assert (OUTPUT_HOLDER, "saving") in holders  # inside the grace
+        assert reap_orphan_holds(refs, store) == 0
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_releases_nothing_when_it_finds_no_outputs(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """An unmounted or emptied outputs volume reads like every output deleted."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    part = written.manifest[0].part
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest)
+        _age_holds(refs, old.id, 2)
+        shutil.rmtree(store.paths.outputs)
+        assert reap_orphan_holds(refs, store) == 0
+        assert (OUTPUT_HOLDER, old.id) in _holders(refs, part)

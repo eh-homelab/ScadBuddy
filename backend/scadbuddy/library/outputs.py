@@ -9,7 +9,7 @@ import uuid
 import zipfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -686,3 +686,44 @@ def hold_parts(refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject
 
 def release_parts(refs: BlobRefs, output_id: str) -> None:
     refs.drop_holder(OUTPUT_HOLDER, output_id)
+
+
+#: How old an `output` hold must be before the reaper may call it orphaned: a save holds
+#: its Parts before it writes meta.json (api/outputs.py `create_output`).
+ORPHAN_HOLD_GRACE = timedelta(hours=1)
+
+
+def reap_orphan_holds(
+    refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
+) -> int:
+    """Release every `output` hold older than ``grace`` whose output has no meta.json
+    (#1007). A delete's `rmtree` racing a write can leave a directory that holds Parts
+    with no record, and nothing else ever drops those holds. Returns how many outputs'
+    holds it released.
+
+    It releases nothing when it finds no output at all while holds exist: an outputs
+    volume that is unmounted or empty reads like every output deleted, and acting on that
+    would hand every Part to the blob sweep."""
+    root = store.paths.outputs
+    with refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT holder_id FROM blob_refs"
+            " WHERE holder_kind = %s AND created_at < now() - %s",
+            (OUTPUT_HOLDER, grace),
+        ).fetchall()
+    held = {row["holder_id"] for row in rows}
+    if not held:
+        return 0
+    live = {path.parent.name for path in root.glob(f"*/*/{META_NAME}")} if root.is_dir() else set()
+    if not live:
+        logger.error(
+            "found no outputs while %d hold Parts; not releasing any",
+            len(held),
+            extra={"root": str(root)},
+        )
+        return 0
+    orphans = sorted(held - live)
+    for output_id in orphans:
+        release_parts(refs, output_id)
+        logger.info("released an orphaned output's Parts", extra={"id": output_id})
+    return len(orphans)
