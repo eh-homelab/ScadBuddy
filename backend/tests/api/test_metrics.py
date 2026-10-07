@@ -15,6 +15,7 @@ from scadbuddy.api.metrics import refresh_asset_metrics
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.library.assets import AssetStore
 from tests.api.conftest import wait_for_job
+from tests.support.operations import press
 
 
 def test_an_upload_store_without_a_database_keeps_the_last_gauges(
@@ -103,7 +104,7 @@ def test_a_body_refused_on_its_size_is_counted(client: TestClient) -> None:
     refused = client.post(
         "/api/v1/models",
         content=b"x" * (MAX_TEXT_BODY_BYTES + 1),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge"},
     )
     assert refused.status_code == 413
 
