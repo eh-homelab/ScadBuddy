@@ -549,11 +549,12 @@ async def check_print(
     mounted nozzle of the size is not of the flow sliced there (#723, #797, #484), and
     not of the rack side once the preview picks it a hotend (#1238). The run's slot
     refusals (no spool, an override Bambuddy lacks) are judged from a copy Bambuddy
-    already has, so they are errors here before the run uploads (#1050). Only
-    the run's own refusals
-    (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the
-    check, as it would fail the run. With no printer chosen or configured there is
-    nothing to judge, and the run says why."""
+    already has, so they are errors here before the run uploads (#1050). The dialog
+    sends no check before its choices read, which is what makes that copy. Only the
+    run's own refusals (:class:`RunRefusalError`) and slot refusals become ``errors``: a
+    failed read of Bambuddy, the slot reads included, fails the check, as it would fail
+    the run. With no printer chosen or configured there is nothing to judge, and the
+    run says why."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
