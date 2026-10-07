@@ -37,12 +37,12 @@ export const RENDER_LIMITS: RenderLimits = {
 export class RenderLimiter {
   private readonly inFlight = new Map<string, number>()
   private readonly started = new Map<string, number[]>()
-  private lastSweep = 0
+  private lastSweep = Number.NEGATIVE_INFINITY
 
   readonly limits: RenderLimits
   private readonly now: () => number
 
-  constructor(limits: RenderLimits = RENDER_LIMITS, now: () => number = Date.now) {
+  constructor(limits: RenderLimits = RENDER_LIMITS, now: () => number = () => performance.now()) {
     this.limits = limits
     this.now = now
   }

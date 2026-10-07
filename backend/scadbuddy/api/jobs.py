@@ -11,7 +11,6 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowUpdateFailedError
-from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
@@ -73,6 +72,7 @@ from scadbuddy.store.content import StoreFullError
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
     TemporalRefusedError,
     TemporalUnavailableError,
 )
@@ -84,26 +84,6 @@ router = APIRouter(tags=["jobs"])
 #: A render whose `accepted` Update failed, or whose start Temporal refused, for a
 #: reason a re-send would not change.
 RENDER_UNSTARTABLE_PROBLEM = "https://scadbuddy.dev/problems/render-unstartable"
-
-#: The `RPCError`s worth sending the same request again for; any other is a 500
-#: (review #1066 (8) 2). The codes Temporal's own client retries (`RETRYABLE_ERROR_CODES`
-#: in the sdk-core temporalio 1.33.0 bundles, `crates/client/src/retry.rs`), so one
-#: reaching us outlived those retries, and the two gRPC ends an unanswered call with.
-#: The rest (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
-#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `ALREADY_EXISTS`) are configuration.
-TRANSIENT_RPC = frozenset(
-    {
-        RPCStatusCode.DATA_LOSS,
-        RPCStatusCode.INTERNAL,
-        RPCStatusCode.UNKNOWN,
-        RPCStatusCode.RESOURCE_EXHAUSTED,
-        RPCStatusCode.ABORTED,
-        RPCStatusCode.OUT_OF_RANGE,
-        RPCStatusCode.UNAVAILABLE,
-        RPCStatusCode.DEADLINE_EXCEEDED,
-        RPCStatusCode.CANCELLED,
-    }
-)
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
 PNG_MEDIA_TYPE = "image/png"
@@ -354,7 +334,7 @@ async def render_model(
         # The render's first activity has not answered yet, or its execution ended before
         # it did (review #1061); the same request joins it or starts it again.
         raise still_accepting() from None
-    except (RPCError, TemporalUnavailableError, TemporalRefusedError) as error:
+    except (TemporalUnavailableError, TemporalRefusedError) as error:
         raise _temporal_problem(error) from None
     except WorkflowUpdateFailedError as error:
         # The worker's failure text is for the log, not the client (review #1066 5.1).
@@ -392,7 +372,7 @@ async def render_model(
 
 
 def _temporal_problem(
-    error: RPCError | TemporalUnavailableError | TemporalRefusedError,
+    error: TemporalUnavailableError | TemporalRefusedError,
 ) -> ApiError:
     """What the route answers when Temporal did not take the render's start, as the
     print route does: only a failed connect wrote nothing; any other may follow a start
@@ -400,9 +380,7 @@ def _temporal_problem(
     ``may_have_started`` says which, as #1316's routes do: the browser re-sends the same
     `Idempotency-Key` when it is true, so a detail tells a client to send again only
     then (review #1066 (10) 3, 4)."""
-    if isinstance(error, TemporalRefusedError) or (
-        isinstance(error, RPCError) and error.status not in TRANSIENT_RPC
-    ):
+    if isinstance(error, TemporalRefusedError):
         # A wrong namespace or a denied permission: configuration. Temporal's message
         # stays in the log. The refusal may still follow a start it persisted.
         logger.error("Temporal refused to start a render", exc_info=error)
@@ -414,24 +392,23 @@ def _temporal_problem(
             may_have_started=True,
         )
     logger.warning("could not start a render on Temporal", exc_info=error)
-    started = not (
-        isinstance(error, TemporalUnavailableError) and isinstance(error.__cause__, RuntimeError)
-    )
+    started = not isinstance(error.__cause__, RuntimeError)
     if not started:
         # The lazy client's first connect failed (`start_command`): nothing was sent.
         detail = (
             "ScadBuddy cannot reach Temporal, where renders run. Nothing was queued; try"
             " again shortly."
         )
-    elif isinstance(error, TemporalUnavailableError):
-        detail = (
-            "ScadBuddy cannot reach Temporal, where renders run. Send the same request"
-            " again shortly to follow it if it started."
-        )
-    else:
+    elif isinstance(error, TemporalBusyError):
+        # Temporal answered, but could not take the start now (`temporal_failure`).
         detail = (
             "Temporal could not start this render right now. Send the same request again"
             " shortly to follow it if it started."
+        )
+    else:
+        detail = (
+            "ScadBuddy cannot reach Temporal, where renders run. Send the same request"
+            " again shortly to follow it if it started."
         )
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,

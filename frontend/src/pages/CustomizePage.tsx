@@ -48,7 +48,7 @@ import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
-import { RENDER_DEBOUNCE_MS, type RenderBusy, useRenderJob } from '../lib/useRenderJob'
+import { RENDER_DEBOUNCE_MS, type RenderBusy, useRenderJob, canRetry } from '../lib/useRenderJob'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
@@ -61,8 +61,6 @@ const FLYOUT_ID = 'parameters-flyout'
  */
 const FLYOUT_WIDTH = 'var(--sb-flyout)'
 
-/** An import's origin for the page's label; a URL the record holds that does not parse
- *  must not take the page down. */
 /** The banner while a refused render waits to be sent again, worded by why it waits. */
 function renderBusyText({ seconds, reason }: RenderBusy): string {
   switch (reason) {
@@ -77,6 +75,8 @@ function renderBusyText({ seconds, reason }: RenderBusy): string {
   }
 }
 
+/** An import's origin for the page's label; a URL the record holds that does not parse
+ *  must not take the page down. */
 function importedFrom(originUrl: string): string {
   try {
     return `imported from ${new URL(originUrl).host}`
@@ -1117,10 +1117,15 @@ export function CustomizePage() {
           )}
           {renderError && (
             <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
-              {renderError.message}{' '}
-              <Button size="sm" onClick={retryRender}>
-                Try again
-              </Button>
+              {renderError.message}
+              {canRetry(renderError) && (
+                <>
+                  {' '}
+                  <Button size="sm" onClick={retryRender}>
+                    Try again
+                  </Button>
+                </>
+              )}
             </p>
           )}
           {/* Full screen is the view and its parameters; the actions wait outside it. */}
