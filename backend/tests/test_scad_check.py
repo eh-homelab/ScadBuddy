@@ -9,6 +9,8 @@ from os import PathLike
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from scadbuddy.api.deps import build_state
 from scadbuddy.core.config import Config, load_config
@@ -98,7 +100,9 @@ async def test_the_check_runs_no_more_openscads_at_once_than_its_cap(
     live = 0
     peak = 0
 
-    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+    async def fake_run(
+        args: Sequence[str], *, cwd: Path, config: Config, failure_is_fallback: bool = False
+    ) -> ProcessOutput:
         nonlocal live, peak
         live += 1
         peak = max(peak, live)
@@ -140,7 +144,9 @@ async def test_an_unusable_param_export_is_a_diagnostic_and_not_a_crash(
 ) -> None:
     """`build_schema` subscripts the export directly, so a missing key is a KeyError."""
 
-    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+    async def fake_run(
+        args: Sequence[str], *, cwd: Path, config: Config, failure_is_fallback: bool = False
+    ) -> ProcessOutput:
         Path(args[1]).write_text(
             json.dumps({"parameters": [{"type": "number", "initial": 1}]}), encoding="utf-8"
         )
@@ -158,7 +164,9 @@ async def test_an_unusable_param_export_is_a_diagnostic_and_not_a_crash(
 async def test_a_timeout_says_so_instead_of_blaming_the_syntax(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+    async def fake_run(
+        args: Sequence[str], *, cwd: Path, config: Config, failure_is_fallback: bool = False
+    ) -> ProcessOutput:
         raise RenderTimeoutError("openscad timed out after 120s", ["Compiling design..."])
 
     monkeypatch.setattr(scad, "run_openscad", fake_run)
@@ -226,7 +234,9 @@ async def test_staging_the_check_does_not_block_the_event_loop(
         time.sleep(0.3)
         return real_copy(src, dst, follow_symlinks=follow_symlinks)
 
-    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+    async def fake_run(
+        args: Sequence[str], *, cwd: Path, config: Config, failure_is_fallback: bool = False
+    ) -> ProcessOutput:
         Path(args[1]).write_text(json.dumps({"parameters": []}), encoding="utf-8")
         return ProcessOutput(returncode=0, log_tail=[], duration_s=0.0)
 
@@ -254,3 +264,24 @@ async def test_staging_the_check_does_not_block_the_event_loop(
     # through it. A generous ceiling keeps this about blocking, not about scheduler jitter.
     assert gaps, "the heartbeat never ran at all"
     assert max(gaps) < 0.15
+
+
+async def test_a_failed_check_is_its_answer_not_a_failed_span(
+    tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    """#1245: a syntax error is what the check exists to report, so its
+    ``openscad.export`` span names the class and ends UNSET."""
+    binary = tmp_path / "fake-openscad"
+    binary.write_text(
+        "#!/bin/sh\necho 'ERROR: Parser error in file \"model.scad\", line 3: syntax error' >&2"
+        "\nexit 1\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    result = await check_source(BROKEN, config=Config(openscad=str(binary)))
+
+    assert result.ok is False
+    (export,) = [s for s in spans.get_finished_spans() if s.name == "openscad.export"]
+    assert export.status.status_code is StatusCode.UNSET
+    assert (export.attributes or {})["scadbuddy.failure_class"] == "OpenSCADError"

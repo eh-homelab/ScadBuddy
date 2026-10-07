@@ -141,8 +141,9 @@ async def inspect_source(
         args = ["-o", str(param_path), scad_path.name]
         try:
             async with limit or nullcontext():
+                # A failed check is its answer, not a failed span (#1245).
                 output: ProcessOutput = await run_openscad(
-                    args, cwd=scad_path.parent, config=config
+                    args, cwd=scad_path.parent, config=config, failure_is_fallback=True
                 )
         except RenderTimeoutError as error:
             # A timeout is not a parse failure, and saying so is the difference between

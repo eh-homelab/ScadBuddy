@@ -415,7 +415,7 @@ async def test_a_colours_mesh_parse_is_inside_its_solid_span_and_fails_it(
 
 
 async def test_a_colour_that_times_out_falls_back_without_failing_its_siblings(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spans: InMemorySpanExporter
 ) -> None:
     monkeypatch.setattr(solids_module, "split_by_material", lambda p: _box(_solid_index(p)))
     model, work = _model(tmp_path)
@@ -433,6 +433,15 @@ async def test_a_colour_that_times_out_falls_back_without_failing_its_siblings(
     assert result.warnings == [
         f"{colours[1]}: no closed solid (openscad timed out after 0.5s); {SPLIT_FALLBACK}"
     ]
+    # #1134: the export says why the colour fell back, and still ends UNSET.
+    exports = [s for s in spans.get_finished_spans() if s.name == "openscad.export"]
+    timed_out = [
+        s
+        for s in exports
+        if (s.attributes or {}).get("scadbuddy.failure_class") == "RenderTimeoutError"
+    ]
+    assert len(timed_out) == 1
+    assert {s.status.status_code for s in exports} == {StatusCode.UNSET}
 
 
 async def test_cancelled_siblings_leave_no_openscad_running(

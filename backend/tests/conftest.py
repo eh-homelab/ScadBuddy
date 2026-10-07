@@ -33,7 +33,7 @@ from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter
-from scadbuddy.core.tracing import DEFAULT_SAMPLER
+from scadbuddy.core.tracing import DEFAULT_SAMPLER, adopt_provider
 from scadbuddy.library import url_import
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import GIT, git_env
@@ -55,7 +55,7 @@ GOLDEN = Path(__file__).parent / "golden"
 
 #: Every span any test makes, after the same scrub production uses (spec §6).
 _SPANS = InMemorySpanExporter()
-_provider = TracerProvider(sampler=DEFAULT_SAMPLER)
+_provider = adopt_provider(TracerProvider(sampler=DEFAULT_SAMPLER))
 _provider.add_span_processor(SimpleSpanProcessor(ScrubbingSpanExporter(_SPANS)))
 trace.set_tracer_provider(_provider)
 

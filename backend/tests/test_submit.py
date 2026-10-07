@@ -537,7 +537,10 @@ async def test_an_accept_that_keeps_failing_is_answered_unstartable_within_the_d
 
 
 async def test_a_refused_submit_supersedes_nothing(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    spans: InMemorySpanExporter,
 ) -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -558,6 +561,8 @@ async def test_a_refused_submit_supersedes_nothing(
     assert refused.value.depth == 1 and refused.value.retry_after >= 1
     assert waiting.state == "pending" and waiting.claims == 1
     assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total") == 1
+    # #1245: a full queue is the client's answer (429), not a failed span.
+    _assert_refused_span(spans, "QueueFullError")
 
 
 async def test_a_supersede_never_needs_a_slot_held_by_the_job_it_replaces(
@@ -1634,8 +1639,19 @@ async def test_a_release_to_a_missing_namespace_is_not_taken_for_a_closed_run(
 # ── inputs Temporal can never take (final review I2) ────────────────────────────
 
 
+def _assert_refused_span(spans: InMemorySpanExporter, refusal: str) -> None:
+    refused = [
+        s
+        for s in spans.get_finished_spans()
+        if s.name == "render.submit"
+        and (s.attributes or {}).get("scadbuddy.failure_class") == refusal
+    ]
+    assert refused
+    assert {s.status.status_code for s in refused} == {trace.StatusCode.UNSET}
+
+
 async def test_a_submit_too_large_for_a_workflow_input_is_a_413_and_no_row(
-    make_service: ServiceFactory, projection: JobProjection
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
 ) -> None:
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
@@ -1645,6 +1661,7 @@ async def test_a_submit_too_large_for_a_workflow_input_is_a_413_and_no_row(
 
     assert refused.value.status == 413
     assert await asyncio.to_thread(projection.list_jobs) == []
+    _assert_refused_span(spans, "http-413")
 
 
 async def test_settled_jobs_past_their_ttl_are_pruned(

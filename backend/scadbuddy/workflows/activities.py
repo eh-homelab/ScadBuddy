@@ -9,6 +9,7 @@ import os
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
@@ -20,7 +21,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.metrics import Metrics, RenderOutcome
+from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
@@ -82,6 +83,29 @@ class WorkerDeps:
     snapshots: SnapshotStore | None = None
     fonts_mirror: FontMirror | None = None
     remote_assets: RemoteAssets | None = None
+
+
+def _retried(error: Exception) -> bool:
+    """Whether Temporal runs another attempt of the current activity after ``error``.
+    Never for what the activities make non-retryable once the stage has raised it: an
+    `OpenSCADError` (`_failure`) and an `AssetUnavailableError` (`_unavailable`, which
+    retries only a copy the sweep removed, and is counted final here)."""
+    if isinstance(error, (OpenSCADError, AssetUnavailableError)):
+        return False
+    if isinstance(error, ApplicationError) and error.non_retryable:
+        return False
+    info = activity.info()
+    policy = info.retry_policy
+    if policy is None or (policy.maximum_attempts and info.attempt >= policy.maximum_attempts):
+        return False
+    kind = error.type if isinstance(error, ApplicationError) else type(error).__name__
+    return kind not in (policy.non_retryable_error_types or ())
+
+
+def _stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
+    """The current activity's stages: traced with its attempt, and a failed attempt
+    that is retried is no failed span (#1183)."""
+    return timed_stage(metrics, attempt=activity.info().attempt, retried=_retried)
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -298,7 +322,7 @@ class RenderActivities:
         d = self.deps
         await self._materialize(req.slug, req.revision)
         try:
-            with timed_stage(d.metrics)("source"):
+            with _stage(d.metrics)("source"):
                 prepared, _ = await _heartbeating(
                     asyncio.create_task(
                         prepare_source(
@@ -345,7 +369,7 @@ class RenderActivities:
                 assets=d.assets,
                 checkouts=d.checkouts,
                 holder=f"piece:{req.piece_key}",
-                stage=timed_stage(d.metrics),
+                stage=_stage(d.metrics),
             )
         )
         try:
@@ -381,7 +405,7 @@ class RenderActivities:
                 assets=d.assets,
                 checkouts=d.checkouts,
                 holder=f"piece:{req.piece_key}",
-                stage=timed_stage(d.metrics),
+                stage=_stage(d.metrics),
             )
         )
         try:
@@ -424,7 +448,7 @@ class RenderActivities:
                     paths=d.paths,
                     slug=req.slug,
                     thumbnail_executor=d.thumbnail_executor,
-                    stage=timed_stage(d.metrics),
+                    stage=_stage(d.metrics),
                 )
         except OpenSCADError as error:
             raise _failure(error) from None

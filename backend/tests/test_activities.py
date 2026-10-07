@@ -17,7 +17,10 @@ from typing import Any
 import psycopg
 import pytest
 import trimesh
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 from temporalio.client import Client
+from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -40,7 +43,7 @@ from scadbuddy.render.job_models import (
 )
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.render.runner import ProcessOutput
+from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
@@ -54,6 +57,7 @@ from scadbuddy.workflows.activities import (
     _main_result,
     _process_output,
     _scope,
+    _stage,
     _write_piece,
 )
 from scadbuddy.workflows.client import make_current, render_worker
@@ -777,3 +781,37 @@ async def test_an_upload_whose_local_copy_vanished_is_not_called_absent_from_the
             await ActivityEnvironment().run(acts.render_main, req, prepared)
     assert raised.value.type == "AssetUnavailable" and not raised.value.non_retryable
     assert meta.id in str(raised.value) and "not in the blob store" not in str(raised.value)
+
+
+class _BlipError(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("attempt", "error", "status"),
+    [
+        (1, _BlipError(), StatusCode.UNSET),
+        (3, _BlipError(), StatusCode.ERROR),
+        (1, OpenSCADError("openscad exited with 1", []), StatusCode.ERROR),
+        (1, ApplicationError("gone", non_retryable=True), StatusCode.ERROR),
+    ],
+)
+async def test_a_stage_fails_its_span_only_when_its_attempt_is_not_retried(
+    attempt: int, error: Exception, status: StatusCode, spans: InMemorySpanExporter
+) -> None:
+    """#1183: an attempt Temporal retries is not the job's failure (spec 2026-10-01 §6);
+    an `OpenSCADError` is, because the activity makes it non-retryable."""
+    env = ActivityEnvironment()
+    env.info = replace(env.info, attempt=attempt, retry_policy=RetryPolicy(maximum_attempts=3))
+
+    async def run() -> None:
+        with _stage(None)("render"):
+            raise error
+
+    with pytest.raises(type(error)):
+        await env.run(run)
+
+    (stage,) = [s for s in spans.get_finished_spans() if s.name == "render.render"]
+    assert stage.status.status_code is status
+    assert (stage.attributes or {})["scadbuddy.attempt"] == attempt
+    assert (stage.attributes or {})["scadbuddy.failure_class"] == type(error).__name__

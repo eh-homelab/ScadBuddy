@@ -37,6 +37,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import (
     current_traceparent,
+    failure_class,
     link_to,
     span,
 )
@@ -194,25 +195,36 @@ class RenderService:
         the `accepted` Update's id, which Temporal answers with its first outcome on
         the open run and, once that run has closed, on the closed one (until another
         run of the key starts)."""
+        refusal: Exception | None = None
         with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
-            job, coalesced = await self._submit(
-                slug,
-                params,
-                model_version=model_version,
-                supersedes=supersedes,
-                inputs=inputs,
-                request_id=request_id,
-            )
-            current.set_attribute("scadbuddy.job_id", job.id)
-            current.set_attribute("scadbuddy.coalesced", coalesced)
-            # A coalesced request links to the trace of the render it joined.
-            if (
-                coalesced
-                and job.traceparent != current_traceparent()
-                and (link := link_to(job.traceparent)) is not None
-            ):
-                current.add_link(link.context)
-            return job
+            try:
+                job, coalesced = await self._submit(
+                    slug,
+                    params,
+                    model_version=model_version,
+                    supersedes=supersedes,
+                    inputs=inputs,
+                    request_id=request_id,
+                )
+            except (ApiError, QueueFullError) as error:
+                if isinstance(error, ApiError) and error.status >= 500:
+                    raise
+                # The client's answer (a 413, a full queue's 429), not a failure: the
+                # span names it and ends UNSET, as the server span does (#1245).
+                current.set_attribute("scadbuddy.failure_class", failure_class(error))
+                refusal = error
+            else:
+                current.set_attribute("scadbuddy.job_id", job.id)
+                current.set_attribute("scadbuddy.coalesced", coalesced)
+                # A coalesced request links to the trace of the render it joined.
+                if (
+                    coalesced
+                    and job.traceparent != current_traceparent()
+                    and (link := link_to(job.traceparent)) is not None
+                ):
+                    current.add_link(link.context)
+                return job
+        raise refusal
 
     async def _submit(
         self,

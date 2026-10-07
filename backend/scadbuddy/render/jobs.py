@@ -32,7 +32,7 @@ from scadbuddy.core.paths import (
     DataPaths,
     model_path,
 )
-from scadbuddy.core.tracing import span
+from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
@@ -731,18 +731,49 @@ def no_stage(name: RenderStage) -> AbstractContextManager[None]:
 
 
 @contextmanager
-def _traced_stage(name: RenderStage, timed: AbstractContextManager[None]) -> Iterator[None]:
-    """One render stage: a span (spec 2026-10-01 §5.1) around the existing timing."""
-    with span(f"render.{name}"), timed:
-        yield
+def _traced_stage(
+    name: RenderStage,
+    timed: AbstractContextManager[None],
+    *,
+    attempt: int | None = None,
+    retried: Callable[[Exception], bool] | None = None,
+) -> Iterator[None]:
+    """One render stage: a span (spec 2026-10-01 §5.1) around the existing timing.
+    ``attempt`` is the activity attempt it runs in; a failure ``retried`` says another
+    attempt follows is that attempt's, not the job's (spec §6): the span names its class
+    and ends UNSET (#1183)."""
+    failed: Exception | None = None
+    with span(f"render.{name}") as current:
+        if attempt is not None:
+            current.set_attribute("scadbuddy.attempt", attempt)
+        try:
+            with timed:
+                yield
+        except Exception as error:
+            if retried is None or not retried(error):
+                raise
+            current.set_attribute("scadbuddy.failure_class", failure_class(error))
+            failed = error
+    if failed is not None:
+        raise failed
 
 
-def timed_stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
+def timed_stage(
+    metrics: Metrics | None,
+    *,
+    attempt: int | None = None,
+    retried: Callable[[Exception], bool] | None = None,
+) -> Callable[[RenderStage], AbstractContextManager[None]]:
     """A stage timed into `stage_duration`, as `render_job`'s are, and traced; untimed
-    without metrics."""
+    without metrics. ``attempt`` and ``retried`` are `_traced_stage`'s."""
 
     def stage(name: RenderStage) -> AbstractContextManager[None]:
-        return _traced_stage(name, metrics.stage(name) if metrics is not None else nullcontext())
+        return _traced_stage(
+            name,
+            metrics.stage(name) if metrics is not None else nullcontext(),
+            attempt=attempt,
+            retried=retried,
+        )
 
     return stage
 

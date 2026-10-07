@@ -544,7 +544,11 @@ browser's decision.
   `RenderTimeoutError`).
 
 A render's spans end in `ERROR` exactly when its job settles `failed`, so a
-trace and its `render_jobs` row agree.
+trace and its `render_jobs` row agree. Our spans inside an activity carry
+`scadbuddy.attempt`; an attempt that Temporal retries names its
+`scadbuddy.failure_class` and ends `UNSET` (#1183). The `RunActivity:*` span is
+Temporal's own `TracingInterceptor`'s, which marks every failed attempt `ERROR`,
+retried or not.
 
 Exception messages carry exactly what the list above forbids:
 - `ParameterValueError` and the other checks in `render/runner.py` interpolate

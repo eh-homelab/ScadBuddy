@@ -606,6 +606,7 @@ class BambuddyClient:
         request = self._http.build_request("GET", self.config.url(path), headers=headers)
         # The span fails only on what Bambuddy did: an error the consumer raises inside
         # the ``async with`` (a browser that went away) leaves it, and is raised after.
+        # A transport error there is the body's read failing, which is Bambuddy's.
         consumer_error: Exception | None = None
         with _call_span(operation, "GET", Scope.READ_STATUS, detached=True) as current:
             try:
@@ -620,6 +621,9 @@ class BambuddyClient:
                     raise map_response(response, scope=Scope.READ_STATUS, what=what)
                 try:
                     yield response
+                except httpx.HTTPError as error:
+                    logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                    raise map_transport(error, what=what) from error
                 except Exception as error:
                     consumer_error = error
             finally:

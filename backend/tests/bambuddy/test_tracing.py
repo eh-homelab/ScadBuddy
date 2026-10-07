@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, get_args
 
 import httpx
@@ -14,8 +15,11 @@ import respx
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
+from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
-from scadbuddy.bambuddy.client import Operation
+from scadbuddy.api import prints
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, Operation
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL
 
@@ -123,6 +127,78 @@ async def test_the_consumers_error_inside_a_stream_does_not_fail_bambuddys_span(
     assert "scadbuddy.failure_class" not in (call.attributes or {})
     assert [event.name for event in call.events] == []
     assert (call.attributes or {})["http.response.status_code"] == 200
+
+
+class _DroppedMidway(httpx.AsyncByteStream):
+    """Bambuddy's body: one chunk, then the connection drops."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"first"
+        raise httpx.ReadError(SENTINEL)
+
+
+def _media_span(spans: InMemorySpanExporter) -> Any:
+    (call,) = [s for s in spans.get_finished_spans() if s.name == "bambuddy.media.timelapse"]
+    return call
+
+
+@respx.mock
+async def test_a_read_failure_inside_a_stream_fails_bambuddys_span(
+    bambuddy: Any, spans: InMemorySpanExporter
+) -> None:
+    # #1177: the body is read by the consumer, but a dropped connection is Bambuddy's.
+    respx.get(f"{BASE_URL}/api/v1/archives/1/video").mock(
+        return_value=httpx.Response(200, stream=_DroppedMidway())
+    )
+    with trace.get_tracer("t").start_as_current_span("request"), pytest.raises(ApiError):
+        async with bambuddy.stream(
+            "/archives/1/video", operation="media.timelapse", what="read it"
+        ) as response:
+            async for _ in response.aiter_raw():
+                pass
+    call = _media_span(spans)
+    assert call.status.status_code is trace.StatusCode.ERROR
+    assert "scadbuddy.failure_class" in (call.attributes or {})
+    assert SENTINEL not in repr(
+        (call.attributes, call.status.description, [e.attributes for e in call.events])
+    )
+
+
+@respx.mock
+async def test_the_media_proxy_hands_a_mid_stream_failure_to_bambuddys_span(
+    config: BambuddyConfig, spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #1192: the proxy's body closes the stream with the failure, not without one.
+    respx.get(f"{BASE_URL}/api/v1/archives/1/video").mock(
+        return_value=httpx.Response(200, stream=_DroppedMidway())
+    )
+
+    @asynccontextmanager
+    async def client_for(_: object) -> AsyncIterator[BambuddyClient]:
+        async with BambuddyClient(config) as client:
+            yield client
+
+    class _Store:
+        def load(self) -> None:
+            return None
+
+    monkeypatch.setattr(prints, "client_for", client_for)
+    request = Request({"type": "http", "method": "GET", "headers": []})
+    with trace.get_tracer("t").start_as_current_span("request"):
+        response = await prints._proxy(
+            _Store(),  # type: ignore[arg-type]
+            request,
+            "/archives/1/video",
+            operation="media.timelapse",
+            what="read it",
+        )
+    assert isinstance(response, StreamingResponse)
+    with pytest.raises(Exception):  # noqa: B017 - whichever error ends the body
+        async for _ in response.body_iterator:
+            pass
+    call = _media_span(spans)
+    assert call.status.status_code is trace.StatusCode.ERROR
+    assert "scadbuddy.failure_class" in (call.attributes or {})
 
 
 @respx.mock

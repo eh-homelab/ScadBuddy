@@ -16,7 +16,7 @@ from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
-from scadbuddy.core.tracing import span
+from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.render.confinement import escaping_includes, sandboxed
 from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector, parse_diagnostics
 from scadbuddy.render.schema import (
@@ -439,8 +439,8 @@ async def run_openscad(
 ) -> ProcessOutput:
     """``failure_is_fallback``: the caller handles an `OpenSCADError` as a fallback, not
     a failure (a colour's solid, spec 09-22 §6.3), so the span records the exit code and
-    ends without ERROR: a trace's spans are ERROR exactly when its job fails (spec
-    2026-10-01 §6)."""
+    the failure's class and ends without ERROR: a trace's spans are ERROR exactly when
+    its job fails (spec 2026-10-01 §6)."""
     fallback: OpenSCADError | None = None
     with span("openscad.export", attributes=_export_attributes(args)) as current:
         try:
@@ -450,6 +450,7 @@ async def run_openscad(
                 current.set_attribute("scadbuddy.openscad.exit_code", error.returncode)
             if not failure_is_fallback:
                 raise
+            current.set_attribute("scadbuddy.failure_class", failure_class(error))
             fallback = error
         else:
             current.set_attribute("scadbuddy.openscad.exit_code", output.returncode)
@@ -457,10 +458,17 @@ async def run_openscad(
     raise fallback
 
 
-async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any]:
+async def export_param_json(
+    scad_path: Path, *, config: Config, failure_is_fallback: bool = False
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="scadbuddy-param-") as tmp:
         target = Path(tmp) / "model.param"
-        await run_openscad(["-o", str(target), scad_path.name], cwd=scad_path.parent, config=config)
+        await run_openscad(
+            ["-o", str(target), scad_path.name],
+            cwd=scad_path.parent,
+            config=config,
+            failure_is_fallback=failure_is_fallback,
+        )
         try:
             data: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
@@ -472,7 +480,9 @@ async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any
     return data
 
 
-async def export_schema(scad_path: Path, *, config: Config) -> CustomizerSchema:
+async def export_schema(
+    scad_path: Path, *, config: Config, failure_is_fallback: bool = False
+) -> CustomizerSchema:
     """Every caller of this gets a schema or an OpenSCADError, never a raw KeyError.
 
     `build_schema` subscripts the export's dicts directly, so an entry without a `name`
@@ -481,19 +491,23 @@ async def export_schema(scad_path: Path, *, config: Config) -> CustomizerSchema:
     reach on purpose (a `force`d save of source whose export is unusable).
     """
     source = scad_path.read_text(encoding="utf-8")
-    data = await export_param_json(scad_path, config=config)
+    data = await export_param_json(
+        scad_path, config=config, failure_is_fallback=failure_is_fallback
+    )
     try:
         return build_schema(data, source)
     except (ValueError, KeyError, TypeError) as error:
         raise OpenSCADError(f"the customizer schema could not be derived: {error}", []) from error
 
 
-async def cached_schema(scad_path: Path, cache_path: Path, *, config: Config) -> CustomizerSchema:
+async def cached_schema(
+    scad_path: Path, cache_path: Path, *, config: Config, failure_is_fallback: bool = False
+) -> CustomizerSchema:
     source = scad_path.read_text(encoding="utf-8")
     cached = load_cached_schema(cache_path, source_sha256(source), library_path=config.library_path)
     if cached is not None:
         return cached
-    schema = await export_schema(scad_path, config=config)
+    schema = await export_schema(scad_path, config=config, failure_is_fallback=failure_is_fallback)
     store_cached_schema(cache_path, schema, library_path=config.library_path)
     return schema
 

@@ -307,21 +307,25 @@ def test_either_endpoint_variable_turns_export_on(monkeypatch: pytest.MonkeyPatc
     assert tracing.traces_export_enabled()
 
 
-def test_a_provider_scadbuddy_did_not_build_is_warned_about(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_provider_scadbuddy_did_not_build_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """``opentelemetry-instrument`` installs its own SDK provider, whose exporters skip
-    the scrub (spec §6): kept, but never silently."""
+    the scrub (spec §6): the process refuses to start rather than export through it."""
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
     monkeypatch.setattr(tracing, "_instrument_libraries", lambda: None)
     foreign = TracerProvider()
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: foreign)
-    with caplog.at_level(logging.WARNING, logger=tracing.__name__):
+    with pytest.raises(RuntimeError, match="did not build"):
         tracing.configure_tracing("scadbuddy", version="v", revision="r")
-    assert "do not scrub spans" in caplog.text
-    caplog.clear()
+
+
+def test_its_own_provider_and_an_adopted_one_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    monkeypatch.setattr(tracing, "_instrument_libraries", lambda: None)
+    installed: list[object] = []
+    monkeypatch.setattr(trace, "set_tracer_provider", installed.append)
     own = tracing.build_provider("scadbuddy", version="v", revision="r")
-    monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
-    with caplog.at_level(logging.WARNING, logger=tracing.__name__):
+    adopted = tracing.adopt_provider(TracerProvider())
+    for provider in (own, adopted):
+        monkeypatch.setattr(trace, "get_tracer_provider", lambda p=provider: p)
         tracing.configure_tracing("scadbuddy", version="v", revision="r")
-    assert "do not scrub spans" not in caplog.text
+    assert installed == []

@@ -149,6 +149,14 @@ def build_provider(
     return provider
 
 
+def adopt_provider(provider: TracerProvider) -> TracerProvider:
+    """Count ``provider`` as ScadBuddy's own, so `configure_tracing` keeps it: only for
+    one built elsewhere whose every exporter is behind `ScrubbingSpanExporter` (the
+    tests')."""
+    _OWN_PROVIDERS.add(provider)
+    return provider
+
+
 def _instrument_libraries() -> None:
     from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
 
@@ -161,15 +169,15 @@ def configure_tracing(
     service_name: str, *, version: str, revision: str, inprocess_worker: bool = False
 ) -> None:
     """Once per process, before anything that traces is built. A provider already set
-    (the tests' own, or an earlier `create_app` in the same process) is kept. One that
-    `build_provider` did not make (``opentelemetry-instrument``, an auto-configurator)
-    exports without ScadBuddy's scrub (spec §6), which is warned about, never silent."""
+    (an earlier `create_app` in the same process, or one `adopt_provider` took) is kept.
+    One that neither made (``opentelemetry-instrument``, an auto-configurator) exports
+    without ScadBuddy's scrub (spec §6), so the process refuses to start (#1193)."""
     propagate.set_global_textmap(_PROPAGATOR)
     if tracing_disabled():
         return
     current = trace.get_tracer_provider()
     if isinstance(current, TracerProvider) and current not in _OWN_PROVIDERS:
-        logger.warning(
+        raise RuntimeError(
             "a TracerProvider ScadBuddy did not build is already installed (for example "
             "by opentelemetry-instrument); its exporters do not scrub spans (spec §6). "
             "Run the process without it"
@@ -295,6 +303,7 @@ def use_traceparent(traceparent: str | None) -> Iterator[None]:
 __all__ = [
     "DEFAULT_SAMPLER",
     "TRACER_NAME",
+    "adopt_provider",
     "build_provider",
     "configure_tracing",
     "current_traceparent",

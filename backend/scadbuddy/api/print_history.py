@@ -380,6 +380,7 @@ class _Defaults:
                     config=self._config,
                     version=requested,
                     fetcher=self._fetcher,
+                    failure_is_fallback=True,
                 )
             except (ApiError, OpenSCADError):
                 continue
