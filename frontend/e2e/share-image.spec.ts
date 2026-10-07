@@ -1,9 +1,21 @@
 import { readFile } from 'node:fs/promises'
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator } from '@playwright/test'
 
 /** A PNG's width and height, from its IHDR chunk. */
 function pngSize(bytes: Buffer): { width: number; height: number } {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
+}
+
+/** A screenshot of ``canvas`` once two in a row agree, as preview-overlays.spec.ts takes. */
+async function settled(canvas: Locator): Promise<Buffer> {
+  let last = await canvas.screenshot()
+  for (let tries = 0; tries < 20; tries += 1) {
+    await canvas.page().waitForTimeout(150)
+    const next = await canvas.screenshot()
+    if (next.equals(last)) return next
+    last = next
+  }
+  return last
 }
 
 test.describe('rendered image', () => {
@@ -39,10 +51,13 @@ test.describe('rendered image', () => {
     // The bounding box is known before the model's GLB has loaded: until it has, the
     // canvas shows only the plate and the Rendering chip, so a screenshot taken then
     // differs from any taken later without the camera having moved (#1778).
-    await expect(page.getByText('Rendering')).toHaveCount(0)
+    await expect(
+      page.getByTestId('preview').locator('[data-overlay="chip"]', { hasText: 'Rendering' }),
+    ).toHaveCount(0)
     const canvas = page.getByTestId('preview-canvas').locator('canvas')
     const view = (await canvas.boundingBox())!
-    const before = await canvas.screenshot()
+    // The chip goes as the model loads; the frame that draws it can land a tick later.
+    const before = await settled(canvas)
 
     await page.getByTestId('generate-menu').click()
     await page.getByTestId('generate-image').click()
