@@ -52,7 +52,8 @@ class Late extends Error {}
 /** What a call that outlived its bound means: the execution exists (still accepting), or Temporal is away. */
 async function late(client: Client, workflowId: string): Promise<Error> {
   try {
-    await client.connection.withDeadline(Date.now() + DESCRIBE_MS, () =>
+    // A timer, not a wall-clock deadline (the host's clock may step).
+    await client.connection.withAbortSignal(AbortSignal.timeout(DESCRIBE_MS), () =>
       client.workflow.getHandle(workflowId).describe(),
     )
   } catch {
@@ -81,7 +82,7 @@ export async function startCommand(
   })
   try {
     return await Promise.race([
-      client.connection.withDeadline(Date.now() + deadlineMs, () =>
+      client.connection.withAbortSignal(AbortSignal.timeout(deadlineMs), () =>
         client.workflow.executeUpdateWithStart<(input: OperationInput) => Promise<unknown>, OperationAnswer, []>(
           ACCEPTED_UPDATE,
           { startWorkflowOperation: operation },
@@ -99,11 +100,11 @@ export async function startCommand(
       }
       throw err
     }
-    // gRPC: 4 DEADLINE_EXCEEDED, 14 UNAVAILABLE.
+    // gRPC: 1 CANCELLED (the deadline's abort signal), 4 DEADLINE_EXCEEDED, 14 UNAVAILABLE.
     const cause = (err as { cause?: unknown } | undefined)?.cause
     const grpc = isGrpcServiceError(err) ? err : isGrpcServiceError(cause) ? cause : undefined
     if (grpc) {
-      if (grpc.code === 4) throw await late(client, workflowId)
+      if (grpc.code === 1 || grpc.code === 4) throw await late(client, workflowId)
       if (grpc.code === 14) throw new TemporalUnavailableError(workflowId)
     }
     throw err
