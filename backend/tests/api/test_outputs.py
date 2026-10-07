@@ -22,6 +22,7 @@ from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
+from tests.support.operations import press
 
 
 def _finished_job(client: TestClient, slug: str, width: float = 12) -> str:
@@ -55,10 +56,13 @@ def test_persisting_a_job_writes_the_documented_layout(
     directory = paths.output_dir(model, body["id"])
     assert sorted(path.name for path in directory.iterdir()) == [
         "inputs.json",
+        # Its objects (phase 5, spec 2026-09-27 §7): what Arrange lays out again.
+        "manifest.json",
         "meta.json",
         "model.3mf",
         "params.json",
         "preview.glb",
+        "record.json",
     ]
     assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {"width": 12}
 
@@ -103,6 +107,7 @@ def test_a_job_from_another_model_is_refused(client: TestClient, model: str) -> 
     client.post(
         "/api/v1/models",
         files={"file": ("other.scad", b"width = 1;\n", "application/octet-stream")},
+        headers=press(),
     )
     job_id = _finished_job(client, "other")
     response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
@@ -268,6 +273,7 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
         "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "record",
+        "arranged_from": [],
     }
 
 
@@ -292,6 +298,7 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
         "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "3mf",
+        "arranged_from": [],
     }
 
 

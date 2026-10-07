@@ -22,6 +22,7 @@ from scadbuddy.library.url_import import shown_url
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.operation_models import FINISH_ACTIVITY
+from tests.support.operations import press
 
 RAW_URL = "https://raw.githubusercontent.com/someone/models/main/Gridfinity%20Bin.scad"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -35,7 +36,7 @@ pytestmark = pytest.mark.usefixtures("fake_dns")
 def test_a_raw_url_imports_through_the_create_path(client: TestClient, paths: DataPaths) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
 
     assert response.status_code == 201
     body = response.json()
@@ -51,7 +52,9 @@ def test_a_raw_url_imports_through_the_create_path(client: TestClient, paths: Da
 def test_a_name_overrides_the_one_taken_from_the_url(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL, "name": "My Bin"})
+    response = client.post(
+        "/api/v1/models/import", json={"url": RAW_URL, "name": "My Bin"}, headers=press()
+    )
 
     assert response.status_code == 201
     assert response.json()["slug"] == "my-bin"
@@ -61,7 +64,9 @@ def test_a_name_overrides_the_one_taken_from_the_url(client: TestClient) -> None
 def test_a_name_too_long_for_a_slug_is_refused_and_nothing_saved(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL, "name": "x" * 300})
+    response = client.post(
+        "/api/v1/models/import", json={"url": RAW_URL, "name": "x" * 300}, headers=press()
+    )
 
     assert response.status_code == 422
     assert "longer than" in response.json()["detail"]
@@ -71,9 +76,12 @@ def test_a_name_too_long_for_a_slug_is_refused_and_nothing_saved(client: TestCli
 @respx.mock
 def test_an_import_over_an_existing_slug_conflicts(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
-    assert client.post("/api/v1/models/import", json={"url": RAW_URL}).status_code == 201
+    assert (
+        client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press()).status_code
+        == 201
+    )
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
 
     assert response.status_code == 409
 
@@ -82,7 +90,7 @@ def test_an_import_over_an_existing_slug_conflicts(client: TestClient) -> None:
 def test_source_openscad_cannot_parse_is_refused_and_nothing_is_saved(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text="%%FAIL%%\n"))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
 
     assert response.status_code == 422
     assert response.json()["log_tail"] == ["ERROR: Parser error: syntax error"]
@@ -93,13 +101,17 @@ def test_source_openscad_cannot_parse_is_refused_and_nothing_is_saved(client: Te
 def test_force_saves_an_import_that_does_not_parse(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text="%%FAIL%%\n"))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL, "force": True})
+    response = client.post(
+        "/api/v1/models/import", json={"url": RAW_URL, "force": True}, headers=press()
+    )
 
     assert response.status_code == 201
 
 
 def test_a_plain_http_url_is_a_problem_422(client: TestClient) -> None:
-    response = client.post("/api/v1/models/import", json={"url": "http://example.com/model.scad"})
+    response = client.post(
+        "/api/v1/models/import", json={"url": "http://example.com/model.scad"}, headers=press()
+    )
 
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
@@ -109,7 +121,9 @@ def test_a_plain_http_url_is_a_problem_422(client: TestClient) -> None:
 def test_a_makerworld_url_is_a_problem_422_that_says_what_to_do(client: TestClient) -> None:
     with respx.mock(assert_all_called=False) as mock:
         response = client.post(
-            "/api/v1/models/import", json={"url": "https://makerworld.com/en/models/1398039"}
+            "/api/v1/models/import",
+            json={"url": "https://makerworld.com/en/models/1398039"},
+            headers=press(),
         )
 
     assert response.status_code == 422
@@ -122,7 +136,7 @@ def test_a_makerworld_url_is_a_problem_422_that_says_what_to_do(client: TestClie
 def test_a_public_server_error_status_is_a_422_that_names_it(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(404))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
 
     assert response.status_code == 422
     assert "404" in response.json()["detail"]
@@ -139,9 +153,13 @@ def test_a_cluster_address_reads_exactly_like_one_that_did_not_answer(
             side_effect=httpx.ConnectTimeout("slow")
         )
         internal = client.post(
-            "/api/v1/models/import", json={"url": "https://bambuddy.bambuddy.svc.cluster.local/x"}
+            "/api/v1/models/import",
+            json={"url": "https://bambuddy.bambuddy.svc.cluster.local/x"},
+            headers=press(),
         )
-        slow = client.post("/api/v1/models/import", json={"url": "https://slow.example.com/x"})
+        slow = client.post(
+            "/api/v1/models/import", json={"url": "https://slow.example.com/x"}, headers=press()
+        )
 
     assert internal.status_code == slow.status_code == 422
     assert internal.json()["detail"] == slow.json()["detail"].replace(
@@ -156,14 +174,16 @@ def test_a_cluster_address_reads_exactly_like_one_that_did_not_answer(
 def test_a_source_longer_than_a_paste_may_be_is_refused(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text="x" * (MAX_SOURCE_CHARS + 1)))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
 
     assert response.status_code == 422
     assert str(MAX_SOURCE_CHARS) in response.json()["detail"]
 
 
 def test_a_model_created_any_other_way_has_no_origin(client: TestClient) -> None:
-    response = client.post("/api/v1/models", json={"name": "Pasted", "source": SOURCE})
+    response = client.post(
+        "/api/v1/models", json={"name": "Pasted", "source": SOURCE}, headers=press()
+    )
 
     assert response.json()["origin_url"] is None
 
@@ -173,7 +193,9 @@ def test_an_import_never_targets_a_built_in(client: TestClient) -> None:
     """The name is slugified like any create's, so `builtin:` cannot survive into the id."""
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL, "name": "builtin:bin"})
+    response = client.post(
+        "/api/v1/models/import", json={"url": RAW_URL, "name": "builtin:bin"}, headers=press()
+    )
 
     assert response.status_code == 201
     assert (response.json()["slug"], response.json()["origin"]) == ("builtin-bin", "mine")
@@ -192,7 +214,7 @@ def test_an_import_over_the_fetch_budget_is_a_503_with_retry_after(client: TestC
         oldest = next(iter(imports._taken))
         imports._taken[oldest] -= url_import.IMPORT_TIMEOUT - 10
         with respx.mock(assert_all_called=False) as mock:
-            response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+            response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
 
     assert response.status_code == 503
     # About 10 s left on the oldest fetch, less however long the request took.
@@ -214,7 +236,7 @@ def test_an_import_with_every_resolver_thread_busy_is_a_503_not_the_refusal(
         taken += 1
     try:
         with respx.mock(assert_all_called=False) as mock:
-            response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+            response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
     finally:
         url_import._RESOLVER_SLOTS.release(taken)
 
@@ -269,10 +291,16 @@ def test_an_import_whose_run_finds_the_budget_full_waits_for_a_permit(
 def test_every_import_gives_its_fetch_permit_back(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(404))
     for _ in range(IMPORT_CONCURRENCY + 1):
-        assert client.post("/api/v1/models/import", json={"url": RAW_URL}).status_code == 422
+        assert (
+            client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press()).status_code
+            == 422
+        )
 
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
-    assert client.post("/api/v1/models/import", json={"url": RAW_URL}).status_code == 201
+    assert (
+        client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press()).status_code
+        == 201
+    )
 
 
 def test_import_retry_after_counts_down_from_the_oldest_held_fetch() -> None:
@@ -296,7 +324,9 @@ def test_an_imports_operation_names_the_host_never_the_url(client: TestClient) -
     may carry a token, and past 2 KB it would fail the workflow task."""
     url = RAW_URL + "?token=secret"
     respx.get(url).mock(return_value=httpx.Response(200, text=SOURCE))
-    assert client.post("/api/v1/models/import", json={"url": url}).status_code == 201
+    assert (
+        client.post("/api/v1/models/import", json={"url": url}, headers=press()).status_code == 201
+    )
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     with state.components.get(OPERATIONS).store._require().connection() as conn:
         rows = conn.execute("SELECT subject FROM operations WHERE kind = 'model_import'").fetchall()
@@ -310,7 +340,7 @@ def test_an_import_never_records_the_urls_query(client: TestClient, paths: DataP
     nor its history, nor the model.json, ever holds the token."""
     url = RAW_URL + "?token=secret#secret"
     respx.get(RAW_URL + "?token=secret").mock(return_value=httpx.Response(200, text=SOURCE))
-    created = client.post("/api/v1/models/import", json={"url": url})
+    created = client.post("/api/v1/models/import", json={"url": url}, headers=press())
     assert created.status_code == 201, created.text
     assert created.json()["origin_url"] == RAW_URL
     assert "secret" not in paths.model_meta("gridfinity-bin").read_text("utf-8")
@@ -382,7 +412,7 @@ def test_a_url_refused_on_its_shape_starts_no_operation(
     """#1054: these refusals quote the URL, query and all. Made in the route, before
     any operation, they are recorded nowhere."""
     with respx.mock(assert_all_called=False) as mock:
-        response = client.post("/api/v1/models/import", json={"url": url})
+        response = client.post("/api/v1/models/import", json={"url": url}, headers=press())
 
     assert response.status_code == 422, response.text
     assert detail in response.json()["detail"]
@@ -400,7 +430,7 @@ def test_a_refused_redirect_records_no_query(client: TestClient) -> None:
         )
     )
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL}, headers=press())
 
     assert response.status_code == 422, response.text
     assert "http://example.com/model.scad" in response.json()["detail"]
@@ -414,7 +444,9 @@ def test_a_host_that_is_not_public_records_no_query(
     fake_dns["internal.example.com"] = ["10.43.0.12"]
 
     response = client.post(
-        "/api/v1/models/import", json={"url": "https://internal.example.com/m.scad?token=secret"}
+        "/api/v1/models/import",
+        json={"url": "https://internal.example.com/m.scad?token=secret"},
+        headers=press(),
     )
 
     assert response.status_code == 422, response.text
