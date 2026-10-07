@@ -384,11 +384,11 @@ def test_the_run_commits_as_the_requests_agent_author(client: TestClient) -> Non
     response = client.post(
         "/api/v1/test-op?kind=test_author",
         json={},
-        headers={AUTHOR_HEADER: "token:abc123", AUTHOR_SESSION_HEADER: "s-1"},
+        headers={**press(), AUTHOR_HEADER: "token:abc123", AUTHOR_SESSION_HEADER: "s-1"},
     )
     assert response.status_code == 200, response.text
     assert response.json() == {"principal": "token:abc123", "session": "s-1"}
-    plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1})
+    plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1}, headers=press())
     assert plain.json() == {"principal": None, "session": None}
 
 
