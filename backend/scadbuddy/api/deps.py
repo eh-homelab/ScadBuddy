@@ -66,9 +66,9 @@ from scadbuddy.workflows.client import connect_lazily
 logger = logging.getLogger(__name__)
 
 STATE_ATTR = "scadbuddy"
-JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
-RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
-OPERATION_ID_PATTERN = r"^[0-9a-f]{32}$"
+#: A render job, a print run and an operation are all named by ``uuid.uuid4().hex``,
+#: so they share one pattern rather than three copies that could drift apart (#1807).
+HEX_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 #: URL fetches at once per replica (#178): `POST /models/import` and, since #844,
@@ -588,10 +588,10 @@ FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
-JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
+JobIdPath = Annotated[str, Path(pattern=HEX_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
-RunIdPath = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
-OperationIdPath = Annotated[str, Path(pattern=OPERATION_ID_PATTERN)]
+RunIdPath = Annotated[str, Path(pattern=HEX_ID_PATTERN)]
+OperationIdPath = Annotated[str, Path(pattern=HEX_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
 # with the full 40 characters.
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]
