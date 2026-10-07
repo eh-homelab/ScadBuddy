@@ -202,6 +202,12 @@ on shutdown.
     `Recreate` rollout, or the old replicas scaled to 0 first: a replica still on the
     old build takes the new sweep's task and fails it as unregistered, and since a
     sweep is not retried, that sweep waits for the next tick (a day, by default).
+  - **This release adds a sweep**, `housekeeping_attach_backfills` (#902's backstop:
+    an output re-render whose `job.done` no API replica heard), so it needs that
+    `Recreate` rollout. Each replica attaches a finished re-render to its output when
+    it hears the job settle, and every API start runs one backstop pass whatever the
+    interval, so with 0 a re-render missed while every replica was down waits for the
+    next start.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):

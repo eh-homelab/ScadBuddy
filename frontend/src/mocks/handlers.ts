@@ -2697,7 +2697,7 @@ export const handlers = [
   }),
 
   // #902 — an ordinary render of the output's own params; the output gains its objects
-  // when a read finds the job done (the API's attach loop), or records why it failed.
+  // when a read finds the job done (the API attaches on the job's event), or records why it failed.
   http.post(`${base}/outputs/:id/backfill`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')

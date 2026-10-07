@@ -14,6 +14,10 @@ class BlobRefs:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        return self._pool
+
     def add(self, key: str, holder_kind: str, holder_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(

@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
+import threading
+import time
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import psycopg
 import pytest
+from temporalio.testing import ActivityEnvironment
 
+from scadbuddy import main
+from scadbuddy.core.events import InProcessEventBus, JobEvent
 from scadbuddy.library import outputs as outputs_module
-from scadbuddy.library.backfill import attach_backfills, choose_output
+from scadbuddy.library.backfill import (
+    attach_backfills,
+    attach_job_backfills,
+    choose_output,
+    follow_backfills,
+)
 from scadbuddy.library.outputs import OUTPUT_HOLDER, BackfillState, OutputStore, release_parts
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.workflows.housekeeping import BACKFILL_SWEEP, SWEEPS
 from tests.support.arrange import finished_job
 from tests.support.store import store_pool
 
@@ -261,3 +276,104 @@ async def test_a_marker_left_after_its_manifest_was_written_is_cleared_not_faile
         assert attach_backfills(store, refs, _jobs()) == 0
     assert store.backfill(old.id) is None
     assert store.manifest(old.id) == written.manifest
+
+
+async def _until(check, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]
+    deadline = time.monotonic() + timeout
+    while not check():
+        assert time.monotonic() < deadline, "timed out"
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.requires_postgres
+async def test_a_job_done_event_attaches_its_backfill_promptly(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    bus = InProcessEventBus()
+    with store_pool(pg_conninfo) as pool:
+        remove = follow_backfills(
+            bus, partial(attach_job_backfills, store, BlobRefs(pool), _jobs(job))
+        )
+        try:
+            bus.publish(JobEvent(kind="job.done", job_id=job.id, slug="demo"))
+            await _until(lambda: store.backfill(old.id) is None, timeout=2.0)
+        finally:
+            remove()
+    assert store.manifest(old.id) == written.manifest
+
+
+@pytest.mark.requires_postgres
+async def test_another_jobs_event_attaches_nothing(tmp_path: Path, pg_conninfo: str) -> None:
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    with store_pool(pg_conninfo) as pool:
+        assert attach_job_backfills(store, BlobRefs(pool), _jobs(job), "someone-else") == 0
+    assert store.manifest(old.id) == []
+
+
+@pytest.mark.requires_postgres
+async def test_duplicate_events_and_the_backstop_attach_once(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """Two `job.done` (a replica each) and the Schedule's backstop, all at once."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    read: Callable[[str], Job] = _jobs(job)
+
+    def slow(job_id: str) -> Job:
+        time.sleep(0.3)  # every caller is inside its attach together
+        return read(job_id)
+
+    results: list[int] = []
+    lock = threading.Lock()
+
+    def attach(job_id: str) -> int:
+        attached = attach_job_backfills(store, refs, slow, job_id)
+        with lock:
+            results.append(attached)
+        return attached
+
+    bus = InProcessEventBus()
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        remove = follow_backfills(bus, attach)
+        try:
+            bus.publish(JobEvent(kind="job.done", job_id=job.id, slug="demo"))
+            bus.publish(JobEvent(kind="job.done", job_id=job.id, slug="demo"))
+            backstop = await asyncio.to_thread(attach_backfills, store, refs, slow)
+            await _until(lambda: len(results) == 2)
+        finally:
+            remove()
+        assert sum(results) + backstop == 1
+        assert _holders(refs, written.manifest[0].part) == [(OUTPUT_HOLDER, old.id)]
+    assert store.manifest(old.id) == written.manifest
+    assert store.backfill(old.id) is None
+
+
+@pytest.mark.requires_postgres
+async def test_the_backstop_sweep_attaches_a_backfill_whose_event_was_missed(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """The API was down when the job finished: no event, so the Schedule's sweep."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    with store_pool(pg_conninfo) as pool:
+        state = SimpleNamespace(
+            outputs=store,
+            refs=BlobRefs(pool),
+            render=SimpleNamespace(store=SimpleNamespace(read=_jobs(job))),
+        )
+        activities = main._housekeeping_activities(state)  # type: ignore[arg-type]
+        names = [fn.__temporal_activity_definition.name for fn in activities]  # type: ignore[attr-defined]
+        assert names == list(SWEEPS)
+        sweep = activities[SWEEPS.index(BACKFILL_SWEEP)]
+        await ActivityEnvironment().run(sweep)
+    assert store.manifest(old.id) == written.manifest
+    assert store.backfill(old.id) is None
+
+
+def test_the_api_runs_no_attach_loop() -> None:
+    assert not hasattr(main, "_attach_backfills_forever")
+    assert not hasattr(main, "BACKFILL_ATTACH_INTERVAL")

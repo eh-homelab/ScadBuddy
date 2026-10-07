@@ -37,7 +37,7 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.library.assets import referenced_asset_ids
-from scadbuddy.library.backfill import attach_backfills
+from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
@@ -337,24 +337,26 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A crashed duplicate's staging otherwise waits for the next boot (#397).
         await _heartbeating(_sweep_duplicate_staging_logged(state, reraise=True))
 
-    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging]
+    @activity.defn(name=SWEEPS[4])
+    async def sweep_backfills() -> None:
+        # #902: `follow_backfills` attaches on the job's event; this finds what no
+        # process heard (the API was down, the listener reconnecting).
+        await _heartbeating(_attach_backfills_logged(state))
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_backfills]
 
 
-#: How often finished output re-renders are attached to their outputs (#902).
-BACKFILL_ATTACH_INTERVAL = 5.0
-
-
-async def _attach_backfills_forever(state: AppState) -> None:
-    """#902: every `BACKFILL_ATTACH_INTERVAL`, attach each finished re-render to the
-    output it was queued for. A pass that fails leaves the markers for the next."""
-    while True:
-        try:
-            await asyncio.to_thread(
-                attach_backfills, state.outputs, state.refs, state.render.store.read
-            )
-        except Exception:
-            logger.exception("could not attach the finished output re-renders")
-        await asyncio.sleep(BACKFILL_ATTACH_INTERVAL)
+async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:
+    """#902's backstop pass. The Schedule's sweep (``reraise``) fails its activity on an
+    error; the boot's pass only logs it."""
+    try:
+        await asyncio.to_thread(
+            attach_backfills, state.outputs, state.refs, state.render.store.read
+        )
+    except Exception:
+        logger.exception("could not attach the finished output re-renders")
+        if reraise:
+            raise
 
 
 async def _prepare_catalogue(state: AppState) -> None:
@@ -753,9 +755,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     library: asyncio.Task[None] | None = None
     stop_library = asyncio.Event()
     backfill: asyncio.Task[None] | None = None
-    attacher: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
+    unfollow_backfills: Callable[[], None] | None = None
+    attach_now: asyncio.Task[None] | None = None
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
     stop = asyncio.Event()
@@ -773,7 +776,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             task.add_done_callback(partial(_worker_exited, stop))
             worker = (task, deps)
-        attacher = asyncio.create_task(_attach_backfills_forever(state))
+        # #902: a finished re-render is attached on its event, by every replica;
+        # the housekeeping Schedule's `BACKFILL_SWEEP` catches one none heard.
+        unfollow_backfills = follow_backfills(
+            state.events,
+            partial(attach_job_backfills, state.outputs, state.refs, state.render.store.read),
+        )
+        # And once now, whatever the Schedule: a re-render that settled while no replica
+        # was listening (the sweeps' interval 0, or the Schedule paused).
+        attach_now = asyncio.create_task(_attach_backfills_logged(state, reraise=False))
         # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
         printing = asyncio.create_task(_run_print_worker(state, stop_printing))
         # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
@@ -815,7 +826,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await state.previews.aclose()
         stop_library.set()
         await _stop_queue_worker(library, "library")
-        for background in (backfill, attacher):
+        if unfollow_backfills is not None:
+            unfollow_backfills()
+        for background in (backfill, attach_now):
             if background is not None:
                 background.cancel()
                 with suppress(asyncio.CancelledError):

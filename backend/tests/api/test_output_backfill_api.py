@@ -67,7 +67,7 @@ def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str
 
 
 def attached(client: TestClient, output_id: str, timeout: float = 30) -> dict[str, Any]:
-    """The output once the lifespan's attach loop has given it its manifest."""
+    """The output once the API has attached its re-render, on the job's event."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         detail: dict[str, Any] = client.get(f"/api/v1/outputs/{output_id}").json()
@@ -93,7 +93,7 @@ def test_a_backfill_rerenders_the_output_and_gives_it_a_manifest(
     assert queued.status_code == 202, queued.text
     job_id = queued.json()["id"]
     pending = client.get(f"/api/v1/outputs/{output_id}").json()
-    # Unless the attach loop already finished it.
+    # Unless the attach already finished it.
     assert pending["backfill"] in ({"job_id": job_id, "error": None}, None)
     assert wait_for_job(client, job_id)["status"] == "done"
 
