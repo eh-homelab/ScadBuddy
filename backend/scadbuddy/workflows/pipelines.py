@@ -534,10 +534,11 @@ class TemplatePipeline:
         await workflow.wait_condition(workflow.all_handlers_finished)
 
     async def _render(self, job: Job) -> None:
-        async def project(**fields: object) -> None:
-            await workflow.execute_activity(
+        async def project(**fields: object) -> bool:
+            open_row: bool = await workflow.execute_activity(
                 "project",
                 Projection.model_validate({"job_id": job.id, "slug": job.slug, **fields}),
+                result_type=bool,
                 start_to_close_timeout=SHORT,
                 retry_policy=PROJECT_RETRY,
                 # A release that cancels the job mid-projection waits for the write to
@@ -549,6 +550,7 @@ class TemplatePipeline:
                 # A write that completed despite the cancel returns normally: the
                 # release still stands.
                 raise asyncio.CancelledError
+            return open_row
 
         problem = input_problem(job.slug, job.model_version)
         if problem is not None:
@@ -562,7 +564,11 @@ class TemplatePipeline:
             return
         steps = [StepInfo(name="render", state="running", done=0, total=1)]
         try:
-            await project(state="running")
+            if not await project(state="running"):
+                # Settled before this run began: an older build's API commits the row
+                # before it starts the run, and a release in between cancels the row
+                # with no run to cancel. Nothing to render (#603).
+                return
             self._upsert(STATUS.value_set("running"))
             params = job.inputs.get("params", job.params)
             # Without a revision the source is live and may change before the next job,
