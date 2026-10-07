@@ -53,7 +53,7 @@ _INPUT_TIMEOUT = timedelta(seconds=10)
 # service commits before it nudges, so a miss is a race, never a reason to give the
 # message up (lead ruling); after the last one it answers UNKNOWN_INPUT, and the message,
 # if it does exist, stays pending for the next load.
-_UNSEEN_RETRIES = (0.5, 1.0, 2.0, 4.0)
+_UNSEEN_RETRIES: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0)
 
 
 @workflow.defn(name=WORKFLOW_NAME)
@@ -67,6 +67,10 @@ class DurableSession:
 
     #: How long one input activity (inputs.py) may take.
     input_timeout = _INPUT_TIMEOUT
+    #: The waits between a nudge's loads of an id not seen yet.
+    unseen_retries: tuple[float, ...] = _UNSEEN_RETRIES
+    #: The plugin's `continue_as_new_after_events` (None: when Temporal suggests it).
+    continue_as_new_after_events: int | None = None
 
     @workflow.init
     def __init__(self, inp: SessionInput, state: AgentState | None = None) -> None:
@@ -101,6 +105,7 @@ class DurableSession:
             max_segments=None,  # a chat; the budget is the limit (ruling 3)
             state=state,
             auto_continue_as_new=True,
+            continue_as_new_after_events=self.continue_as_new_after_events,
             continue_as_new_args=lambda s: [
                 dataclasses.replace(self._inp, ran=self._ran[-RECENT_INPUTS:]),
                 s,
@@ -225,7 +230,7 @@ class DurableSession:
         if self._handing_over and nudge.id not in self._outcome:
             # No turn runs in the hand-over: the next run loads the message at start.
             raise ApplicationError(BUSY, non_retryable=True)
-        for delay in (*_UNSEEN_RETRIES, None):
+        for delay in (*self.unseen_retries, None):
             if self._known(nudge.id) or workflow.cancellation_reason() is not None:
                 break
             loaded = await self._load(LoadInputs(self._inp.session_id, asked=nudge.id))

@@ -50,8 +50,8 @@ from scadbuddy_durable.models import (
 )
 from scadbuddy_durable.workflow import DurableSession
 from tests.conftest import free_port, start_dev_server, stop_dev_server, temporal_cli
-from tests.short_runs import ForcedHandOver, LongStop, ShortRuns, SlowTakes
-from tests.support import WAIT, FakeInputs, Rig, Seen, make_policy, rig_on
+from tests.short_runs import ForcedHandOver, LongRetries, LongStop, ShortRuns, SlowTakes
+from tests.support import TASK_TIMEOUT, WAIT, FakeInputs, Rig, Seen, make_policy, rig_on
 
 HISTORIES = Path(__file__).parent / "histories"
 BROWSER = "browser:browser"
@@ -333,25 +333,22 @@ async def test_a_nudge_during_the_hand_over_is_queued_for_the_next_run(rig: Rig)
 @temporal
 async def test_a_stop_wakes_a_nudge_that_waits_to_look_again(rig: Rig) -> None:
     # Round 3, item 2: the stopped run answers its nudges before it returns, so a nudge
-    # sleeping between loads must wake on the Stop, not wait out its retry (up to 4 s).
+    # waiting between loads must wake on the Stop, not wait out its retry. LongRetries
+    # waits a minute there; the Stop must be answered well before.
     wid, inp = rig.new()
-    handle = await rig.send(wid, inp, "first")
+    handle = await rig.send(wid, inp, "first", workflow=LongRetries)
     await rig.event(wid, "done")
     unseen = await rig.inputs.commit(inp.session_id, "unseen")
     rig.fake.unseen[unseen] = 99
     loads = rig.fake.loads
     nudging = asyncio.create_task(handle.execute_update(SEND_UPDATE, Nudge(unseen), id=unseen))
-    # In its 4 s wait now, after three timers (each up to ~15 s late on a loaded host).
-    assert await until(lambda: rig.fake.loads >= loads + 4, 3 * WAIT)
+    assert await until(lambda: rig.fake.loads > loads, WAIT)  # in its minute's wait now
     await handle.cancel()
     with pytest.raises(WorkflowUpdateFailedError) as err:
-        await asyncio.wait_for(nudging, WAIT)
+        await asyncio.wait_for(nudging, WAIT / 2)
     assert STOPPING in str(err.value.cause)
-    await asyncio.wait_for(handle.result(), WAIT)
-    events = (await handle.fetch_history()).events
-    cancel = EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
-    stop = next(i for i, e in enumerate(events) if e.event_type == cancel)
-    assert not [e for e in events[stop:] if e.event_type == EventType.EVENT_TYPE_TIMER_FIRED]
+    await asyncio.wait_for(handle.result(), WAIT / 2)
+    assert rig.fake.loads == loads + 1  # it never looked again
 
 
 @temporal
@@ -555,7 +552,9 @@ async def test_a_message_whose_nudge_was_lost_runs_when_a_run_starts(rig: Rig) -
     # run of the session loads it.
     wid, inp = rig.new()
     message_id = await rig.inputs.commit(inp.session_id, "hello")
-    await rig.client.start_workflow(DurableSession.run, args=[inp, None], id=wid, task_queue=TASK_QUEUE)
+    await rig.client.start_workflow(
+        DurableSession.run, args=[inp, None], id=wid, task_queue=TASK_QUEUE, task_timeout=TASK_TIMEOUT
+    )
     assert (await rig.event(wid, "done"))["result"] == "answer to hello"
     assert rig.fake.status(message_id) == "run"
 
@@ -724,6 +723,7 @@ async def test_a_nudge_and_a_stop_in_one_activation_refuse_the_message(
         task_queue=queue,
         id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
         id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        task_timeout=TASK_TIMEOUT,
     )
     sending = asyncio.create_task(
         temporal_env.execute_update_with_start_workflow(

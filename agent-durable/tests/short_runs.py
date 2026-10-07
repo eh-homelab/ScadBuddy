@@ -17,10 +17,7 @@ AFTER_EVENTS = 40
 
 @workflow.defn(name="DurableSessionShortRuns")
 class ShortRuns(DurableSession):
-    @workflow.init
-    def __init__(self, inp: SessionInput, state: AgentState | None = None) -> None:
-        super().__init__(inp, state)
-        self.agent._continue_as_new_after_events = AFTER_EVENTS
+    continue_as_new_after_events = AFTER_EVENTS
 
     @workflow.run
     async def run(self, inp: SessionInput, state: AgentState | None = None) -> AgentState:
@@ -81,6 +78,18 @@ class SlowTakes(DurableSession):
     workflow task's heartbeats (which admit a nudge meanwhile) without it timing out."""
 
     input_timeout = timedelta(minutes=1)
+
+    @workflow.run
+    async def run(self, inp: SessionInput, state: AgentState | None = None) -> AgentState:
+        return await super().run(inp, state)
+
+
+@workflow.defn(name="DurableSessionLongRetries")
+class LongRetries(DurableSession):
+    """A nudge for an id not seen yet waits a minute before it looks again, so a test can
+    tell a Stop that wakes that wait from one that waits it out."""
+
+    unseen_retries = (60.0,)
 
     @workflow.run
     async def run(self, inp: SessionInput, state: AgentState | None = None) -> AgentState:

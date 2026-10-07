@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +41,13 @@ from scadbuddy_durable.models import (
 from scadbuddy_durable.segments import SAVE_SNAPSHOT
 from scadbuddy_durable.tools import TOOL_QUEUE, TOOLS
 from scadbuddy_durable.workflow import DurableSession
-from tests.short_runs import ForcedHandOver, LongStop, ShortRuns, SlowTakes
+from tests.short_runs import ForcedHandOver, LongRetries, LongStop, ShortRuns, SlowTakes
 
 WAIT = 60.0
+# The tests' workflow task timeout. Temporal's 10 s default is a worker's whole budget for
+# one activation; on this loaded host one took longer, the task timed out, and its retry
+# came too late for the test's WAIT. A worker that is merely slow should not fail a test.
+TASK_TIMEOUT = timedelta(seconds=30)
 
 
 # ---- the scripted Claude --------------------------------------------------------------
@@ -287,6 +292,7 @@ class Rig:
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            task_timeout=TASK_TIMEOUT,
         )
 
     async def nudge(
@@ -376,7 +382,7 @@ async def rig_on(
             Worker(
                 client,
                 task_queue=task_queue,
-                workflows=[DurableSession, ShortRuns, LongStop, ForcedHandOver, SlowTakes],
+                workflows=[DurableSession, ShortRuns, LongStop, ForcedHandOver, SlowTakes, LongRetries],
                 activities=[snaps.activity, *inputs.activities],
                 plugins=[ClaudeAgentPlugin(runner, heartbeat_every=1.0)],
             ),
