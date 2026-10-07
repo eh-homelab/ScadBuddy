@@ -221,9 +221,15 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
-  /** #1457, #1484 — the preset the template UI last loaded or saved, for the picker. */
-  const [presetElsewhere, setPresetElsewhere] = useState<(SelectedElsewhere & { slug: string }) | null>(null)
-  if (presetElsewhere && presetElsewhere.slug !== slug) setPresetElsewhere(null)
+  /**
+   * #1457, #1484 — a preset the template UI just loaded or saved, for the picker. A
+   * one-shot message: cleared once the picker has rendered it, so a later remount (the
+   * form taking over from a failed UI) never brings it back over a pick made since.
+   */
+  const [presetElsewhere, setPresetElsewhere] = useState<SelectedElsewhere | null>(null)
+  useEffect(() => {
+    if (presetElsewhere) setPresetElsewhere(null)
+  }, [presetElsewhere])
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -458,7 +464,7 @@ export function CustomizePage() {
             inputs: presetInputs(schemaNow(), savedValues, savedExtra),
           })
           // The picker shows it selected, as its own Save as preset does.
-          setPresetElsewhere({ slug, preset: created, values: savedValues, extra: savedExtra })
+          setPresetElsewhere({ preset: created, values: savedValues, extra: savedExtra })
           setPresetsRevision((n) => n + 1) // the picker keeps its own list; remount it
           return created
         },
@@ -467,7 +473,7 @@ export function CustomizePage() {
           if (!preset) throw new Error(`no preset ${id}`)
           const applied = applyPreset(schemaNow(), preset)
           onApplyPreset(applied.values, applied.extra)
-          setPresetElsewhere({ slug, preset, values: applied.values, extra: applied.extra })
+          setPresetElsewhere({ preset, values: applied.values, extra: applied.extra })
         },
       },
       onDescribe: (fn: (() => string) | null) => {
