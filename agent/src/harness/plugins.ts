@@ -120,7 +120,7 @@ const HOOKS_FILE_KEYS = new Set(['$schema', 'description', 'hooks'])
  */
 export function hookEvents(config: Json): { file: boolean; events: Json } {
   const file = isRecord(config) && ['modules', ...HOOKS_FILE_KEYS].some((key) => key in config)
-  return { file, events: file ? (config.hooks ?? {}) : config }
+  return { file, events: file ? (config.hooks === undefined ? {} : config.hooks) : config }
 }
 
 function checkHooksConfig(config: Json, where: string, problems: string[]): void {
