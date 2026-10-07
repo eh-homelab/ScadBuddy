@@ -37,6 +37,7 @@ from scadbuddy_durable.models import (
     PENDING_QUERY,
     REVIEW_UPDATE,
     SEND_UPDATE,
+    STOPPING,
     TASK_QUEUE,
     WORKFLOW_NAME,
     InFlight,
@@ -49,7 +50,7 @@ from scadbuddy_durable.models import (
 )
 from scadbuddy_durable.workflow import DurableSession
 from tests.conftest import free_port, start_dev_server, stop_dev_server, temporal_cli
-from tests.short_runs import LongStop, ShortRuns
+from tests.short_runs import ForcedHandOver, LongStop, ShortRuns
 from tests.support import WAIT, FakeInputs, Rig, Seen, make_policy, rig_on
 
 HISTORIES = Path(__file__).parent / "histories"
@@ -269,6 +270,83 @@ async def test_a_nudge_racing_its_commit_loads_it_again_and_runs_it_once(rig: Ri
     assert (await rig.event(wid, "done"))["result"] == "answer to hello"
     assert rig.fake.takes == [message_id]
     assert rig.fake.status(message_id) == "run"
+
+
+# How long a nudge may take before a test counts it as deadlocked.
+DEADLOCK = 30.0
+
+
+@temporal
+async def test_a_hand_over_suggested_while_a_nudge_looks_again_waits_for_it(rig: Rig) -> None:
+    # Round 3, item 1: idle, the run must not continue as new while a nudge for an id it
+    # did not load yet sleeps between loads; the nudge would find its message, queue it in
+    # a run waiting in the plugin's hand-over for every handler, and wait for it forever.
+    wid, inp = rig.new()
+    handle = await rig.send(wid, inp, "first", workflow=ForcedHandOver)
+    await rig.event(wid, "done")
+    late = await rig.inputs.commit(inp.session_id, "late")
+    rig.fake.unseen[late] = 3  # three loads miss it: 3.5 s of sleeps between them
+    loads = rig.fake.loads
+    nudging = asyncio.create_task(handle.execute_update(SEND_UPDATE, Nudge(late), id=late))
+    assert await until(lambda: rig.fake.loads > loads, WAIT)
+    await handle.signal("suggest")
+    await asyncio.wait_for(nudging, DEADLOCK)
+    assert (await rig.event(wid, "done", 2))["result"] == "answer to late"
+    assert rig.fake.takes[-1] == late
+
+
+@temporal
+async def test_a_nudge_during_the_hand_over_is_queued_for_the_next_run(rig: Rig) -> None:
+    # Round 3, item 1: a nudge that arrives once the run is in the plugin's hand-over
+    # (waiting for every handler) answers BUSY at once; its message stays committed, and
+    # the next run loads and runs it. No turn runs inside the hand-over.
+    wid, inp = rig.new()
+    handle = await rig.send(wid, inp, "first", workflow=ForcedHandOver)
+    await rig.event(wid, "done")
+    holding = asyncio.create_task(handle.execute_update("hold", id="hold"))
+    await asyncio.wait_for(admitted_update(handle, "hold"), WAIT)
+    await handle.signal("suggest")
+
+    async def handing_over() -> None:
+        # Not the `continued_as_new` event: the hand-over refuses new stream polls.
+        while True:
+            if await handle.query("handing_over"):
+                return
+            await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(handing_over(), WAIT)
+    late = await rig.inputs.commit(inp.session_id, "late")
+    with pytest.raises(WorkflowUpdateFailedError) as err:
+        await asyncio.wait_for(handle.execute_update(SEND_UPDATE, Nudge(late), id=late), DEADLOCK)
+    assert BUSY in str(err.value.cause)
+    assert rig.fake.status(late) == "pending"
+    await handle.signal("release")
+    await asyncio.wait_for(holding, WAIT)
+    assert (await rig.event(wid, "done", 2))["result"] == "answer to late"
+    assert rig.fake.takes[-1] == late
+
+
+@temporal
+async def test_a_stop_wakes_a_nudge_that_waits_to_look_again(rig: Rig) -> None:
+    # Round 3, item 2: the stopped run answers its nudges before it returns, so a nudge
+    # sleeping between loads must wake on the Stop, not wait out its retry (up to 4 s).
+    wid, inp = rig.new()
+    handle = await rig.send(wid, inp, "first")
+    await rig.event(wid, "done")
+    unseen = await rig.inputs.commit(inp.session_id, "unseen")
+    rig.fake.unseen[unseen] = 99
+    loads = rig.fake.loads
+    nudging = asyncio.create_task(handle.execute_update(SEND_UPDATE, Nudge(unseen), id=unseen))
+    assert await until(lambda: rig.fake.loads >= loads + 4, WAIT)  # in its 4 s wait now
+    await handle.cancel()
+    with pytest.raises(WorkflowUpdateFailedError) as err:
+        await asyncio.wait_for(nudging, WAIT)
+    assert STOPPING in str(err.value.cause)
+    await asyncio.wait_for(handle.result(), WAIT)
+    events = (await handle.fetch_history()).events
+    cancel = EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+    stop = next(i for i, e in enumerate(events) if e.event_type == cancel)
+    assert not [e for e in events[stop:] if e.event_type == EventType.EVENT_TYPE_TIMER_FIRED]
 
 
 @temporal

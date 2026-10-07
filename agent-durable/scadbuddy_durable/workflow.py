@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 from datetime import datetime, timedelta
 from typing import Any
@@ -75,10 +76,13 @@ class DurableSession:
         # will not run here. Messages that ran in an earlier run of this chain count too.
         self._outcome: dict[str, str] = dict.fromkeys(inp.ran, RAN)
         self._ran: list[str] = list(inp.ran)
-        # Nudge handlers loading right now: the run does not continue as new under them.
-        self._loading = 0
-        # Nudge handlers not finished yet: a stopped run answers them before it returns.
+        # Nudge handlers not finished yet: the run does not continue as new under them (one
+        # would queue a message in a run waiting for it to finish), and a stopped run
+        # answers them before it returns.
         self._nudges = 0
+        # In the plugin's hand-over (continue_as_new): a nudge arriving now answers BUSY at
+        # once, and its committed message is the next run's, which loads it at start.
+        self._handing_over = False
         # The message being taken (START_INPUT in flight), and the take's token: known to
         # every nudge, so none loads it back into the inbox meanwhile (it would run twice).
         self._taking: tuple[str, str] | None = None
@@ -112,12 +116,15 @@ class DurableSession:
             while True:
                 prompt: str | None = None
                 if not self.agent.busy:
+                    # Continue as new only with the inbox empty and no nudge in flight; the
+                    # plugin's hand-over then waits for every other handler.
                     await workflow.wait_condition(
                         lambda: (
-                            bool(self._inbox) or (self._loading == 0 and self.agent.should_continue_as_new())
+                            bool(self._inbox) or (self._nudges == 0 and self.agent.should_continue_as_new())
                         )
                     )
                     if not self._inbox:
+                        self._handing_over = True
                         await self.agent.continue_as_new()
                     message = self._inbox.pop(0)
                     if message.id in self._outcome:
@@ -212,14 +219,13 @@ class DurableSession:
             self._nudges -= 1
 
     async def _answer(self, nudge: Nudge) -> None:
+        if self._handing_over and nudge.id not in self._outcome:
+            # No turn runs in the hand-over: the next run loads the message at start.
+            raise ApplicationError(BUSY, non_retryable=True)
         for delay in (*_UNSEEN_RETRIES, None):
             if self._known(nudge.id) or workflow.cancellation_reason() is not None:
                 break
-            self._loading += 1
-            try:
-                loaded = await self._load(LoadInputs(self._inp.session_id, asked=nudge.id))
-            finally:
-                self._loading -= 1
+            loaded = await self._load(LoadInputs(self._inp.session_id, asked=nudge.id))
             self._enqueue(loaded)
             if self._known(nudge.id):
                 break
@@ -230,7 +236,11 @@ class DurableSession:
             if delay is None:
                 # Not cached in `_outcome`: a later nudge looks again.
                 raise ApplicationError(UNKNOWN_INPUT, non_retryable=True)
-            await workflow.sleep(delay)
+            # A Stop wakes it: the stopped run must not wait out the retry.
+            with contextlib.suppress(asyncio.TimeoutError):
+                await workflow.wait_condition(
+                    lambda: workflow.cancellation_reason() is not None, timeout=delay
+                )
 
         def taking() -> bool:
             return self._taking is not None and self._taking[0] == nudge.id
