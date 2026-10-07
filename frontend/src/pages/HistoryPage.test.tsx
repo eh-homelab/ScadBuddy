@@ -61,7 +61,11 @@ describe('HistoryPage', () => {
     const nova = await row('Nova')
     expect(within(nova).getByText(/^[\d.]+ × [\d.]+ × [\d.]+ mm$/)).toBeInTheDocument()
     act(() => setDisplayUnit('in'))
-    expect(within(nova).getByText(/^\d+\.\d\d × \d+\.\d\d × \d+\.\d\d in$/)).toBeInTheDocument()
+    // Awaited: the row reads the unit through useSyncExternalStore, which subscribes in a
+    // passive effect. findAllByText can resolve on the commit before that effect has run,
+    // and then the change is not heard inside act; the store's check on subscribe
+    // re-renders the row a moment later, outside it.
+    expect(await within(nova).findByText(/^\d+\.\d\d × \d+\.\d\d × \d+\.\d\d in$/)).toBeInTheDocument()
   })
 
   it('diffs each output against the model defaults', async () => {
