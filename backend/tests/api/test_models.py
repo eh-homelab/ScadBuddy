@@ -27,6 +27,7 @@ from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES, set_fake_env
+from tests.support.operations import press
 
 SOURCE = "width = 10;\ncube(width);\n"
 
@@ -40,6 +41,7 @@ def _upload(
         "/api/v1/models",
         files={"file": (filename, SOURCE.encode(), "application/octet-stream")},
         data=data or {},
+        headers=press(),
     )
     return response
 
@@ -67,6 +69,7 @@ def test_upload_accepts_metadata_a_thumbnail_and_a_readme(client: TestClient) ->
             "readme": ("README.md", b"# Widget\n", "text/markdown"),
         },
         data={"name": "Widget", "description": "a widget", "tags": '["a", "b"]'},
+        headers=press(),
     )
     assert response.status_code == 201
     body = response.json()
@@ -92,6 +95,7 @@ def test_a_binary_upload_is_rejected_before_openscad_sees_it(client: TestClient)
     response = client.post(
         "/api/v1/models",
         files={"file": ("blob.scad", b"\x00\x01\x02binary", "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 422
     assert "binary" in response.json()["detail"]
@@ -101,6 +105,7 @@ def test_source_openscad_cannot_parse_is_rejected(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models",
         files={"file": ("broken.scad", b"%%FAIL%% not scad\n", "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 422
     body = response.json()
@@ -115,6 +120,7 @@ def test_a_thumbnail_that_is_not_a_png_is_rejected(client: TestClient) -> None:
             "file": ("ok.scad", SOURCE.encode(), "application/octet-stream"),
             "thumbnail": ("thumb.png", b"GIF89a", "image/png"),
         },
+        headers=press(),
     )
     assert response.status_code == 422
     assert response.json()["detail"] == "the thumbnail is not a PNG"
@@ -123,12 +129,14 @@ def test_a_thumbnail_that_is_not_a_png_is_rejected(client: TestClient) -> None:
 def test_get_patch_and_delete_a_model(client: TestClient, model: str) -> None:
     assert client.get(f"/api/v1/models/{model}").json()["name"] == "Demo"
 
-    patched = client.patch(f"/api/v1/models/{model}", json={"name": "Renamed", "tags": ["x"]})
+    patched = client.patch(
+        f"/api/v1/models/{model}", json={"name": "Renamed", "tags": ["x"]}, headers=press()
+    )
     assert patched.status_code == 200
     assert patched.json()["name"] == "Renamed"
     assert patched.json()["description"] == "a demo"
 
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
     assert client.get(f"/api/v1/models/{model}").status_code == 404
 
 
@@ -142,7 +150,7 @@ def test_the_derived_schema_is_cached_outside_the_versioned_tree(
     metadata commit would carry a cache blob it has nothing to do with.
     """
     assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
-    client.patch(f"/api/v1/models/{model}", json={"description": "edited"})
+    client.patch(f"/api/v1/models/{model}", json={"description": "edited"}, headers=press())
 
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     assert meta["description"] == "edited"
@@ -156,7 +164,7 @@ def test_deleting_a_model_takes_its_outputs_with_it(
 ) -> None:
     orphan = paths.outputs / model / "deadbeef"
     orphan.mkdir(parents=True)
-    client.delete(f"/api/v1/models/{model}")
+    client.delete(f"/api/v1/models/{model}", headers=press())
     assert not orphan.exists()
 
 
@@ -164,7 +172,7 @@ def test_a_deleted_model_leaves_the_list(client: TestClient) -> None:
     slug = _upload(client).json()["slug"]
     assert [entry["slug"] for entry in client.get("/api/v1/models").json()] == [slug]
 
-    response = client.delete(f"/api/v1/models/{slug}")
+    response = client.delete(f"/api/v1/models/{slug}", headers=press())
 
     assert response.status_code == 204
     assert response.content == b""
@@ -172,7 +180,7 @@ def test_a_deleted_model_leaves_the_list(client: TestClient) -> None:
 
 
 def test_deleting_an_unknown_model_is_a_problem_404(client: TestClient) -> None:
-    response = client.delete("/api/v1/models/missing")
+    response = client.delete("/api/v1/models/missing", headers=press())
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.json()["detail"] == "no model named 'missing'"
@@ -186,7 +194,7 @@ def test_deleting_a_model_clears_its_derived_cache(
     export = paths.model_revision_dir(model, "0" * 40)
     export.mkdir(parents=True)
 
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
     assert not paths.model_dir(model).exists()
     assert not paths.model_schema_cache(model).exists()
@@ -234,7 +242,7 @@ def test_a_delete_sweeps_other_models_orphans(
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
 
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
     assert not (paths.outputs / "gone").exists()
     assert not paths.model_schema_cache("gone").exists()
@@ -426,7 +434,7 @@ def test_a_failed_tombstone_removal_is_logged_and_retried(
 ) -> None:
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
     with patch("scadbuddy.library.catalogue.shutil.rmtree", side_effect=OSError("busy")):
-        assert client.delete(f"/api/v1/models/{model}").status_code == 204
+        assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
     assert "could not remove a path" in caplog.text
     assert [entry.name.split(".")[0] for entry in paths.tombstones.iterdir()] == [model]
 
@@ -465,7 +473,7 @@ def test_losing_a_delete_race_is_a_404_not_a_500(
     # Both requests pass the existence checks; the other one renames first.
     shutil.rmtree(paths.model_dir(model))
     with patch.object(Catalogue, "exists", return_value=True):
-        response = client.delete(f"/api/v1/models/{model}")
+        response = client.delete(f"/api/v1/models/{model}", headers=press())
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
@@ -478,7 +486,9 @@ def test_a_metadata_edit_that_loses_a_delete_race_is_a_404_and_resurrects_nothin
     # The PATCH passes its existence checks; a DELETE renames the model away first.
     shutil.rmtree(paths.model_dir(model))
     with patch.object(Catalogue, "exists", return_value=True):
-        response = client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"})
+        response = client.patch(
+            f"/api/v1/models/{model}", json={"name": "Renamed"}, headers=press()
+        )
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
@@ -499,7 +509,9 @@ def test_a_metadata_write_racing_a_delete_does_not_recreate_the_model_dir(
         return meta
 
     with patch.object(Catalogue, "read_raw_meta", read_then_lose_the_race):
-        response = client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"})
+        response = client.patch(
+            f"/api/v1/models/{model}", json={"name": "Renamed"}, headers=press()
+        )
 
     assert response.status_code == 404
     assert response.json()["detail"] == f"no model named {model!r}"
@@ -560,7 +572,7 @@ def test_a_failed_cleanup_step_does_not_fail_a_completed_delete(
         real_unlink(self, missing_ok=missing_ok)
 
     with patch.object(Path, "unlink", failing_unlink):
-        response = client.delete(f"/api/v1/models/{model}")
+        response = client.delete(f"/api/v1/models/{model}", headers=press())
 
     assert response.status_code == 204
     assert [getattr(record, "path", None) for record in caplog.records if record.exc_info] == [
@@ -575,7 +587,7 @@ def test_a_failed_cleanup_step_does_not_fail_a_completed_delete(
 
 def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> None:
     slug = _upload(client).json()["slug"]
-    assert client.delete(f"/api/v1/models/{slug}").status_code == 204
+    assert client.delete(f"/api/v1/models/{slug}", headers=press()).status_code == 204
 
     state = client.app.state.scadbuddy  # type: ignore[attr-defined]
     revisions = state.history.log(slug)
@@ -593,7 +605,7 @@ def test_a_model_with_a_render_in_progress_cannot_be_deleted(
     projection.accept(job, "planted", workflow_id="render-planted", run_id="r")
     assert projection.mark_started(job.id) is not None
 
-    response = client.delete(f"/api/v1/models/{model}")
+    response = client.delete(f"/api/v1/models/{model}", headers=press())
 
     assert response.status_code == 409
     assert response.headers["content-type"].startswith("application/problem+json")
@@ -601,7 +613,7 @@ def test_a_model_with_a_render_in_progress_cannot_be_deleted(
 
     job.state = "done"
     assert projection.finish(job)
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
 
 def test_unknown_model_routes_answer_with_problem_details(client: TestClient) -> None:
@@ -643,6 +655,7 @@ def test_a_json_body_creates_a_model_from_pasted_source(client: TestClient) -> N
     response = client.post(
         "/api/v1/models",
         json={"name": "Name Keychain", "source": SOURCE, "tags": ["pasted"]},
+        headers=press(),
     )
     assert response.status_code == 201
     body = response.json()
@@ -655,7 +668,11 @@ def test_a_plain_text_paste_takes_its_name_from_the_header(client: TestClient) -
     response = client.post(
         "/api/v1/models",
         content=SOURCE.encode(),
-        headers={"Content-Type": "text/plain; charset=utf-8", "X-Model-Name": "Pasted Thing"},
+        headers={
+            **press(),
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-Model-Name": "Pasted Thing",
+        },
     )
     assert response.status_code == 201
     assert response.json()["slug"] == "pasted-thing"
@@ -663,7 +680,7 @@ def test_a_plain_text_paste_takes_its_name_from_the_header(client: TestClient) -
 
 def test_a_plain_text_paste_without_a_name_is_rejected(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=SOURCE.encode(), headers={"Content-Type": "text/plain"}
+        "/api/v1/models", content=SOURCE.encode(), headers={**press(), "Content-Type": "text/plain"}
     )
     assert response.status_code == 422
     assert "X-Model-Name" in response.json()["detail"]
@@ -672,7 +689,9 @@ def test_a_plain_text_paste_without_a_name_is_rejected(client: TestClient) -> No
 def test_a_name_too_long_for_a_slug_is_rejected_and_nothing_saved(
     client: TestClient,
 ) -> None:
-    response = client.post("/api/v1/models", json={"name": "x" * 300, "source": SOURCE})
+    response = client.post(
+        "/api/v1/models", json={"name": "x" * 300, "source": SOURCE}, headers=press()
+    )
     assert response.status_code == 422
     assert "longer than" in response.json()["detail"]
     assert client.get("/api/v1/models").json() == []
@@ -680,19 +699,25 @@ def test_a_name_too_long_for_a_slug_is_rejected_and_nothing_saved(
 
 def test_an_upload_whose_filename_is_too_long_for_a_slug_is_rejected(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", files={"file": ("x" * 300 + ".scad", SOURCE.encode(), "text/plain")}
+        "/api/v1/models",
+        files={"file": ("x" * 300 + ".scad", SOURCE.encode(), "text/plain")},
+        headers=press(),
     )
     assert response.status_code == 422
 
 
 def test_a_name_that_yields_no_slug_is_rejected(client: TestClient) -> None:
-    response = client.post("/api/v1/models", json={"name": "***", "source": SOURCE})
+    response = client.post(
+        "/api/v1/models", json={"name": "***", "source": SOURCE}, headers=press()
+    )
     assert response.status_code == 422
     assert "slug" in response.json()["detail"]
 
 
 def test_pasted_source_openscad_cannot_parse_is_rejected(client: TestClient) -> None:
-    response = client.post("/api/v1/models", json={"name": "Broken", "source": "%%FAIL%%\n"})
+    response = client.post(
+        "/api/v1/models", json={"name": "Broken", "source": "%%FAIL%%\n"}, headers=press()
+    )
     assert response.status_code == 422
     body = response.json()
     assert body["log_tail"] == ["ERROR: Parser error: syntax error"]
@@ -709,7 +734,9 @@ def test_pasted_source_openscad_cannot_parse_is_rejected(client: TestClient) -> 
 
 def test_force_saves_source_that_does_not_parse(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", json={"name": "Broken", "source": "%%FAIL%%\n", "force": True}
+        "/api/v1/models",
+        json={"name": "Broken", "source": "%%FAIL%%\n", "force": True},
+        headers=press(),
     )
     assert response.status_code == 201
     assert client.get("/api/v1/models/broken/source").text == "%%FAIL%%\n"
@@ -717,7 +744,9 @@ def test_force_saves_source_that_does_not_parse(client: TestClient) -> None:
 
 def test_the_force_query_parameter_forces_a_json_paste(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models?force=true", json={"name": "Broken", "source": "%%FAIL%%\n"}
+        "/api/v1/models?force=true",
+        json={"name": "Broken", "source": "%%FAIL%%\n"},
+        headers=press(),
     )
     assert response.status_code == 201
 
@@ -727,7 +756,9 @@ def test_a_nul_in_pasted_source_is_refused_even_when_forced(
     client: TestClient, model: str, force: bool
 ) -> None:
     source = "cube(1);\x00\n"
-    created = client.post("/api/v1/models", json={"name": "Blob", "source": source, "force": force})
+    created = client.post(
+        "/api/v1/models", json={"name": "Blob", "source": source, "force": force}, headers=press()
+    )
     assert created.status_code == 422
     assert "NUL" in created.json()["detail"]
 
@@ -737,12 +768,14 @@ def test_a_nul_in_pasted_source_is_refused_even_when_forced(
 
 def test_pasting_over_an_existing_slug_conflicts(client: TestClient) -> None:
     assert _upload(client).status_code == 201
-    response = client.post("/api/v1/models", json={"name": "name keychain", "source": SOURCE})
+    response = client.post(
+        "/api/v1/models", json={"name": "name keychain", "source": SOURCE}, headers=press()
+    )
     assert response.status_code == 409
 
 
 def test_a_multipart_post_without_a_file_is_rejected(client: TestClient) -> None:
-    response = client.post("/api/v1/models", data={"name": "No File"})
+    response = client.post("/api/v1/models", data={"name": "No File"}, headers=press())
     assert response.status_code == 422
     assert "file part" in response.json()["detail"]
 
@@ -821,7 +854,7 @@ def test_a_plain_text_paste_that_is_not_utf8_is_rejected(client: TestClient) -> 
     response = client.post(
         "/api/v1/models",
         content=b"\xff\xfe cube(1);",
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Bad Bytes"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Bad Bytes"},
     )
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
@@ -832,7 +865,7 @@ def test_a_plain_text_paste_with_a_nul_byte_is_rejected(client: TestClient) -> N
     response = client.post(
         "/api/v1/models",
         content=b"cube(1);\x00",
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Binary"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Binary"},
     )
     assert response.status_code == 422
     assert "binary" in response.json()["detail"]
@@ -840,7 +873,9 @@ def test_a_plain_text_paste_with_a_nul_byte_is_rejected(client: TestClient) -> N
 
 def test_a_body_that_is_not_json_is_rejected(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=b"{not json", headers={"Content-Type": "application/json"}
+        "/api/v1/models",
+        content=b"{not json",
+        headers={**press(), "Content-Type": "application/json"},
     )
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
@@ -849,20 +884,20 @@ def test_a_body_that_is_not_json_is_rejected(client: TestClient) -> None:
 
 def test_an_empty_json_body_is_rejected(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", content=b"", headers={"Content-Type": "application/json"}
+        "/api/v1/models", content=b"", headers={**press(), "Content-Type": "application/json"}
     )
     assert response.status_code == 422
 
 
 def test_a_json_body_of_the_wrong_shape_is_rejected(client: TestClient) -> None:
-    response = client.post("/api/v1/models", json=["not", "an", "object"])
+    response = client.post("/api/v1/models", json=["not", "an", "object"], headers=press())
     assert response.status_code == 422
 
 
 def test_a_json_body_missing_its_source_is_rejected_like_any_other_body(
     client: TestClient,
 ) -> None:
-    response = client.post("/api/v1/models", json={"name": "No Source"})
+    response = client.post("/api/v1/models", json={"name": "No Source"}, headers=press())
     assert response.status_code == 422
     body = response.json()
     assert body["errors"][0]["loc"] == ["body", "source"]
@@ -898,7 +933,9 @@ def test_a_pasted_model_opens_without_deriving_its_schema_again(
     log = tmp_path / "invocations.log"
     set_fake_env(tmp_path, "FAKE_OPENSCAD_LOG", str(log))
 
-    created = client.post("/api/v1/models", json={"name": "Pasted", "source": SOURCE})
+    created = client.post(
+        "/api/v1/models", json={"name": "Pasted", "source": SOURCE}, headers=press()
+    )
     assert created.status_code == 201
     assert client.get("/api/v1/models/pasted/schema").status_code == 200
     assert _openscad_runs(log) == 1
@@ -909,7 +946,7 @@ def test_a_text_content_type_other_than_plain_is_not_a_paste(client: TestClient)
     response = client.post(
         "/api/v1/models",
         content=b"<html>not openscad</html>",
-        headers={"Content-Type": "text/html", "X-Model-Name": "Sneaky"},
+        headers={**press(), "Content-Type": "text/html", "X-Model-Name": "Sneaky"},
     )
     assert response.status_code == 415
     assert "text/plain" in response.json()["detail"]
@@ -917,7 +954,7 @@ def test_a_text_content_type_other_than_plain_is_not_a_paste(client: TestClient)
 
 
 def test_a_body_with_no_content_type_at_all_is_refused(client: TestClient) -> None:
-    response = client.post("/api/v1/models", content=b"cube(1);")
+    response = client.post("/api/v1/models", content=b"cube(1);", headers=press())
     assert response.status_code == 415
 
 
@@ -925,7 +962,9 @@ def test_the_schema_of_a_forced_save_answers_a_problem_not_a_crash(client: TestC
     """`force` is the first way unparseable source can reach the catalogue, and the UI
     goes straight to the customizer after one."""
     forced = client.post(
-        "/api/v1/models", json={"name": "Broken", "source": "%%FAIL%%\n", "force": True}
+        "/api/v1/models",
+        json={"name": "Broken", "source": "%%FAIL%%\n", "force": True},
+        headers=press(),
     )
     assert forced.status_code == 201
 
@@ -976,7 +1015,9 @@ def test_the_schema_of_an_unusable_export_is_a_problem_not_a_crash(client: TestC
     """The same failure `inspect_source` reports as a diagnostic must not become a 500
     when the read path hits it — which `force` makes reachable."""
     created = client.post(
-        "/api/v1/models", json={"name": "Odd Export", "source": "%%BADPARAM%%\n", "force": True}
+        "/api/v1/models",
+        json={"name": "Odd Export", "source": "%%BADPARAM%%\n", "force": True},
+        headers=press(),
     )
     assert created.status_code == 201
 
@@ -988,7 +1029,7 @@ def test_the_schema_of_an_unusable_export_is_a_problem_not_a_crash(client: TestC
 
 def test_an_unusable_export_is_refused_at_save_time_without_force(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/models", json={"name": "Odd Export", "source": "%%BADPARAM%%\n"}
+        "/api/v1/models", json={"name": "Odd Export", "source": "%%BADPARAM%%\n"}, headers=press()
     )
     assert response.status_code == 422
     assert "could not be derived" in response.json()["diagnostics"][0]["message"]
@@ -1006,7 +1047,7 @@ def test_a_source_too_large_to_be_a_model_is_refused_before_openscad_runs(
     checked = client.post("/api/v1/models/check", json={"source": huge})
     assert checked.status_code == 422
 
-    created = client.post("/api/v1/models", json={"name": "Huge", "source": huge})
+    created = client.post("/api/v1/models", json={"name": "Huge", "source": huge}, headers=press())
     assert created.status_code == 422
 
     replaced = client.put(f"/api/v1/models/{model}/source", json={"source": huge})
@@ -1020,7 +1061,7 @@ def test_a_text_plain_paste_is_capped_the_same_way(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models",
         content="y" * (MAX_SOURCE_CHARS + 1),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge Text"},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Huge Text"},
     )
     assert response.status_code == 422
     assert "too large" in response.json()["detail"]

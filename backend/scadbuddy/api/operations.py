@@ -2,11 +2,13 @@
 route that runs a generic command calls, and ``GET /operations/{id}``.
 
 A route's request is keyed by its kind, subject, body and the client's
-``Idempotency-Key`` (one per deliberate press; without one, each request is its own
-command, as before). Our record is read first: a repeat answers from it and starts
-nothing. Otherwise ``Operation`` is started (or attached to) with update-with-start.
-Every kind is ``done``: the answer is the route's body once the effect ended, or 202
-with the operation when it has not within the deadline.
+``Idempotency-Key`` (one per deliberate press). The key is required: without one a
+retry after a lost answer could not be told from a second press, so it would upload,
+enqueue or create again (#1143); a keyless request is refused with 428. Our record is
+read first: a repeat answers from it and starts nothing. Otherwise ``Operation`` is
+started (or attached to) with update-with-start. Every kind is ``done``: the answer is
+the route's body once the effect ended, or 202 with the operation when it has not
+within the deadline.
 """
 
 from __future__ import annotations
@@ -14,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -60,6 +61,12 @@ TEMPORAL_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/temporal-unavaila
 TEMPORAL_REFUSED_PROBLEM = "https://scadbuddy.dev/problems/temporal-refused"
 #: A request that already ran and whose record was pruned: it may have been done.
 RECORD_GONE_PROBLEM = "https://scadbuddy.dev/problems/operation-record-gone"
+#: A write sent without an ``Idempotency-Key`` (#1143): nothing was done.
+KEY_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/idempotency-key-required"
+KEY_REQUIRED_DETAIL = (
+    "This request needs an Idempotency-Key header: one new value per deliberate press,"
+    " kept when the same request is sent again. Nothing was done."
+)
 
 #: The problem extension on every ``temporal-unavailable`` and ``temporal-refused``
 #: answer to a command: whether its start may have reached Temporal (review #1316 (13)
@@ -303,6 +310,10 @@ async def _run_operation(
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
 ) -> dict[str, Any] | OperationAccepted:
+    if not idempotency_key:
+        raise ApiError(
+            status.HTTP_428_PRECONDITION_REQUIRED, KEY_REQUIRED_DETAIL, type_=KEY_REQUIRED_PROBLEM
+        )
     body = _body(request)
     size = len(json.dumps(body, separators=(",", ":")).encode())
     if size > MAX_REQUEST_BYTES:
@@ -313,9 +324,8 @@ async def _run_operation(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"This request is {size} bytes; at most {MAX_REQUEST_BYTES} are accepted here.",
         )
-    key = operation_key(kind.name, subject, body, idempotency_key or uuid.uuid4().hex)
-    # Without a key, the key is new: no record can match it.
-    recorded = None if idempotency_key is None else await ops.store.find(key)
+    key = operation_key(kind.name, subject, body, idempotency_key)
+    recorded = await ops.store.find(key)
     if recorded is not None:
         return _answer(recorded, response, repeated=True)
     arg = OperationInput(
@@ -396,6 +406,10 @@ OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
     413: {
         "description": f"The request, less what goes by claim, is past {MAX_REQUEST_BYTES} "
         "bytes; nothing was started"
+    },
+    428: {
+        "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
+        "description": f'`{KEY_REQUIRED_PROBLEM}`: "{KEY_REQUIRED_DETAIL}"',
     },
     **temporal_problems(
         refused=OPERATION_REFUSED_DETAIL,
