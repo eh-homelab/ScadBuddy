@@ -172,6 +172,7 @@ def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str)
     assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "cancelled")
 
 
+@pytest.mark.keyless
 def test_a_supersede_without_an_idempotency_key_is_refused(client: TestClient, model: str) -> None:
     """Without a key a re-send would release the job a second time, and with it another
     claimant's: refused before anything starts (review #1066 2.1)."""
