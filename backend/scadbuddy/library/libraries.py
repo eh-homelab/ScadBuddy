@@ -412,8 +412,8 @@ class CheckoutLeases:
     :data:`REMOVAL_LOCK` exclusively while it checks and deletes, and a lease is
     inserted holding it shared: a lease is either seen by the removal's check or taken
     after the removal ends (and then finds the checkout gone, :func:`require_checkouts`).
-    A pin's hold is inserted the same way, and a removal, once it holds the lock, waits
-    until no hold is live: no pin starts meanwhile, and the ones running finish.
+    A pin's hold is inserted the same way, and a removal takes the lock only at a
+    moment no hold is live.
     """
 
     def __init__(
@@ -503,18 +503,24 @@ class CheckoutLeases:
 
     @contextlib.contextmanager
     def removing(self) -> Iterator[None]:
-        """Hold :data:`REMOVAL_LOCK` exclusively: no lease or pin is inserted
-        meanwhile. Then wait for the pins already running to end, whose holds go
-        without the lock. A transaction's lock, so however the block ends it goes with
-        the transaction and never back to the pool on its connection."""
-        with self.pool.connection() as conn, conn.transaction():
-            conn.execute("SELECT pg_advisory_xact_lock(%s)", (REMOVAL_LOCK,))
-            # `clock_timestamp()`: `now()` stands still for the whole transaction.
-            while conn.execute(
-                "SELECT 1 FROM library_pin_holds WHERE expires_at > clock_timestamp() LIMIT 1"
-            ).fetchone():
+        """Hold :data:`REMOVAL_LOCK` exclusively, at a moment no pin is live: no lease
+        or pin is inserted meanwhile. A transaction's lock, so however the block ends
+        it goes with the transaction and never back to the pool on its connection.
+
+        While a pin is live the lock is let go again before the next look: a pin's
+        holder may take a lease or pin again before it ends (a create's fetcher), and
+        Postgres queues that shared request behind an exclusive one waiting or held,
+        so holding it would leave each waiting on the other."""
+        with self.pool.connection() as conn:
+            while True:
+                with conn.transaction():
+                    conn.execute("SELECT pg_advisory_xact_lock(%s)", (REMOVAL_LOCK,))
+                    if not conn.execute(
+                        "SELECT 1 FROM library_pin_holds WHERE expires_at > now() LIMIT 1"
+                    ).fetchone():
+                        yield
+                        return
                 time.sleep(self.poll)
-            yield
 
 
 def _first_column(row: Any) -> str:

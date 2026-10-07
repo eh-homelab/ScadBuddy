@@ -106,6 +106,27 @@ async def test_a_pin_in_another_process_holds_off_a_removal(
     assert removed.is_set()
 
 
+async def test_a_pin_nested_in_one_a_removal_waits_on_completes(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """A create holds a pin and its fetcher pins again inside it. A removal in another
+    process waiting on the outer pin must not block the inner one: that would wait on
+    each other for good."""
+    worker, api = _gate(pg_pool, tmp_path), _gate(pg_pool, tmp_path)
+
+    async with worker.pinning():
+        removal = asyncio.create_task(_enter_removal(api))
+        await asyncio.sleep(1.0)
+        assert not removal.done()
+
+        async def nested() -> None:
+            async with worker.pinning():
+                pass
+
+        await asyncio.wait_for(nested(), 10)
+    await asyncio.wait_for(removal, 10)
+
+
 async def test_a_pin_waits_out_a_removal_in_another_process(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
