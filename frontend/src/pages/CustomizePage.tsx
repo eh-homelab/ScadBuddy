@@ -1089,9 +1089,18 @@ export function CustomizePage() {
             full ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
           }`}
         >
-          <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
-            {uiPresets}
-            {uiOrigin}
+          {/* One grid row: the page slot has no flyout to hold unmigrated inputs (#917). */}
+          <div className="border-b border-line">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-1.5">
+              {uiPresets}
+              {uiOrigin}
+            </div>
+            {/* Capped: in full screen this row's height comes out of the template's own. */}
+            {unmigrated && (
+              <div className="max-h-[30vh] overflow-auto">
+                <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />
+              </div>
+            )}
           </div>
           {templateUi}
           {actionBar}
