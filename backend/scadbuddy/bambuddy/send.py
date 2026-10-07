@@ -94,7 +94,10 @@ def _read_3mf(store: OutputStore, meta: OutputMeta) -> bytes:
 
 #: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
 _RECOLORED = "~"
-#: The flow the slicer assumes when the file states none (#484).
+#: The flow the slicer assumes when the file states none (#484). So an all-Standard
+#: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
+#: bytes differ under one key, and reusing either is right only while Standard stays
+#: the slicer's default.
 _STANDARD = VOLUME_TYPE["standard"]
 
 
