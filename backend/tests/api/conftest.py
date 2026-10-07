@@ -19,6 +19,7 @@ from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.render import submit as submit_module
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
@@ -85,6 +86,13 @@ def _print_answer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     longer = (TEST_ANSWER_DEADLINE - COMMAND_ANSWER_DEADLINE).total_seconds()
     monkeypatch.setattr(printing_api, "COMMAND_ANSWER_DEADLINE", TEST_ANSWER_DEADLINE)
     monkeypatch.setattr(printing_api, "ACCEPT_BUDGET", printing_api.ACCEPT_BUDGET + longer)
+    # Under load, a print run's execution outlived the 5 s a reprint waits for it to
+    # close, so the reprint joined it and answered the earlier run.
+    monkeypatch.setattr(printing_api, "CLOSING_WAIT", printing_api.CLOSING_WAIT + longer)
+    # The render submit's bound is built on the same deadline at import: under load a
+    # render's first submit answered a 503 `command-still-accepting` past it, and the
+    # tests that render an output to send or print failed on it.
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", submit_module.SUBMIT_DEADLINE + longer)
 
 
 @pytest.fixture
