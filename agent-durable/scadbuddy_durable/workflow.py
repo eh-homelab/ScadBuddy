@@ -70,6 +70,8 @@ class DurableSession:
         self._ran: list[str] = list(inp.ran)
         # Nudge handlers loading right now: the run does not continue as new under them.
         self._loading = 0
+        # Nudge handlers not finished yet: a stopped run answers them before it returns.
+        self._nudges = 0
         # When each waiting call's expiry timer started (ruling 8).
         self._timed: dict[str, datetime] = {}
         self._saved: tuple[Any, ...] | None = None
@@ -125,8 +127,10 @@ class DurableSession:
             # results in pending, fork_next) and published `cancelled`. The state is this
             # execution's result, so the next message's execution resumes the same Claude
             # session from the SessionStore at the checkpoint. A nudge still waiting for its
-            # message refuses it as stopping (`send_message`) before the run returns.
-            await workflow.wait_condition(workflow.all_handlers_finished)
+            # message refuses it as stopping (`send_message`) before the run returns. Not
+            # `all_handlers_finished`: live output subscribers' polls are Update handlers too,
+            # and they wait as long as the run is open.
+            await workflow.wait_condition(lambda: self._nudges == 0)
             return self.agent.state()
 
     async def _load(self, inp: LoadInputs) -> Loaded:
@@ -163,6 +167,13 @@ class DurableSession:
         message's turn starting first (BUSY), so the agent service always learns that the
         message did not run, and abandons it (START_INPUT then skips it here too).
         """
+        self._nudges += 1
+        try:
+            await self._answer(nudge)
+        finally:
+            self._nudges -= 1
+
+    async def _answer(self, nudge: Nudge) -> None:
         if not self._known(nudge.id):
             self._loading += 1
             try:

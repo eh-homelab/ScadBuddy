@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import os
 import uuid
@@ -14,7 +15,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from temporalio.api.enums.v1 import EventType
-from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, ToolOutcome
+from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, ToolOutcome, follow_agent
 from temporalio.claude_agent_sdk.testing import ScriptedClaude
 from temporalio.client import (
     Client,
@@ -409,6 +410,30 @@ async def test_stop_during_a_tool_hands_over_the_state_and_resumes(rig: Rig) -> 
     ]
     assert rig.stubs.ids("get_model").count(call_id) == 1
     assert len(rig.stubs.ids("get_model")) == 2
+
+
+@temporal
+async def test_a_stop_returns_while_a_live_output_subscriber_polls(rig: Rig) -> None:
+    # A subscriber's poll is an Update handler that waits as long as the run is open: the
+    # Stop must not wait for every handler, only for the nudges it owes an answer.
+    rig.stubs.gate("get_model")
+    wid, inp = rig.new()
+    await rig.send(wid, inp, "read slow")
+    await rig.started("get_model")
+
+    async def follow() -> None:
+        async for _ in follow_agent(rig.client, wid):
+            pass
+
+    following = asyncio.create_task(follow())
+    try:
+        await asyncio.sleep(1)  # the subscriber is polling
+        state = await cancel_result(rig, wid)
+        assert state.fork_next
+    finally:
+        following.cancel()
+        with contextlib.suppress(BaseException):
+            await following
 
 
 @temporal
