@@ -201,8 +201,8 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     const append = m.events.append.bind(m.events)
     m.events.append = async (sessionId, events, tx) => {
       if (tx === undefined && events.some((e) => e.type === 'tool.call')) {
-        const deadline = Date.now() + 3000
-        while (Date.now() < deadline && (await m.approvals.list(browser, { sessionId })).length === 0) {
+        const deadline = performance.now() + 3000
+        while (performance.now() < deadline && (await m.approvals.list(browser, { sessionId })).length === 0) {
           await new Promise((r) => setTimeout(r, 50))
         }
       }

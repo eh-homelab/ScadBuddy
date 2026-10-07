@@ -122,12 +122,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const id = await pending(session.id)
-    expect((await m.questions.listPending()).questions).toEqual([
+    expect((await m.questions.listPending(browser)).questions).toEqual([
       expect.objectContaining({ id, sessionId: session.id, kind: 'attention', attentionReason: 'blocked', onTimeout: 'proceed', expiresAt: expect.any(String) }),
     ])
     await m.questions.answer(browser, answer(session.id, id, ['Carry on without me']))
     await turn!.done
-    expect((await m.questions.listPending()).questions).toEqual([])
+    expect((await m.questions.listPending(browser)).questions).toEqual([])
+  })
+
+  // #1218: only a browser-owned session parks a request, and a handoff cancels
+  // its pending ones; a row that outlives an ownership change anyway (here the
+  // owner is moved behind the manager's back) is still not listed for the user.
+  it("lists only the requests of the principal's own sessions", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const mine = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const theirs = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const myId = await pending(mine.session.id)
+    await pending(theirs.session.id)
+    await db.sql`UPDATE ai_sessions SET owner_kind = ${agentA.kind}, owner_id = ${agentA.id}, owner_label = ${agentA.label}
+                 WHERE id = ${theirs.session.id}`
+    expect((await m.questions.listPending(browser)).questions.map((q) => q.id)).toEqual([myId])
+    expect(await m.interrupt(mine.session.id, browser)).toBe(true)
+    expect(await m.interrupt(theirs.session.id, agentA)).toBe(true)
+    await Promise.all([mine.turn!.done, theirs.turn!.done])
   })
 
   // #815 §4: the timer never answers for the user, and never approves.
@@ -190,7 +207,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   // The check runs beside the wait, not before it: the row resolving ends the wait at once, however long the check takes.
   it('a reply or a reconnect ends the wait at once while the reconnect check still hangs', async () => {
     const hangs = () => new Promise<void>(() => undefined)
-    const started = Date.now()
+    const started = performance.now()
     const m = manager({
       sql: db.sql,
       paths: await tempPaths(),
@@ -208,7 +225,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       { answered: false, reconnected: true, message: expect.any(String) },
     ])
     // Neither the 300 s timer nor even one 5 s poll: wake() ended both waits.
-    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(performance.now() - started).toBeLessThan(5_000)
   })
 
   // #1394: the wait's own row read can see the row before the commit that resolves it; the wake() that commit
@@ -505,7 +522,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       FROM generate_series(1, ${PENDING_CAP}) AS i`
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const id = await pending(session.id)
-    const listed = (await m.questions.listPending()).questions
+    const listed = (await m.questions.listPending(browser)).questions
     expect(listed[0]).toMatchObject({ id, attentionReason: 'blocked' })
     expect(listed.filter((q) => q.attentionReason === 'done')).toHaveLength(PENDING_CAP)
     await m.questions.answer(browser, answer(session.id, id, ['Carry on without me']))
@@ -563,7 +580,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
     await turn!.done
     await (await m.send(session.id, browser, 'two')).done
-    const done = (await m.questions.listPending()).questions.filter((q) => q.attentionReason === 'done')
+    const done = (await m.questions.listPending(browser)).questions.filter((q) => q.attentionReason === 'done')
     expect(done.map((q) => q.toolUseId)).toEqual(['toolu_done1', 'toolu_done0'])
     expect(done[1]!.summary).toContain('created preset `unattended`')
     expect(await db.sql`SELECT unattended FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_done0'`).toEqual([{ unattended: true }])
@@ -610,7 +627,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       SELECT summary, unattended FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_done0'`
     expect(first).toMatchObject({ unattended: false, summary: expect.stringContaining('While nobody answered') })
     await (await m.send(session.id, browser, 'two')).done
-    const pendingDone = (await m.questions.listPending()).questions.filter((q) => q.attentionReason === 'done')
+    const pendingDone = (await m.questions.listPending(browser)).questions.filter((q) => q.attentionReason === 'done')
     expect(pendingDone.map((q) => q.toolUseId)).toEqual(['toolu_done1'])
   })
 
@@ -973,7 +990,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const id = await pending(session.id)
     const [row] = await db.sql`SELECT kind, attention_reason, tool, tool_use_id FROM ai_questions WHERE id = ${id}`
     expect(row).toEqual({ kind: 'attention', attention_reason: 'tab_disconnected', tool: 'mcp__scadbuddy__browser_snapshot', tool_use_id: 'toolu_s' })
-    expect((await m.questions.listPending()).questions).toHaveLength(1)
+    expect((await m.questions.listPending(browser)).questions).toHaveLength(1)
     await m.questions.reconnected(session.id)
     await turn!.done
     expect(results).toEqual([{ back: true, why: 'reconnected' }, { back: true, why: 'reconnected' }])
@@ -1166,7 +1183,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     })
     await turn.done
     expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }])
-    expect((await m.questions.listPending()).questions).toEqual([])
+    expect((await m.questions.listPending(browser)).questions).toEqual([])
     const [row] = await db.sql`SELECT reason FROM ai_questions WHERE session_id = ${session.id}`
     expect(row).toEqual({ reason: 'the call was withdrawn' })
   })

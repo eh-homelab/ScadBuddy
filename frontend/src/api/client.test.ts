@@ -256,18 +256,26 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
   it("waits the still-accepting answer's Retry-After before sending again (review #1061 4a)", async () => {
     printRunPoll.intervalMs = 1
     const result = { queue_item_ids: [7], warnings: [] }
-    const sent: number[] = []
+    let posts = 0
     server.use(
       http.post('/api/v1/print/outputs/out-1/run', () => {
-        sent.push(performance.now())
-        return sent.length < 2 ? stillAccepting('0.2') : HttpResponse.json(started, { status: 202 })
+        posts += 1
+        return posts < 2 ? stillAccepting('0.2') : HttpResponse.json(started, { status: 202 })
       }),
       http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
     )
-
-    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
-    expect(sent).toHaveLength(2)
-    expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190)
+    // The wait the client asks for, not one timed with a clock: this host's clock can
+    // step back seconds mid-test (the gap read -11707 ms once).
+    const timeout = vi.spyOn(globalThis, 'setTimeout')
+    let waits: number[]
+    try {
+      await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+      waits = timeout.mock.calls.map(([, ms]) => ms ?? 0)
+    } finally {
+      timeout.mockRestore()
+    }
+    expect(posts).toBe(2)
+    expect(waits).toContain(200)
   })
 
   it('keeps sending while still accepting, past the re-sends for an unanswered request (#1052)', async () => {
@@ -972,6 +980,133 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     )
     await call()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
+describe('library pins are commands (#1054)', () => {
+  const defaults = { ...printRunPoll }
+  afterEach(() => {
+    Object.assign(printRunPoll, defaults)
+  })
+
+  it.each([
+    ['pinModelLibrary', () => api.pinModelLibrary('w', 'BOSL2', {}), 'put'],
+    ['repinModelLibrary', () => api.repinModelLibrary('w', 'BOSL2', {}), 'patch'],
+    ['unpinModelLibrary', () => api.unpinModelLibrary('w', 'BOSL2'), 'delete'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to the model', async (_name, call, method) => {
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    const operation = {
+      id: 'op-9',
+      kind: 'library_pin',
+      subject: 'w',
+      status: 'running',
+      created_at: '2026-10-03T00:00:00Z',
+    }
+    let key: string | null = null
+    server.use(
+      http[method]('/api/v1/models/w/libraries/BOSL2', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () =>
+        HttpResponse.json({ ...operation, status: 'succeeded', result: model }),
+      ),
+    )
+    await expect(call()).resolves.toEqual(model)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it("rejects with a failed operation's problem, so the pin dialog's 409 still applies", async () => {
+    printRunPoll.intervalMs = 1
+    const operation = {
+      id: 'op-9',
+      kind: 'library_pin',
+      subject: 'w',
+      status: 'running',
+      created_at: '2026-10-03T00:00:00Z',
+    }
+    const detail = "'w''s 'BOSL2' was changed or removed while this re-pin ran; nothing was recorded"
+    server.use(
+      http.put('/api/v1/models/w/libraries/BOSL2', () => HttpResponse.json(operation, { status: 202 })),
+      http.get('/api/v1/operations/op-9', () =>
+        HttpResponse.json({
+          ...operation,
+          status: 'failed',
+          error: { status: 409, title: 'Conflict', detail, extensions: {} },
+        }),
+      ),
+    )
+    const error = await api.pinModelLibrary('w', 'BOSL2', {}).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(409)
+    expect((error as ApiError).message).toBe(detail)
+  })
+})
+
+describe("a model's lifecycle is commands (#1054)", () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
+  const operation = { id: 'op-9', kind: 'model_create', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+
+  it.each([
+    ['createModelFromSource', () => api.createModelFromSource({ name: 'W', source: 'cube(1);', description: '', force: false }), 'post', '/api/v1/models'],
+    ['importModel', () => api.importModel({ url: 'https://example.com/w.scad', force: false }), 'post', '/api/v1/models/import'],
+    ['updateModel', () => api.updateModel('w', { description: 'd' }), 'patch', '/api/v1/models/w'],
+    ['duplicateModel', () => api.duplicateModel('v', 'W'), 'post', '/api/v1/models/v/duplicate'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to the model', async (_name, call, method, path) => {
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () => HttpResponse.json({ ...operation, status: 'succeeded', result: model })),
+    )
+    await expect(call()).resolves.toEqual(model)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('uploadModel sends an Idempotency-Key and follows a 202 to the model', async () => {
+    // Stubbed below msw: jsdom's File cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-9')
+        ? Response.json({ ...operation, status: 'succeeded', result: model })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(api.uploadModel(new File(['cube(1);'], 'w.scad'))).resolves.toEqual(model)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('deleteModel sends an Idempotency-Key and follows a 202 to its end', async () => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http.delete('/api/v1/models/w', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () => HttpResponse.json({ ...operation, status: 'succeeded', result: {} })),
+    )
+    await expect(api.deleteModel('w')).resolves.toBeUndefined()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('deleteModel answers a 204 at once', async () => {
+    server.use(http.delete('/api/v1/models/w', () => new HttpResponse(null, { status: 204 })))
+    await expect(api.deleteModel('w')).resolves.toBeUndefined()
   })
 })
 

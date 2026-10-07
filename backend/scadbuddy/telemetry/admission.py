@@ -20,11 +20,16 @@ through; the relay is stricter.
 
 **Rate limits**, in memory: a per-process bucket caps what one pod sends the collector
 whatever the client, and a per-client bucket sits under it. The client is the peer,
-unless the peer is in ``SCADBUDDY_TRUSTED_PROXIES`` (`core/proxies.py`).
+unless the peer is in ``SCADBUDDY_TRUSTED_PROXIES`` (`core/proxies.py`). An IPv6 client
+is its /64 (`bucket_key`): one host may rotate its address within it, by privacy
+extensions or on purpose, and would otherwise get a fresh bucket each time (#1152). The
+agent keys its own limits by the exact address; who the client *is*
+(`core/proxies.py`) is the same in both.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import time
 from collections import OrderedDict
@@ -84,6 +89,20 @@ def relay_client(headers: Headers, peer: str | None, trusted_proxies: tuple[Netw
     return client_address(peer, forwarded_for, trusted_proxies) or UNKNOWN_CLIENT
 
 
+def bucket_key(client: str) -> str:
+    """The rate-limit bucket of ``client``: an IPv6 address's /64, an IPv4-mapped one's
+    IPv4 address; any other value as is."""
+    try:
+        address = ipaddress.ip_address(client)
+    except ValueError:
+        return client
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return str(address.ipv4_mapped)
+        return str(ipaddress.IPv6Network((address, 64), strict=False))
+    return client
+
+
 def _too_many(detail: str, limit: RateLimit) -> ApiError:
     seconds = max(1, math.ceil(limit.retry_after()))
     return ApiError(429, detail, title="Too Many Requests", headers={"Retry-After": str(seconds)})
@@ -125,7 +144,7 @@ class RelayLimits:
     def take(self, client: str) -> None:
         """One batch from ``client``, or a 429 whose ``Retry-After`` is the seconds until
         the bucket that refused it holds one again."""
-        limit = self._client(client)
+        limit = self._client(bucket_key(client))
         # Check both, then take from both: a refusal by the process bucket must not
         # spend the client's own token. ``retry_after() > 0`` is "no token now".
         if limit.retry_after() > 0:
@@ -143,6 +162,7 @@ __all__ = [
     "PROCESS_BURST",
     "PROCESS_PER_SECOND",
     "RelayLimits",
+    "bucket_key",
     "check_content_type",
     "check_origin",
     "relay_client",

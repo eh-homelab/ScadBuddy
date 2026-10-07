@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import type { BackendClient } from '../api/backend.js'
+import { command, isRunning } from './command.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
-import { defineTool, json, type Tool, ToolError } from './registry.js'
+import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { compositeKey, page, PAGED, pageInput } from './pagination.js'
 
 // Libraries & fonts (issue #251): the library catalogue, pinning a library to a
@@ -26,13 +26,15 @@ export function sameRepository(first: string, second: string): boolean {
   return bare(first) === bare(second)
 }
 
-function repin(backend: BackendClient, slug: string, name: string, ref: string | undefined) {
-  return ok(
-    backend.PATCH('/api/v1/models/{slug}/libraries/{name}', {
+// The pin writes are commands (#1054): one key per call, and a clone past the backend's
+// deadline is followed to the model.
+function repin(ctx: ToolContext, slug: string, name: string, ref: string | undefined) {
+  return command(ctx, `re-pin ${name} of ${slug}`, (headers) =>
+    ctx.backend.PATCH('/api/v1/models/{slug}/libraries/{name}', {
       params: { path: { slug, name } },
       body: { ref: ref ?? null },
+      headers,
     }),
-    `re-pin ${name} of ${slug}`,
   )
 }
 
@@ -82,7 +84,8 @@ export const libraryTools: Tool[] = [
     risk: 'write',
     // Also reads GET /api/v1/libraries (list_libraries) when `url` is given.
     routes: ['PUT /api/v1/models/{slug}/libraries/{name}'],
-    handler: async ({ slug, name, ref, url }, { backend }) => {
+    handler: async ({ slug, name, ref, url }, ctx) => {
+      const { backend } = ctx
       if (url !== undefined) {
         // The backend's catalogue is the source of truth for "the catalogue's
         // URL", compared the way the backend does (libraries.py `_same_repository`).
@@ -96,14 +99,14 @@ export const libraryTools: Tool[] = [
         }
       }
       return json(
-        await ok(
-          backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
+        await command(ctx, `pin ${name} to ${slug}`, (headers) =>
+          ctx.backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
             params: { path: { slug, name } },
             // The catalogue's URL is the backend's default; not sending it keeps
             // the request identical to a plain catalogue pin.
             body: { ref: ref ?? null, url: null },
+            headers,
           }),
-          `pin ${name} to ${slug}`,
         ),
       )
     },
@@ -126,14 +129,14 @@ export const libraryTools: Tool[] = [
     risk: 'outward',
     routes: ['PUT /api/v1/models/{slug}/libraries/{name}'],
     summarize: ({ slug, name, url, ref }) => `Clone ${url} at ${ref} and pin it to model "${slug}" as ${name}`,
-    handler: async ({ slug, name, url, ref }, { backend }) =>
+    handler: async ({ slug, name, url, ref }, ctx) =>
       json(
-        await ok(
-          backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
+        await command(ctx, `pin ${name} from ${url} to ${slug}`, (headers) =>
+          ctx.backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
             params: { path: { slug, name } },
             body: { ref, url },
+            headers,
           }),
-          `pin ${name} from ${url} to ${slug}`,
         ),
       ),
   }),
@@ -155,13 +158,13 @@ export const libraryTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['DELETE /api/v1/models/{slug}/libraries/{name}'],
-    handler: async ({ slug, name, index }, { backend }) =>
+    handler: async ({ slug, name, index }, ctx) =>
       json(
-        await ok(
-          backend.DELETE('/api/v1/models/{slug}/libraries/{name}', {
+        await command(ctx, `unpin ${name} from ${slug}`, (headers) =>
+          ctx.backend.DELETE('/api/v1/models/{slug}/libraries/{name}', {
             params: { path: { slug, name }, ...(index === undefined ? {} : { query: { index } }) },
+            headers,
           }),
-          `unpin ${name} from ${slug}`,
         ),
       ),
   }),
@@ -183,7 +186,8 @@ export const libraryTools: Tool[] = [
     risk: 'write',
     // Also reads GET /models/{slug} (get_model) and GET /libraries (list_libraries).
     routes: ['PATCH /api/v1/models/{slug}/libraries/{name}'],
-    handler: async ({ slug, name, ref }, { backend }) => {
+    handler: async ({ slug, name, ref }, ctx) => {
+      const { backend } = ctx
       const [model, catalogue] = await Promise.all([
         ok(backend.GET('/api/v1/models/{slug}', { params: { path: { slug } } }), `get model ${slug}`),
         ok(backend.GET('/api/v1/libraries'), 'list libraries'),
@@ -197,7 +201,7 @@ export const libraryTools: Tool[] = [
             'that URL, which needs a human approval: use repin_library_from_pinned_url.',
         )
       }
-      return json(await repin(backend, slug, name, ref))
+      return json(await repin(ctx, slug, name, ref))
     },
   }),
 
@@ -211,7 +215,7 @@ export const libraryTools: Tool[] = [
     routes: ['PATCH /api/v1/models/{slug}/libraries/{name}'],
     summarize: ({ slug, name, ref }) =>
       `Clone library ${name} of model "${slug}" again from the URL its pin records, at ${ref ?? 'the pinned ref'}`,
-    handler: async ({ slug, name, ref }, { backend }) => json(await repin(backend, slug, name, ref)),
+    handler: async ({ slug, name, ref }, ctx) => json(await repin(ctx, slug, name, ref)),
   }),
 
   defineTool({
@@ -247,12 +251,16 @@ export const libraryTools: Tool[] = [
     routes: ['DELETE /api/v1/libraries/{name}'],
     summarize: ({ name, commit }) =>
       commit ? `Delete the ${name} checkout at ${commit}` : `Delete every checkout of library ${name}`,
-    handler: async ({ name, commit }, { backend }) => {
-      await ok(
-        backend.DELETE('/api/v1/libraries/{name}', { params: { path: { name }, query: { commit: commit ?? null } } }),
-        `remove ${name} checkouts`,
+    handler: async ({ name, commit }, ctx) => {
+      const removed = await command(ctx, `remove ${name} checkouts`, (headers) =>
+        ctx.backend.DELETE('/api/v1/libraries/{name}', {
+          params: { path: { name }, query: { commit: commit ?? null } },
+          headers,
+        }),
       )
-      return json({ removed: name, commit: commit ?? 'all' })
+      // Still running past the follow window (it waits out a pin holding the gate):
+      // hand back the operation to follow, not a removal that may yet be refused.
+      return json(isRunning(removed) ? removed : { removed: name, commit: commit ?? 'all' })
     },
   }),
 
