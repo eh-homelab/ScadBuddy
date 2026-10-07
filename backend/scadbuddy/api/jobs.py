@@ -588,7 +588,7 @@ async def get_job_colours(
         Query(ge=MIN_VIEW_SIZE, le=MAX_BREAKDOWN_TILE_SIZE, description="Edge of each tile"),
     ] = BREAKDOWN_TILE_SIZE,
 ) -> Response:
-    job = require_job(render, job_id)
+    job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
