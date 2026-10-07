@@ -324,7 +324,7 @@ def test_no_serial_enters_the_runs_workflow_history(
     pending, positions = [rows[0][0]], 0
     while pending:
         handle = workflow_reaper.client.get_workflow_handle(pending.pop())
-        history = workflow_reaper._run(handle.fetch_history())
+        history = workflow_reaper.run(handle.fetch_history())
         # Payloads are bytes; the text format prints their ASCII as it is.
         text = "\n".join(text_format.MessageToString(event) for event in history.events)
         positions += text.count('\\"position\\"')

@@ -497,7 +497,7 @@ def test_a_request_id_retry_after_retention_pruned_its_run_does_not_invite_a_rep
         ).fetchone()
         assert row is not None
         assert workflow_reaper.client is not None
-        workflow_reaper._run(workflow_reaper.client.get_workflow_handle(row[0]).result())
+        workflow_reaper.run(workflow_reaper.client.get_workflow_handle(row[0]).result())
         conn.execute("DELETE FROM print_runs WHERE id = %s", (first.json()["id"],))
 
     retry = start(client, output_id, request)
@@ -935,10 +935,10 @@ def cancel_run(reaper: WorkflowReaper, conninfo: str, run_id: str) -> None:
         row = conn.execute("SELECT workflow_id FROM print_runs WHERE id = %s", (run_id,)).fetchone()
     assert row is not None and reaper.client is not None
     handle = reaper.client.get_workflow_handle(row[0])
-    reaper._run(handle.cancel())
+    reaper.run(handle.cancel())
 
     def requested() -> bool:
-        history = reaper._run(handle.fetch_history())
+        history = reaper.run(handle.fetch_history())
         return any(
             event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
             for event in history.events
