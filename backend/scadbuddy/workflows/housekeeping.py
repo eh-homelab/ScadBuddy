@@ -66,6 +66,8 @@ def prune_schedule_id_for(task_queue: str) -> str:
 #: The shortest interval a Temporal Schedule takes ("interval is too small" below it).
 MIN_INTERVAL = 1.0
 
+#: #902's backstop: a finished output re-render whose settling event no API heard.
+BACKFILL_SWEEP = "housekeeping_attach_backfills"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -73,6 +75,7 @@ SWEEPS = (
     "housekeeping_sweep_blobs",
     "housekeeping_sweep_staging",
     "housekeeping_sweep_claims",
+    BACKFILL_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1).

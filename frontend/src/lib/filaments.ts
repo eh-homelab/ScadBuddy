@@ -244,3 +244,20 @@ export function seedPlan(options: FilamentOptions, remembered: SlotChoice[]): Sl
     return choice ? [{ ...choice }] : []
   })
 }
+
+/**
+ * The selection after a re-arrange: the plan the user chose and arranged for, kept slot
+ * by slot whatever its colours (a spool picked in this dialog is a choice, not a
+ * remembered one that may have gone stale, #933), less any slot the new file lacks or
+ * spool no longer in the inventory; the auto-match fills the rest.
+ */
+export function carriedPlan(options: FilamentOptions, carried: SlotChoice[]): SlotChoice[] {
+  const inventory = new Set((options.spools ?? []).map((spool) => spool.spool_id))
+  return (options.slots ?? []).flatMap((slot) => {
+    const kept = carried.find(
+      (choice) => choice.slot_id === slot.slot_id && inventory.has(choice.spool_id),
+    )
+    const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
+    return choice ? [{ ...choice }] : []
+  })
+}

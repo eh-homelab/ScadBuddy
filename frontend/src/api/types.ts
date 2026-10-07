@@ -62,6 +62,14 @@ export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
+export type ArrangeRequest = Schemas['ArrangeRequest']
+export type ManifestObject = Schemas['ManifestObject']
+/** #902 — the re-render queued to give an output saved before Arrange its objects. */
+export type BackfillState = Schemas['BackfillState']
+/** #902 — Arrange's 409 naming every output that needs a re-render first. */
+export type NeedsBackfillProblem = Schemas['NeedsBackfillProblem']
+export type BomEntry = Schemas['BomEntry']
+export type MigrateResult = Schemas['MigrateResult']
 export type LibraryCopy = Schemas['LibraryCopy']
 export type EditTarget = Schemas['EditTarget']
 
