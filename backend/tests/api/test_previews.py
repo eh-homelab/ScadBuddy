@@ -34,6 +34,7 @@ from scadbuddy.render.previews import PreviewScheduler
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.submit import RenderService
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -115,6 +116,7 @@ def _create(
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream"), **files},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()
@@ -191,7 +193,7 @@ def test_a_duplicate_gets_a_preview_of_its_own(
     client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
 ) -> None:
     _create(client)
-    copy = client.post(f"/api/v1/models/{SLUG}/duplicate", json={"name": "Copy"})
+    copy = client.post(f"/api/v1/models/{SLUG}/duplicate", json={"name": "Copy"}, headers=press())
     assert copy.status_code == 201, copy.text
     settle(client, state)
 
@@ -207,7 +209,7 @@ def test_a_model_can_be_deleted_while_its_preview_is_pending(
     stub.released.clear()
     _create(client)
 
-    assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
+    assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code == 204
     stub.released.set()
     settle(client, state)
     assert scheduler(state).store.record(SLUG) is None
@@ -224,7 +226,9 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
     assert scheduler(state).store.image(SLUG) is not None
 
     own = client.put(
-        f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
+        f"/api/v1/models/{SLUG}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
     )
     assert own.json()["thumbnail_source"] == "model"
     # Dropped with the write, not later: there is nothing left for it to stand in for.
@@ -232,7 +236,7 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
     settle(client, state)
     assert len(stub.calls) == 1
 
-    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail").status_code == 200
+    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press()).status_code == 200
     settle(client, state)
     assert len(stub.calls) == 2
     assert _model(client)["thumbnail_source"] == "preview"
@@ -281,7 +285,7 @@ def test_a_source_edit_re_renders_and_changes_the_preview_id(
     edited = SOURCE.replace("width = 10", "width = 12")
     assert (
         client.put(
-            f"/api/v1/models/{SLUG}/source", json={"source": edited, "force": True}
+            f"/api/v1/models/{SLUG}/source", json={"source": edited, "force": True}, headers=press()
         ).status_code
         == 200
     )
@@ -302,10 +306,11 @@ def test_a_restored_revision_is_rendered_again(
     client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": SOURCE.replace("10", "12"), "force": True},
+        headers=press(),
     )
     settle(client, state)
 
-    restored = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore")
+    restored = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore", headers=press())
     assert restored.status_code == 200, restored.text
     settle(client, state)
 
@@ -318,8 +323,8 @@ def test_a_readme_or_metadata_edit_does_not_re_render(
     _create(client)
     settle(client, state)
 
-    client.put(f"/api/v1/models/{SLUG}/readme", json={"content": "# Widget\n"})
-    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Widget Two"})
+    client.put(f"/api/v1/models/{SLUG}/readme", json={"content": "# Widget\n"}, headers=press())
+    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Widget Two"}, headers=press())
     settle(client, state)
 
     assert len(stub.calls) == 1
@@ -331,7 +336,7 @@ def test_a_burst_of_changes_renders_once(
     scheduler(state).debounce = 0.3
     _create(client)
     for tags in ("a", "b", "c"):
-        client.patch(f"/api/v1/models/{SLUG}", json={"tags": [tags]})
+        client.patch(f"/api/v1/models/{SLUG}", json={"tags": [tags]}, headers=press())
     settle(client, state)
 
     assert stub.calls == [(SLUG, SOURCE)]
@@ -358,7 +363,7 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
 
     # Asked again with nothing changed: no second attempt.
     scheduler(state).request(SLUG)
-    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Still Broken"})
+    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Still Broken"}, headers=press())
     settle(client, state)
     assert len(stub.calls) == 1
 
@@ -367,6 +372,7 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
     client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": SOURCE.replace("10", "11"), "force": True},
+        headers=press(),
     )
     settle(client, state)
     assert len(stub.calls) == 2

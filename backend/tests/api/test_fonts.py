@@ -29,6 +29,7 @@ from scadbuddy.library.googlefonts import (
     GoogleFontsError,
 )
 from scadbuddy.render.schema import CustomizerSchema, Parameter
+from tests.support.operations import press
 
 CATALOGUE = "/api/v1/fonts/catalogue"
 
@@ -356,7 +357,12 @@ def test_a_render_or_preset_naming_a_family_that_is_not_installed_is_refused(
     The fake openscad exports `label` as a string, which `// font` overlays."""
     app.dependency_overrides[get_fonts] = lambda: Resolving({"DejaVu Sans"})
     source = 'width = 10;\nlabel = "DejaVu Sans"; // font\n'
-    assert client.post("/api/v1/models", json={"name": "sign", "source": source}).status_code == 201
+    assert (
+        client.post(
+            "/api/v1/models", json={"name": "sign", "source": source}, headers=press()
+        ).status_code
+        == 201
+    )
 
     render = client.post("/api/v1/models/sign/render", json={"params": {"label": "Pacifico"}})
     preset = client.post(

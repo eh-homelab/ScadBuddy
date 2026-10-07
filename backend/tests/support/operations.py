@@ -1,4 +1,5 @@
-"""Sending a Bambuddy write as its clients do (#1143)."""
+"""Calling an operation route as ScadBuddy's clients do (#1143): every one (model,
+library, print and Bambuddy writes) requires an ``Idempotency-Key`` since #1777."""
 
 from __future__ import annotations
 

@@ -30,6 +30,7 @@ from scadbuddy.library.history import GIT, git_env
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -638,7 +639,12 @@ def test_the_first_write_converts_a_legacy_thumbnail(
 
 def test_the_legacy_id_can_be_reordered_and_removed(client: TestClient, model: str) -> None:
     thumbnail = {"file": ("t.png", PNG, "image/png")}
-    assert client.put(f"/api/v1/models/{model}/thumbnail", files=thumbnail).status_code == 200
+    assert (
+        client.put(
+            f"/api/v1/models/{model}/thumbnail", files=thumbnail, headers=press()
+        ).status_code
+        == 200
+    )
     added = _upload(client, model, JPEG).json()["media"]
     converted = added[0]["id"]
 
@@ -703,7 +709,9 @@ def test_setting_the_thumbnail_replaces_an_image_cover(client: TestClient, model
     video = _upload(client, model, WEBM).json()["media"][1]
 
     response = client.put(
-        f"/api/v1/models/{model}/thumbnail", files={"file": ("t.png", PNG, "image/png")}
+        f"/api/v1/models/{model}/thumbnail",
+        files={"file": ("t.png", PNG, "image/png")},
+        headers=press(),
     )
 
     assert response.status_code == 200, response.text
@@ -712,9 +720,9 @@ def test_setting_the_thumbnail_replaces_an_image_cover(client: TestClient, model
     assert media[1]["id"] == video["id"]
     assert client.get(f"/api/v1/models/{model}/thumbnail").content == PNG
 
-    assert client.delete(f"/api/v1/models/{model}/thumbnail").status_code == 200
+    assert client.delete(f"/api/v1/models/{model}/thumbnail", headers=press()).status_code == 200
     assert [item["id"] for item in _media(client, model)] == [video["id"]]
-    assert client.delete(f"/api/v1/models/{model}/thumbnail").status_code == 404
+    assert client.delete(f"/api/v1/models/{model}/thumbnail", headers=press()).status_code == 404
 
 
 def test_a_video_whose_file_is_gone_is_reported_missing(
@@ -760,7 +768,7 @@ def test_a_restore_brings_back_a_file_but_not_its_row(
     commit = client.get(f"/api/v1/models/{model}/versions").json()[0]["commit"]
     client.delete(f"/api/v1/models/{model}/media/{image['id']}")
 
-    restored = client.post(f"/api/v1/models/{model}/versions/{commit}/restore")
+    restored = client.post(f"/api/v1/models/{model}/versions/{commit}/restore", headers=press())
 
     assert restored.status_code == 200, restored.text
     assert (paths.model_dir(model) / "media" / image["file"]).read_bytes() == PNG
@@ -860,7 +868,9 @@ def test_a_duplicate_of_a_built_in_takes_what_was_added_to_it(client: TestClient
     added = _upload(client, BUILTIN, JPEG, caption="Mine").json()["media"][1]
     client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]})
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     copy = response.json()
@@ -878,7 +888,9 @@ def test_a_duplicate_copies_its_media_videos_included(
     image = _upload(client, model, PNG).json()["media"][0]
     video = _upload(client, model, MP4).json()["media"][1]
 
-    response = client.post(f"/api/v1/models/{model}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{model}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     copy = response.json()
@@ -889,7 +901,9 @@ def test_a_duplicate_copies_its_media_videos_included(
 
 
 def test_a_duplicate_of_a_built_in_copies_its_media(client: TestClient) -> None:
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Mine"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Mine"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     [item] = response.json()["media"]
@@ -1016,7 +1030,9 @@ def test_other_multipart_routes_keep_the_multipart_cap(
     oversized = PNG + b"\x00" * MAX_MULTIPART_BODY_BYTES
 
     response = small_limit_client.put(
-        f"/api/v1/models/{model}/thumbnail", files={"file": ("t.png", oversized, "image/png")}
+        f"/api/v1/models/{model}/thumbnail",
+        files={"file": ("t.png", oversized, "image/png")},
+        headers=press(),
     )
 
     assert response.status_code == 413, response.text

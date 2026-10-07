@@ -21,6 +21,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import wait_for_job
+from tests.support.operations import press
 from tests.support.temporal import WorkflowReaper
 
 pytestmark = pytest.mark.requires_openscad
@@ -65,6 +66,7 @@ def test_upload_render_and_persist_against_a_real_openscad(client: TestClient) -
     created = client.post(
         "/api/v1/models",
         files={"file": ("Two Colour.scad", TWO_COLOUR.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
@@ -102,6 +104,7 @@ def test_an_unparsable_upload_is_rejected_by_the_real_binary(client: TestClient)
     response = client.post(
         "/api/v1/models",
         files={"file": ("broken.scad", b"cube(\n", "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 422
     assert "could not parse" in response.json()["detail"]
@@ -119,16 +122,21 @@ def test_paste_check_and_replace_against_a_real_openscad(client: TestClient) -> 
     assert broken.json()["ok"] is False
     assert broken.json()["diagnostics"], broken.json()
 
-    created = client.post("/api/v1/models", json={"name": "Pasted", "source": TWO_COLOUR})
+    created = client.post(
+        "/api/v1/models", json={"name": "Pasted", "source": TWO_COLOUR}, headers=press()
+    )
     assert created.status_code == 201, created.text
     schema = client.get("/api/v1/models/pasted/schema").json()
     assert [parameter["name"] for parameter in schema["parameters"]] == ["size"]
 
-    refused = client.put("/api/v1/models/pasted/source", json={"source": "cube(;\n"})
+    refused = client.put(
+        "/api/v1/models/pasted/source", json={"source": "cube(;\n"}, headers=press()
+    )
     assert refused.status_code == 422
     replaced = client.put(
         "/api/v1/models/pasted/source",
         json={"source": "width = 3; // [1:1:9]\ncube(width);\n"},
+        headers=press(),
     )
     assert replaced.status_code == 200, replaced.text
     schema = client.get("/api/v1/models/pasted/schema").json()
@@ -142,7 +150,7 @@ def test_the_check_resolves_a_sibling_include_through_the_models_slug(
     include of a file beside the model resolves; without one, OpenSCAD cannot see it."""
     source = "include <helper.scad>\nwidth = 3; // [1:1:9]\ncube([width, 2, helper_depth]);\n"
     created = client.post(
-        "/api/v1/models", json={"name": "Widget", "source": source, "force": True}
+        "/api/v1/models", json={"name": "Widget", "source": source, "force": True}, headers=press()
     )
     assert created.status_code == 201, created.text
     DataPaths(data_dir).model_dir("widget").joinpath("helper.scad").write_text(
@@ -173,7 +181,9 @@ TRIANGLE_SVG = (
 
 
 def test_an_uploaded_svg_is_rendered_into_every_part(client: TestClient, data_dir: Path) -> None:
-    created = client.post("/api/v1/models", json={"name": "Overlay", "source": OVERLAY})
+    created = client.post(
+        "/api/v1/models", json={"name": "Overlay", "source": OVERLAY}, headers=press()
+    )
     assert created.status_code == 201, created.text
     schema = client.get("/api/v1/models/overlay/schema").json()
     assert schema["parameters"][0]["type"] == "file"
@@ -205,7 +215,9 @@ def test_an_uploaded_svg_is_rendered_into_every_part(client: TestClient, data_di
 
 def test_a_file_openscad_cannot_open_is_a_warning_not_silence(client: TestClient) -> None:
     source = OVERLAY.replace('overlay = "";', 'overlay = "missing.svg";')
-    created = client.post("/api/v1/models", json={"name": "Missing", "source": source})
+    created = client.post(
+        "/api/v1/models", json={"name": "Missing", "source": source}, headers=press()
+    )
     assert created.status_code == 201, created.text
 
     accepted = client.post("/api/v1/models/missing/render", json={"params": {}})
@@ -218,7 +230,9 @@ def test_a_file_openscad_cannot_open_is_a_warning_not_silence(client: TestClient
 def test_a_sample_the_template_ships_is_rendered_into_every_part(
     client: TestClient, data_dir: Path
 ) -> None:
-    created = client.post("/api/v1/models", json={"name": "Sampled", "source": OVERLAY})
+    created = client.post(
+        "/api/v1/models", json={"name": "Sampled", "source": OVERLAY}, headers=press()
+    )
     assert created.status_code == 201, created.text
     model_dir = DataPaths(data_dir).model_dir("sampled")
     (model_dir / "sample-triangle.svg").write_bytes(TRIANGLE_SVG)
@@ -264,6 +278,7 @@ def test_a_real_render_announces_its_states_in_order(client: TestClient) -> None
     created = client.post(
         "/api/v1/models",
         files={"file": (f"Stages {token}.scad", source.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
@@ -300,7 +315,9 @@ if (on_plate(2))
 def test_a_template_that_asks_for_two_plates_renders_a_two_plate_3mf(
     client: TestClient,
 ) -> None:
-    created = client.post("/api/v1/models", json={"name": "Two Plates", "source": TWO_PLATES})
+    created = client.post(
+        "/api/v1/models", json={"name": "Two Plates", "source": TWO_PLATES}, headers=press()
+    )
     assert created.status_code == 201, created.text
     schema = client.get("/api/v1/models/two-plates/schema").json()
     # `$plate` is not a customizer parameter.
@@ -334,7 +351,9 @@ def test_a_template_that_asks_for_two_plates_renders_a_two_plate_3mf(
 
 
 def test_a_template_that_asks_for_one_plate_renders_as_before(client: TestClient) -> None:
-    created = client.post("/api/v1/models", json={"name": "One Plate", "source": TWO_PLATES})
+    created = client.post(
+        "/api/v1/models", json={"name": "One Plate", "source": TWO_PLATES}, headers=press()
+    )
     assert created.status_code == 201, created.text
 
     accepted = client.post("/api/v1/models/one-plate/render", json={"params": {"split": False}})
