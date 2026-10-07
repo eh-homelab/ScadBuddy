@@ -6,7 +6,10 @@ function pngSize(bytes: Buffer): { width: number; height: number } {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
 }
 
-/** A screenshot of ``canvas`` once two in a row agree, as preview-overlays.spec.ts takes. */
+/**
+ * A screenshot of ``canvas`` once two in a row agree, as preview-overlays.spec.ts takes.
+ * Fails if it never settles, so that is not later read as the camera having moved.
+ */
 async function settled(canvas: Locator): Promise<Buffer> {
   let last = await canvas.screenshot()
   for (let tries = 0; tries < 20; tries += 1) {
@@ -15,7 +18,7 @@ async function settled(canvas: Locator): Promise<Buffer> {
     if (next.equals(last)) return next
     last = next
   }
-  return last
+  throw new Error('the canvas never settled: 20 screenshots 150 ms apart all differed')
 }
 
 test.describe('rendered image', () => {
