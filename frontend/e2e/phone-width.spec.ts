@@ -57,6 +57,8 @@ test.describe('customize page at 390 px (#362)', () => {
     await expect(page.getByTestId('bbox-readout')).toBeVisible()
     await page.getByTestId('generate').click()
     await expect(page.getByText(/^Saved /)).toBeVisible()
+    // #1741 — behind More on a phone, which keeps the action bar to one row.
+    await page.getByTestId('more-actions').click()
     await expect(page.getByTestId('print')).toBeInViewport()
     expect(await pageWidth(page)).toBeLessThanOrEqual(390)
     expect(await offscreen(page)).toEqual([])
