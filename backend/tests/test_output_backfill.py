@@ -551,7 +551,7 @@ async def test_the_reaper_keeps_holds_of_unknown_template_and_learns_live_ones(
 
 @pytest.mark.requires_postgres
 async def test_releasing_an_output_forgets_its_slug(tmp_path: Path, pg_conninfo: str) -> None:
-    store, old, _, written = await _legacy_output(tmp_path)
+    _, old, _, written = await _legacy_output(tmp_path)
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
         hold_parts(refs, old.id, written.manifest, old.slug)
