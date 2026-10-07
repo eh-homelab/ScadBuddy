@@ -135,6 +135,40 @@ describe('useFilamentPlan', () => {
     )
   })
 
+  it('a slot new to a later plate is seeded from the remembered plan, not the auto-match (#1044 review)', async () => {
+    const plateOne = {
+      ...filamentOptions,
+      slots: (filamentOptions.slots ?? []).slice(0, 1),
+      suggested: [{ slot_id: 1, spool_id: 21 }],
+    }
+    const remembering: ChoicesView = {
+      ...choicesView,
+      filaments: plateOne,
+      model_choices: { printer_id: null, filament_plan: [{ slot_id: 2, spool_id: 27 }] },
+    }
+    // Every plate's slots, with an auto-match for slot 2 other than the remembered spool.
+    getFilaments.mockResolvedValueOnce({
+      ...filamentOptions,
+      suggested: [
+        { slot_id: 1, spool_id: 21 },
+        { slot_id: 2, spool_id: 22 },
+      ],
+    })
+    const { result, rerender } = renderHook(
+      ({ plate }: { plate: number | 'all' }) => useFilamentPlan(OUTPUT, remembering, plate),
+      { initialProps: { plate: 1 as number | 'all' } },
+    )
+    await waitFor(() => expect(result.current.plan).toEqual([{ slot_id: 1, spool_id: 21 }]))
+
+    rerender({ plate: 'all' })
+    await waitFor(() =>
+      expect(result.current.plan).toEqual([
+        { slot_id: 1, spool_id: 21 },
+        { slot_id: 2, spool_id: 27 },
+      ]),
+    )
+  })
+
   it('a failed read reports the error and clears the plan', async () => {
     getFilaments.mockRejectedValueOnce(new ApiError(503, 'Bambuddy is down.'))
     const { result } = renderHook(() => useFilamentPlan(OUTPUT, choicesView, 2))

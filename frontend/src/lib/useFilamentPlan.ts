@@ -94,15 +94,26 @@ export function useFilamentPlan(
         if (carried.ready) carry?.set(null)
         return
       }
+      // What this model last printed with seeds the selection, else the server's
+      // auto-match (#78); every slot stays editable.
+      const seeded = seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[])
       if (held.current?.choices === choices) {
-        // The same choices on another plate: what is picked already holds (#1044).
-        setPlan(carriedPlan(next, [...held.current.slots.values()]))
+        // The same choices on another plate: what is picked already holds (#1044), and a
+        // slot new to this plate is seeded as the first plate's were.
+        const inventory = new Set((next.spools ?? []).map((spool) => spool.spool_id))
+        const kept = held.current.slots
+        setPlan(
+          (next.slots ?? []).flatMap((slot) => {
+            const pick = kept.get(slot.slot_id)
+            if (pick && inventory.has(pick.spool_id)) return [{ ...pick }]
+            const choice = seeded.find((entry) => entry.slot_id === slot.slot_id)
+            return choice ? [choice] : []
+          }),
+        )
         return
       }
       held.current = { choices, slots: new Map() }
-      // What this model last printed with seeds the selection, else the server's
-      // auto-match (#78); every slot stays editable.
-      setPlan(seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[]))
+      setPlan(seeded)
     }
     if (chosenPlate === 1 && !allPlates) {
       seed(choices.filaments)
