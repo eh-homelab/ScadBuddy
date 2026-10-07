@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import threading
@@ -406,9 +407,9 @@ async def test_the_reaper_releases_old_holds_of_outputs_with_no_record(
     part = written.manifest[0].part
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest)  # a live output
-        hold_parts(refs, "gone", written.manifest)  # its record deleted under it
-        hold_parts(refs, "saving", written.manifest)  # held, meta.json not written yet
+        hold_parts(refs, old.id, written.manifest, old.slug)  # a live output
+        hold_parts(refs, "gone", written.manifest, old.slug)  # its record deleted under it
+        hold_parts(refs, "saving", written.manifest, old.slug)  # held, meta.json not written yet
         _age_holds(refs, old.id, 2)
         _age_holds(refs, "gone", 2)
         assert reap_orphan_holds(refs, store) == 1
@@ -428,7 +429,7 @@ async def test_the_reaper_releases_nothing_when_it_finds_no_outputs(
     part = written.manifest[0].part
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest)
+        hold_parts(refs, old.id, written.manifest, old.slug)
         _age_holds(refs, old.id, 2)
         shutil.rmtree(store.paths.outputs)
         assert reap_orphan_holds(refs, store) == 0
@@ -452,8 +453,8 @@ async def test_the_reaper_stops_on_a_directory_it_cannot_list(
 
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest)
-        hold_parts(refs, "gone", written.manifest)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        hold_parts(refs, "gone", written.manifest, old.slug)
         _age_holds(refs, old.id, 2)
         _age_holds(refs, "gone", 2)
         monkeypatch.setattr(os, "scandir", refusing)
@@ -482,7 +483,78 @@ async def test_the_reaper_follows_symlinks_as_the_store_does(
     assert store.get(old.id).id == old.id  # the store still serves it
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest)
+        hold_parts(refs, old.id, written.manifest, old.slug)
         _age_holds(refs, old.id, 2)
         assert reap_orphan_holds(refs, store) == 0
         assert (OUTPUT_HOLDER, old.id) in _holders(refs, part)
+
+
+def _forget_slug(refs: BlobRefs, output_id: str) -> None:
+    """A hold taken before `output_hold_slugs` existed."""
+    with refs.pool.connection() as conn:
+        conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
+
+
+def _slug_of(refs: BlobRefs, output_id: str) -> str | None:
+    with refs.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT slug FROM output_hold_slugs WHERE output_id = %s", (output_id,)
+        ).fetchone()
+    return None if row is None else str(row["slug"])
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_releases_nothing_of_a_missing_slug_directory(
+    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1806: a slug directory that is missing (not yet copied onto a new volume) must
+    not read as every one of its outputs deleted, while another slug's outputs are live.
+    A deleted output of a slug whose directory is there is still released."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    part = written.manifest[0].part
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        hold_parts(refs, "uncopied", written.manifest, "builtin:not-copied-yet")
+        hold_parts(refs, "gone", written.manifest, old.slug)
+        for output_id in (old.id, "uncopied", "gone"):
+            _age_holds(refs, output_id, 2)
+        with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
+            assert reap_orphan_holds(refs, store) == 1
+        holders = _holders(refs, part)
+        assert (OUTPUT_HOLDER, "uncopied") in holders
+        assert (OUTPUT_HOLDER, "gone") not in holders
+        assert (OUTPUT_HOLDER, old.id) in holders
+        assert "builtin:not-copied-yet is missing" in caplog.text
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_keeps_holds_of_unknown_template_and_learns_live_ones(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """A hold taken before slugs were recorded: a live output's slug is learnt from its
+    directory; one with no output cannot be placed, so it is never released."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    part = written.manifest[0].part
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        hold_parts(refs, "legacy", written.manifest, old.slug)
+        for output_id in (old.id, "legacy"):
+            _age_holds(refs, output_id, 2)
+            _forget_slug(refs, output_id)
+        assert reap_orphan_holds(refs, store) == 0
+        assert (OUTPUT_HOLDER, "legacy") in _holders(refs, part)
+        assert _slug_of(refs, old.id) == old.slug
+        assert _slug_of(refs, "legacy") is None
+
+
+@pytest.mark.requires_postgres
+async def test_releasing_an_output_forgets_its_slug(tmp_path: Path, pg_conninfo: str) -> None:
+    store, old, _, written = await _legacy_output(tmp_path)
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        assert _slug_of(refs, old.id) == old.slug
+        release_parts(refs, old.id)
+        assert _slug_of(refs, old.id) is None
