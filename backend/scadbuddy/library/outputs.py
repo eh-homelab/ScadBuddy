@@ -691,15 +691,16 @@ def release_parts(refs: BlobRefs, output_id: str) -> None:
 
 def _live_output_ids(root: Path) -> set[str]:
     """Every output id under ``root`` with a meta.json. Unlike ``glob``, a slug or output
-    directory that cannot be listed raises instead of being skipped."""
+    directory that cannot be listed raises instead of being skipped. Symlinks are followed,
+    as ``OutputStore``'s own globs follow them: an output it serves must not look deleted."""
     live: set[str] = set()
     with os.scandir(root) as slugs:
         for slug in slugs:
-            if not slug.is_dir(follow_symlinks=False):
+            if not slug.is_dir(follow_symlinks=True):
                 continue
             with os.scandir(slug.path) as entries:
                 for entry in entries:
-                    if entry.is_dir(follow_symlinks=False) and os.path.isfile(
+                    if entry.is_dir(follow_symlinks=True) and os.path.isfile(
                         os.path.join(entry.path, META_NAME)
                     ):
                         live.add(entry.name)
@@ -748,4 +749,12 @@ def reap_orphan_holds(
     for output_id in orphans:
         release_parts(refs, output_id)
         logger.info("released an orphaned output's Parts", extra={"id": output_id})
+    if orphans:
+        # One line to spot an unexpected mass release (#1806 review).
+        logger.warning(
+            "released the Parts of %d orphaned outputs (%d outputs live, %d held past the grace)",
+            len(orphans),
+            len(live),
+            len(held),
+        )
     return len(orphans)

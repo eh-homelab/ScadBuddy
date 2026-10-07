@@ -7,7 +7,7 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -445,7 +445,7 @@ async def test_the_reaper_stops_on_a_directory_it_cannot_list(
     part = written.manifest[0].part
     real = os.scandir
 
-    def refusing(path):  # type: ignore[no-untyped-def]
+    def refusing(path: str | os.PathLike[str]) -> Iterator[os.DirEntry[str]]:
         if str(path) != str(store.paths.outputs):
             raise PermissionError(13, "Permission denied", str(path))
         return real(path)
@@ -462,3 +462,25 @@ async def test_the_reaper_stops_on_a_directory_it_cannot_list(
         holders = _holders(refs, part)
         assert (OUTPUT_HOLDER, old.id) in holders
         assert (OUTPUT_HOLDER, "gone") in holders
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_follows_symlinks_as_the_store_does(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1806 review: an output reached through a symlinked slug directory is served by the
+    store, so the reaper must count it live, not release its Parts."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    part = written.manifest[0].part
+    slug_dir = store.directory(old.id).parent
+    moved = tmp_path / "elsewhere" / slug_dir.name
+    moved.parent.mkdir()
+    shutil.move(slug_dir, moved)
+    slug_dir.symlink_to(moved, target_is_directory=True)
+    assert store.get(old.id).id == old.id  # the store still serves it
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest)
+        _age_holds(refs, old.id, 2)
+        assert reap_orphan_holds(refs, store) == 0
+        assert (OUTPUT_HOLDER, old.id) in _holders(refs, part)
