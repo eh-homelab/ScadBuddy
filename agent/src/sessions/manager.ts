@@ -303,6 +303,14 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
   }
 }
 
+/**
+ * #815 §2: a session whose tab is connected again (bridge/hub.ts `onSessionTab`)
+ * stops waiting for it. main.ts wires the hub with this.
+ */
+export function resolveTabWaits(tabs: { onSessionTab: ((sessionId: string) => Promise<unknown>) | undefined }, sessions: SessionManager): void {
+  tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
+}
+
 function abortMessage(signal: AbortSignal): string {
   const reason: unknown = signal.reason
   return reason instanceof Error ? reason.message : 'the turn was interrupted'

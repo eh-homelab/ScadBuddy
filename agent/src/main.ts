@@ -33,7 +33,7 @@ import { TabHub } from './bridge/hub.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { startHeartbeat } from './routes/chat.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
-import { SessionManager } from './sessions/manager.js'
+import { resolveTabWaits, SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/setup.js'
@@ -274,7 +274,7 @@ const sessions =
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
 // #815 §2: a session whose tab is connected again stops waiting for it.
-if (sessions) tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
+if (sessions) resolveTabWaits(tabs, sessions)
 // The `sessions_*` tools (#300) act on the same manager, over /mcp and in-process.
 if (sessions) toolServices.sessions = sessions
 // The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
