@@ -51,7 +51,7 @@ export type FeedItem =
   | {
       kind: 'question'
       id: string
-      /** The AskUserQuestion or `ask_user` tool_use id; a subagent's call has no `tool.call` in the feed (#1108). */
+      /** The AskUserQuestion or `ask_user` tool_use id: a `tool.call` in the feed (a subagent's too, #1108). */
       tool: string
       questions: Question[]
       /** #815 — set when this is an attention request rather than a question. */
