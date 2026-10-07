@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.api.deps import OperationIdPath
+from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
@@ -39,6 +40,7 @@ from scadbuddy.workflows.commands import (
 from scadbuddy.workflows.operation_models import (
     OPERATION_WORKFLOW,
     OperationAnswer,
+    OperationAuthor,
     OperationInput,
 )
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
@@ -195,6 +197,12 @@ def _answer(
     return OperationAccepted(**op.model_dump(), repeated=repeated)
 
 
+def _author() -> OperationAuthor | None:
+    """The request's agent author, for the run's commits (#252)."""
+    author = current_author()
+    return None if author is None else OperationAuthor(**vars(author))
+
+
 async def run_operation(
     ops: OperationCommands,
     response: Response,
@@ -218,7 +226,9 @@ async def run_operation(
         key=key,
         request=body,
         run_attempts=kind.run_attempts,
+        run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
+        author=_author(),
     )
     try:
         answer = await start_command(
@@ -226,7 +236,7 @@ async def run_operation(
             OPERATION_WORKFLOW,
             arg,
             id=f"op-{kind.name}-{key}",
-            task_queue=ops.task_queue,
+            task_queue=ops.queues[kind.queue],
             update=ACCEPTED_UPDATE,
             result_type=OperationAnswer,
             reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
@@ -239,7 +249,7 @@ async def run_operation(
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 "This request already ran, and its record has since been deleted, so it "
-                "may have been done. Check Bambuddy before sending it again.",
+                f"may have been done. Check {kind.where} before sending it again.",
                 type_=RECORD_GONE_PROBLEM,
             ) from None
         return _answer(recorded, response, repeated=True)

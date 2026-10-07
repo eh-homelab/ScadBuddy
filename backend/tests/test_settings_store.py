@@ -562,12 +562,37 @@ def test_a_settings_read_timeout_bounds_the_whole_read(
             elapsed = time.monotonic() - started
     finally:
         release.cancel()
-        release.join()
+        # Only a started Timer can be joined; one that never started would mask the
+        # real failure with a RuntimeError (#1269).
+        if release.ident is not None:
+            release.join()
         settings_holder.close()
     # The read waits 0.6 budgets on one table and the rest on the other: about one
     # budget in all. A per-statement bound would take about 1.6; a bound in the wrong
     # unit would give up at once.
     assert 0.9 * budget < elapsed < 1.45 * budget
+
+
+def test_a_bounded_settings_read_gives_up_waiting_for_a_connection(settings: Settings) -> None:
+    """#1261: the pool wait is inside the read's one deadline too: with the pool's only
+    connection held the whole time, the read gives up instead of waiting it out."""
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    failed: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            store.load(timeout=0.2)
+        except Exception as exc:
+            failed.append(exc)
+
+    try:
+        with store.pool.connection():
+            finished = _finishes_while_held(read)
+    finally:
+        store.close()
+    assert finished
+    assert [type(exc) for exc in failed] == [PoolTimeout]
 
 
 def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
@@ -596,8 +621,8 @@ def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(
 
     with psycopg.connect(settings.database_url) as holder, holder.transaction():
         holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
-        took = _timed_in_thread(save)
-    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
+        finished = _finishes_while_held(save)
+    assert finished
     assert [type(exc) for exc in failed] == [psycopg.errors.QueryCanceled]
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
@@ -619,11 +644,11 @@ def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
             failed.append(exc)
 
     try:
-        with store._pool.connection():
-            took = _timed_in_thread(save)
+        with store.pool.connection():
+            finished = _finishes_while_held(save)
     finally:
         store.close()
-    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
+    assert finished
     assert [type(exc) for exc in failed] == [PoolTimeout]
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
@@ -637,29 +662,26 @@ def test_a_committed_rack_algorithm_save_answers_without_reading_everything_back
     answered: list[str] = []
     with psycopg.connect(settings.database_url) as holder, holder.transaction():
         holder.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
-        took = _timed_in_thread(
+        finished = _finishes_while_held(
             lambda: answered.append(store.set_printer_rack_algorithm(1, "bambuddy"))
         )
-    assert took < GAVE_UP_ON_THE_PATCHED_BOUND
+    assert finished
     assert answered == ["bambuddy"]
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
 
 
-#: The rack tests patch the bound to 0.2 s. A save that gave up in under half the
-#: real 5 s bound gave up on the patched one; one that ran past it is the regression
-#: this tells apart (a dropped ``SET LOCAL`` or pool timeout), with over ten times the
-#: patched bound to spare for a loaded runner.
-GAVE_UP_ON_THE_PATCHED_BOUND = settings_store.RACK_ALGORITHM_WRITE_TIMEOUT / 2
+def _finishes_while_held(call: Callable[[], object]) -> bool:
+    """Run ``call`` in a thread and give it 5 s; whether it finished.
 
-
-def _timed_in_thread(call: Callable[[], object]) -> float:
-    """Run ``call`` in a thread, give it 5 s, and return how long it took."""
-    started = time.monotonic()
+    The caller holds what ``call`` waits on (a row lock, the pool's one connection)
+    for those whole 5 s, so finishing at all means a bound gave up: without one the
+    save waits until the holder lets go. That is the property, not a wall-clock margin
+    (#1714). The caller asserts only after letting go, so a failure cannot leave the
+    holder's lock pinning the teardown (#1283)."""
     worker = threading.Thread(target=call, daemon=True)
     worker.start()
     worker.join(timeout=5)
-    assert not worker.is_alive()
-    return time.monotonic() - started
+    return not worker.is_alive()
 
 
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:

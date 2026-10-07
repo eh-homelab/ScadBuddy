@@ -64,7 +64,9 @@ from scadbuddy.library.history import (
 from scadbuddy.library.url_import import (
     ImportRefusedError,
     ResolverUnavailableError,
+    is_public,
     public_addresses,
+    unreachable,
 )
 
 logger = logging.getLogger(__name__)
@@ -958,12 +960,35 @@ class LibraryStore:
         url, ref, pinned = self._prepare(pin.name, pin.url, pin.ref)
         self._clone(pin.name, url, ref, pinned, commit=pin.commit)
 
+    def check(self, name: str, *, url: str | None = None, ref: str | None = None) -> None:
+        """:meth:`resolve`'s refusals that need neither a clone nor a lookup: the same
+        errors, raised before either (review #1119 2-2). A host name is vetted only by
+        :meth:`resolve`; an address literal that is not public is refused here."""
+        url, _, trusted = self._settle(name, url, ref)
+        host = urlsplit(url).hostname
+        if trusted or not host:
+            return
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return
+        if not is_public(host):
+            raise LibraryError(str(unreachable(host)))
+
     def _prepare(
         self, name: str, url: str | None, ref: str | None
     ) -> tuple[str, str, tuple[str, ...]]:
         """Check what :meth:`resolve` was asked for, and fill in the catalogue's
         defaults. Returns the URL and ref to clone, and the git config that holds
         the clone to the vetted addresses."""
+        url, ref, trusted = self._settle(name, url, ref)
+        # The catalogue's own URLs are trusted as they are; anything a client named
+        # is vetted on every clone.
+        return url, ref, (() if trusted else self._vet(url))
+
+    def _settle(self, name: str, url: str | None, ref: str | None) -> tuple[str, str, bool]:
+        """:meth:`_prepare` short of the vetting: the URL and ref to clone, and whether
+        the URL is the catalogue's own."""
         if not re.fullmatch(NAME_PATTERN, name):
             raise LibraryError(f"{name!r} is not a usable library name")
         # A URL is recorded in the pin, logged and quoted back in errors, so one that
@@ -991,9 +1016,7 @@ class LibraryStore:
         scheme = urlsplit(url).scheme.lower()
         if scheme not in self.protocols:
             raise LibraryError(f"{url!r} is not a {' or '.join(self.protocols)} URL")
-        # The catalogue's own URLs are trusted as they are; anything a client named
-        # is vetted on every clone.
-        return url, ref, (() if trusted else self._vet(url))
+        return url, ref, trusted
 
     def _vet(self, url: str) -> tuple[str, ...]:
         """Refuse ``url`` unless its host resolves only to public addresses, and

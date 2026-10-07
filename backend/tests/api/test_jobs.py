@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 from httpx import Response
 from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
-from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM
@@ -223,13 +222,8 @@ def _unreachable() -> TemporalUnavailableError:
         # The rest may follow a start Temporal persisted: the same request follows it,
         # and `may_have_started` is what the clients re-send on (review #1066 (10) 4).
         (TemporalUnavailableError("render-x"), "to follow it if it started", True),
-        (
-            RPCError("busy", RPCStatusCode.RESOURCE_EXHAUSTED, b""),
-            "to follow it if it started",
-            True,
-        ),
-        (RPCError("oops", RPCStatusCode.INTERNAL, b""), "to follow it if it started", True),
-        (TemporalBusyError("render-x"), "to follow it if it started", True),
+        # Temporal answered, but could not take the start now: not "cannot reach".
+        (TemporalBusyError("render-x"), "could not start this render right now", True),
     ],
 )
 def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
@@ -248,10 +242,8 @@ def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
 @pytest.mark.parametrize(
     "refusal",
     [
-        RPCError("Namespace nope is not found.", RPCStatusCode.NOT_FOUND, b""),
-        RPCError("denied for nope", RPCStatusCode.PERMISSION_DENIED, b""),
-        RPCError("nope is invalid", RPCStatusCode.INVALID_ARGUMENT, b""),
-        # What `start_command` raises for a refusal since #1316 (review #1066 of c144c02).
+        # What `start_command` raises for a refusal since #1316 (review #1066 of c144c02);
+        # no raw `RPCError` reaches the route (#1670).
         TemporalRefusedError("render-nope"),
     ],
 )
