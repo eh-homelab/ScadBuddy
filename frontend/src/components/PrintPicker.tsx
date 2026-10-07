@@ -379,7 +379,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
         })
         const read = ready[0]
         if (!read) {
-          setArrangeError(backfillFailures(failed))
+          setArrangeError(backfillFailures(failed, 'Re-arrange'))
           return
         }
         from = read
