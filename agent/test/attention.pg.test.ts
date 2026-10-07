@@ -1083,7 +1083,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
           questions: [card],
           toolUseId: 'toolu_own',
           signal: new AbortController().signal,
-          attention: { ...spec(), onParked: () => (joined(), Promise.resolve()) },
+          attention: spec({ onParked: () => (joined(), Promise.resolve()) }),
         })
         results.push(...(await Promise.all([auto, own])), card.question)
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
