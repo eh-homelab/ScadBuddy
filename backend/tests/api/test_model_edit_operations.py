@@ -33,13 +33,14 @@ from tests.api.test_model_operations import (
     _state,
     _workflow_ids,
 )
+from tests.support.operations import press
 
 SOURCE = "cube(10);\n"
 
 
 def _model(client: TestClient, name: str) -> tuple[str, str]:
     """A new model's slug and version."""
-    created = client.post("/api/v1/models", json={"name": name, "source": SOURCE})
+    created = client.post("/api/v1/models", json={"name": name, "source": SOURCE}, headers=press())
     assert created.status_code == 201, created.text
     return created.json()["slug"], created.json()["version"]
 
@@ -61,7 +62,9 @@ def test_a_repeated_source_save_makes_one_revision(client: TestClient, app: Fast
 def test_a_large_source_save_goes_by_claim(client: TestClient, app: FastAPI) -> None:
     slug, _ = _model(client, "Big")
     source = "// " + "x" * 900_000 + "\ncube(1);\n"
-    saved = client.put(f"/api/v1/models/{slug}/source?force=true", json={"source": source})
+    saved = client.put(
+        f"/api/v1/models/{slug}/source?force=true", json={"source": source}, headers=press()
+    )
     assert saved.status_code == 200, saved.text
     assert client.get(f"/api/v1/models/{slug}/source").text == source
     (workflow_id,) = _workflow_ids(app, "model_source_put")
@@ -76,11 +79,18 @@ def test_an_edits_final_answer_drops_its_claim(
     slug, version = _model(client, "Claims")
     png = models_api.PNG_MAGIC + b"\2" * 64
     answers = [
-        (200, client.put(f"/api/v1/models/{slug}/source", json={"source": "cube(5);\n"})),
+        (
+            200,
+            client.put(
+                f"/api/v1/models/{slug}/source", json={"source": "cube(5);\n"}, headers=press()
+            ),
+        ),
         (
             409,
             client.put(
-                f"/api/v1/models/{slug}/source", json={"source": "cube(6);\n", "base": version}
+                f"/api/v1/models/{slug}/source",
+                json={"source": "cube(6);\n", "base": version},
+                headers=press(),
             ),
         ),
         (
@@ -88,16 +98,29 @@ def test_an_edits_final_answer_drops_its_claim(
             client.post(
                 f"/api/v1/models/{slug}/source/patch",
                 json={"base": version, "edits": [{"search": "cube", "replace": "sphere"}]},
+                headers=press(),
             ),
         ),
         (
             200,
             client.put(
-                f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", png, "image/png")}
+                f"/api/v1/models/{slug}/thumbnail",
+                files={"file": ("t.png", png, "image/png")},
+                headers=press(),
             ),
         ),
-        (200, client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Hi\n"})),
-        (200, client.put(f"/api/v1/models/{slug}/files/a.scad", json={"content": "a = 1;\n"})),
+        (
+            200,
+            client.put(
+                f"/api/v1/models/{slug}/readme", json={"content": "# Hi\n"}, headers=press()
+            ),
+        ),
+        (
+            200,
+            client.put(
+                f"/api/v1/models/{slug}/files/a.scad", json={"content": "a = 1;\n"}, headers=press()
+            ),
+        ),
     ]
     current = client.get(f"/api/v1/models/{slug}").json()["version"]
     answers.append(
@@ -106,12 +129,18 @@ def test_an_edits_final_answer_drops_its_claim(
             client.post(
                 f"/api/v1/models/{slug}/source/patch",
                 json={"base": current, "edits": [{"search": "cube", "replace": "sphere"}]},
+                headers=press(),
             ),
         )
     )
     monkeypatch.setattr(model_files, "MAX_SOURCE_FILES", 1)
     answers.append(
-        (422, client.put(f"/api/v1/models/{slug}/files/b.scad", json={"content": "b = 1;\n"}))
+        (
+            422,
+            client.put(
+                f"/api/v1/models/{slug}/files/b.scad", json={"content": "b = 1;\n"}, headers=press()
+            ),
+        )
     )
     for status, answered in answers:
         assert answered.status_code == status, answered.text
@@ -120,10 +149,14 @@ def test_an_edits_final_answer_drops_its_claim(
 
 def test_a_stale_base_is_a_409_with_current(client: TestClient) -> None:
     slug, version = _model(client, "Stale")
-    moved = client.put(f"/api/v1/models/{slug}/source", json={"source": "cube(2);\n"})
+    moved = client.put(
+        f"/api/v1/models/{slug}/source", json={"source": "cube(2);\n"}, headers=press()
+    )
     assert moved.status_code == 200, moved.text
     stale = client.put(
-        f"/api/v1/models/{slug}/source", json={"source": "cube(3);\n", "base": version}
+        f"/api/v1/models/{slug}/source",
+        json={"source": "cube(3);\n", "base": version},
+        headers=press(),
     )
     assert stale.status_code == 409, stale.text
     assert stale.json()["base"] == version
@@ -140,6 +173,7 @@ def test_a_patch_with_large_edits_goes_by_claim(client: TestClient, app: FastAPI
             "edits": [{"search": "cube(10);", "replace": replace}],
             "force": True,
         },
+        headers=press(),
     )
     assert patched.status_code == 200, patched.text
     assert client.get(f"/api/v1/models/{slug}/source").text == replace + "\n"
@@ -161,7 +195,9 @@ def test_a_slow_save_answers_202_and_its_operation_ends_with_the_model(
         return await save(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_save_source", slowly)
-    started = client.put(f"/api/v1/models/{slug}/source", json={"source": "cube(4);\n"})
+    started = client.put(
+        f"/api/v1/models/{slug}/source", json={"source": "cube(4);\n"}, headers=press()
+    )
     assert started.status_code == 202, started.text
     op = started.json()
     deadline = time.monotonic() + 60
@@ -210,12 +246,15 @@ def test_a_stale_base_the_run_finds_after_a_202_carries_current(
     try:
         if route == "put":
             started = client.put(
-                f"/api/v1/models/{slug}/source", json={"source": "cube(6);\n", "base": version}
+                f"/api/v1/models/{slug}/source",
+                json={"source": "cube(6);\n", "base": version},
+                headers=press(),
             )
         else:
             started = client.post(
                 f"/api/v1/models/{slug}/source/patch",
                 json={"base": version, "edits": [{"search": "10", "replace": "6"}], "force": True},
+                headers=press(),
             )
         assert started.status_code == 202, started.text
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
@@ -245,7 +284,7 @@ def test_a_merge_that_conflicts_only_in_the_run_is_a_retryable_409_without_merge
         raise MergeConflictError(conflict, "dismissed")
 
     monkeypatch.setattr(Catalogue, "merge_upstream", conflicts)
-    refused = client.post(f"/api/v1/models/{slug}/upstream/merge")
+    refused = client.post(f"/api/v1/models/{slug}/upstream/merge", headers=press())
     assert refused.status_code == 409, refused.text
     assert refused.json()["state"] == "dismissed"
     assert "merged" not in refused.json()
@@ -262,22 +301,37 @@ def test_sidecar_and_file_edits_are_operations(client: TestClient, app: FastAPI)
         (
             "model_thumbnail_put",
             lambda: client.put(
-                f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", png, "image/png")}
+                f"/api/v1/models/{slug}/thumbnail",
+                files={"file": ("t.png", png, "image/png")},
+                headers=press(),
             ),
         ),
-        ("model_thumbnail_delete", lambda: client.delete(f"/api/v1/models/{slug}/thumbnail")),
+        (
+            "model_thumbnail_delete",
+            lambda: client.delete(f"/api/v1/models/{slug}/thumbnail", headers=press()),
+        ),
         (
             "model_readme_put",
-            lambda: client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Hi\n"}),
+            lambda: client.put(
+                f"/api/v1/models/{slug}/readme", json={"content": "# Hi\n"}, headers=press()
+            ),
         ),
-        ("model_readme_delete", lambda: client.delete(f"/api/v1/models/{slug}/readme")),
+        (
+            "model_readme_delete",
+            lambda: client.delete(f"/api/v1/models/{slug}/readme", headers=press()),
+        ),
         (
             "model_file_put",
             lambda: client.put(
-                f"/api/v1/models/{slug}/files/part.scad", json={"content": "module p() {}\n"}
+                f"/api/v1/models/{slug}/files/part.scad",
+                json={"content": "module p() {}\n"},
+                headers=press(),
             ),
         ),
-        ("model_file_delete", lambda: client.delete(f"/api/v1/models/{slug}/files/part.scad")),
+        (
+            "model_file_delete",
+            lambda: client.delete(f"/api/v1/models/{slug}/files/part.scad", headers=press()),
+        ),
     ]
     for kind, call in steps:
         answered = call()
@@ -297,13 +351,15 @@ def test_a_file_edits_volume_refusals_record_nothing(
 ) -> None:
     """Review 1130 5 and M1: the refusals that read the volume are made by the check."""
     slug, _ = _model(client, "Files Refused")
-    own = client.delete(f"/api/v1/models/{slug}/files/model.scad")
+    own = client.delete(f"/api/v1/models/{slug}/files/model.scad", headers=press())
     _refused_by_the_check(app, own, 409, "model_file_delete")
-    missing = client.delete(f"/api/v1/models/{slug}/files/missing.scad")
+    missing = client.delete(f"/api/v1/models/{slug}/files/missing.scad", headers=press())
     _refused_by_the_check(app, missing, 404, "model_file_delete")
     assert "has no file 'missing.scad'" in missing.json()["detail"]
     monkeypatch.setattr(model_files, "MAX_SOURCE_FILES", 1)
-    too_many = client.put(f"/api/v1/models/{slug}/files/x.scad", json={"content": "x = 1;\n"})
+    too_many = client.put(
+        f"/api/v1/models/{slug}/files/x.scad", json={"content": "x = 1;\n"}, headers=press()
+    )
     _refused_by_the_check(app, too_many, 422, "model_file_put")
     assert "already has 1 .scad files" in too_many.json()["detail"]
 
@@ -311,9 +367,9 @@ def test_a_file_edits_volume_refusals_record_nothing(
 def test_a_sidecars_volume_refusals_record_nothing(client: TestClient, app: FastAPI) -> None:
     """M1: no README or thumbnail of its own to remove is refused by the check."""
     slug, _ = _model(client, "Sidecars Refused")
-    readme = client.delete(f"/api/v1/models/{slug}/readme")
+    readme = client.delete(f"/api/v1/models/{slug}/readme", headers=press())
     _refused_by_the_check(app, readme, 404, "model_readme_delete")
-    thumbnail = client.delete(f"/api/v1/models/{slug}/thumbnail")
+    thumbnail = client.delete(f"/api/v1/models/{slug}/thumbnail", headers=press())
     _refused_by_the_check(app, thumbnail, 404, "model_thumbnail_delete")
     assert "no thumbnail of its own" in thumbnail.json()["detail"]
 
@@ -326,16 +382,23 @@ def test_edits_of_a_missing_model_are_404s_that_claim_nothing(
     png = models_api.PNG_MAGIC + b"\1" * 64
     content = "// for a model that is not there\n"
     calls = [
-        client.put("/api/v1/models/nope/files/part.scad", json={"content": content}),
-        client.delete("/api/v1/models/nope/files/part.scad"),
-        client.delete("/api/v1/models/nope/files/model.scad"),
-        client.put("/api/v1/models/nope/readme", json={"content": content}),
-        client.put("/api/v1/models/nope/source", json={"source": content}),
+        client.put(
+            "/api/v1/models/nope/files/part.scad", json={"content": content}, headers=press()
+        ),
+        client.delete("/api/v1/models/nope/files/part.scad", headers=press()),
+        client.delete("/api/v1/models/nope/files/model.scad", headers=press()),
+        client.put("/api/v1/models/nope/readme", json={"content": content}, headers=press()),
+        client.put("/api/v1/models/nope/source", json={"source": content}, headers=press()),
         client.post(
             "/api/v1/models/nope/source/patch",
             json={"base": "abc1234", "edits": [{"search": "a", "replace": "b"}]},
+            headers=press(),
         ),
-        client.put("/api/v1/models/nope/thumbnail", files={"file": ("t.png", png, "image/png")}),
+        client.put(
+            "/api/v1/models/nope/thumbnail",
+            files={"file": ("t.png", png, "image/png")},
+            headers=press(),
+        ),
     ]
     for answered in calls:
         assert answered.status_code == 404, answered.text
@@ -349,7 +412,7 @@ def test_a_nul_in_a_saved_source_is_refused_before_its_claim(
     """M4: PUT /source refuses binary in the route, as it did before it was an operation."""
     slug, _ = _model(client, "Binary")
     source = "cube(1);\x00\n"
-    refused = client.put(f"/api/v1/models/{slug}/source", json={"source": source})
+    refused = client.put(f"/api/v1/models/{slug}/source", json={"source": source}, headers=press())
     assert refused.status_code == 422, refused.text
     assert _operation_ids(app, "model_source_put") == []
     claim = _state(app).paths.claims / hashlib.sha256(source.encode()).hexdigest()
@@ -366,23 +429,27 @@ def test_a_swept_upload_asks_for_the_edit_again(
         raise LookupError(name)
 
     monkeypatch.setattr(ClaimStore, "get", swept)
-    refused = client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Gone\n"})
+    refused = client.put(
+        f"/api/v1/models/{slug}/readme", json={"content": "# Gone\n"}, headers=press()
+    )
     assert refused.status_code == 409, refused.text
     assert "start the edit again" in refused.json()["detail"]
 
 
 def test_removing_a_missing_readme_is_still_404(client: TestClient) -> None:
     slug, _ = _model(client, "No Readme")
-    response = client.delete(f"/api/v1/models/{slug}/readme")
+    response = client.delete(f"/api/v1/models/{slug}/readme", headers=press())
     assert response.status_code == 404, response.text
     assert "has no README" in response.json()["detail"]
 
 
 def test_a_restore_is_an_operation(client: TestClient, app: FastAPI) -> None:
     slug, first = _model(client, "Restored")
-    moved = client.put(f"/api/v1/models/{slug}/source", json={"source": "cube(5);\n"})
+    moved = client.put(
+        f"/api/v1/models/{slug}/source", json={"source": "cube(5);\n"}, headers=press()
+    )
     assert moved.status_code == 200, moved.text
-    restored = client.post(f"/api/v1/models/{slug}/versions/{first}/restore")
+    restored = client.post(f"/api/v1/models/{slug}/versions/{first}/restore", headers=press())
     assert restored.status_code == 200, restored.text
     assert restored.json()["current"] is True
     assert client.get(f"/api/v1/models/{slug}/source").text == SOURCE

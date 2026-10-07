@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from tests.api.conftest import wait_for_job
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -23,6 +24,7 @@ def upload(client: TestClient, source: str = FIRST) -> dict[str, Any]:
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()
@@ -33,7 +35,9 @@ def put_source(client: TestClient, source: str, message: str | None = None) -> h
     body: dict[str, Any] = {"source": source}
     if message is not None:
         body["message"] = message
-    response: httpx.Response = client.put(f"/api/v1/models/{SLUG}/source", json=body)
+    response: httpx.Response = client.put(
+        f"/api/v1/models/{SLUG}/source", json=body, headers=press()
+    )
     return response
 
 
@@ -77,7 +81,12 @@ def test_upload_then_two_edits_gives_three_revisions(client: TestClient) -> None
 
 def test_a_metadata_change_is_its_own_revision(client: TestClient) -> None:
     upload(client)
-    assert client.patch(f"/api/v1/models/{SLUG}", json={"description": "nicer"}).status_code == 200
+    assert (
+        client.patch(
+            f"/api/v1/models/{SLUG}", json={"description": "nicer"}, headers=press()
+        ).status_code
+        == 200
+    )
 
     assert [entry["message"] for entry in versions(client)] == [
         f"Update {SLUG} metadata",
@@ -126,6 +135,7 @@ def test_a_commit_is_a_snapshot_of_the_whole_repository(client: TestClient) -> N
     other = client.post(
         "/api/v1/models",
         files={"file": ("plate.scad", FIRST.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert other.status_code == 201
 
@@ -140,6 +150,7 @@ def test_a_revision_that_predates_the_model_is_a_404(client: TestClient) -> None
     other = client.post(
         "/api/v1/models",
         files={"file": ("plate.scad", FIRST.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert other.status_code == 201
     upload(client)
@@ -200,7 +211,7 @@ def test_restore_is_a_new_revision_and_never_a_rewrite(client: TestClient) -> No
     first = upload(client)["version"]
     put_source(client, SECOND)
 
-    response = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore")
+    response = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore", headers=press())
 
     assert response.status_code == 200
     restored = response.json()
@@ -219,7 +230,7 @@ def test_restore_is_a_new_revision_and_never_a_rewrite(client: TestClient) -> No
 def test_restoring_an_unknown_revision_is_a_404(client: TestClient) -> None:
     upload(client)
 
-    response = client.post(f"/api/v1/models/{SLUG}/versions/{'0' * 40}/restore")
+    response = client.post(f"/api/v1/models/{SLUG}/versions/{'0' * 40}/restore", headers=press())
 
     assert response.status_code == 404
 
@@ -245,7 +256,9 @@ def test_a_messaged_edit_is_parse_guarded_and_names_its_revision(
     upload(client)
 
     refused = client.put(
-        f"/api/v1/models/{SLUG}/source", json={"source": "%%FAIL%%\n", "message": "Broken"}
+        f"/api/v1/models/{SLUG}/source",
+        json={"source": "%%FAIL%%\n", "message": "Broken"},
+        headers=press(),
     )
     assert refused.status_code == 422
     assert [entry["message"] for entry in versions(client)] == [f"Add {SLUG}"]
@@ -254,6 +267,7 @@ def test_a_messaged_edit_is_parse_guarded_and_names_its_revision(
     forced = client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": "%%FAIL%%\n", "message": "Saved anyway", "force": True},
+        headers=press(),
     )
     assert forced.status_code == 200, forced.text
 
@@ -273,7 +287,12 @@ def test_rendering_does_not_dirty_the_repository(client: TestClient) -> None:
     assert wait_for_job(client, job["job_id"])["status"] == "done"
 
     before = versions(client)
-    assert client.patch(f"/api/v1/models/{SLUG}", json={"description": "nicer"}).status_code == 200
+    assert (
+        client.patch(
+            f"/api/v1/models/{SLUG}", json={"description": "nicer"}, headers=press()
+        ).status_code
+        == 200
+    )
 
     added = versions(client)[0]
     assert added["message"] == f"Update {SLUG} metadata"
@@ -314,7 +333,9 @@ def test_an_output_records_the_revision_it_was_rendered_from(client: TestClient)
     assert finished["model_version"] == second
 
     output = client.post(
-        f"/api/v1/models/{SLUG}/outputs", json={"job_id": job["job_id"], "name": "now"}
+        f"/api/v1/models/{SLUG}/outputs",
+        json={"job_id": job["job_id"], "name": "now"},
+        headers=press(),
     )
     assert output.status_code == 201
     assert output.json()["model_version"] == second
@@ -352,7 +373,7 @@ def test_rendering_an_unknown_revision_is_a_404(client: TestClient) -> None:
 def test_deleting_a_model_records_the_deletion(client: TestClient) -> None:
     upload(client)
 
-    assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
+    assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code == 204
 
     # The model is gone, so its history is only reachable through the repository --
     # which is the point of not inventing a store: the commit is still there.

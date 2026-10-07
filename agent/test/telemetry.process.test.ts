@@ -11,21 +11,26 @@ import { TRACE_ID, TRACEPARENT } from './support/tracing.js'
 
 // The entry as it runs in the image (spec 2026-10-01 §5.4):
 // `node --import ./dist/telemetry.js dist/main.js`. Incoming requests continue
-// the caller's trace; only the backend client injects `traceparent`; fetch
-// and node:http requests carry none; with no endpoint nothing is exported,
-// and with OTEL_SDK_DISABLED nothing is traced at all.
+// the caller's trace; only the backend client injects `traceparent`; fetch,
+// node:http, the plugin forwarder's request on to a plugin and the
+// http_request tool's carry none; with no endpoint nothing is exported, and
+// with OTEL_SDK_DISABLED nothing is traced at all and the SDK is never loaded.
 
 const AGENT = fileURLToPath(new URL('..', import.meta.url))
 const OUT = path.join(AGENT, 'node_modules', '.cache', 'scadbuddy-telemetry-test', String(process.pid))
 const TSC = path.join(AGENT, 'node_modules', 'typescript', 'bin', 'tsc')
 
-const FORWARDER_TOKEN = 'f0rw4rd3r-c4p4b1l1ty'
-
 const CHILD = `
 import http from 'node:http'
+import { mkdtemp } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { trace } from '@opentelemetry/api'
 const { createBackendClient } = await import('./api/backend.js')
-const { shutdownTelemetry, traceListener } = await import('./telemetry/setup.js')
+// What main.ts imports: the SDK-free half (telemetry/runtime.ts).
+const { shutdownTelemetry, traceListener } = await import('./telemetry/runtime.js')
+const { PluginForwarder } = await import('./plugins/forwarder.js')
+const { runHttpRequest, withDefaults } = await import('./harness/httpRequest.js')
 
 const target = process.argv[2]
 // HttpInstrumentation wraps Server.prototype.emit with shimmer, which marks the wrapper.
@@ -41,6 +46,15 @@ const get = (url, headers = {}) =>
       })
       .on('error', reject)
   })
+const post = (url, body, headers = {}) =>
+  new Promise((resolve, reject) => {
+    const req = http.request(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers } }, (res) => {
+      res.resume()
+      res.on('end', () => resolve(res.statusCode))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
 
 const server = http.createServer((_req, res) => {
   res.end(JSON.stringify({ traceId: trace.getActiveSpan()?.spanContext().traceId ?? null }))
@@ -50,37 +64,53 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 traceListener(server.address().port)
 const incoming = JSON.parse(await get('http://127.0.0.1:' + server.address().port + '/', { traceparent: '${TRACEPARENT}' }))
 
-// Another listener in the process, as the plugin forwarder's loopback server
-// (plugins/forwarder.ts): its requests are not the app's, and its path is a capability.
-const forwarder = http.createServer((_req, res) => {
-  res.end(JSON.stringify({ traceId: trace.getActiveSpan()?.spanContext().traceId ?? null }))
-})
-await new Promise((resolve) => forwarder.listen(0, '127.0.0.1', resolve))
-const forwarded = JSON.parse(await get('http://127.0.0.1:' + forwarder.address().port + '/p/${FORWARDER_TOKEN}', { traceparent: '${TRACEPARENT}' }))
-forwarder.close()
+// The plugin forwarder (plugins/forwarder.ts), with a plugin at the target:
+// its listener is not the app's, its path is a capability, and the request
+// it sends on carries no trace context, whatever came in.
+const forwarder = await PluginForwarder.start()
+const route = forwarder.register({ name: 'p', url: target + '/plugin', toolTiers: {}, disabledTools: [] }, '127.0.0.1')
 
 const client = createBackendClient(target)
 const work = await trace.getTracer('child').startActiveSpan('work', async (span) => {
   await client.GET('/healthz')
   await fetch(target + '/plain')
   await get(target + '/node')
+  const forwardedStatus = await post(route.url, '{"jsonrpc":"2.0","id":1,"method":"ping"}', { traceparent: '${TRACEPARENT}' })
+  // The http_request tool as a turn runs it (harness/httpRequest.ts).
+  const saveDir = path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-process-')), 'http')
+  const requested = await runHttpRequest(withDefaults({ url: target + '/http-request', method: 'GET' }), {
+    saveDir,
+    secrets: () => [],
+    actor: { kind: 'browser', id: 'user', label: 'User' },
+  })
   span.end()
-  return span.spanContext().traceId
+  return { traceId: span.spanContext().traceId, forwardedStatus, requestFailed: requested.isError === true }
 })
+await forwarder.close()
 server.close()
 await shutdownTelemetry()
+const sdkLoaded = (globalThis.resolvedUrls ?? []).some((url) => url.includes('/@opentelemetry/sdk-node/'))
 // Like main.ts, exit explicitly: a pending export retry to an unreachable
 // collector would otherwise keep the loop alive past shutdownTelemetry's budget.
-process.stdout.write(JSON.stringify({ incoming: incoming.traceId, forwarded: forwarded.traceId, work, emitWrapped, hooks: globalThis.registeredHooks }) + '\\n', () => process.exit(0))
+process.stdout.write(JSON.stringify({ incoming: incoming.traceId, forwarderToken: route.url.split('/p/')[1], work: work.traceId, forwardedStatus: work.forwardedStatus, requestFailed: work.requestFailed, emitWrapped, sdkLoaded, hooks: globalThis.registeredHooks }) + '\\n', () => process.exit(0))
 `
 
 // Imported before telemetry.js: records each loader hook registered, since
-// node:module offers no way to list them. syncBuiltinESMExports carries the
-// patch to the named `register` export telemetry.ts imports.
+// node:module offers no way to list them, and every module resolved (an
+// in-thread hook, which registers no loader). syncBuiltinESMExports carries
+// the patch to the named `register` export telemetry.ts imports.
 const RECORDER = `
 import module, { syncBuiltinESMExports } from 'node:module'
 const original = module.register
 globalThis.registeredHooks = []
+globalThis.resolvedUrls = []
+module.registerHooks({
+  resolve(specifier, context, next) {
+    const resolved = next(specifier, context)
+    globalThis.resolvedUrls.push(resolved.url)
+    return resolved
+  },
+})
 module.register = (specifier, ...rest) => {
   globalThis.registeredHooks.push(String(specifier))
   return original(specifier, ...rest)
@@ -90,7 +120,16 @@ syncBuiltinESMExports()
 
 type Hit = { path: string; traceparent: string | undefined; contentType: string | undefined; body: Buffer }
 
-type Out = { incoming: string | null; forwarded: string | null; work: string; emitWrapped: boolean; hooks: string[] }
+type Out = {
+  incoming: string | null
+  forwarderToken: string
+  work: string
+  forwardedStatus: number
+  requestFailed: boolean
+  emitWrapped: boolean
+  sdkLoaded: boolean
+  hooks: string[]
+}
 
 let target: Server
 let url: string
@@ -104,6 +143,9 @@ beforeAll(async () => {
       TSC,
       'src/telemetry.ts',
       'src/api/backend.ts',
+      'src/telemetry/runtime.ts',
+      'src/plugins/forwarder.ts',
+      'src/harness/httpRequest.ts',
       '--ignoreConfig',
       '--outDir', OUT,
       '--rootDir', 'src',
@@ -185,6 +227,11 @@ describe('the agent under `node --import ./dist/telemetry.js`', () => {
     expect(hit('/healthz')?.traceparent).toMatch(new RegExp(`^00-${out.work}-[0-9a-f]{16}-01$`))
     expect(hit('/plain')).toMatchObject({ traceparent: undefined })
     expect(hit('/node')).toMatchObject({ traceparent: undefined })
+    expect(out.forwardedStatus).toBe(200)
+    expect(hit('/plugin')).toMatchObject({ traceparent: undefined })
+    expect(out.requestFailed).toBe(false)
+    expect(hit('/http-request')).toMatchObject({ traceparent: undefined })
+    expect(out.sdkLoaded).toBe(true)
     expect(hit('/v1/traces')?.contentType).toBe('application/x-protobuf')
   }, 30_000)
 
@@ -192,10 +239,11 @@ describe('the agent under `node --import ./dist/telemetry.js`', () => {
     const { code, out } = await runChild({ OTEL_EXPORTER_OTLP_ENDPOINT: url })
     expect(code).toBe(0)
     expect(out.incoming).toBe(TRACE_ID)
-    expect(out.forwarded).toBeNull()
+    expect(out.forwardedStatus).toBe(200)
     const exported = Buffer.concat(hits.filter((h) => h.path === '/v1/traces').map((h) => h.body))
     expect(exported.length).toBeGreaterThan(0)
-    expect(exported.includes(FORWARDER_TOKEN)).toBe(false)
+    expect(out.forwarderToken).toMatch(/^[A-Za-z0-9_-]{24}$/)
+    expect(exported.includes(out.forwarderToken)).toBe(false)
     expect(exported.includes('/p/')).toBe(false)
   }, 30_000)
 
@@ -214,6 +262,9 @@ describe('the agent under `node --import ./dist/telemetry.js`', () => {
     // The kill switch's point: no loader hook, so node:http is never shimmed.
     expect(out.emitWrapped).toBe(false)
     expect(out.hooks).toEqual([])
+    // Nor is the SDK loaded: main.ts's telemetry/runtime.ts imports none of it.
+    expect(out.sdkLoaded).toBe(false)
+    expect(hit('/plugin')).toMatchObject({ traceparent: undefined })
     expect(hit('/healthz')).toMatchObject({ traceparent: undefined })
     expect(hit('/v1/traces')).toBeUndefined()
   }, 30_000)

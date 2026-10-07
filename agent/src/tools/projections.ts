@@ -1,7 +1,7 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { context as otelContext, SpanStatusCode } from '@opentelemetry/api'
+import { type Context, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
 import { toolContextFor, withSpan } from '../telemetry/trace.js'
@@ -85,6 +85,8 @@ export function createHarnessServer(
   principal: Principal,
   /** The session the server's calls run in, for the commits they make (authorship.ts, #252). */
   session?: string,
+  /** The turn's open segment (telemetry/turn.ts TurnTrace.context): where a call with no bound span is traced. */
+  turnContext?: () => Context,
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -107,7 +109,7 @@ export function createHarnessServer(
           // In the call's own span (telemetry/turn.ts TurnTrace), found by the
           // tool_use id Claude Code sends in `_meta`: the SDK runs this handler
           // in the query's context, not the tool's (telemetry/trace.ts).
-          otelContext.with(toolContextFor(extra), () =>
+          otelContext.with(toolContextFor(extra, turnContext), () =>
             // `gate: 'harness'`: the query's permission seam has already parked
             // an outward call for approval (registry.ts ToolContext.gate).
             runTool(t, args, {

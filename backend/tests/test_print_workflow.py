@@ -455,7 +455,9 @@ async def test_a_failure_before_any_enqueue_closes_at_once(
     fake.plan_error = ApplicationError("boom", type="Boom", non_retryable=True)
     arg = run_input(window=600)
     await start(client, worker, arg)
-    run = await asyncio.wait_for(ended(client, arg), timeout=10)
+    # Well short of the 600 s repeat window a run that may have queued would wait out,
+    # and well past a loaded dev server's latency: one start there has taken 8 s.
+    run = await asyncio.wait_for(ended(client, arg), timeout=60)
     assert run.status == "failed" and not run.may_have_queued
 
 

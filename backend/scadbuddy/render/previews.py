@@ -57,6 +57,10 @@ DEFAULT_DEBOUNCE = 2.0
 #: with every thumbnail-less model to render -- never runs back to back. The
 #: backfill's, so the two never drift apart.
 DEFAULT_INTERVAL = PAUSE.total_seconds()
+#: The longest a preview waits before trying its source's snapshot again. Each try
+#: holds the scheduler's one worker for up to `PIN_TIMEOUT`, so the wait doubles from
+#: the store's own Retry-After up to this (#1435).
+MAX_SNAPSHOT_RETRY_DELAY = 600.0
 #: A preview renders the schema, the model and its plate image, each bounded by
 #: `render_timeout`; this bounds the three together.
 TIMEOUT_FACTOR = 3
@@ -168,6 +172,8 @@ class PreviewScheduler:
         self._busy = False
         #: Held by every refresh, the backfill's too: one preview at a time.
         self._lock = asyncio.Lock()
+        #: Model id -> its tries in a row that found the snapshot still storing.
+        self._pending_tries: dict[str, int] = {}
 
     def start(self) -> None:
         # Made here, on the loop that will run the worker, not in `__init__`.
@@ -263,6 +269,7 @@ class PreviewScheduler:
 
     async def _refresh(self, slug: str, *, raise_unrun: bool) -> bool:
         key = await asyncio.to_thread(self.plan, slug)
+        tries = self._pending_tries.pop(slug, 0)
         if key is None:
             return False
         try:
@@ -276,11 +283,13 @@ class PreviewScheduler:
             # The source's first snapshot is still uploading and carries on (#686):
             # come back once it should be stored. Nothing else would bring the slug
             # back before its next edit or the next boot.
+            delay = min(error.retry_after * 2**tries, MAX_SNAPSHOT_RETRY_DELAY)
+            self._pending_tries[slug] = tries + 1
             logger.info(
                 "a preview waits for its source snapshot; it is tried again",
-                extra={"slug": slug, "retry_after": error.retry_after},
+                extra={"slug": slug, "retry_after": delay},
             )
-            self._schedule(slug, error.retry_after)
+            self._schedule(slug, delay)
             return True
         except Exception as error:
             reason = str(error) or type(error).__name__

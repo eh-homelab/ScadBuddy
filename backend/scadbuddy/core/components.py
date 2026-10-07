@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from scadbuddy.core.settings import Settings
     from scadbuddy.library.catalogue import Catalogue
     from scadbuddy.library.history import ModelHistory
-    from scadbuddy.library.libraries import CheckoutGate, LibraryStore
+    from scadbuddy.library.libraries import CheckoutGate, InstallPermits, LibraryStore
     from scadbuddy.library.outputs import OutputStore
     from scadbuddy.library.settings_store import SettingsStore
     from scadbuddy.render.projection import JobProjection
@@ -62,7 +62,7 @@ class Core(Protocol):
     metrics: Metrics
     checkouts: CheckoutGate
     libraries: LibraryStore
-    installs: asyncio.Semaphore
+    installs: InstallPermits
     checks: asyncio.Semaphore
     settings_store: SettingsStore
     print_links: PrintLinkStore

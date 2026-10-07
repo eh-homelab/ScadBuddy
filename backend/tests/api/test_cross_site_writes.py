@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from tests.support.operations import press
 
 SOURCE = "cube(6);"
 FOREIGN = ["https://evil.example", "http://scad.example.com", "null", "not a url"]
@@ -23,7 +24,7 @@ def _paste(client: TestClient, name: str, headers: dict[str, str]) -> int:
     response = client.post(
         "/api/v1/models",
         content=SOURCE.encode(),
-        headers={"Content-Type": "text/plain", "X-Model-Name": name, **headers},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": name, **headers},
     )
     status: int = response.status_code
     return status
@@ -42,6 +43,7 @@ def test_a_foreign_origin_cannot_create_a_model(public: TestClient, origin: str)
         "/api/v1/models",
         content=SOURCE.encode(),
         headers={
+            **press(),
             "Content-Type": "text/plain",
             "X-Model-Name": "csrf",
             "Origin": origin,
@@ -57,7 +59,7 @@ def test_a_foreign_multipart_form_is_refused(public: TestClient) -> None:
     response = public.post(
         "/api/v1/models",
         files={"file": ("csrf.scad", SOURCE.encode(), "application/octet-stream")},
-        headers={"Origin": "https://evil.example"},
+        headers={**press(), "Origin": "https://evil.example"},
     )
     assert response.status_code == 403, response.text
     assert public.get("/api/v1/models/csrf").status_code == 404
@@ -68,6 +70,7 @@ def test_a_foreign_bodyless_post_is_refused(public: TestClient) -> None:
     response = public.post(
         "/api/v1/models/kept/upstream/detach",
         headers={
+            **press(),
             "Origin": "https://evil.example",
             "Content-Type": "application/x-www-form-urlencoded",
         },
@@ -132,7 +135,7 @@ def test_unconfigured_a_foreign_origin_is_still_refused(client: TestClient, orig
     response = client.post(
         "/api/v1/models",
         content=SOURCE.encode(),
-        headers={"Content-Type": "text/plain", "X-Model-Name": "Far", "Origin": origin},
+        headers={**press(), "Content-Type": "text/plain", "X-Model-Name": "Far", "Origin": origin},
     )
     assert response.status_code == 403, response.text
     detail = response.json()["detail"]

@@ -22,6 +22,7 @@ from scadbuddy.core.authorship import (
 )
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.history import GitError, git_env
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -34,6 +35,7 @@ def upload(client: TestClient, source: str = FIRST) -> dict[str, Any]:
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()
@@ -41,7 +43,9 @@ def upload(client: TestClient, source: str = FIRST) -> dict[str, Any]:
 
 
 def patch(client: TestClient, body: dict[str, Any], **headers: str) -> Any:
-    return client.post(f"/api/v1/models/{SLUG}/source/patch", json=body, headers=headers)
+    return client.post(
+        f"/api/v1/models/{SLUG}/source/patch", json=body, headers={**press(), **headers}
+    )
 
 
 def source(client: TestClient) -> str:
@@ -74,7 +78,9 @@ def test_search_replace_edits_apply_against_a_short_base(client: TestClient) -> 
 
 def test_a_stale_base_is_a_409_naming_the_current_revision(client: TestClient) -> None:
     base = upload(client)["version"]
-    moved = client.put(f"/api/v1/models/{SLUG}/source", json={"source": FIRST + "sphere(1);\n"})
+    moved = client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": FIRST + "sphere(1);\n"}, headers=press()
+    )
     current = moved.json()["version"]
 
     response = patch(client, {"base": base, "edits": [{"search": "10", "replace": "11"}]})
@@ -123,6 +129,7 @@ def test_a_built_in_cannot_be_patched(client: TestClient) -> None:
     response = client.post(
         "/api/v1/models/builtin:keychain/source/patch",
         json={"base": "0" * 40, "edits": [{"search": "a", "replace": "b"}]},
+        headers=press(),
     )
     assert response.status_code in (403, 404)
 
@@ -130,16 +137,23 @@ def test_a_built_in_cannot_be_patched(client: TestClient) -> None:
 def test_put_source_with_a_stale_base_is_refused(client: TestClient) -> None:
     base = upload(client)["version"]
     assert (
-        client.put(f"/api/v1/models/{SLUG}/source", json={"source": "a = 1;\n"}).status_code == 200
+        client.put(
+            f"/api/v1/models/{SLUG}/source", json={"source": "a = 1;\n"}, headers=press()
+        ).status_code
+        == 200
     )
 
-    stale = client.put(f"/api/v1/models/{SLUG}/source", json={"source": "a = 2;\n", "base": base})
+    stale = client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": "a = 2;\n", "base": base}, headers=press()
+    )
 
     assert stale.status_code == 409
     assert source(client) == "a = 1;\n"
     current = stale.json()["current"]
     fresh = client.put(
-        f"/api/v1/models/{SLUG}/source", json={"source": "a = 2;\n", "base": current}
+        f"/api/v1/models/{SLUG}/source",
+        json={"source": "a = 2;\n", "base": current},
+        headers=press(),
     )
     assert fresh.status_code == 200
 
@@ -180,10 +194,11 @@ def test_a_restore_in_a_threadpool_route_is_the_agents_too(
     """`restore_version` is a plain `def` route: Starlette runs it in its threadpool,
     which must still see the request's author."""
     base = upload(client)["version"]
-    client.put(f"/api/v1/models/{SLUG}/source", json={"source": "a = 1;\n"})
+    client.put(f"/api/v1/models/{SLUG}/source", json={"source": "a = 1;\n"}, headers=press())
 
     restored = client.post(
-        f"/api/v1/models/{SLUG}/versions/{base}/restore", headers={AUTHOR_HEADER: "browser"}
+        f"/api/v1/models/{SLUG}/versions/{base}/restore",
+        headers={**press(), AUTHOR_HEADER: "browser"},
     )
 
     assert restored.status_code == 200, restored.text
@@ -195,7 +210,7 @@ def test_the_headless_browsers_marker_names_the_session(client: TestClient) -> N
     response = client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": "a = 3;\n"},
-        headers={"X-ScadBuddy-Agent-Session": "headless-1"},
+        headers={**press(), "X-ScadBuddy-Agent-Session": "headless-1"},
     )
     assert response.status_code == 200, response.text
     latest = client.get(f"/api/v1/models/{SLUG}/versions").json()[0]

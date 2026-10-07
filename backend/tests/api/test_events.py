@@ -28,6 +28,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import follow_run, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.conftest import make_library_upstream
+from tests.support.operations import press
 
 API = f"{BASE}/api/v1"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
@@ -104,7 +105,10 @@ def events(app: FastAPI) -> Recorded:
 @pytest.fixture
 def mine(client: TestClient, events: list[Event]) -> str:
     """A template created through the API, so it is committed like any other."""
-    _ok(client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}), 201)
+    _ok(
+        client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}, headers=press()),
+        201,
+    )
     events.clear()
     return "widget"
 
@@ -134,18 +138,23 @@ def _ok(response: httpx.Response, status: int = 200) -> Any:
 
 
 def test_creating_a_model_publishes_model_created(client: TestClient, events: list[Event]) -> None:
-    _ok(client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}), 201)
+    _ok(
+        client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}, headers=press()),
+        201,
+    )
     _ok(
         client.post(
             "/api/v1/models",
             content=SOURCE,
-            headers={"content-type": "text/plain", "X-Model-Name": "Pasted"},
+            headers={**press(), "content-type": "text/plain", "X-Model-Name": "Pasted"},
         ),
         201,
     )
     _ok(
         client.post(
-            "/api/v1/models", files={"file": ("uploaded.scad", SOURCE.encode(), "text/plain")}
+            "/api/v1/models",
+            files={"file": ("uploaded.scad", SOURCE.encode(), "text/plain")},
+            headers=press(),
         ),
         201,
     )
@@ -159,7 +168,9 @@ def test_creating_a_model_publishes_model_created(client: TestClient, events: li
 def test_a_refused_create_publishes_nothing(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
-    response = client.post("/api/v1/models", json={"name": "Demo", "source": SOURCE})
+    response = client.post(
+        "/api/v1/models", json={"name": "Demo", "source": SOURCE}, headers=press()
+    )
     assert response.status_code == 409
     assert published(events) == []
 
@@ -169,21 +180,25 @@ def test_a_refused_create_publishes_nothing(
 def test_importing_a_model_publishes_model_created(client: TestClient, events: list[Event]) -> None:
     url = "https://raw.githubusercontent.com/someone/models/main/Bin.scad"
     respx.get(url).mock(return_value=httpx.Response(200, text=SOURCE))
-    _ok(client.post("/api/v1/models/import", json={"url": url}), 201)
+    _ok(client.post("/api/v1/models/import", json={"url": url}, headers=press()), 201)
     assert published(events, "model.created") == [{"kind": "model.created", "slug": "bin"}]
 
 
 def test_editing_metadata_publishes_model_updated(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
-    _ok(client.patch(f"/api/v1/models/{model}", json={"description": "new"}))
+    _ok(client.patch(f"/api/v1/models/{model}", json={"description": "new"}, headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": model}]
 
 
 def test_saving_source_publishes_source_changed_and_model_updated(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
-    _ok(client.put(f"/api/v1/models/{model}/source", json={"source": SOURCE + "// v2\n"}))
+    _ok(
+        client.put(
+            f"/api/v1/models/{model}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     assert published(events, "source.changed") == [{"kind": "source.changed", "slug": model}]
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": model}]
 
@@ -192,18 +207,20 @@ def test_thumbnail_and_readme_writes_publish_model_updated(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
     png = {"file": ("thumb.png", PNG_BYTES, "image/png")}
-    _ok(client.put(f"/api/v1/models/{model}/thumbnail", files=png))
-    _ok(client.delete(f"/api/v1/models/{model}/thumbnail"))
-    _ok(client.put(f"/api/v1/models/{model}/readme", json={"content": "# Demo\n"}))
-    _ok(client.delete(f"/api/v1/models/{model}/readme"))
+    _ok(client.put(f"/api/v1/models/{model}/thumbnail", files=png, headers=press()))
+    _ok(client.delete(f"/api/v1/models/{model}/thumbnail", headers=press()))
+    _ok(client.put(f"/api/v1/models/{model}/readme", json={"content": "# Demo\n"}, headers=press()))
+    _ok(client.delete(f"/api/v1/models/{model}/readme", headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": model}] * 4
 
 
 def test_duplicating_and_deleting_publish_created_and_deleted(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    _ok(client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}), 201)
-    _ok(client.delete("/api/v1/models/copy"), 204)
+    _ok(
+        client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
+    _ok(client.delete("/api/v1/models/copy", headers=press()), 204)
     assert published(events, "model.created") == [{"kind": "model.created", "slug": "copy"}]
     assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": "copy"}]
 
@@ -214,12 +231,18 @@ def test_every_preset_write_publishes_presets_changed(
 ) -> None:
     """#357: another tab, or the assistant, sees a preset change without a reload."""
     url = f"/api/v1/models/{model}/presets"
-    saved = _ok(client.post(url, json={"name": "Big", "params": {"width": 25}}), 201)
-    _ok(client.patch(f"{url}/{saved['id']}", json={"name": "Bigger"}))
-    copy = _ok(client.post(f"{url}/{saved['id']}/duplicate", json={"name": "Copy"}), 201)
+    saved = _ok(
+        client.post(url, json={"name": "Big", "params": {"width": 25}}, headers=press()), 201
+    )
+    _ok(client.patch(f"{url}/{saved['id']}", json={"name": "Bigger"}, headers=press()))
+    copy = _ok(
+        client.post(f"{url}/{saved['id']}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
     _ok(client.delete(f"{url}/{copy['id']}"), 204)
     # A refused write changed nothing, so it says nothing.
-    assert client.post(url, json={"name": "bigger", "params": {}}).status_code == 409
+    assert (
+        client.post(url, json={"name": "bigger", "params": {}}, headers=press()).status_code == 409
+    )
     assert published(events, "presets.changed") == [{"kind": "presets.changed", "slug": model}] * 4
 
 
@@ -227,7 +250,11 @@ def test_every_preset_write_publishes_presets_changed(
 def test_every_commit_publishes_version_committed(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    saved = _ok(client.put(f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}))
+    saved = _ok(
+        client.put(
+            f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     committed = published(events, "version.committed")
     assert committed == [{"kind": "version.committed", "slug": mine, "commit": saved["version"]}]
 
@@ -237,10 +264,14 @@ def test_restoring_a_version_publishes_source_changed_and_its_commit(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
     first = _ok(client.get(f"/api/v1/models/{mine}"))["version"]
-    _ok(client.put(f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}))
+    _ok(
+        client.put(
+            f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     events.clear()
 
-    restored = _ok(client.post(f"/api/v1/models/{mine}/versions/{first}/restore"))
+    restored = _ok(client.post(f"/api/v1/models/{mine}/versions/{first}/restore", headers=press()))
 
     assert published(events, "source.changed") == [{"kind": "source.changed", "slug": mine}]
     assert published(events, "version.committed") == [
@@ -252,13 +283,16 @@ def test_restoring_a_version_publishes_source_changed_and_its_commit(
 def test_an_upstream_edit_is_announced_to_its_duplicates(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    _ok(client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}), 201)
+    _ok(
+        client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
     events.clear()
 
     saved = _ok(
         client.put(
             f"/api/v1/models/{mine}/source",
             json={"source": SOURCE.replace("width = 10", "width = 11")},
+            headers=press(),
         )
     )
 
@@ -276,20 +310,26 @@ def test_an_upstream_edit_is_announced_to_its_duplicates(
 def test_merging_dismissing_and_detaching_publish_their_events(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    _ok(client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}), 201)
-    _ok(client.put(f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}))
+    _ok(
+        client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
+    _ok(
+        client.put(
+            f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}, headers=press()
+        )
+    )
     events.clear()
-    _ok(client.post("/api/v1/models/copy/upstream/dismiss"))
+    _ok(client.post("/api/v1/models/copy/upstream/dismiss", headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
 
     events.clear()
-    _ok(client.post("/api/v1/models/copy/upstream/merge"))
+    _ok(client.post("/api/v1/models/copy/upstream/merge", headers=press()))
     assert published(events, "source.changed") == [{"kind": "source.changed", "slug": "copy"}]
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
 
-    _ok(client.delete(f"/api/v1/models/{mine}", params={"force": "true"}), 204)
+    _ok(client.delete(f"/api/v1/models/{mine}", params={"force": "true"}, headers=press()), 204)
     events.clear()
-    _ok(client.post("/api/v1/models/copy/upstream/detach"))
+    _ok(client.post("/api/v1/models/copy/upstream/detach", headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
 
 
@@ -311,8 +351,8 @@ def test_pinning_and_unpinning_a_library_publish_library_changed(
     app.dependency_overrides[get_libraries] = lambda: store
     getattr(app.state, STATE_ATTR).libraries = store
 
-    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
-    _ok(client.delete(f"/api/v1/models/{mine}/libraries/BOSL2"))
+    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}, headers=press()))
+    _ok(client.delete(f"/api/v1/models/{mine}/libraries/BOSL2", headers=press()))
 
     assert (
         published(events, "library.changed")
@@ -342,12 +382,16 @@ def test_repinning_and_removing_checkouts_publish_their_events(
     )
     app.dependency_overrides[get_libraries] = lambda: store
     getattr(app.state, STATE_ATTR).libraries = store
-    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
+    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}, headers=press()))
     events.clear()
 
-    _ok(client.patch(f"/api/v1/models/{mine}/libraries/BOSL2", json={"ref": "v2"}))
-    assert client.delete("/api/v1/libraries/BOSL2").status_code == 409  # still pinned
-    assert client.patch("/api/v1/models/widget/libraries/other", json={}).status_code == 404
+    _ok(client.patch(f"/api/v1/models/{mine}/libraries/BOSL2", json={"ref": "v2"}, headers=press()))
+    # Still pinned.
+    assert client.delete("/api/v1/libraries/BOSL2", headers=press()).status_code == 409
+    assert (
+        client.patch("/api/v1/models/widget/libraries/other", json={}, headers=press()).status_code
+        == 404
+    )
     # Through published(), which settles the Postgres bus first (#562).
     repinned = [
         event
@@ -356,7 +400,7 @@ def test_repinning_and_removing_checkouts_publish_their_events(
     ]
     events.clear()
     _ok(
-        client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}),
+        client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()),
         204,
     )
 
@@ -416,7 +460,7 @@ def test_a_pin_that_lands_after_its_run_was_cancelled_still_publishes(
 
     monkeypatch.setattr(state.catalogue, "pin_library", slow_pin)
 
-    response = client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={})
+    response = client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}, headers=press())
     assert response.status_code == 500, response.text
     assert "may have been done" in response.json()["detail"]
     events.wait_for_kind("model.updated", timeout=40)
@@ -470,7 +514,7 @@ def test_saving_and_deleting_an_output_publish_their_events(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
     output_id = make_output(client, model)
-    _ok(client.delete(f"/api/v1/outputs/{output_id}"), 204)
+    _ok(client.delete(f"/api/v1/outputs/{output_id}", headers=press()), 204)
     cast(Recorded, events).wait_for_kind("output.deleted")
     assert published(events, "output.created") == [
         {"kind": "output.created", "output_id": output_id, "slug": model}
@@ -551,7 +595,7 @@ def test_installing_a_font_publishes_font_installed(
 ) -> None:
     service = FakeBackedService(data_dir, client=FakeClient())
     app.dependency_overrides[get_fonts] = lambda: service
-    _ok(client.post("/api/v1/fonts/install", json={"family": "Pacifico"}))
+    _ok(client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press()))
     assert published(events, "font.installed") == [{"kind": "font.installed", "family": "Pacifico"}]
 
 
@@ -569,7 +613,11 @@ def test_a_broken_bus_never_fails_the_request(
 
     monkeypatch.setattr(bus, "publish", broken)
     with caplog.at_level(logging.ERROR):
-        _ok(client.patch(f"/api/v1/models/{model}", json={"description": "still saved"}))
+        _ok(
+            client.patch(
+                f"/api/v1/models/{model}", json={"description": "still saved"}, headers=press()
+            )
+        )
         _ok(client.put("/api/v1/settings", json={"public_url": "https://scad.example"}))
     assert _ok(client.get(f"/api/v1/models/{model}"))["description"] == "still saved"
     assert "could not publish an event" in caplog.text

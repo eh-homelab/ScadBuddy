@@ -17,6 +17,7 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.library.googlefonts import FamilyFiles
 from tests.api.test_fonts import FakeBackedService, FakeClient
 from tests.api.test_model_operations import _workflow_ids
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_postgres]
 
@@ -34,7 +35,7 @@ def fonts(app: FastAPI, data_dir: Path) -> FakeBackedService:
 def test_font_install_is_an_operation(
     client: TestClient, app: FastAPI, fonts: FakeBackedService
 ) -> None:
-    response = client.post(INSTALL, json={"family": "Pacifico"})
+    response = client.post(INSTALL, json={"family": "Pacifico"}, headers=press())
     assert response.status_code == 200, response.text
     assert response.json()["family"] == "Pacifico"
     assert _workflow_ids(app, "font_install")
@@ -76,7 +77,7 @@ def test_two_installs_of_one_family_with_one_key_download_once(
 def test_a_family_not_in_the_catalogue_is_still_404(
     client: TestClient, app: FastAPI, fonts: FakeBackedService
 ) -> None:
-    response = client.post(INSTALL, json={"family": "Comic Sans MS"})
+    response = client.post(INSTALL, json={"family": "Comic Sans MS"}, headers=press())
     assert response.status_code == 404, response.text
     assert "not in the Google Fonts catalogue" in response.json()["detail"]
 

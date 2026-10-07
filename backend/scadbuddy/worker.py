@@ -48,6 +48,7 @@ from scadbuddy.library.libraries import (
     CheckoutFetcher,
     CheckoutGate,
     CheckoutLeases,
+    InstallPermits,
     LibraryStore,
 )
 from scadbuddy.library.library_seed import seed_libraries
@@ -58,6 +59,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.usage import RackUsageStore, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -77,6 +79,7 @@ from scadbuddy.workflows.client import (
 )
 from scadbuddy.workflows.follow import FOLLOW_WORKFLOW
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -126,7 +129,9 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     # The leases in Postgres, where the API's removals see them (#872).
     checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    fetcher = CheckoutFetcher(libraries, asyncio.Semaphore(INSTALL_CONCURRENCY), checkouts)
+    fetcher = CheckoutFetcher(
+        libraries, InstallPermits(INSTALL_CONCURRENCY, projection.pool), checkouts
+    )
     assets = AssetStore(
         paths.assets,
         projection.pool,
@@ -196,6 +201,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         snapshots=state.store.snapshots,
         fonts_mirror=state.store.fonts,
         remote_assets=state.store.remote_assets,
+        openscad_version=state.openscad_version or "",
     )
 
 
@@ -269,10 +275,17 @@ async def _poll(
 ) -> None:
     config = deps.config
     build_id = settings.revision
+    # What every output's record names (§8.4): this image and its openscad. The
+    # in-process worker has the API's probe already; running openscad again here, in a
+    # task beside the API's first requests, would only race them.
+    deps.revision = settings.revision
+    if not deps.openscad_version:
+        deps.openscad_version = await probe_openscad_version(config) or ""
     worker = render_worker(
         client,
         settings.temporal_task_queue_render,
         RenderActivities(deps),
+        pipeline=PipelineActivities(deps),
         build_id=build_id,
         max_concurrent_activities=config.render_concurrency,
         graceful_shutdown_timeout=timedelta(

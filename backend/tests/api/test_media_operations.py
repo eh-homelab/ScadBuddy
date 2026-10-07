@@ -17,6 +17,7 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from tests.api.conftest import PNG_BYTES
 from tests.api.test_media import WEBM
 from tests.api.test_model_operations import _commits, _history_bytes, _state, _workflow_ids
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -28,7 +29,7 @@ def _upload(client: TestClient, slug: str, payload: bytes, key: str | None = Non
         f"/api/v1/models/{slug}/media",
         files={"file": ("f.png", payload, "image/png")},
         data={"caption": "c"},
-        headers={"Idempotency-Key": key} if key else None,
+        headers={"Idempotency-Key": key} if key else press(),
     )
 
 
@@ -58,16 +59,20 @@ def test_a_repeated_media_upload_makes_one_item(
 def test_media_edits_are_operations(client: TestClient, app: FastAPI, model: str) -> None:
     first = _upload(client, model, PNG).json()["media"][0]["id"]
     second = _upload(client, model, PNG_BYTES + b"\x01").json()["media"][1]["id"]
-    captioned = client.patch(f"/api/v1/models/{model}/media/{first}", json={"caption": "x"})
+    captioned = client.patch(
+        f"/api/v1/models/{model}/media/{first}", json={"caption": "x"}, headers=press()
+    )
     assert captioned.status_code == 200, captioned.text
     assert captioned.json()["media"][0]["caption"] == "x"
-    ordered = client.put(f"/api/v1/models/{model}/media/order", json={"ids": [second, first]})
+    ordered = client.put(
+        f"/api/v1/models/{model}/media/order", json={"ids": [second, first]}, headers=press()
+    )
     assert ordered.status_code == 200, ordered.text
     assert [item["id"] for item in ordered.json()["media"]] == [second, first]
-    covered = client.put(f"/api/v1/models/{model}/media/cover", json={"id": first})
+    covered = client.put(f"/api/v1/models/{model}/media/cover", json={"id": first}, headers=press())
     assert covered.status_code == 200, covered.text
     assert covered.json()["media"][0]["id"] == first
-    deleted = client.delete(f"/api/v1/models/{model}/media/{second}")
+    deleted = client.delete(f"/api/v1/models/{model}/media/{second}", headers=press())
     assert deleted.status_code == 200, deleted.text
     assert [item["id"] for item in deleted.json()["media"]] == [first]
     for kind in (
@@ -113,7 +118,7 @@ def test_a_keyed_media_edit_resent_after_the_model_went_answers_as_first(
     url = f"/api/v1/models/{model}/media/{item}"
     first = client.patch(url, json={"caption": "x"}, headers=headers)
     assert first.status_code == 200, first.text
-    assert client.delete(f"/api/v1/models/{model}").status_code in (200, 204)
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code in (200, 204)
     again = client.patch(url, json={"caption": "x"}, headers=headers)
     assert again.status_code == 200, again.text
     assert again.json() == first.json()
@@ -138,6 +143,7 @@ def test_a_poster_that_cannot_be_held_releases_the_files_claim(
         client.post(
             f"/api/v1/models/{model}/media",
             files={"file": ("v.webm", WEBM, "video/webm"), "poster": ("p.png", PNG, "image/png")},
+            headers=press(),
         )
     assert holds[0] == hashlib.sha256(WEBM).hexdigest()
     assert not (_state(app).paths.claims / holds[0]).exists()
