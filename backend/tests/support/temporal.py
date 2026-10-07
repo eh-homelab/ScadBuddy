@@ -49,8 +49,12 @@ NO_TICK = 100 * 365 * 86400.0
 #: How long a test's app may take to have its render build serve its queue: the
 #: worker's own `MAKE_CURRENT_DEADLINE`, with room for the describes.
 BUILD_SERVES_TIMEOUT = 75.0
-#: Between two checks of whether it does.
+#: The first wait between two checks of whether it does, doubled after each up to
+#: `BUILD_SERVES_MAX_POLL`: the dev server rate-limits Worker Deployment calls ("too
+#: many requests issued to Worker Deployment"), and the worker's `make_current` needs
+#: them more than this wait does.
 BUILD_SERVES_POLL = 0.25
+BUILD_SERVES_MAX_POLL = 2.0
 
 
 def namespace_not_found_error() -> RPCError:
@@ -187,7 +191,8 @@ async def build_serves(client: Client, task_queue: str, build_id: str) -> bool:
     """Whether the render deployment routes ``task_queue``'s new workflows to
     ``build_id``: the build is the deployment's current version, and the queue is one of
     its version's (a worker of it polled the queue). Until then a render started on the
-    queue waits unrouted. Any `RPCError` (no such deployment or version yet) is a no."""
+    queue waits unrouted. Any `RPCError` (no such deployment or version yet, or
+    RESOURCE_EXHAUSTED from the rate limit) is a no, asked again later."""
     rpc_timeout = timedelta(seconds=5)
     try:
         if not await is_current(client, namespace=client.namespace, build_id=build_id):
@@ -210,17 +215,25 @@ async def build_serves(client: Client, task_queue: str, build_id: str) -> bool:
 
 
 async def wait_until_build_serves(
-    client: Client, task_queue: str, build_id: str, *, timeout: float, poll: float
+    client: Client,
+    task_queue: str,
+    build_id: str,
+    *,
+    timeout: float,
+    poll: float,
+    max_poll: float,
 ) -> bool:
-    """Poll `build_serves` until it holds (True) or ``timeout`` seconds have passed
-    (False). The time waited is summed on the loop's monotonic clock, each step
-    clamped at zero: this host's monotonic clock has stepped back too."""
+    """Ask `build_serves` until it holds (True) or ``timeout`` seconds have passed
+    (False), ``poll`` seconds apart at first, doubling up to ``max_poll``. The time
+    waited is summed on the loop's monotonic clock, each step clamped at zero: this
+    host's monotonic clock has stepped back too."""
     loop = asyncio.get_running_loop()
     waited, last = 0.0, loop.time()
     while not await build_serves(client, task_queue, build_id):
         if waited >= timeout:
             return False
         await asyncio.sleep(poll)
+        poll = min(poll * 2, max_poll)
         now = loop.time()
         waited += max(0.0, now - last)
         last = now
@@ -269,6 +282,7 @@ class WorkflowReaper:
                 build_id,
                 timeout=BUILD_SERVES_TIMEOUT,
                 poll=BUILD_SERVES_POLL,
+                max_poll=BUILD_SERVES_MAX_POLL,
             ),
             # Past the wait's own bound by its last check's two describes.
             timeout=BUILD_SERVES_TIMEOUT + 15,
