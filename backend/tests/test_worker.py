@@ -52,6 +52,7 @@ from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
     MAKE_CURRENT_BACKOFF,
+    MAKE_CURRENT_DEADLINE,
     MAKE_CURRENT_EVERY,
     _drain,
     _poll,
@@ -343,7 +344,7 @@ async def test_is_current_names_the_deployments_current_build() -> None:
             build_id=build_id,
             backoff=MAKE_CURRENT_BACKOFF,
             every=MAKE_CURRENT_EVERY,
-            deadline=60,
+            deadline=MAKE_CURRENT_DEADLINE,
         )
         assert await _is_current_answer(client, build_id)
         assert not await _is_current_answer(client, "other")
@@ -352,6 +353,14 @@ async def test_is_current_names_the_deployments_current_build() -> None:
 #: `is_current`'s attempts and the longest wait between two (`_is_current_answer`).
 IS_CURRENT_ATTEMPTS = 12
 IS_CURRENT_MAX_WAIT = 5.0
+#: What a busy server answers meanwhile; anything else is a real error, raised at once.
+IS_CURRENT_TRANSIENT = frozenset(
+    {
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        RPCStatusCode.UNAVAILABLE,
+    }
+)
 
 
 async def _is_current_answer(client: Client, build_id: str) -> bool:
@@ -363,8 +372,8 @@ async def _is_current_answer(client: Client, build_id: str) -> bool:
     for attempt in range(IS_CURRENT_ATTEMPTS):
         try:
             return await is_current(client, namespace=client.namespace, build_id=build_id)
-        except RPCError:
-            if attempt == IS_CURRENT_ATTEMPTS - 1:
+        except RPCError as error:
+            if error.status not in IS_CURRENT_TRANSIENT or attempt == IS_CURRENT_ATTEMPTS - 1:
                 raise
             await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
     raise AssertionError("unreachable")
