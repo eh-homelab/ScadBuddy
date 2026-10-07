@@ -1,5 +1,8 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
+
+/** One deliberate press: every operation route requires a fresh `Idempotency-Key` (#1143). */
+const press = (): Record<string, string> => ({ 'Idempotency-Key': randomUUID() })
 
 /**
  * The real stack: a real OpenSCAD behind the real FastAPI app, no msw anywhere.
@@ -131,6 +134,7 @@ test.describe('real backend', () => {
     const second = first.replace('width = 10;', 'width = 24;')
 
     const created = await request.post('/api/v1/models', {
+      headers: press(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from(first) },
       },
@@ -176,7 +180,7 @@ test.describe('real backend', () => {
         'width = 10;',
       )
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await request.delete(`/api/v1/models/${slug}`, { headers: press() })
     }
   })
 
@@ -192,6 +196,7 @@ test.describe('real backend', () => {
     // A parameter to change: the customizer renders on a change, not on open.
     const source = `// ${slug}\ntag = "a";\ncolor("red") linear_extrude(2) import("pic.svg");\n`
     const created = await request.post('/api/v1/models', {
+      headers: press(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from(source) },
       },
@@ -206,7 +211,7 @@ test.describe('real backend', () => {
         'OpenSCAD could not open pic.svg',
       )
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await request.delete(`/api/v1/models/${slug}`, { headers: press() })
     }
   })
 
@@ -223,6 +228,7 @@ test.describe('real backend', () => {
     // a keystroke.
     const slug = `e2e-lsp-${Date.now().toString(36)}`
     const created = await request.post('/api/v1/models', {
+      headers: press(),
       multipart: {
         file: {
           name: `${slug}.scad`,
@@ -254,7 +260,7 @@ test.describe('real backend', () => {
         { timeout: 30_000 },
       )
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await request.delete(`/api/v1/models/${slug}`, { headers: press() })
     }
   })
 
@@ -265,6 +271,7 @@ test.describe('real backend', () => {
   test('shows details edited in one tab in another', async ({ context, request }) => {
     const slug = `e2e-live-${Date.now().toString(36)}`
     const created = await request.post('/api/v1/models', {
+      headers: press(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
       },
@@ -286,7 +293,7 @@ test.describe('real backend', () => {
         timeout: 15_000,
       })
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await request.delete(`/api/v1/models/${slug}`, { headers: press() })
     }
   })
 
@@ -316,6 +323,7 @@ test.describe('real backend', () => {
 
     const slug = `e2e-ws-${Date.now().toString(36)}`
     const created = await request.post('/api/v1/models', {
+      headers: press(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
       },
@@ -326,7 +334,7 @@ test.describe('real backend', () => {
         .poll(async () => (await frames()).find((f) => f.kind === 'model.created')?.data?.slug)
         .toBe(slug)
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await request.delete(`/api/v1/models/${slug}`, { headers: press() })
     }
   })
 })
