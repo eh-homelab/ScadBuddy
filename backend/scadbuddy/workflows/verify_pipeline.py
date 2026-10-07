@@ -79,9 +79,10 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
         finals: dict[str, Projection] = {}
 
         @activity.defn(name="project")
-        async def project(projection: Projection) -> None:
+        async def project(projection: Projection) -> bool:
             if projection.state not in (None, "running"):
                 finals[projection.job_id] = projection
+            return True  # every case's row is open: nothing here settles one early
 
         render = RenderActivities(deps)
         acts = [a for a in render.all() if a != render.project]
