@@ -305,7 +305,9 @@ def test_no_serial_enters_the_runs_workflow_history(
     while pending:
         handle = workflow_reaper.client.get_workflow_handle(pending.pop())
         history = workflow_reaper.run(handle.fetch_history())
-        # Payloads are bytes; the text format prints their ASCII as it is.
+        # Payloads are bytes; the text format prints their ASCII as it is. That assumes
+        # the default (JSON) payload converter: a binary or compressed one would hide
+        # both the serials and the positions, and this test would need to decode them.
         text = "\n".join(text_format.MessageToString(event) for event in history.events)
         positions += text.count('\\"position\\"')
         for invented in INVENTED_SERIALS:
