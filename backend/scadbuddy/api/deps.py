@@ -93,9 +93,16 @@ class ImportPermits:
         self.limit = limit
         #: When each held permit was taken, by a token of its own.
         self._taken: dict[object, float] = {}
+        #: Set when a permit is given back, then replaced.
+        self._freed = asyncio.Event()
 
     def full(self) -> bool:
         return len(self._taken) >= self.limit
+
+    async def wait(self) -> None:
+        """Until a permit is free; take it with `hold` with no await in between."""
+        while self.full():
+            await self._freed.wait()
 
     @contextmanager
     def hold(self) -> Iterator[None]:
@@ -105,6 +112,8 @@ class ImportPermits:
             yield
         finally:
             del self._taken[token]
+            self._freed.set()
+            self._freed = asyncio.Event()
 
     def retry_after(self) -> int:
         """Seconds until the oldest held fetch reaches `IMPORT_TIMEOUT` and must have

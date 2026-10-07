@@ -275,9 +275,8 @@ describe('PrintPicker', () => {
       ...queuedResult,
       warnings: [
         {
-          kind: 'hf-unsupported',
-          message:
-            "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet.",
+          kind: 'not-installed',
+          message: 'No 0.6 mm nozzle is installed. Install one before this prints.',
         },
         {
           kind: 'plate-differs',
@@ -292,7 +291,7 @@ describe('PrintPicker', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     const warnings = await screen.findByTestId('run-warnings')
-    expect(warnings).toHaveTextContent('High Flow presets')
+    expect(warnings).toHaveTextContent('No 0.6 mm nozzle is installed')
     expect(warnings).toHaveTextContent('Swap to Textured PEI Plate')
     expect(screen.getByTestId('queued-items')).toHaveTextContent('Sliced and queued for 3DP-31B-598')
     expect(onRan).toHaveBeenCalledTimes(1)

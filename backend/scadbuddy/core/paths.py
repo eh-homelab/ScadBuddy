@@ -131,6 +131,11 @@ class DataPaths:
         return self.cache / "tombstones"
 
     @property
+    def claims(self) -> Path:
+        """Request bytes an operation's run reads by name (``operations/claims.py``)."""
+        return self.cache / "claims"
+
+    @property
     def model_revisions(self) -> Path:
         return self.cache / "revisions"
 

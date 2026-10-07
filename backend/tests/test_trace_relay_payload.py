@@ -960,3 +960,24 @@ def test_a_long_url_attribute_is_reduced_in_linear_time() -> None:
     ]
     body = export(span(attributes=[string("url.full", url) for url in urls]))
     assert _timed(lambda: prepare(body)) < _LINEAR_BUDGET_SECONDS
+
+
+def test_a_batch_that_rewrites_past_the_cap_is_too_large() -> None:
+    """#1137: `rewrite` fills in every default field and ``ensure_ascii`` escapes, so a
+    small body can grow several times over; what is queued and sent is capped."""
+    sparse = {"traceId": TRACE_ID, "spanId": SPAN_ID, "events": [{}] * payload.MAX_EVENTS}
+    body = json.dumps(
+        {"resourceSpans": [{"scopeSpans": [{"spans": [sparse] * payload.MAX_SPANS}]}]},
+        separators=(",", ":"),
+    ).encode()
+    assert len(body) < payload.MAX_PREPARED_BYTES
+    with pytest.raises(BatchTooLargeError) as error:
+        payload.prepare(body, lambda path: None, lambda origin: True)
+    assert str(error.value) == "a trace batch is at most 256 KiB once rewritten"
+
+
+def test_a_batch_just_under_the_cap_is_kept() -> None:
+    sparse = {"traceId": TRACE_ID, "spanId": SPAN_ID}
+    body = export(*[sparse] * payload.MAX_SPANS)
+    prepared = payload.prepare(body, lambda path: None, lambda origin: True)
+    assert prepared is not None and len(prepared) <= payload.MAX_PREPARED_BYTES

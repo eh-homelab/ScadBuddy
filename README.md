@@ -928,12 +928,17 @@ call parks, and the decision is a trace of its own linked to it
 (`backend/scadbuddy/telemetry/`) forwards it in the background to
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (used as is) or else
 `$OTEL_EXPORTER_OTLP_ENDPOINT/v1/traces`, with `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or else
-`OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It accepts only the UI's own origins (the
+`OTEL_EXPORTER_OTLP_HEADERS` sent on every post. It reads the CA file, the client
+certificate and key, and the timeout (seconds) as the backend's exporter does:
+`OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE`, `…_CLIENT_CERTIFICATE`, `…_CLIENT_KEY` and
+`…_TIMEOUT`, each else its `OTEL_EXPORTER_OTLP_` form; a file it cannot read stops the
+start. It accepts only the UI's own origins (the
 public URL, `SCADBUDDY_ALLOWED_ORIGINS` and loopback, as the realtime socket does; a `Sec-Fetch-Site` the browser sends must be
 `same-origin`, so a page on another allowed origin is refused; a request without
 `Sec-Fetch-Site`, from an older browser or a non-browser client, is admitted on `Origin`
 alone), at
-most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`), and rewrites every batch's resource to
+most 256 KiB and 512 spans a batch (and 16 `resourceSpans`, 64 `scopeSpans`, and 256 KiB
+once rewritten), and rewrites every batch's resource to
 `service.name=scadbuddy-web`. A page span's URLs keep no path of their own: each is
 reduced to the backend route template its path matches, or to its origin (a relative
 one on no route is dropped), as a server span keeps only its route; a URL on any host
@@ -942,7 +947,8 @@ No user agent and no `exception.message` is forwarded, wherever the page put it.
 answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
 export, arrives with row 4 of #988). Its rate
 limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
-client), so with more than one API replica the overall ceiling multiplies.
+client, an IPv6 client being its /64), so with more than one API replica the overall
+ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
 whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
 `SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
@@ -950,8 +956,11 @@ gets a bucket of its own. Empty, every browser behind the gateway shares one. It
 only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
 `FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
 that flag lets any loopback caller name its own client.
-`scadbuddy_trace_relay_batches_total{outcome}` counts `forwarded`, `failed`,
-`queue_full` and `shutdown`; any rise in the last three means browser spans were lost.
+`scadbuddy_trace_relay_batches_total{outcome}` counts every batch a page sent:
+`forwarded`, `failed` (the collector refused it or was unreachable, or the forwarding
+task had died, which is logged when it happens and answered 503), `queue_full`,
+`shutdown`, `rate_limited` (429) and `rejected` (400, 413, 415); any rise in an outcome
+but `forwarded` means browser spans were lost.
 
 The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
 directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
