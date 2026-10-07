@@ -1,5 +1,8 @@
 const KEY = 'scadbuddy:stale-chunk-reload'
 
+/** A message naming the module that failed: an absolute URL or a `.js` path. */
+const NAMES_A_URL = /\w+:\/\/|\.js\b/
+
 /** Matchers for the optional chunks whose import is in flight. */
 const optionalLoads = new Set<RegExp>()
 
@@ -8,9 +11,12 @@ const optionalLoads = new Set<RegExp>()
  * failure is often not staleness (blockers match names like `tracing-<hash>.js`), and a
  * reload would lose the user's first edits and fail again, so a `vite:preloadError`
  * about it does not reload. Vite dispatches that event before the import rejects, with
- * the error as `payload`; Chromium's message names the failing URL, which `chunk` must
- * match. An error about any other chunk, or one whose message names no URL (Firefox's
- * does not), is treated as stale as before. The rejection still reaches the caller.
+ * the error as `payload`; Chromium's and Firefox's messages name the failing URL, which
+ * `chunk` must match. Safari's (`Importing a module script failed.`) names none, so while
+ * an optional load is in flight an error naming no URL is taken as its failure too: a
+ * stale chunk failing in that same window skips one reload and recovers on the next. An
+ * error naming any other chunk is treated as stale as before. The rejection still
+ * reaches the caller.
  */
 export async function loadOptionalChunk<T>(load: () => Promise<T>, chunk: RegExp): Promise<T> {
   optionalLoads.add(chunk)
@@ -24,6 +30,7 @@ export async function loadOptionalChunk<T>(load: () => Promise<T>, chunk: RegExp
 function isOptional(event: Event): boolean {
   const payload = (event as Event & { payload?: unknown }).payload
   const message = payload instanceof Error ? payload.message : String(payload ?? '')
+  if (optionalLoads.size > 0 && !NAMES_A_URL.test(message)) return true
   return [...optionalLoads].some((chunk) => chunk.test(message))
 }
 
