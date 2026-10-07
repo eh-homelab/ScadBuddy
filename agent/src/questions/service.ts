@@ -238,8 +238,10 @@ export class QuestionService {
    * expires them, so under one shared cap enough of them would push a question
    * a turn is parked on off the badge. `summariesTruncated`: there were more
    * summaries than that, so the oldest are not listed and the badge says so.
+   * Only the rows of sessions `principal` owns (#1218): a handoff cancels a
+   * session's pending rows, but the listing does not rely on that.
    */
-  async listPending(): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
+  async listPending(principal: Owner): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
     type Pending = {
       id: string
       session_id: string
@@ -254,13 +256,19 @@ export class QuestionService {
       expires_at: Date | null
     }
     const waiting = await this.deps.sql<Pending[]>`
-      SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
-      FROM ai_questions WHERE outcome IS NULL AND (attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL)
-      ORDER BY created_at, id LIMIT ${PENDING_CAP}`
+      SELECT q.id, q.session_id, q.kind, q.tool, q.tool_use_id, q.questions, q.attention_reason, q.on_timeout, q.summary,
+             q.created_at, q.expires_at
+      FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
+      WHERE s.owner_kind = ${principal.kind} AND s.owner_id = ${principal.id}
+        AND q.outcome IS NULL AND (q.attention_reason IS DISTINCT FROM 'done' OR q.expires_at IS NOT NULL)
+      ORDER BY q.created_at, q.id LIMIT ${PENDING_CAP}`
     const done = await this.deps.sql<Pending[]>`
-      SELECT id, session_id, kind, tool, tool_use_id, questions, attention_reason, on_timeout, summary, created_at, expires_at
-      FROM ai_questions WHERE outcome IS NULL AND attention_reason = 'done' AND expires_at IS NULL
-      ORDER BY created_at DESC, id DESC LIMIT ${PENDING_CAP + 1}`
+      SELECT q.id, q.session_id, q.kind, q.tool, q.tool_use_id, q.questions, q.attention_reason, q.on_timeout, q.summary,
+             q.created_at, q.expires_at
+      FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
+      WHERE s.owner_kind = ${principal.kind} AND s.owner_id = ${principal.id}
+        AND q.outcome IS NULL AND q.attention_reason = 'done' AND q.expires_at IS NULL
+      ORDER BY q.created_at DESC, q.id DESC LIMIT ${PENDING_CAP + 1}`
     const summariesTruncated = done.length > PENDING_CAP
     const questions = [...waiting, ...done.slice(0, PENDING_CAP)].map((r) => ({
       id: r.id,
