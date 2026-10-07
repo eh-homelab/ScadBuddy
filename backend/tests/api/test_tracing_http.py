@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 
-from tests.conftest import wait_for_span
+from tests.conftest import http_server_span, wait_for_span
 
 #: Every attribute a server span carries today (instrumentation 0.66b0, the default
 #: semconv). The scrub (`core/trace_scrub.py`) is a denylist of exact names, so a
@@ -32,7 +32,7 @@ def _server_spans(spans: InMemorySpanExporter) -> list[str]:
     return [
         str((s.attributes or {}).get("http.route"))
         for s in spans.get_finished_spans()
-        if s.kind is SpanKind.SERVER
+        if http_server_span(s)
     ]
 
 
@@ -40,7 +40,7 @@ def test_an_api_request_is_a_server_span_named_by_its_route(
     client: TestClient, spans: InMemorySpanExporter
 ) -> None:
     assert client.get("/api/v1/models").status_code == 200
-    server = wait_for_span(spans, lambda s: s.kind is SpanKind.SERVER)
+    server = wait_for_span(spans, http_server_span)
     assert (server.attributes or {}).get("http.route") == "/api/v1/models"
     assert "?" not in server.name
 
@@ -51,7 +51,7 @@ def test_its_queries_are_children_of_the_request(
     # A job lookup reads render_jobs (projection.read) before answering 404.
     missing = "0123456789abcdef0123456789abcdef"
     assert client.get(f"/api/v1/jobs/{missing}").status_code == 404
-    server = wait_for_span(spans, lambda s: s.kind is SpanKind.SERVER)
+    server = wait_for_span(spans, http_server_span)
     queries = [
         s
         for s in spans.get_finished_spans()
@@ -76,9 +76,9 @@ def test_a_server_span_carries_only_known_attributes(
     assert client.get(f"/api/v1/jobs/{missing}?q=s3ntinel", headers=headers).status_code == 404
     wait_for_span(
         spans,
-        lambda s: s.kind is SpanKind.SERVER and (s.attributes or {}).get("http.status_code") == 404,
+        lambda s: http_server_span(s) and (s.attributes or {}).get("http.status_code") == 404,
     )
-    server = [s for s in spans.get_finished_spans() if s.kind is SpanKind.SERVER]
+    server = [s for s in spans.get_finished_spans() if http_server_span(s)]
     assert len(server) == 2
     for finished in server:
         assert set(finished.attributes or {}) <= KNOWN_SERVER_ATTRIBUTES, finished.attributes
@@ -101,14 +101,14 @@ def test_a_path_that_only_contains_an_excluded_one_is_traced(
     client: TestClient, spans: InMemorySpanExporter
 ) -> None:
     assert client.get("/api/v1/models/metrics-x").status_code == 404
-    wait_for_span(spans, lambda s: s.kind is SpanKind.SERVER)
+    wait_for_span(spans, http_server_span)
 
 
 def test_body_chunks_and_messages_are_not_spans(
     client: TestClient, spans: InMemorySpanExporter
 ) -> None:
     assert client.get("/api/v1/models").status_code == 200
-    wait_for_span(spans, lambda s: s.kind is SpanKind.SERVER)
+    wait_for_span(spans, http_server_span)
     names = [s.name for s in spans.get_finished_spans()]
     assert not [n for n in names if n.endswith((" http send", " http receive"))], names
 
@@ -118,5 +118,5 @@ def test_a_garbage_traceparent_starts_a_fresh_trace(
 ) -> None:
     response = client.get("/api/v1/models", headers={"traceparent": "00-garbage-xx-01"})
     assert response.status_code == 200
-    server = wait_for_span(spans, lambda s: s.kind is SpanKind.SERVER)
+    server = wait_for_span(spans, http_server_span)
     assert server.parent is None

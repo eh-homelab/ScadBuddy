@@ -221,7 +221,7 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 - An explicit `env`, so the service's own environment (the database URL above all) does
   not reach the Claude Code subprocess.
 
-The option semantics are quoted from the pinned SDK's `sdk.d.ts` 0.3.287 in that file.
+The option semantics are quoted from the pinned SDK's `sdk.d.ts` (0.3.283, and unchanged in 0.3.287) in that file.
 `run.ts` also sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, citing the
 [gateway docs](https://code.claude.com/docs/en/llm-gateway-connect) ("Turn off traffic
 outside the gateway path").
@@ -614,9 +614,9 @@ is refused, with every problem listed, if it has any of the following:
   line, as the CLI matches it) in any Markdown file. These run a shell "before the
   skill content is sent to Claude" ([skills](https://code.claude.com/docs/en/skills)).
   Every query also sets `disableSkillShellExecution` (`harness/options.ts`); measured on
-  CLI 2.1.283 and 2.1.287, the CLI then puts a placeholder in place of both forms instead
-  of running them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness
-  denied the resulting Bash call (2.1.283).
+  CLI 2.1.283 and 2.1.287, the CLI then puts a placeholder in place of both forms instead of running
+  them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness denied the
+  resulting Bash call.
 - **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
   in the vetted files and in the review. So that no key can hide from this check,
   frontmatter must be plain YAML (`frontmatter()`): the block is cut where the CLI cuts

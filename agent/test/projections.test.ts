@@ -44,7 +44,9 @@ describe('registry projections', () => {
     }
   })
 
-  it('fill an omitted default in-process (the SDK 0.3.283 server refused it given a raw shape)', async () => {
+  // The harness server gets each tool's raw shape (projections.ts). SDK 0.3.283
+  // refused this call ("expected nonoptional"); 0.3.287 fills the default.
+  it('fill an omitted default in-process', async () => {
     const bodies: unknown[] = []
     const backend = createBackendClient(BACKEND, async (request) => {
       bodies.push(await (request as Request).json())

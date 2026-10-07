@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path as FilePath
 from typing import IO, Annotated, Any
@@ -389,19 +391,22 @@ THUMBNAIL_FORMATS = ("PNG", "JPEG", "WEBP")
 #: thumbnail is cached as ``immutable`` only when it does: bump it whenever the
 #: output changes for the same source (side, quality, resampler, format), and the
 #: frontend's ``MEDIA_THUMBNAIL_VERSION`` with it, so a browser holding an old copy
-#: asks again (#1424).
+#: asks again (#1424). ``client.test.ts`` fails when the two differ (#1691).
 THUMBNAIL_VERSION = 1
 #: How many thumbnails are decoded at once: a 50 MP PNG costs some 200 MB, and a
 #: gallery strip asks for every item's thumbnail together (#1420).
 MAX_CONCURRENT_THUMBNAILS = 2
+#: How many thumbnails are kept in memory once made, so a source is decoded once
+#: rather than on every request (#1420). A WebP of `THUMBNAIL_SIDE` is some 10 kB.
+THUMBNAIL_CACHE_ITEMS = 512
 #: Square, so an EXIF orientation of 5 to 8, which swaps width and height, fits it
 #: either way round: the image is shrunk before it is turned upright, and the
 #: full-size copy `exif_transpose` would make is never made (#1426).
 _THUMBNAIL_BOX = (THUMBNAIL_SIDE, THUMBNAIL_SIDE)
 
 
-def _thumbnail_of(path: FilePath) -> bytes | None:
-    """``path`` shrunk to a WebP no larger than `THUMBNAIL_SIDE`, or None when Pillow
+def _shrink(file: IO[bytes]) -> bytes | None:
+    """``file`` shrunk to a WebP no larger than `THUMBNAIL_SIDE`, or None when Pillow
     cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
     `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
     header, before decoding). ``draft`` lets a JPEG decode at a fraction of its size,
@@ -409,7 +414,7 @@ def _thumbnail_of(path: FilePath) -> bytes | None:
     malformed EXIF block raises ``ValueError`` or ``SyntaxError`` -- is a None too,
     since serving the file as it is is always safe."""
     try:
-        with Image.open(path, formats=THUMBNAIL_FORMATS) as image:
+        with Image.open(file, formats=THUMBNAIL_FORMATS) as image:
             image.draft("RGB", _THUMBNAIL_BOX)
             if image.width * image.height > MAX_THUMBNAIL_SOURCE_PIXELS:
                 return None
@@ -429,22 +434,94 @@ def _thumbnail_of(path: FilePath) -> bytes | None:
         return None
 
 
-async def _bounded_thumbnail_of(request: Request, path: FilePath) -> bytes | None:
-    """`_thumbnail_of`, at most `MAX_CONCURRENT_THUMBNAILS` at a time. A request
-    waiting its turn holds no thread. The semaphore is the app's, made on first use,
-    so it belongs to the loop that serves the app."""
-    decodes: asyncio.Semaphore | None = getattr(request.app.state, "thumbnail_decodes", None)
+@dataclass(frozen=True)
+class _Thumbnail:
+    body: bytes
+    media_type: str
+    #: Of the file ``body`` was read from, through the same handle.
+    stat: os.stat_result
+
+
+def _thumbnail_of(path: FilePath, content_type: str) -> _Thumbnail:
+    """``path`` shrunk by `_shrink`, or as it is (typed ``content_type``) when it
+    cannot be. The stat and the bytes come from one open handle, so the legacy
+    item's ETag describes what is served even if a thumbnail PUT replaces the file
+    meanwhile (#1689). ``FileNotFoundError`` when the file is gone. The fallback is
+    read whole, not streamed: an image is capped at `MAX_IMAGE_BYTES`, and at most
+    `MAX_CONCURRENT_THUMBNAILS` are held at once."""
+    with path.open("rb") as file:
+        stat = os.fstat(file.fileno())
+        small = _shrink(file)
+        if small is not None:
+            return _Thumbnail(small, "image/webp", stat)
+        file.seek(0)
+        return _Thumbnail(file.read(), content_type, stat)
+
+
+def _cache_key(path: FilePath, stat: os.stat_result) -> tuple[object, ...]:
+    """Which file, and which content of it: an item replaced in place (the legacy
+    one) or renamed over (a thumbnail PUT) changes its inode, size or times."""
+    return (
+        str(path),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+class _ThumbnailCache:
+    """The WebPs made most recently, by `_cache_key`; only touched on the loop."""
+
+    def __init__(self, size: int = THUMBNAIL_CACHE_ITEMS) -> None:
+        self.size = size
+        self._items: OrderedDict[tuple[object, ...], _Thumbnail] = OrderedDict()
+
+    def get(self, key: tuple[object, ...]) -> _Thumbnail | None:
+        thumbnail = self._items.get(key)
+        if thumbnail is not None:
+            self._items.move_to_end(key)
+        return thumbnail
+
+    def put(self, path: FilePath, thumbnail: _Thumbnail) -> None:
+        key = _cache_key(path, thumbnail.stat)
+        self._items[key] = thumbnail
+        self._items.move_to_end(key)
+        while len(self._items) > self.size:
+            self._items.popitem(last=False)
+
+
+async def _bounded_thumbnail_of(request: Request, path: FilePath, content_type: str) -> _Thumbnail:
+    """`_thumbnail_of`, at most `MAX_CONCURRENT_THUMBNAILS` at a time, and once per
+    content of a file: a WebP made is kept (#1420), while a file served as it is is
+    not. A request waiting its turn holds no thread, and finds the WebP a request
+    ahead of it made. The semaphore and the cache are the app's, made on first use,
+    so they belong to the loop that serves the app."""
+    state = request.app.state
+    decodes: asyncio.Semaphore | None = getattr(state, "thumbnail_decodes", None)
     if decodes is None:
         decodes = asyncio.Semaphore(MAX_CONCURRENT_THUMBNAILS)
-        request.app.state.thumbnail_decodes = decodes
+        state.thumbnail_decodes = decodes
+    cache: _ThumbnailCache | None = getattr(state, "thumbnail_cache", None)
+    if cache is None:
+        cache = _ThumbnailCache()
+        state.thumbnail_cache = cache
+    key = _cache_key(path, await asyncio.to_thread(path.stat))
+    if (kept := cache.get(key)) is not None:
+        return kept
     async with decodes:
-        return await asyncio.to_thread(_thumbnail_of, path)
+        if (kept := cache.get(key)) is not None:
+            return kept
+        thumbnail = await asyncio.to_thread(_thumbnail_of, path, content_type)
+    if thumbnail.media_type == "image/webp":
+        cache.put(path, thumbnail)
+    return thumbnail
 
 
-def _legacy_etag(path: FilePath) -> str:
+def _legacy_etag(stat: os.stat_result) -> str:
     """A validator for the legacy item's thumbnail, which a thumbnail PUT replaces
     in place: from the source's mtime and size, and `THUMBNAIL_VERSION`."""
-    stat = path.stat()
     return f'W/"{stat.st_mtime_ns:x}-{stat.st_size:x}-{THUMBNAIL_VERSION}"'
 
 
@@ -489,7 +566,10 @@ def _thumbnail_source(catalogue: Catalogue, slug: str, item_id: str) -> _Thumbna
     "/models/{slug}/media/{item_id}/thumbnail",
     response_class=Response,
     responses={
-        200: {"content": {"image/webp": {}, "image/*": {}}},
+        200: {
+            "content": {"image/*": {}},
+            "description": "Usually `image/webp`; the item's own type when it is served as it is",
+        },
         304: {"description": "The legacy item's thumbnail has not changed (`If-None-Match`)"},
     },
     summary="A small copy of one item",
@@ -516,16 +596,21 @@ async def get_media_thumbnail(
     else:
         headers = {"Cache-Control": IMMUTABLE_CACHE_CONTROL}
     if source.legacy:
+        # A cheap check before the decode; the ETag sent is the decoded file's own.
         try:
-            headers["ETag"] = _legacy_etag(source.path)
+            current = _legacy_etag(source.path.stat())
         except FileNotFoundError:
             raise _no_item(slug, item_id) from None
-        if _matches(request.headers.get("if-none-match"), headers["ETag"]):
+        if _matches(request.headers.get("if-none-match"), current):
+            headers["ETag"] = current
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
-    small = await _bounded_thumbnail_of(request, source.path)
-    if small is None:
-        return FileResponse(source.path, media_type=source.content_type, headers=headers)
-    return Response(small, media_type="image/webp", headers=headers)
+    try:
+        thumbnail = await _bounded_thumbnail_of(request, source.path, source.content_type)
+    except FileNotFoundError:
+        raise _no_item(slug, item_id) from None
+    if source.legacy:
+        headers["ETag"] = _legacy_etag(thumbnail.stat)
+    return Response(thumbnail.body, media_type=thumbnail.media_type, headers=headers)
 
 
 @router.post(

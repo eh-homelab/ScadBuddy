@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readdir, readFile } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { createSdkMcpServer, type SDKMessage, type SDKResultMessage, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -74,27 +73,6 @@ describe('buildHarnessOptions', () => {
     const { env: _env, ...rest } = options
     expect(JSON.stringify(rest)).not.toContain(API_KEY)
     expect(process.env.ANTHROPIC_API_KEY).not.toBe(API_KEY)
-  })
-
-  it('is the only query() call, so every query asks for the default permission mode', async () => {
-    // SDK 0.3.286 leaves an omitted `permissionMode` to Claude Code, which "on
-    // third-party providers or with telemetry off" starts in auto mode, where a
-    // classifier decides calls instead of canUseTool (#258) (its changelog;
-    // against the fake gateway an omitted mode still started in `default`,
-    // measured 2026-10-06). So the mode is asked for outright, here only; the
-    // end-to-end test below checks the mode Claude Code reports.
-    expect(buildHarnessOptions(base).permissionMode).toBe('default')
-    // `query` imported by name (aliased or not), the whole module, or a dynamic import.
-    const sdk = String.raw`\s*['"]@anthropic-ai/claude-agent-sdk['"]`
-    const reachesQuery = new RegExp(
-      String.raw`import\s*\{[^}]*\bquery\b[^}]*\}\s*from${sdk}|import\s*\*\s*as\s+\w+\s+from${sdk}|import\(${sdk}`,
-    )
-    const src = fileURLToPath(new URL('../src', import.meta.url))
-    const callers: string[] = []
-    for (const file of await readdir(src, { recursive: true })) {
-      if (file.endsWith('.ts') && reachesQuery.test(await readFile(path.join(src, file), 'utf8'))) callers.push(file)
-    }
-    expect(callers).toEqual([path.join('harness', 'run.ts')])
   })
 
   it('sets the limits, with defaults', () => {
@@ -281,7 +259,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     expect(calls.flatMap((c) => c.body?.tools ?? [])).toEqual([])
     const init = messages.find((m) => m.type === 'system' && m.subtype === 'init')
     expect(init && 'tools' in init ? init.tools : undefined).toEqual([])
-    // The mode in which canUseTool decides every call (see 'is the only query() call').
+    // The mode in which canUseTool decides every call (test/permissionMode.test.ts).
     expect(init).toMatchObject({ permissionMode: 'default' })
     // The credential appears in no message and no stderr line.
     expect(JSON.stringify(messages)).not.toContain(GATEWAY_TOKEN)
@@ -433,7 +411,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
       return { hang: true }
     }
     const messages: SDKMessage[] = []
-    const started = Date.now()
+    const started = performance.now()
     const run = (async () => {
       for await (const m of runHarness({
         paths: { stateDir },
@@ -450,7 +428,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     await expect(run).rejects.toThrow(/error result/i)
     expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'error_during_execution' })
     expect(fake.messageCalls()).toHaveLength(1)
-    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(performance.now() - started).toBeLessThan(10_000)
   })
 
   describe('testConnection', () => {

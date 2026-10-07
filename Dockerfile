@@ -258,15 +258,14 @@ COPY --from=agent-build /src/agent/dist ./dist
 # session gets a copy of it with its own `.mcp.json` (headlessBrowser.ts).
 COPY --from=agent-build /src/agent/plugins ./plugins
 
-# The Claude Code binary the Agent SDK bundles: the SDK "runs the Claude Code
-# binary" (https://code.claude.com/docs/en/agent-sdk/overview), so an SDK bump
-# changes the harness underneath every query. Its version is the one the SDK
-# declares (`claudeCodeVersion`), and agent/package.json pins the SDK exactly,
-# so there is no second pin to bump here (#1540): an SDK bump's `agent` job,
-# whose tests run this binary, is its re-verification. This fails the build
-# when the binary is missing or its own `--version` differs from what the SDK
-# declares. It runs against the node_modules that ship, for the platform being
-# built.
+# The Agent SDK "runs the Claude Code binary"
+# (https://code.claude.com/docs/en/agent-sdk/overview), a per-platform optional
+# dependency. agent/package.json pins the SDK exactly and the lockfile pins each
+# platform's binary by integrity hash, so the version is not repeated here
+# (#1540; it was a CLAUDE_CODE_VERSION ARG, edited by hand on every SDK bump).
+# This fails the build when no binary installed for the platform being built,
+# or its own `--version` differs from the `claudeCodeVersion` the SDK declares.
+# It runs against the node_modules that ship.
 RUN node dist/check-cli-version.js
 ENV NODE_ENV=production \
     HOME=/var/lib/scadbuddy-agent \

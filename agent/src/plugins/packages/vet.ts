@@ -84,7 +84,7 @@ const NON_COMMAND_MCP_TYPE = 'http'
 
 // The hook events a package may use: an allowlist, so an event added to
 // Claude Code later is refused until it is read. Left out on purpose, from
-// the CLI 2.1.283 event list (2.1.287's is the same) and the hooks reference
+// the CLI 2.1.283 event list (the same 33 events in 2.1.287) and the hooks reference
 // (https://code.claude.com/docs/en/hooks):
 //   - PermissionRequest: the CLI races these against the host's
 //     `can_use_tool` answer, and a hook's `behavior: "allow"` (or
@@ -143,10 +143,12 @@ function listFiles(root: string, rel = ''): string[] {
   return out.sort()
 }
 
-// Claude Code's own frontmatter patterns (bundled CLI 2.1.283, `Dk` and `ZH`
-// in its frontmatter parser; the same in 2.1.287, as `jk` and `qj`): the
-// block it parses ends at the FIRST `---`, even one in the middle of a line;
-// the line-anchored form is what it checks that against. A byte-order mark is stripped first.
+// Claude Code's own frontmatter patterns, FM_CLI and FM_LINES below, as they
+// read in its frontmatter parser (bundled CLI 2.1.283, byte-identical in
+// 2.1.287; its minified names change from build to build): the block it
+// parses ends at the FIRST `---`, even one in the middle of a line; the
+// line-anchored form is what it checks that against. A byte-order mark is
+// stripped first.
 const FM_CLI = /^---\s*\n([\s\S]*?)---\s*\n?/
 const FM_OPEN = /^---\s*\n/
 const FM_LINES = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
@@ -238,8 +240,7 @@ export function isAllowlistedTool(name: string): boolean {
 }
 
 const INJECTION_INLINE = /(^|\s)!`/m
-// Anywhere in the text, as the CLI matches it (2.1.283 and 2.1.287:
-// /```!\s*\n?([\s\S]*?)\n?```/g).
+// Anywhere in the text, as the CLI matches it (2.1.283 and 2.1.287: /```!\s*\n?([\s\S]*?)\n?```/g).
 const INJECTION_BLOCK = /(```|~~~)!/
 
 function checkMarkdown(rel: string, text: string, problems: string[]): void {

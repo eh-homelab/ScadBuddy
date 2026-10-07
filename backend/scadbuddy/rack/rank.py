@@ -28,10 +28,6 @@ from scadbuddy.bambuddy.models import (
 
 __all__ = ["DEFAULT_ALGORITHM", "RackAlgorithm"]
 
-#: The flow every slice carries while Bambuddy has no High Flow presets (#484): the
-#: preview and the manual pick's 422 judge it, since Bambuddy re-checks a pick against
-#: the sliced group at dispatch.
-SLICED_VOLUME_TYPE = "Standard"
 #: ``nozzle_type`` code -> material, from the hotends' own labels (spec §8 unknown 1).
 #: Ships EMPTY: every code then counts as not hardened, so an abrasive group always
 #: carries ``rack-unsafe-material`` and never gets a silent brass pick.

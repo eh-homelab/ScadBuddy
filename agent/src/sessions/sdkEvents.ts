@@ -30,8 +30,14 @@ import { event, type ServerEvent } from './protocol.js'
 // `system/init` is not mapped: every resumed query emits one, while
 // `session.started` is emitted once, when the session is created (manager.ts).
 // `result` is handled by the manager, which owns the session's running totals.
-// Messages of subagents (`parent_tool_use_id` set) are skipped: with
-// `tools: []` there is no Task tool to spawn one.
+// A subagent's messages (`parent_tool_use_id` set: the session's `Agent` call
+// that spawned it, which every session has through ScadBuddy's plugin, #896)
+// map their tool calls and results only (#1108), so each call is in the feed
+// and has its `tool_call` audit row (audit/turn.ts). Its `tool.call` carries
+// that id as `parent`. A subagent's text is not shown: the panel shows what the
+// session's own agent says, and the subagent's answer reaches it as the
+// `Agent` call's result. A call the approval gate shows first (ShownCalls) has
+// no `parent`, since the gate is not told which subagent made it.
 
 /** The longest tool.result summary; the full result stays in the transcript. */
 export const SUMMARY_MAX = 500
@@ -168,10 +174,18 @@ export class SdkEventMapper {
    * is produced once: by the stream's `tool_use`, or by the approval gate when the
    * gate gets there first (ShownCalls). Undefined when it was produced already.
    */
-  call(id: string, name: string, input: Record<string, unknown>): ServerEvent | undefined {
+  call(id: string, name: string, input: Record<string, unknown>, parent?: string): ServerEvent | undefined {
     if (this.calls.has(id)) return undefined
     this.calls.add(id)
-    return event({ type: 'tool.call', sessionId: this.sessionId, id, name, input, risk: this.tierOf(name, input) ?? 'outward' })
+    return event({
+      type: 'tool.call',
+      sessionId: this.sessionId,
+      id,
+      name,
+      input,
+      risk: this.tierOf(name, input) ?? 'outward',
+      ...(parent !== undefined ? { parent } : {}),
+    })
   }
 
   map(message: SDKMessage): ServerEvent[] {
@@ -207,12 +221,12 @@ export class SdkEventMapper {
         }
       }
       case 'assistant': {
-        if (message.parent_tool_use_id !== null) return []
+        const parent = message.parent_tool_use_id ?? undefined
         const out: ServerEvent[] = []
         const apiId = message.message.id
         const streamed = this.streamedMessages.has(apiId)
         blocks(message.message.content).forEach((block, index) => {
-          if (block.type === 'text' && !streamed && typeof block.text === 'string' && block.text !== '') {
+          if (block.type === 'text' && parent === undefined && !streamed && typeof block.text === 'string' && block.text !== '') {
             const messageId = `${apiId}:${index}`
             out.push(event({ type: 'assistant.text.delta', sessionId, messageId, delta: block.text }))
             out.push(event({ type: 'assistant.text.done', sessionId, messageId }))
@@ -222,7 +236,7 @@ export class SdkEventMapper {
               typeof block.input === 'object' && block.input !== null && !Array.isArray(block.input)
                 ? (block.input as Record<string, unknown>)
                 : {}
-            const call = this.call(block.id, name, input)
+            const call = this.call(block.id, name, input, parent)
             if (call) out.push(call)
           }
         })
@@ -231,7 +245,7 @@ export class SdkEventMapper {
       case 'user': {
         // SDKUserMessageReplay (`isReplay: true`, sdk.d.ts) echoes history, which
         // was already emitted when it happened.
-        if (message.parent_tool_use_id !== null || ('isReplay' in message && message.isReplay)) return []
+        if ('isReplay' in message && message.isReplay) return []
         return blocks(message.message.content)
           .filter((b) => b.type === 'tool_result' && typeof b.tool_use_id === 'string')
           .map((b) =>

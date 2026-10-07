@@ -31,7 +31,6 @@ from scadbuddy.api.deps import (
     ChecksDep,
     ConfigDep,
     DependencyChecksDep,
-    EventsDep,
     FetcherDep,
     FontsDep,
     InstallsDep,
@@ -42,34 +41,32 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.library_pins import resolve_pin
 from scadbuddy.api.limits import ClientGoneError, unless_the_client_leaves
 from scadbuddy.api.models import MAX_SOURCE_CHARS, require_mine, require_model_exists
-from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
+from scadbuddy.core.events import EventBus, LibraryChanged, ModelEvent, emit
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.catalogue import (
-    Catalogue,
-    LibraryNotDeclaredError,
-    LibraryPinChangedError,
-    ModelNotFoundError,
     ModelRecord,
 )
-from scadbuddy.library.history import GitError
 from scadbuddy.library.includes import Candidates, DependencyReport, resolve_dependencies
 from scadbuddy.library.libraries import (
     COMMIT_PATTERN,
     NAME_PATTERN,
     REF_PATTERN,
     CatalogueLibrary,
-    CheckoutGate,
-    LibraryCheckoutNotFoundError,
     LibraryDeclarationError,
-    LibraryError,
     LibraryNotInstalledError,
-    LibraryStore,
-    ModelLibrary,
     declared_libraries,
     resolve_search_path,
     search_path,
 )
 from scadbuddy.library.scad import SourceCheck, check_source
+from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.store import Operation
 
 router = APIRouter(tags=["libraries"])
 
@@ -127,76 +124,36 @@ def list_libraries(libraries: LibrariesDep) -> list[CatalogueLibrary]:
 @router.put(
     "/models/{slug}/libraries/{name}",
     response_model=ModelRecord,
+    responses=OPERATION_RESPONSES,
     summary="Pin a library to a model, or re-pin it at another ref",
     description=(
         "Clones the library at `ref` onto the data volume and records the commit that "
         "resolved to in this model's `model.json`, as one revision of the model. The "
         "model renders against that pin from then on; no other model moves. A 503 when "
         "the URL's host could not be looked up just now (try again), as distinct from "
-        "the 422 for a host that is not a public address."
+        "the 422 for a host that is not a public address. A 202 with the operation when "
+        "the clone is still running past the answer's deadline: follow "
+        "`GET /operations/{id}` for this answer."
     ),
 )
 async def pin_library(
     slug: SlugPath,
     name: LibraryName,
     body: LibraryPinRequest,
-    catalogue: CatalogueDep,
-    libraries: LibrariesDep,
-    installs: InstallsDep,
-    checkouts: CheckoutsDep,
-    events: EventsDep,
-) -> ModelRecord:
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
-    return await _pin(
-        slug,
-        name,
-        url=body.url,
-        ref=body.ref,
-        catalogue=catalogue,
-        libraries=libraries,
-        installs=installs,
-        checkouts=checkouts,
-        events=events,
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_pin"],
+        subject=slug,
+        request={"slug": slug, "name": name, **body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
     )
-
-
-async def _pin(
-    slug: str,
-    name: str,
-    *,
-    url: str | None,
-    ref: str | None,
-    catalogue: Catalogue,
-    libraries: LibraryStore,
-    installs: asyncio.Semaphore,
-    checkouts: CheckoutGate,
-    events: EventBus,
-    replacing: ModelLibrary | None = None,
-) -> ModelRecord:
-    """Clone ``name`` and record the pin in ``slug``, with the same checks and status
-    codes for a first pin and a re-pin. ``replacing`` is the entry a re-pin read:
-    the record is refused, a 409, if it changed while the clone ran."""
-    try:
-        # Held from the clone to the record, so no removal lands in between.
-        async with checkouts.pinning():
-            pin = await resolve_pin(name, url=url, ref=ref, libraries=libraries, installs=installs)
-            record = await asyncio.to_thread(
-                partial(catalogue.pin_library, slug, pin, replacing=replacing)
-            )
-    except LibraryPinChangedError:
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            f"{slug!r}'s {name!r} was changed or removed while this re-pin ran; "
-            "nothing was recorded",
-        ) from None
-    except ModelNotFoundError:
-        # A concurrent delete of the same slug got there first.
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    except GitError as error:
-        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    _library_changed(events, slug, name)
-    return record
+    return operation_answer(result, ModelRecord)
 
 
 @router.patch(
@@ -209,42 +166,30 @@ async def _pin(
         "branch pin moves to the branch's current commit), and records the commit as one "
         "revision of the model. The same checks and errors as pinning it in the first "
         "place; a 404 when the model does not declare the library, and a 409 when its "
-        "entry is changed or removed by another request while the clone runs."
+        "entry is changed or removed by another request while the clone runs. A 202 "
+        "with the operation when the clone is still running past the answer's deadline: "
+        "follow `GET /operations/{id}` for this answer."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def repin_library(
     slug: SlugPath,
     name: LibraryName,
     body: LibraryRepinRequest,
-    catalogue: CatalogueDep,
-    libraries: LibrariesDep,
-    installs: InstallsDep,
-    checkouts: CheckoutsDep,
-    paths: PathsDep,
-    events: EventsDep,
-) -> ModelRecord:
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
-    # A malformed declaration is the 409 every other reader of it gives
-    # (install_library_handlers); PUT is the way to replace one.
-    declared = await asyncio.to_thread(declared_libraries, paths.model_dir(slug))
-    current = next((entry for entry in declared if entry.name == name), None)
-    if current is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
-        )
-    return await _pin(
-        slug,
-        name,
-        url=current.url,
-        ref=body.ref or current.ref,
-        catalogue=catalogue,
-        libraries=libraries,
-        installs=installs,
-        checkouts=checkouts,
-        events=events,
-        replacing=current,
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_repin"],
+        subject=slug,
+        request={"slug": slug, "name": name, "ref": body.ref},
+        idempotency_key=idempotency_key,
     )
+    return operation_answer(result, ModelRecord)
 
 
 @router.delete(
@@ -255,38 +200,32 @@ async def repin_library(
         "Removes every entry of that name, or with `index` only the invalid entry at that "
         "position (`invalid_libraries[].index`): a 409 when that entry is no longer an "
         "invalid one of that name. The checkout stays on the volume: an older revision "
-        "may still pin it."
+        "may still pin it. A 202 with the operation when it is still running past the "
+        "answer's deadline: follow `GET /operations/{id}` for this answer."
     ),
+    responses=OPERATION_RESPONSES,
 )
-def unpin_library(
+async def unpin_library(
     slug: SlugPath,
     name: LibraryName,
-    catalogue: CatalogueDep,
-    events: EventsDep,
+    response: Response,
+    ops: OperationsDep,
     index: Annotated[
         int | None,
         Query(ge=0, description="Only the invalid entry at this position of `libraries`"),
     ] = None,
-) -> ModelRecord:
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
-    try:
-        record = catalogue.unpin_library(slug, name, index=index)
-    except LibraryPinChangedError:
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            f"{slug!r}'s entry {index} is no longer an invalid {name!r}; nothing was removed",
-        ) from None
-    except LibraryNotDeclaredError:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
-        ) from None
-    except ModelNotFoundError:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    except GitError as error:
-        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    _library_changed(events, slug, name)
-    return record
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_unpin"],
+        subject=slug,
+        request={"slug": slug, "name": name, "index": index},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
 
 
 class LibraryCheckRequest(BaseModel):
@@ -434,60 +373,38 @@ async def list_library_users(name: LibraryName, catalogue: CatalogueDep) -> list
     "/libraries/{name}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    responses=OPERATION_RESPONSES,
     summary="Remove a library's checkouts from the volume",
     description=(
         "Deletes the checkout at `commit`, or every checkout of the library. Refused "
         "with a 409 naming the models while any model's live pin still reads one, and "
         "with a 409 naming the jobs while a running render reads one. "
         "Older revisions are not counted: rendering one that pinned a removed checkout "
-        "clones it again at that commit, and is a 409 only when that fails."
+        "clones it again at that commit, and is a 409 only when that fails. A 202 with "
+        "the operation, instead of the 204, when it is still running past the answer's "
+        "deadline: follow `GET /operations/{id}`."
     ),
 )
 async def remove_library(
     name: LibraryName,
-    catalogue: CatalogueDep,
-    libraries: LibrariesDep,
-    checkouts: CheckoutsDep,
-    events: EventsDep,
+    response: Response,
+    ops: OperationsDep,
     commit: Annotated[
         str | None,
         Query(pattern=COMMIT_PATTERN, description="Only this checkout; every one when omitted"),
     ] = None,
+    idempotency_key: IdempotencyKey = None,
 ) -> Response:
-    what = name if commit is None else f"{name} at {commit[:7]}"
-    directory = libraries.paths.libraries / name
-    if commit is not None:
-        directory /= commit
-    # Alone: no pin can find this checkout and record it while it goes, and no
-    # render can take a lease on it.
-    async with checkouts.removing():
-        jobs = await asyncio.to_thread(checkouts.leased, directory)
-        if jobs:
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                f"{what} is being read by render job {', '.join(jobs)}; "
-                "try again once it has finished",
-                jobs=jobs,
-            )
-        users = await asyncio.to_thread(catalogue.library_users, name, commit)
-        if users:
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                f"{what} is still pinned by {', '.join(users)}; remove it from "
-                f"{'that model' if len(users) == 1 else 'those models'} first",
-                models=users,
-            )
-        try:
-            removed = await asyncio.to_thread(libraries.remove, name, commit)
-        except LibraryCheckoutNotFoundError:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"
-            ) from None
-        except LibraryError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    # No model changes -- a removal is refused while one pins it -- so no
-    # `model.updated`: only the checkouts on the volume moved.
-    emit(events, LibraryRemoved(name=name, commits=removed))
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_remove"],
+        subject=f"library:{name}",
+        request={"name": name, "commit": commit},
+        idempotency_key=idempotency_key,
+    )
+    if isinstance(result, Operation):
+        return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

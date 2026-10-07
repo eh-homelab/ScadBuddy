@@ -1,9 +1,9 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { ApiError, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, api } from '../api/client'
+import { ApiError, OFFLINE, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
-import { TRANSIENT_RETRIES, useRenderJob } from './useRenderJob'
+import { TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
 const JOB_B = 'b'.repeat(32)
@@ -460,5 +460,21 @@ describe('useRenderJob', () => {
       })
       expect(read.mock.calls.length - before).toBe(3)
     })
+  })
+})
+
+
+describe('canRetry (review #1066 (13) 2)', () => {
+  it.each([
+    [new ApiError({ type: TEMPORAL_UNAVAILABLE, title: 'Service Unavailable', status: 503, detail: 'down' }), true],
+    [new ApiError({ type: STILL_ACCEPTING, title: 'Service Unavailable', status: 503, detail: 'checking' }), true],
+    [new ApiError({ type: UNANSWERED, title: 'Bad Gateway', status: 502, detail: 'no answer' }), true],
+    [new ApiError({ type: OFFLINE, title: 'Offline', status: 0, detail: 'offline' }), true],
+    [new TypeError('Failed to fetch'), true],
+    [new ApiError({ title: 'Unprocessable Content', status: 422, detail: 'width must be at most 100' }), false],
+    [new ApiError({ title: 'Internal Server Error', status: 500, detail: 'the render could not be started' }), false],
+    [new Error('openscad exited with 1'), false],
+  ])('%#: %s is %s', (error, expected) => {
+    expect(canRetry(error)).toBe(expected)
   })
 })

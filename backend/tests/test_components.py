@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import textwrap
 from collections.abc import AsyncIterator, Iterator
@@ -15,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import scadbuddy
-from scadbuddy.api import deps
+from scadbuddy.api import components, deps
 from scadbuddy.api.components import component_dep, getter_for
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.core.components import (
@@ -29,6 +30,7 @@ from scadbuddy.core.components import (
 )
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import operations as library_operations
 from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
@@ -391,6 +393,14 @@ def test_two_features_claiming_one_kind_name_are_refused() -> None:
         build_kinds(CORE, Components(CORE, []), [lambda c, cs: [kind("send")]] * 2)
 
 
+def test_the_model_kinds_refuse_a_core_that_is_not_the_app_state() -> None:
+    """Review #1126 1.2: their runs are the routes' bodies, which read services the
+    ``Core`` does not name; a core without them is refused when the kinds are built,
+    not with an ``AttributeError`` inside an operation."""
+    with pytest.raises(TypeError, match="AppState"):
+        library_operations.OPERATION_KINDS(CORE, Components(CORE, []))
+
+
 @pytest.mark.parametrize("attempts", [0, -1])
 def test_a_kind_whose_effect_could_retry_forever_is_refused(attempts: int) -> None:
     """Review #1063 fourth review 2: Temporal reads ``maximum_attempts=0`` as unlimited."""
@@ -400,3 +410,16 @@ def test_a_kind_whose_effect_could_retry_forever_is_refused(attempts: int) -> No
 
     with pytest.raises(ValueError, match="run_attempts"):
         OperationKind("send", step, step, run_attempts=attempts)
+
+
+def test_the_docstrings_example_alias_exists() -> None:
+    """The module docstring shows a real feature's alias, not a removed one (#1706)."""
+    example = re.search(r"^\s+(\w+Dep) = Annotated\[", components.__doc__ or "", re.MULTILINE)
+    assert example is not None
+    aliases = {
+        line.split(" = ")[0]
+        for path in Path(scadbuddy.__file__).parent.glob("*/component.py")
+        for line in path.read_text().splitlines()
+        if " = Annotated[" in line
+    }
+    assert example.group(1) in aliases

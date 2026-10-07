@@ -53,7 +53,7 @@
 #     `grafana_dashboard: "1"`, whose `scadbuddy.json` is the file above
 #
 # $KUSTOMIZE names the binary (default `kustomize` on PATH); CI points it at
-# the pinned release its own step installed. Needs jq and mikefarah yq v4.
+# the pinned release its own step installed. Needs jq, mikefarah yq v4 and python3.
 # Exit status 1 if there was any problem, 2 on a usage error.
 set -euo pipefail
 
@@ -140,25 +140,40 @@ done < <(jq -r "$panels"'
 
 # Prometheus series against the registry in core/metrics.py: the names each
 # declaration exposes, by its constructor, one `<series> <label>...` line each
-# (the labels its labelnames list declares).
-exposed=$(
-  tr '\n' ' ' < "$metrics_py" | sed 's/registry=r/\n/g' \
-    | grep -E '(Counter|Gauge|Histogram|Summary|Info)\(\s*"scadbuddy_' \
-    | while read -r decl; do
-      [[ "$decl" =~ (Counter|Gauge|Histogram|Summary|Info)\(\ *\"(scadbuddy_[a-z0-9_]+)\" ]] || continue
-      kind=${BASH_REMATCH[1]} name=${BASH_REMATCH[2]} labels=""
-      if [[ "$decl" =~ \[((\"[a-z_]+\",?\ *)+)\] ]]; then
-        labels=${BASH_REMATCH[1]//[\",]/}
-      fi
-      case "$kind" in
-        Gauge) echo "$name $labels" ;;
-        Counter) echo "${name%_total}_total $labels" ;;
-        Histogram) printf '%s\n' "${name}_bucket $labels le" "${name}_sum $labels" "${name}_count $labels" ;;
-        Summary) printf '%s\n' "${name}_sum $labels" "${name}_count $labels" ;;
-        Info) echo "${name%_info}_info $labels" ;;
-      esac
-    done
-)
+# (the labels it declares, a list or tuple, positional or `labelnames=`). Read
+# as Python rather than split on text, so how a declaration passes its registry
+# cannot merge it with the next one (#1190, #1233).
+exposed=$(python3 - "$metrics_py" <<'PY'
+import ast, sys
+
+suffixes = {
+    "Gauge": lambda n: [n],
+    "Counter": lambda n: [n.removesuffix("_total") + "_total"],
+    "Histogram": lambda n: [n + "_bucket le", n + "_sum", n + "_count"],
+    "Summary": lambda n: [n + "_sum", n + "_count"],
+    "Info": lambda n: [n.removesuffix("_info") + "_info"],
+}
+for call in ast.walk(ast.parse(open(sys.argv[1]).read())):
+    if not isinstance(call, ast.Call):
+        continue
+    kind = getattr(call.func, "id", getattr(call.func, "attr", None))
+    if kind not in suffixes or not call.args:
+        continue
+    name = call.args[0]
+    if not (isinstance(name, ast.Constant) and str(name.value).startswith("scadbuddy_")):
+        continue
+    labels = call.args[2] if len(call.args) > 2 else None
+    labels = next((k.value for k in call.keywords if k.arg == "labelnames"), labels)
+    names = []
+    if isinstance(labels, (ast.List, ast.Tuple)):
+        names = [e.value for e in labels.elts if isinstance(e, ast.Constant)]
+    for series in suffixes[kind](name.value):
+        series, *extra = series.split()
+        print(" ".join([series, *names, *extra]))
+PY
+) || exposed=""
+[ -n "$exposed" ] \
+  || problem "backend/scadbuddy/core/metrics.py" "no scadbuddy_* metric declarations found"
 series_labels() { # series -> its declared labels on one line; fails when undeclared
   awk -v s="$1" '$1 == s { $1 = ""; print; found = 1 } END { exit !found }' <<< "$exposed"
 }
@@ -200,7 +215,7 @@ done < <(jq -r "$panels"' panels | . as $p | .targets[]? | select(has("expr"))
 # `render.{name}`), and every literal its code passes to span()/detached_span().
 span_literals() { # python files... -> the literals passed to span()/detached_span()
   cat "$@" | tr '\n' ' ' \
-    | grep -oE '(^|[^A-Za-z_])(detached_)?span\(\s*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"'
+    | grep -oE '(^|[^A-Za-z_])(detached_)?span\(\s*"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"' || true
 }
 bk="$root/backend/scadbuddy"
 # The worker runs the render pipeline: render/ (but for submit.py, which the API
@@ -214,11 +229,15 @@ mapfile -t api_files < <(
 )
 worker_names=$(
   {
-    grep -E '^RenderStage = Literal\[' "$metrics_py" | grep -oE '"[a-z_]+"' | tr -d '"' | sed 's/^/render./'
+    grep -E '^RenderStage = Literal\[' "$metrics_py" | grep -oE '"[a-z_]+"' | tr -d '"' | sed 's/^/render./' || true
     span_literals "${worker_files[@]}"
   } | sort -u
 )
+[ -n "$worker_names" ] \
+  || problem "backend/scadbuddy" "scadbuddy-worker has no RenderStage and passes no literal to span()/detached_span()"
 api_names=$(span_literals "${api_files[@]}" | sort -u)
+[ -n "$api_names" ] \
+  || problem "backend/scadbuddy" "scadbuddy-api passes no literal to span()/detached_span()"
 # openscad.export is run_openscad's span, and the API calls run_openscad too
 # (library/scad.py, api/params.py, api/models.py): both services emit it.
 both_names="openscad.export"

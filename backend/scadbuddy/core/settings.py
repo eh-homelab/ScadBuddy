@@ -36,6 +36,7 @@ from scadbuddy.core.config import (
     DEFAULT_SOLID_CONCURRENCY,
     DEFAULT_STORE_MAX_COUNT,
     DEFAULT_STORE_MAX_TOTAL_BYTES,
+    DEFAULT_TEMPLATE_ACTIVITY_MAX_TIMEOUT,
     DEFAULT_TEMPORAL_NAMESPACE,
     DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     DEFAULT_WORKER_CACHE_MAX_BYTES,
@@ -61,6 +62,7 @@ class Settings(BaseSettings):
     openscad: str = DEFAULT_OPENSCAD
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
+    template_activity_max_timeout: float = DEFAULT_TEMPLATE_ACTIVITY_MAX_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
@@ -196,6 +198,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY: where print runs run (#1052, spec
     # 2026-10-01 §4.3). The API serves it itself in this phase (#1060).
     temporal_task_queue_bambuddy: str = "bambuddy"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY: where the housekeeping Schedule's sweeps
+    # run (#1054, spec 2026-10-01 §4.3, §4.4); this process serves it.
+    temporal_task_queue_library: str = "library"
     # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
     # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
     # an unregistered attribute fails the workflow task.
@@ -229,6 +234,7 @@ class Settings(BaseSettings):
         "temporal_namespace",
         "temporal_task_queue_render",
         "temporal_task_queue_bambuddy",
+        "temporal_task_queue_library",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -301,6 +307,7 @@ class Settings(BaseSettings):
             openscad=self.openscad,
             data_dir=self.data_dir,
             render_timeout=self.render_timeout,
+            template_activity_max_timeout=self.template_activity_max_timeout,
             render_concurrency=self.render_concurrency,
             solid_concurrency=self.solid_concurrency,
             render_queue_max=self.render_queue_max,
@@ -400,6 +407,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Paired with the Temporal address: the API starts print runs on it, and the"
             " worker that serves it must name the same queue."
         ),
+        "temporal_task_queue_library": (
+            "Paired with the Temporal address: the housekeeping Schedule starts its sweeps on"
+            " it, and this process serves it."
+        ),
         "temporal_search_attributes": (
             "Whether the namespace has ScadBuddy's Search Attributes registered, which the"
             " deployment's Temporal manifests decide."
@@ -441,6 +452,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "media_upload_max_bytes": "live",
         # Read from the queue's config by each job, poll or admission check.
         "render_timeout": "live",
+        # Read from the config by every pipeline submit (spec 2026-09-27 §5.2).
+        "template_activity_max_timeout": "live",
         "job_ttl": "live",
         "solid_concurrency": "live",
         "render_queue_max": "live",

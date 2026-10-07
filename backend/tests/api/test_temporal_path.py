@@ -3,24 +3,30 @@ the session's Temporal, and the routes read the projection."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from temporalio.client import Client
+from temporalio.client import Client, ScheduleActionExecutionStartWorkflow
+from temporalio.service import RPCError
 
+from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.main import create_app
+from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
+from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.conftest import fake_3mf_openscad
+from tests.support.temporal import NO_TICK
 
 pytestmark = [
     pytest.mark.requires_postgres,
@@ -137,3 +143,49 @@ def test_a_failing_start_on_temporal_still_closes_the_projection(
 
     assert closed == ["projection"]
     assert state.projection.pool.closed
+
+
+def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1054: the sweeps are a Temporal Schedule on the `library` queue this process
+    serves, triggered once at start. The boot itself does not walk the uploads too
+    (review #1095 1): the triggered run is the start's one sweep."""
+    walks: list[object] = []
+
+    def counted(state: AppState) -> list[str]:
+        walks.append(state)
+        return sweep_assets(state)
+
+    monkeypatch.setattr(main, "sweep_assets", counted)
+    settings = settings.model_copy(update={"asset_sweep_interval": NO_TICK})
+    app = create_app(settings)
+    queue = settings.temporal_task_queue_library
+
+    async def described() -> tuple[timedelta, str]:
+        temporal = await Client.connect(
+            settings.temporal_address, namespace=settings.temporal_namespace
+        )
+        handle = temporal.get_schedule_handle(schedule_id_for(queue))
+        async with asyncio.timeout(30):
+            while True:
+                try:
+                    schedule = await handle.describe()
+                except RPCError:
+                    await asyncio.sleep(0.2)
+                    continue
+                if schedule.info.recent_actions:
+                    break
+                await asyncio.sleep(0.2)
+        run = schedule.info.recent_actions[-1].action
+        assert isinstance(run, ScheduleActionExecutionStartWorkflow)
+        result = await temporal.get_workflow_handle(
+            run.workflow_id, run_id=run.first_execution_run_id
+        ).result()
+        return schedule.schedule.spec.intervals[0].every, str(result)
+
+    with TestClient(app):
+        every, result = asyncio.run(described())
+    assert every == timedelta(seconds=NO_TICK)
+    assert result == "[]"  # every sweep ran, none failed
+    assert len(walks) == 1

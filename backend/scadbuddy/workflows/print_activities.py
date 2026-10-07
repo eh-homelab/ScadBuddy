@@ -102,13 +102,12 @@ def problem(error: ApiError) -> PrintRunError:
     )
 
 
-def raised_as(error: ApiError, kind: str) -> ApplicationError:
-    return ApplicationError(error.detail, problem(error), type=kind, non_retryable=True)
+def raised_as(error: ApiError, kind: str, *, non_retryable: bool = True) -> ApplicationError:
+    return ApplicationError(error.detail, problem(error), type=kind, non_retryable=non_retryable)
 
 
 async def heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
-    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive.
-    The operation activities beat with it too."""
+    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive."""
     task = asyncio.create_task(work)
     try:
         while True:

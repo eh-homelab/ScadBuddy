@@ -130,13 +130,13 @@ describe('fetchAiAvailability', () => {
 
   it('gives up on a status read that never answers, as unreachable', async () => {
     const hang: typeof fetch = () => new Promise<Response>(() => {})
-    const started = Date.now()
+    const started = performance.now()
     expect(await fetchAiAvailability(hang, 50)).toEqual({
       available: false,
       state: 'unreachable',
       reason: 'The agent service did not answer within 0.05 s.',
     })
-    expect(Date.now() - started).toBeLessThan(2000)
+    expect(performance.now() - started).toBeLessThan(2000)
     // And one that honours the abort signal is aborted.
     let aborted = false
     const listening: typeof fetch = (_input, init) =>

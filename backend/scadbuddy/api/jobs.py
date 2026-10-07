@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.client import WorkflowUpdateFailedError
-from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
@@ -27,7 +29,7 @@ from scadbuddy.api.deps import (
     SlugPath,
     StateDep,
 )
-from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.models import require_model, require_model_exists
 from scadbuddy.api.operations import (
     TEMPORAL_UNAVAILABLE_PROBLEM,
     IdempotencyKey,
@@ -36,8 +38,10 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
+from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import file_assets
+from scadbuddy.library.catalogue import meta_from_raw
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
@@ -47,6 +51,7 @@ from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.job_models import (
+    BomEntry,
     Job,
     JobNotFoundError,
     JobState,
@@ -73,9 +78,11 @@ from scadbuddy.store.content import StoreFullError
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
+    TemporalBusyError,
     TemporalRefusedError,
     TemporalUnavailableError,
 )
+from scadbuddy.workflows.models import MigrateResult
 
 logger = logging.getLogger(__name__)
 
@@ -84,26 +91,6 @@ router = APIRouter(tags=["jobs"])
 #: A render whose `accepted` Update failed, or whose start Temporal refused, for a
 #: reason a re-send would not change.
 RENDER_UNSTARTABLE_PROBLEM = "https://scadbuddy.dev/problems/render-unstartable"
-
-#: The `RPCError`s worth sending the same request again for; any other is a 500
-#: (review #1066 (8) 2). The codes Temporal's own client retries (`RETRYABLE_ERROR_CODES`
-#: in the sdk-core temporalio 1.33.0 bundles, `crates/client/src/retry.rs`), so one
-#: reaching us outlived those retries, and the two gRPC ends an unanswered call with.
-#: The rest (`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
-#: `FAILED_PRECONDITION`, `UNIMPLEMENTED`, `ALREADY_EXISTS`) are configuration.
-TRANSIENT_RPC = frozenset(
-    {
-        RPCStatusCode.DATA_LOSS,
-        RPCStatusCode.INTERNAL,
-        RPCStatusCode.UNKNOWN,
-        RPCStatusCode.RESOURCE_EXHAUSTED,
-        RPCStatusCode.ABORTED,
-        RPCStatusCode.OUT_OF_RANGE,
-        RPCStatusCode.UNAVAILABLE,
-        RPCStatusCode.DEADLINE_EXCEEDED,
-        RPCStatusCode.CANCELLED,
-    }
-)
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
 PNG_MEDIA_TYPE = "image/png"
@@ -145,6 +132,16 @@ class RenderAccepted(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class JobOutputSummary(BaseModel):
+    """One `ctx.output` of a pipeline job (spec 2026-09-27 §5.2): what Generate saves by
+    its ``index``."""
+
+    index: int
+    name: str | None
+    bom: list[BomEntry] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
+
+
 class JobStatus(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -179,6 +176,8 @@ class JobStatus(BaseModel):
     #: A factory default, as the lists have, so the generated client reads it as
     #: optional: an older mock or cached response without it still type-checks.
     diagnostics_dropped: int = Field(default_factory=int)
+    #: A pipeline job's outputs, in order; empty for a job that wrote none.
+    outputs: list[JobOutputSummary] = Field(default_factory=list)
 
 
 class ModelDiagnostics(BaseModel):
@@ -219,7 +218,24 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         plates=result.plates if result else None,
         diagnostics=job.diagnostics,
         diagnostics_dropped=job.diagnostics_dropped,
+        outputs=[
+            JobOutputSummary(index=i, name=o.name, bom=o.bom, files=o.files)
+            for i, o in enumerate(job.outputs)
+        ],
     )
+
+
+def _declares_pipeline(directory: Path, slug: str) -> bool:
+    """Whether the template's model.json at this revision declares a pipeline (§5.1),
+    read as the catalogue reads it. A malformed declaration counts: the job then reaches
+    the worker, whose `load_pipeline` names what is wrong with it. An unreadable
+    model.json declares none, and the job renders `model.scad`'s parameters."""
+    try:
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
+        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
+    except (OSError, ValueError, ValidationError):
+        return False
+    return meta.pipeline is not None or meta.pipeline_raw is not None
 
 
 async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
@@ -321,9 +337,13 @@ async def render_model(
     except InputsError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     params, inputs = normalized.params, normalized.data
-    require_valid_params(schema, params)
-    # A family that is not installed is a 422 here, not a render in the default font.
-    await require_installed_fonts(schema, params, fonts)
+    # A pipeline passes params to the pieces it renders, each of which checks its own
+    # (§5.2); only the built-in pipeline renders `model.scad` with them.
+    pipeline = await asyncio.to_thread(_declares_pipeline, source.scad.parent, slug)
+    if not pipeline:
+        require_valid_params(schema, params)
+        # A family that is not installed is a 422 here, not a render in the default font.
+        await require_installed_fonts(schema, params, fonts)
     try:
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a
@@ -334,15 +354,30 @@ async def render_model(
 
     # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
     # the queue accepts every render and works through them.
-    try:
+    with submit_problems():
         job = await render.submit(
             slug,
             params,
             inputs=inputs,
             model_version=source.version,
             supersedes=body.supersedes,
+            whole_inputs=pipeline,
             request_id=idempotency_key,
         )
+    return RenderAccepted(
+        job_id=job.id,
+        status_url=request.url_for("get_job", job_id=job.id).path,
+        inputs=inputs,
+    )
+
+
+@contextmanager
+def submit_problems() -> Iterator[None]:
+    """What a route answers when `RenderService` does not accept its job: a full queue,
+    a start still accepting, Temporal out of reach, or the store or a snapshot
+    unready. The render route and Arrange share it."""
+    try:
+        yield
     except QueueFullError as error:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -354,7 +389,7 @@ async def render_model(
         # The render's first activity has not answered yet, or its execution ended before
         # it did (review #1061); the same request joins it or starts it again.
         raise still_accepting() from None
-    except (RPCError, TemporalUnavailableError, TemporalRefusedError) as error:
+    except (TemporalUnavailableError, TemporalRefusedError) as error:
         raise _temporal_problem(error) from None
     except WorkflowUpdateFailedError as error:
         # The worker's failure text is for the log, not the client (review #1066 5.1).
@@ -384,15 +419,10 @@ async def render_model(
             retry_after=error.retry_after,
             code="snapshot_pending",
         ) from None
-    return RenderAccepted(
-        job_id=job.id,
-        status_url=request.url_for("get_job", job_id=job.id).path,
-        inputs=inputs,
-    )
 
 
 def _temporal_problem(
-    error: RPCError | TemporalUnavailableError | TemporalRefusedError,
+    error: TemporalUnavailableError | TemporalRefusedError,
 ) -> ApiError:
     """What the route answers when Temporal did not take the render's start, as the
     print route does: only a failed connect wrote nothing; any other may follow a start
@@ -400,9 +430,7 @@ def _temporal_problem(
     ``may_have_started`` says which, as #1316's routes do: the browser re-sends the same
     `Idempotency-Key` when it is true, so a detail tells a client to send again only
     then (review #1066 (10) 3, 4)."""
-    if isinstance(error, TemporalRefusedError) or (
-        isinstance(error, RPCError) and error.status not in TRANSIENT_RPC
-    ):
+    if isinstance(error, TemporalRefusedError):
         # A wrong namespace or a denied permission: configuration. Temporal's message
         # stays in the log. The refusal may still follow a start it persisted.
         logger.error("Temporal refused to start a render", exc_info=error)
@@ -414,24 +442,23 @@ def _temporal_problem(
             may_have_started=True,
         )
     logger.warning("could not start a render on Temporal", exc_info=error)
-    started = not (
-        isinstance(error, TemporalUnavailableError) and isinstance(error.__cause__, RuntimeError)
-    )
+    started = not isinstance(error.__cause__, RuntimeError)
     if not started:
         # The lazy client's first connect failed (`start_command`): nothing was sent.
         detail = (
             "ScadBuddy cannot reach Temporal, where renders run. Nothing was queued; try"
             " again shortly."
         )
-    elif isinstance(error, TemporalUnavailableError):
-        detail = (
-            "ScadBuddy cannot reach Temporal, where renders run. Send the same request"
-            " again shortly to follow it if it started."
-        )
-    else:
+    elif isinstance(error, TemporalBusyError):
+        # Temporal answered, but could not take the start now (`temporal_failure`).
         detail = (
             "Temporal could not start this render right now. Send the same request again"
             " shortly to follow it if it started."
+        )
+    else:
+        detail = (
+            "ScadBuddy cannot reach Temporal, where renders run. Send the same request"
+            " again shortly to follow it if it started."
         )
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -555,6 +582,47 @@ async def get_job_view(
     return await preview_view(
         paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
     )
+
+
+class MigrateInputsRequest(BaseModel):
+    inputs: dict[str, Any]
+    #: The template revision to migrate for, as the render route takes it; the live
+    #: template by default.
+    version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
+
+
+@router.post(
+    "/models/{slug}/inputs/migrate",
+    response_model=MigrateResult,
+    summary="Migrate saved inputs",
+    responses={
+        status.HTTP_413_CONTENT_TOO_LARGE: {"description": "the inputs are too large to carry"},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {"description": "the render service is unavailable"},
+        status.HTTP_504_GATEWAY_TIMEOUT: {"description": "the migration ran out of time"},
+    },
+)
+async def migrate_inputs(
+    slug: SlugPath,
+    body: MigrateInputsRequest,
+    render: RenderDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+) -> MigrateResult:
+    """Bring saved inputs up to the template's `INPUTS_VERSION` (§8.2)."""
+    record = require_model(catalogue, slug)  # 404 for an unknown template, as `get_model`
+    v = body.inputs.get("v", 0)
+    if record.pipeline is None and record.pipeline_raw is None:
+        # No pipeline, so no `migrate` to run, at any revision: the inputs are as they are.
+        current = v if isinstance(v, int) else 0
+        return MigrateResult(inputs=body.inputs, from_version=current, to_version=current)
+    if body.version is None and isinstance(v, int) and v == record.inputs_version:
+        # Already current: no worker.
+        return MigrateResult(inputs=body.inputs, from_version=v, to_version=v)
+    version = await _resolve_version(history, slug, body.version)
+    try:
+        return await render.migrate_inputs(slug, body.inputs, version=version)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
 #: The header naming a breakdown's tiles, row by row.

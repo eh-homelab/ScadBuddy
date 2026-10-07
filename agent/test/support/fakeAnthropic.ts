@@ -66,8 +66,17 @@ export type MessagesBody = {
   messages?: { role: string; content: unknown }[]
   system?: unknown
   max_tokens?: number
-  /** e.g. `{ type: 'enabled', budget_tokens: 31999, display: 'updates' }`. */
-  thinking?: { type?: string; display?: string }
+}
+
+/**
+ * Whether a request carried the `thinking-display-updates` beta. Claude Code
+ * 2.1.287 sends a request a gateway refused with a 400 once more without it
+ * (src/harness/credentialErrors.ts), which is how that re-send is told apart.
+ */
+export function displayUpdates(request: RecordedRequest): boolean {
+  return String(request.headers['anthropic-beta'] ?? '')
+    .split(',')
+    .includes('thinking-display-updates-2026-08-18')
 }
 
 export type FakeAnthropic = {

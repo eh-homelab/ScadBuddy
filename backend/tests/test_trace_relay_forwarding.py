@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 import time
 from collections.abc import Callable, Coroutine
+from typing import Any
 
 import httpx
 import pytest
@@ -18,6 +20,7 @@ from scadbuddy.telemetry.forwarder import (
     MAX_QUEUED_BYTES,
     TraceForwarder,
 )
+from scadbuddy.telemetry.payload import MAX_PREPARED_BYTES
 
 ENDPOINT = "http://collector.test:4318"
 TARGET: tuple[str, dict[str, str]] = (ENDPOINT + "/v1/traces", {})
@@ -418,3 +421,115 @@ async def test_a_batch_after_an_unexpected_transport_error_is_still_forwarded(
             await until(lambda: outcome(metrics, "forwarded") == 1)
     (record,) = caplog.records
     assert record.__dict__["reason"] == "ZeroDivisionError"
+
+
+def test_the_queue_holds_its_batch_count_of_the_largest_prepared_batches() -> None:
+    """#1137: what is queued is `prepare`'s output, which it caps, not the request body."""
+    assert MAX_QUEUED_BYTES == MAX_QUEUED_BATCHES * MAX_PREPARED_BYTES
+
+
+async def test_a_content_type_among_the_headers_is_replaced_not_sent_twice() -> None:
+    seen: list[httpx.Request] = []
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200)
+
+    forwarder, metrics = make(
+        collector, target=(ENDPOINT + "/v1/traces", {"content-type": "text/plain", "X-K": "v"})
+    )
+    async with forwarder.running():
+        forwarder.offer(BATCH)
+        await until(lambda: outcome(metrics, "forwarded") == 1)
+    (request,) = seen
+    assert request.headers.get_list("content-type") == ["application/json"]
+    assert request.headers["x-k"] == "v"
+
+
+async def test_the_client_verifies_with_what_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    made: list[dict[str, object]] = []
+    real = httpx.AsyncClient
+
+    def client(**kwargs: Any) -> httpx.AsyncClient:
+        made.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    context = ssl.create_default_context()
+    forwarder = TraceForwarder(metrics=Metrics(), target=TARGET, verify=context)
+    async with forwarder.running():
+        pass
+    (kwargs,) = made
+    assert kwargs["verify"] is context
+
+
+async def test_a_cancelled_shutdown_still_counts_every_batch() -> None:
+    """#1151: the lifespan's wait for the drain cancelled (a second SIGTERM, uvicorn's
+    own timeout) leaves no task behind and no batch uncounted."""
+    entered = asyncio.Event()
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.sleep(60)
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector, drain_seconds=30)
+    exiting = asyncio.Event()
+
+    async def lifespan() -> None:
+        async with forwarder.running():
+            forwarder.offer(BATCH)
+            await entered.wait()
+            forwarder.offer(BATCH)
+            exiting.set()
+
+    before = asyncio.all_tasks()
+    app = asyncio.create_task(lifespan())
+    await exiting.wait()
+    await asyncio.sleep(0.05)
+    app.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await app
+    assert outcome(metrics, "shutdown") == 2
+    assert not forwarder._pending
+    assert all(task.done() for task in asyncio.all_tasks() - before - {asyncio.current_task()})
+    assert forwarder._client is None
+
+
+async def test_a_forward_task_that_dies_is_logged_at_once_and_refuses_later_batches(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1176: not only at shutdown, days later, after the queue has filled."""
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    forwarder, metrics = make(collector)
+    real_pop = forwarder._pop
+    pops = 0
+
+    def pop() -> bytes:
+        nonlocal pops
+        pops += 1
+        if pops == 1:
+            raise ZeroDivisionError
+        return real_pop()
+
+    monkeypatch.setattr(forwarder, "_pop", pop)
+    caplog.set_level(logging.ERROR, logger=forwarder_module.__name__)
+    # Checked inside the run, so its own re-raise at shutdown cannot hide a failure here.
+    checked = False
+    with pytest.raises(ZeroDivisionError):
+        async with forwarder.running():
+            forwarder.offer(BATCH)
+            await until(lambda: forwarder.dead)
+            (record,) = caplog.records
+            assert record.exc_info is not None and record.exc_info[0] is ZeroDivisionError
+            forwarder.offer(BATCH)
+            assert outcome(metrics, "failed") == 1
+            assert outcome(metrics, "queue_full") == 0
+            assert len(forwarder._pending) == 1
+            checked = True
+    assert checked
+    # Logged once, when it died, not again at shutdown.
+    assert len(caplog.records) == 1

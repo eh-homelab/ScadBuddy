@@ -258,8 +258,7 @@ request through, refused again).
 
 ## Measured (the tests, and the image)
 
-On `@playwright/mcp` 0.0.82 with Claude Code 2.1.283; the tests again with 2.1.287
-(#1540; the image was not re-measured). The tests are
+On `@playwright/mcp` 0.0.82 with Claude Code 2.1.283, and again with 2.1.287 (#1540). The tests are
 [`agent/test/headlessBrowser.server.test.ts`](../../agent/test/headlessBrowser.server.test.ts)
 (the server over stdio, no model) and
 [`agent/test/headlessBrowser.e2e.test.ts`](../../agent/test/headlessBrowser.e2e.test.ts)
@@ -297,8 +296,8 @@ headless shell before the tests.
   approval.
 - **Aliases**: a navigation to the public URL runs as one to the backend: the server's
   own record of the call (`await page.goto(...)`) names the backend URL, so Claude Code
-  (2.1.283, and 2.1.287) ran the plugin tool with `canUseTool`'s `updatedInput` (e2e
-  test); inside a page the guard moves an alias navigation onto the backend.
+  2.1.283 and 2.1.287 ran the plugin tool with `canUseTool`'s `updatedInput` (e2e test); inside a
+  page the guard moves an alias navigation onto the backend.
 - **A direct navigation off the origin** fails with `net::ERR_BLOCKED_BY_CLIENT` (and the
   harness refuses it before that). **The allow-list alone follows a redirect off the
   origin**: the tool usually reports an interrupted navigation, but the other origin has

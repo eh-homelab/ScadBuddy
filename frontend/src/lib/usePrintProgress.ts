@@ -59,7 +59,7 @@ export function usePrintProgress(
     let unfollow: (() => void) | undefined
     let stopped = false
     let finished = false
-    let lastRead = 0
+    let lastRead = Number.NEGATIVE_INFINITY
     let reading = false
     let again = false
 

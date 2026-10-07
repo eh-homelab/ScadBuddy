@@ -17,13 +17,15 @@ import psycopg
 import pytest
 from fastapi import APIRouter, FastAPI, Response
 from fastapi.testclient import TestClient
+from temporalio import activity
 
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import IdempotencyKey, run_operation
+from scadbuddy.core.authorship import AUTHOR_HEADER, AUTHOR_SESSION_HEADER, current_author
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OPERATIONS, OperationsDep
-from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
@@ -34,6 +36,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnreachableError,
     start_command,
 )
+from tests.support.operations import press
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
 PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6, PRESS_7 = (uuid.uuid4().hex for _ in range(7))
@@ -44,6 +47,8 @@ pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 class Counts:
     def __init__(self) -> None:
         self.runs = 0
+        self.cancelled = 0
+        self.events: list[str] = []
 
 
 @pytest.fixture
@@ -66,22 +71,79 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return {"done": checked["checked"], "n": counts.runs}
 
     state: AppState = getattr(app.state, STATE_ATTR)
+
+    async def where(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return {"queue": activity.info().task_queue}
+
+    async def slow(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            counts.cancelled += 1
+            raise
+        return {}
+
+    test_slow_kind = OperationKind("test_slow", check, slow, run_timeout=timedelta(seconds=2))
+    gate = asyncio.Lock()
+
+    async def threaded(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        def commit() -> None:
+            time.sleep(12)  # past the 2 s timeout and the heartbeat that delivers it
+            counts.events.append("committed")
+
+        try:
+            async with gate:
+                await to_thread_to_end(commit)
+        finally:
+            counts.events.append("released")
+        return {}
+
+    test_threaded_kind = OperationKind(
+        "test_threaded", check, threaded, run_timeout=timedelta(seconds=2)
+    )
+
+    async def slow_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {}
+
+    test_slow_check_kind = OperationKind("test_slow_check", slow_check, where, queue="library")
+    test_library_kind = OperationKind("test_library", check, where, queue="library")
+
+    async def author(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(0)  # off the activity's own task, as a commit in a thread is
+        found = current_author()
+        return {"principal": found and found.principal, "session": found and found.session}
+
+    test_author_kind = OperationKind("test_author", check, author, queue="library")
     ops = state.components.get(OPERATIONS)
-    test_kind = OperationKind("test", check, run)
-    # Before the app starts, so its `bambuddy` worker serves the kind too.
+    added = [
+        OperationKind("test", check, run),
+        OperationKind("test_where", check, where),
+        test_slow_kind,
+        test_threaded_kind,
+        test_slow_check_kind,
+        test_library_kind,
+        test_author_kind,
+    ]
+    # Before the app starts, so its workers serve the kinds too.
     state.components.override(
-        OPERATIONS, dataclasses.replace(ops, kinds={**ops.kinds, "test": test_kind})
+        OPERATIONS,
+        dataclasses.replace(ops, kinds={**ops.kinds, **{kind.name: kind for kind in added}}),
     )
     router = APIRouter()
 
     @router.post("/api/v1/test-op")
     async def post(
-        body: dict[str, Any], response: Response, ops: OperationsDep, key: IdempotencyKey = None
+        body: dict[str, Any],
+        response: Response,
+        ops: OperationsDep,
+        key: IdempotencyKey = None,
+        kind: str = "test",
     ) -> Any:
         return await run_operation(
             ops,
             response,
-            kind=test_kind,
+            kind=ops.kinds[kind],
             subject="s",
             request=body,
             idempotency_key=key,
@@ -93,7 +155,8 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
 
 
 def post(client: TestClient, body: dict[str, Any], key: str | None = None) -> Any:
-    headers = {"Idempotency-Key": key} if key else {}
+    """One press: ``key``, or a fresh one."""
+    headers = {"Idempotency-Key": key or uuid.uuid4().hex}
     return client.post("/api/v1/test-op", json=body, headers=headers)
 
 
@@ -121,32 +184,24 @@ def test_a_retry_with_the_same_key_answers_the_record_and_runs_nothing(
     assert counts.runs == 1
 
 
-def test_without_a_key_each_request_is_its_own_operation(
-    client: TestClient, counts: Counts
+def test_a_request_without_a_key_is_refused_and_runs_nothing(
+    client: TestClient, counts: Counts, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    post(client, {"a": 1})
-    post(client, {"a": 1})
-    assert counts.runs == 2
+    """#1143: a keyless write cannot be told from its own retry, so a proxy's re-send
+    after a lost answer would upload, enqueue or create twice. It is refused (428) before
+    anything starts."""
 
+    async def no_start(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a keyless request must not reach Temporal")
 
-def test_only_a_request_with_a_key_reads_the_record_first(
-    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review #1063 fourth review 3: a keyless request's key is new, so no record can
-    match it; reading one would only spend the answer's deadline."""
-    store = getattr(app.state, STATE_ATTR).components.get(OPERATIONS).store
-    real = type(store).find
-    reads: list[str] = []
-
-    async def find(self: Any, key: str) -> Any:
-        reads.append(key)
-        return await real(self, key)
-
-    monkeypatch.setattr(type(store), "find", find)
-    assert post(client, {"a": 1}).status_code == 200
-    assert reads == []
-    assert post(client, {"a": 1}, key=PRESS_7).status_code == 200
-    assert len(reads) == 1
+    monkeypatch.setattr(operations_api, "start_command", no_start)
+    response = client.post("/api/v1/test-op", json={"a": 1})
+    assert response.status_code == 428, response.text
+    assert response.json()["type"] == operations_api.KEY_REQUIRED_PROBLEM
+    assert "Idempotency-Key" in response.json()["detail"]
+    assert counts.runs == 0
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
 
 
 def test_a_refusal_answers_the_routes_problem_and_writes_nothing(
@@ -183,6 +238,21 @@ def test_a_retry_whose_record_was_pruned_never_invites_a_repeat(
     assert "Check Bambuddy" in again.json()["detail"]
     assert again.json()["type"] == operations_api.RECORD_GONE_PROBLEM
     assert counts.runs == 1
+
+
+def test_a_pruned_library_operation_names_the_model_not_bambuddy(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """Review #1119 2-1: a ``library`` kind's effect is on the model and its checkouts."""
+    headers = {"Idempotency-Key": PRESS_7}
+    first = client.post("/api/v1/test-op?kind=test_library", json={}, headers=headers)
+    assert first.status_code == 200, first.text
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("DELETE FROM operations")
+    again = client.post("/api/v1/test-op?kind=test_library", json={}, headers=headers)
+    assert again.status_code == 409, again.text
+    assert "Bambuddy" not in again.json()["detail"]
+    assert "Check the model and its libraries" in again.json()["detail"]
 
 
 def test_a_slow_done_command_answers_202_and_is_followed(
@@ -245,6 +315,54 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
         assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
 
 
+def test_each_kind_runs_on_its_own_queue(client: TestClient) -> None:
+    """§4.3: a worker serves only the kinds whose effect it holds."""
+    library = client.post("/api/v1/test-op?kind=test_library", json={}, headers=press())
+    bambuddy = client.post("/api/v1/test-op?kind=test_where", json={}, headers=press())
+    assert library.status_code == bambuddy.status_code == 200, library.text
+    assert library.json()["queue"].endswith("-library")
+    assert not bambuddy.json()["queue"].endswith("-library")
+
+
+def test_a_run_past_its_kinds_timeout_is_cancelled_and_recorded_failed(
+    client: TestClient, counts: Counts
+) -> None:
+    """Review I2: the run heartbeats, so its timeout reaches the coroutine, which then
+    stops rather than finishing an effect the record calls failed."""
+    response = client.post("/api/v1/test-op?kind=test_slow", json={}, headers=press())
+    assert response.status_code == 500, response.text
+    deadline = time.monotonic() + 30
+    while counts.cancelled == 0 and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert counts.cancelled == 1
+
+
+def test_a_cancelled_run_holds_its_lock_until_its_thread_returns(
+    client: TestClient, counts: Counts
+) -> None:
+    """Review #1119 1: a pin's clone and commit are threads, which a cancel cannot stop.
+    The run keeps its gate until the thread has returned, so nothing that waits on the
+    gate runs beside it; the effect itself can still land after the record failed."""
+    response = client.post("/api/v1/test-op?kind=test_threaded", json={}, headers=press())
+    assert response.status_code == 500, response.text
+    # Review #1119 2-4: the record says the effect may have landed, not just "failed".
+    assert "may have been done" in response.json()["detail"]
+    deadline = time.monotonic() + 40
+    while len(counts.events) < 2 and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert counts.events == ["committed", "released"]
+
+
+def test_a_library_kinds_slow_check_does_not_blame_bambuddy(client: TestClient) -> None:
+    """Review #1119 2: a ``library`` check reads the data volume, not Bambuddy."""
+    response = client.post("/api/v1/test-op?kind=test_slow_check", json={}, headers=press())
+    assert response.status_code == 504, response.text
+    problem = response.json()
+    assert problem["type"] == "about:blank"
+    assert "Bambuddy" not in problem["detail"]
+    assert "the check did not finish" in problem["detail"]
+
+
 def test_an_execution_ended_before_it_answered_is_still_accepting(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -258,6 +376,20 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
     response = post(client, {})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+def test_the_run_commits_as_the_requests_agent_author(client: TestClient) -> None:
+    """A run is the request's, so a commit it makes is authored as the agent that asked
+    (#252), not as ScadBuddy: the worker has no request of its own to read it from."""
+    response = client.post(
+        "/api/v1/test-op?kind=test_author",
+        json={},
+        headers={**press(), AUTHOR_HEADER: "token:abc123", AUTHOR_SESSION_HEADER: "s-1"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"principal": "token:abc123", "session": "s-1"}
+    plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1}, headers=press())
+    assert plain.json() == {"principal": None, "session": None}
 
 
 def test_a_refusing_temporal_is_a_500_as_the_reconciler_reads_it(
@@ -321,5 +453,6 @@ def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
         assert detail in responses["503"]["description"]
     assert "may_have_started" in responses["503"]["description"]
     assert operations_api.RECORD_GONE_PROBLEM in responses["default"]["description"]
+    assert operations_api.KEY_REQUIRED_PROBLEM in responses["428"]["description"]
     schema = responses["503"]["content"]["application/problem+json"]["schema"]
     assert "may_have_started" in schema["properties"]

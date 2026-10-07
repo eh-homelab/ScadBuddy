@@ -121,7 +121,10 @@ export function PreviewGallery({ slug, media, label, hidden, children }: Props) 
 /** One item in the strip: a small copy of the image, or of a video's poster with a play badge. */
 function Thumbnail({ slide, onOpen }: { slide: Slide; onOpen: () => void }) {
   // The small copy, never the original: eight 4 MB photos are 32 MB of strip (#624).
-  const src = slide.thumbnail
+  // Should it fail, the original image or the video's poster, then an empty tile (#1427).
+  const [failed, setFailed] = useState<string[]>([])
+  const fallback = slide.kind === 'video' ? slide.poster : slide.src
+  const src = [slide.thumbnail, fallback].find((url) => url && !failed.includes(url))
   return (
     <button
       type="button"
@@ -130,7 +133,14 @@ function Thumbnail({ slide, onOpen }: { slide: Slide; onOpen: () => void }) {
       className="relative block h-14 w-[4.5rem] cursor-zoom-in overflow-hidden rounded-[4px] bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
     >
       {src ? (
-        <img src={src} alt="" loading="lazy" draggable={false} className="h-full w-full object-cover" />
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          draggable={false}
+          onError={() => setFailed((urls) => [...urls, src])}
+          className="h-full w-full object-cover"
+        />
       ) : null}
       {slide.kind === 'video' && (
         <span

@@ -34,7 +34,7 @@ describe('NozzleStep', () => {
     ])
   })
 
-  it('offers Standard/High Flow per side, with no per-side size, and says High Flow slices as Standard', () => {
+  it('offers Standard/High Flow per side, with no per-side size, and no longer says High Flow slices as Standard (#484)', () => {
     const onChange = vi.fn()
     const { rerender } = render(
       <NozzleStep sizes={['0.2', '0.4']} installed={installed}
@@ -50,9 +50,8 @@ describe('NozzleStep', () => {
       <NozzleStep sizes={['0.2', '0.4']} installed={installed}
         value={[{ size: '0.4', flow: 'high_flow' }, { size: '0.4', flow: 'standard' }]} onChange={onChange} />,
     )
-    expect(
-      screen.getByText(/Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet\./),
-    ).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /left.*high flow/i })).toBeChecked()
+    expect(screen.queryByText(/slices this as Standard flow/)).toBeNull()
   })
 })
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -31,6 +33,7 @@ from scadbuddy.core.events import (
     SettingsChanged,
     Subscription,
 )
+from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH
 from scadbuddy.main import create_app
@@ -39,6 +42,22 @@ from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 WS = "/api/v1/ws"
 JOB_ID = "a" * 32
 OUTPUT_ID = "b" * 32
+
+
+@pytest.fixture
+def client(client: TestClient, app: FastAPI) -> Iterator[TestClient]:
+    """The app's client, once its bus listens. The Postgres bus hears only what is
+    NOTIFYed after its LISTEN, which ``start`` does not wait for, and the first LISTEN
+    is no reconnect, so no resync follows it: an event published before it is lost,
+    and the socket's next frame is the ping ``PING_SECONDS`` later (#1668). The bus's
+    own tests wait the same way (``make_bus`` in ``tests/test_pg_event_bus.py``)."""
+    events = getattr(app.state, STATE_ATTR).events
+    if isinstance(events, PgNotifyEventBus):
+        deadline = time.monotonic() + 30
+        while events.listener.backend_pid is None:
+            assert time.monotonic() < deadline, "the app's event listener never listened"
+            time.sleep(0.01)
+    yield client
 
 
 @pytest.fixture

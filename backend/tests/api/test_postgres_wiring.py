@@ -4,7 +4,6 @@ decisions are kept there. A render through the projection is `test_temporal_path
 
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
 from collections.abc import Callable
@@ -82,11 +81,17 @@ def test_a_bus_that_fails_to_start_releases_the_render_service_that_did(
     assert isinstance(bus, PgNotifyEventBus)
     assert isinstance(service, RenderService)
     assert isinstance(projection, JobProjection)
-    started: list[asyncio.Task[None]] = []
+    started: list[bool] = []
+    start = service.start
+
+    async def starting() -> None:
+        await start()
+        started.append(True)
+
+    monkeypatch.setattr(service, "start", starting)
 
     async def unreachable(*args: object, **kwargs: object) -> None:
-        assert service._pruner is not None  # the service is fully up by now
-        started.append(service._pruner)
+        assert started  # the service is fully up by now
         raise PoolTimeout("the database refused a second pool")
 
     monkeypatch.setattr(bus._pool, "open", unreachable)
@@ -94,8 +99,6 @@ def test_a_bus_that_fails_to_start_releases_the_render_service_that_did(
         pass
 
     assert started, "the render service had started before the bus failed"
-    assert all(task.done() for task in started)
-    assert service._pruner is None
     assert projection.pool.closed
     assert bus._pool.closed
     assert projection.pg_listener.backend_pid is None

@@ -282,11 +282,11 @@ describe('probeCredential', () => {
     const stop = new AbortController()
     const hanging: typeof fetch = (_input, init) =>
       new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))
-    const started = Date.now()
+    const started = performance.now()
     const verdict = probeCredential({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: hanging, now, signal: stop.signal })
     stop.abort()
     expect((await verdict).verdict).toBe('unknown')
-    expect(Date.now() - started).toBeLessThan(1000)
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   it.each([401, 402, 403])('reports a probe answered %i as refused outright', async (status) => {

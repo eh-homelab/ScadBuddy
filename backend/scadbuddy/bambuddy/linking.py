@@ -28,6 +28,7 @@ from fastapi import status
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import QueueItem
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.stages import stage_of
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
@@ -50,12 +51,26 @@ SCAN_AFTER = timedelta(days=14)
 #: And before its first upload, so a date filter in another time zone cannot cut the
 #: first print off.
 SCAN_BEFORE = timedelta(days=1)
-#: How long a library file's queue item is read for its archive (#976): as long as an
-#: output's print is looked for after its last slice.
-LIBRARY_LINK_WINDOW = SCAN_AFTER
-#: How many such items one call reads at most, and how many at once.
+#: How many of a library file's pending queue items one call reads at most, newest
+#: first, and how many at once (#976).
 LIBRARY_LINK_LIMIT = 50
 LIBRARY_LINK_CONCURRENCY = 8
+#: How long after it was recorded a library file's queue item is read at most. An
+#: item that never settles (one waiting on a printer that was removed, or skipped and
+#: never resumed) would otherwise cost a read on every list and hold a slot in
+#: ``LIBRARY_LINK_LIMIT`` for good; past this it is marked gone (#1703).
+LIBRARY_LINK_BACKSTOP = timedelta(days=180)
+#: The stages a queue item never leaves once it has no archive (#1705). On a
+#: library-file item Bambuddy creates the archive and commits ``archive_id`` before it
+#: uploads the file or sets ``printing``, so a run that got as far as the printer has
+#: its archive by the time it can be ``completed``; an item that settles without one
+#: failed or was cancelled before dispatch. Bambuddy's own note on these states: they
+#: "never return" (``backend/app/services/print_scheduler.py``, the library branch of
+#: ``_start_print`` and ``_repoint_siblings_at_archive``, maziggy/bambuddy@505948f).
+#: Its ``skipped`` is not here: ``POST /queue/printer/{id}/resume``
+#: (``backend/app/api/routes/print_queue.py``) puts a skipped item back to ``pending``,
+#: so it is read on like any pending one, until the backstop (#1704).
+_SETTLED = ("done", "failed", "cancelled")
 
 
 async def link_item(
@@ -188,10 +203,19 @@ async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> 
 
     A library-file run has no output, so no progress read follows it the way an
     output's print is linked: the prints list calls this before it reads the links.
-    An item Bambuddy has dropped before naming an archive is marked gone and not read
-    again; any other failure is logged and leaves the item to the next call.
+    An item is read until it names an archive or Bambuddy is done with it without
+    one (it 404s, or it settled first, see `_SETTLED`): then it is marked gone and not
+    read again. Only the long `LIBRARY_LINK_BACKSTOP` ages an item out, so a run that
+    waits long in the queue, or that nobody lists for a while, is still linked the
+    next time the list is opened (#1664, #1703). Any other
+    failure, a database one included, is logged and leaves the item to the next call
+    (#1662).
     """
-    pending = await links.pending_library(LIBRARY_LINK_WINDOW, LIBRARY_LINK_LIMIT)
+    try:
+        pending = await links.pending_library(LIBRARY_LINK_LIMIT, max_age=LIBRARY_LINK_BACKSTOP)
+    except (psycopg.Error, DatabaseRequiredError):
+        logger.exception("could not read the library prints to link")
+        return
     gate = asyncio.Semaphore(LIBRARY_LINK_CONCURRENCY)
 
     async def link(queue_item_id: int) -> None:
@@ -209,5 +233,16 @@ async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> 
                 return
             if item.archive_id is not None:
                 await links.link_library(queue_item_id, item.archive_id, item.library_file_name)
+            elif stage_of(item.status) in _SETTLED:
+                # Settled before it was dispatched: it will never name an archive.
+                await links.library_gone(queue_item_id)
 
-    await asyncio.gather(*(link(row.queue_item_id) for row in pending))
+    async def guarded(queue_item_id: int) -> None:
+        try:
+            await link(queue_item_id)
+        except (psycopg.Error, DatabaseRequiredError):
+            logger.exception(
+                "could not record a library print's link", extra={"queue_item_id": queue_item_id}
+            )
+
+    await asyncio.gather(*(guarded(row.queue_item_id) for row in pending))

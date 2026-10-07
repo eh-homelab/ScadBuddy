@@ -23,6 +23,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
 from psycopg import Connection, sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
@@ -84,6 +85,16 @@ def wait_for_span(
                 return finished
         time.sleep(0.05)
     raise AssertionError("no matching span was recorded")
+
+
+def http_server_span(span: ReadableSpan) -> bool:
+    """An HTTP request's server span. Temporal's ``TracingInterceptor`` makes its
+    RunWorkflow/RunActivity spans SERVER too, and the housekeeping Schedules (#1054)
+    run activities while an app is up, so a SERVER kind alone may be either."""
+    scope = span.instrumentation_scope
+    return span.kind == SpanKind.SERVER and not (
+        scope is not None and scope.name.startswith("temporalio")
+    )
 
 
 def load_fixture_param(stem: str) -> dict[str, Any]:

@@ -24,9 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
-import psycopg
 from fastapi import APIRouter, Depends, Path, Query, Response, status
-from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from scadbuddy.analyzers import builtin
@@ -67,7 +65,7 @@ from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
 from scadbuddy.library.settings_store import SettingsStore
@@ -84,7 +82,6 @@ STALE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-fix-stale"
 CONFIRMATION_PROBLEM = "https://scadbuddy.dev/problems/confirmation-required"
 SCOPE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-scope"
 UNKNOWN_RULE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-unknown-rule"
-DATABASE_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/database-unavailable"
 
 DIAGNOSTIC_ID_PATTERN = r"^SB[0-9]{4}$"
 #: Where an applied diff would land, and what applying does today.
@@ -93,9 +90,6 @@ ROUTE_NOTE = (
     "print that uses it will slice and queue with the diff, and will go through the "
     "outward approval of AI spec §8.2 before it does."
 )
-
-#: What a database that cannot be reached raises through the store.
-DATABASE_ERRORS = (psycopg.OperationalError, PoolTimeout)
 
 
 class AnalysisTarget(BaseModel):

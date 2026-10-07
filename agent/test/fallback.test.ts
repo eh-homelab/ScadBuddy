@@ -468,9 +468,9 @@ describe('runWithFallback (#1093)', () => {
     })
     // A probe that only ends when its signal does.
     const never = () => new Promise<ProbeVerdict>(() => {})
-    const started = Date.now()
+    const started = performance.now()
     const { error } = await h.collect([A, B], { signal: stop.signal }, never)
-    expect(Date.now() - started).toBeLessThan(1000)
+    expect(performance.now() - started).toBeLessThan(1000)
     expect(error).toBeInstanceOf(Error)
     expect(h.probes[0]?.signal).toBe(stop.signal)
   })

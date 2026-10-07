@@ -77,18 +77,18 @@ dependency of `agent/`.
   store lookup key derives from the working directory, so resume from a `cwd` matching
   the original run's" (§6 therefore gives every session a stable service-owned `cwd`).
   [Sessions][sdk-sessions]
-- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283, and again in #1540 on
-  0.3.287: the bundled Claude Code binary prints its version (`2.1.287 (Claude Code)`)
-  on stdout for `--version` and exits 0, the version the SDK's `package.json` declares
-  as `claudeCodeVersion`, so the image build asserts the binary is that version
-  (`agent/src/check-cli-version.ts`; the SDK itself is pinned exactly, so #1540 dropped
-  the second pin, `CLAUDE_CODE_VERSION`). In that SDK's `sdk.d.ts`, `settingSources: []`
-  means "disable filesystem settings (SDK isolation mode)", so it loads nothing from the
-  host (§4.4).
-- Read and measured in #300 on SDK 0.3.283, and again in #1540 on 0.3.287 (`sdk.d.ts`,
-  `export declare type SessionStore`, marked `@alpha`): `append(key, entries)` and
-  `load(key)` are required; `listSessions?(projectKey)`,
-  `listSessionSummaries?(projectKey)`, `delete?(key)` and
+- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283, and again on 0.3.287
+  (#1540): the bundled Claude Code binary prints its version (`2.1.283 (Claude Code)`,
+  then `2.1.287 (Claude Code)`) on stdout for `--version` and exits 0, the same version
+  the SDK's `package.json` declares as `claudeCodeVersion`. `agent/package.json` pins the
+  SDK exactly and the lockfile pins the binary, so the image build asserts only that the
+  two agree (`agent/src/check-cli-version.ts`); until #1540 it also compared them with a
+  `CLAUDE_CODE_VERSION` build argument, edited by hand on every bump. In that SDK's
+  `sdk.d.ts` (both versions), `settingSources: []` means "disable filesystem settings
+  (SDK isolation mode)", so it loads nothing from the host (§4.4).
+- Read and measured in #300 on SDK 0.3.283, and re-read on 0.3.287 (#1540) (`sdk.d.ts`,
+  `export declare type SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
+  `listSessions?(projectKey)`, `listSessionSummaries?(projectKey)`, `delete?(key)` and
   `listSubkeys?({projectKey, sessionId})` are optional. `SessionKey` is
   `{ projectKey, sessionId, subpath? }` (projectKey "Default: sanitized cwd"; no option
   sets it). `append` "SHOULD treat `uuid` as an idempotency key"; `load` returns `null`
@@ -122,8 +122,8 @@ dependency of `agent/`.
   and re-probed in #1540 on 2.1.287:
   - **Tool-name normalisation.** Claude Code names an MCP tool
     `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
-    (read in the CLI bundle's `Pa()`/`vn()`, `qa()`/`Tn()` in 2.1.287; confirmed by a
-    probe). `files.list` and
+    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe; the same code, under
+    other minified names, in 2.1.287, #1540). `files.list` and
     `files_list` therefore collide on one name, and a name with a space or a dot cannot be
     matched literally. The registry now tiers only names in that alphabet, maps disabled
     names through `vn`, and hides colliding tools (`agent/src/plugins/registry.ts`
@@ -155,7 +155,7 @@ dependency of `agent/`.
   request. Claude does not see the tool and cannot attempt it." Tool-name globs work in
   deny rules. An allow rule only pre-approves; "Auto-approved tools never reach
   `canUseTool`". [Permissions][sdk-permissions]
-- Read and measured in #258 on SDK 0.3.283, and again in #1540 on 0.3.287 (moved up from
+- Read and measured in #258 on SDK 0.3.283, and again on 0.3.287 (#1540) (moved up from
   §3.2): **`canUseTool` can
   park a tool call on an asynchronous human decision, with no deadline of its own.**
   `sdk.d.ts` on `CanUseTool`: "permission prompts have no park deadline"; the
@@ -434,9 +434,9 @@ outward call that the seam approved runs at once, because the harness projection
 prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validated
 arguments with its own bundled zod 4.4.3, which refused any call that left out a
 `.default()` field of our zod 4.6.5 ("expected nonoptional"), so the harness projection
-passed each tool's whole `z.object` instead of its raw shape. SDK 0.3.287 (bundled zod
-4.5.4) fills the default from the raw shape, which the projection now passes (measured
-2026-10-06; `agent/src/tools/projections.ts` `createHarnessServer`,
+passed a whole `z.object` instead of the raw shape. Measured on SDK 0.3.287 (#1540): its
+server (zod 4.5.4) marks such a field defaulted and fills the default, so the projection
+passes the raw shape (`agent/src/tools/projections.ts` `createHarnessServer`;
 `agent/test/projections.test.ts`).
 
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
@@ -814,14 +814,14 @@ including `disabled`. Where it is enforced:
   handoff, a shutdown and every other end of the turn cancel it, and the model is told
   nobody answered. Nothing answers a question by itself. A subagent cannot use
   `AskUserQuestion` (Claude Code refuses it there without asking `canUseTool`, measured
-  on 2.1.283 and 2.1.287), so the same sessions also get
-  `mcp__scadbuddy_questions__ask_user`, an in-process tool with the same input that
-  parks on the same gate
+  on 2.1.283 and 2.1.287), so the same sessions also get `mcp__scadbuddy_questions__ask_user`, an
+  in-process tool with the same input that parks on the same gate
   (`agent/test/harnessWiring.test.ts`). Its call has no timeout short of the turn's end
   (`ASK_USER_TIMEOUT_MS`, measured). `ai_questions.tool` records which tool asked. Each
   answer is an audit row of kind `question`, naming that tool and holding a keyed hash of
-  the answers, never their text (#1075). A subagent's calls are not yet in the panel feed
-  or the `tool_call` rows (#1108), and the card does not yet say who asked (#1109). Expiry and notifications
+  the answers, never their text (#1075). A subagent's calls are in the panel feed, tagged
+  with the `Agent` call that spawned it (`parent`), and have `tool_call` rows (#1108); the
+  card does not yet say who asked (#1109). Expiry and notifications
   belong to the attention requests of #815. The code is `agent/src/harness/questions.ts`
   and `agent/src/questions/service.ts`; the panel's card is `QuestionCard` in
   `frontend/src/components/assistant/FeedItemView.tsx`.

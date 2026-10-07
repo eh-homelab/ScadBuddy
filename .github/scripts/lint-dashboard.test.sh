@@ -7,7 +7,7 @@
 # the real dashboard queries only series and spans the real backend has.
 #
 # Runs in ci.yml's `lint` job after the pinned kustomize is installed
-# ($KUSTOMIZE, as for the lint itself). Needs jq and mikefarah yq v4.
+# ($KUSTOMIZE, as for the lint itself). Needs jq, mikefarah yq v4 and python3.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,6 +166,41 @@ edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "sum by (le) (scadbudd
 check 'le on a series that is not a _bucket fails' \
   "1:$f: panel 2 target A: by (le): \"le\" is not a label of the series the query reads" \
   "$(run)"
+
+# The metric declarations are parsed as Python, not split on a literal
+# `registry=r` (#1190): a declaration that passes its registry another way, or
+# its labels as a tuple or `labelnames=` (#1233), is still its own metric with
+# its own labels.
+good
+m="$r/backend/scadbuddy/core/metrics.py"
+sed -i 's/registry=r,/registry=self.registry,/' "$m"
+check 'declarations without a literal registry=r pass' '0:' "$(run)"
+
+good
+python3 - "$m" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace('["operation"],\n            registry=r,', 'labelnames=("operation",),\n            registry=r,', 1)
+s = s.replace('"scadbuddy_render_queue_depth",', '"scadbuddy_render_queue_depth",\n            "Jobs waiting.",\n            ("stage", "phase"),\n            registry=r,\n        )\n        self.unused = Gauge(\n            "scadbuddy_unused_gauge",', 1)
+open(p, "w").write(s)
+PY
+edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "sum by (phase) (scadbuddy_render_queue_depth) + sum by (operation) (scadbuddy_render_store_errors_total)"'
+check 'tuple and labelnames= labels are read' '0:' "$(run)"
+
+# No declaration found, or no span literal, is a problem the lint names, not a
+# grep failing under pipefail that ends it silently (#1211).
+good
+printf 'from prometheus_client import Gauge\nRenderStage = Literal["render"]\n' > "$m"
+out="$("$script" "$r" 2>&1)" && status=0 || status=$?
+check 'a metrics.py with no declarations is named as a problem' \
+  '1:yes' "$status:$(grep -qxF 'backend/scadbuddy/core/metrics.py: no scadbuddy_* metric declarations found' <<< "$out" && echo yes || echo no)"
+
+good
+find "$r/backend/scadbuddy" -name '*.py' -exec sed -i -E 's/(^|[^A-Za-z_])(detached_)?span\(/\1nospan(/g' {} +
+out="$("$script" "$r" 2>&1)" && status=0 || status=$?
+check 'a backend with no span literals is named as a problem' \
+  '1:yes' "$status:$(grep -qxF 'backend/scadbuddy: scadbuddy-api passes no literal to span()/detached_span()' <<< "$out" && echo yes || echo no)"
 
 good
 p=$(tempo_panel 'render.render')

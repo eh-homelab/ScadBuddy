@@ -8,11 +8,18 @@ import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match, Mount
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
+
+#: A route's answer when the store's database could not be reached (#1264: shared
+#: here, not borrowed from the analyzers route).
+DATABASE_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/database-unavailable"
+#: What a database that cannot be reached raises through the store.
+DATABASE_ERRORS = (psycopg.OperationalError, PoolTimeout)
 
 logger = logging.getLogger(__name__)
 

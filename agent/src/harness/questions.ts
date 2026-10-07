@@ -152,10 +152,8 @@ export async function askThroughGate(
 }
 
 /**
- * ask_user's result, shaped like Claude Code's for AskUserQuestion: its
- * `"q"="a"` pairs, though not its words ("Your questions have been answered:
- * …", or "The user answered: …" when an answer is typed; measured on 2.1.283
- * and 2.1.287). Each question and answer is JSON-quoted, so an answer the user
+ * ask_user's result: Claude Code's wording for AskUserQuestion's (measured on
+ * 2.1.283 and 2.1.287), with each question and answer JSON-quoted, so an answer the user
  * typed with a quote in it cannot read as a second answer.
  */
 export function answersText(answers: Record<string, string>): string {
@@ -168,14 +166,14 @@ const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
 /**
  * ask_user's call timeout. An MCP call is cut off at the server's `timeout`,
- * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283,
- * and still 2.1.287's bundle; the cut-off aborts the call, and the gate
- * withdraws its card). The idle timeout does not apply to `sdk` servers, and
- * MCP auto-backgrounding is off in a non-interactive session. A question waits
- * until it is answered or its turn ends, so the clamp: the turn's end is the
- * only bound. Measured on 2.1.283: 70 s and 130 s waits are answered, and a
- * 2 s MCP_TOOL_TIMEOUT or a 2 s `timeout` on this server cuts the call off (so
- * both are honoured for an `sdk` server).
+ * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283 and 2.1.287;
+ * the cut-off aborts the call, and the gate withdraws its card). The idle
+ * timeout does not apply to `sdk` servers, and MCP auto-backgrounding is off
+ * in a non-interactive session. A question waits until it is answered or its
+ * turn ends, so the clamp: the turn's end is the only bound.
+ * Measured: 70 s and 130 s waits are answered, and a 2 s MCP_TOOL_TIMEOUT
+ * or a 2 s `timeout` on this server cuts the call off (so both are honoured
+ * for an `sdk` server).
  */
 export const ASK_USER_TIMEOUT_MS = 2_147_483_647
 

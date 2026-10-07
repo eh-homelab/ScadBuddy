@@ -31,20 +31,16 @@ class _Remote:
         return 0
 
 
-@pytest.mark.parametrize(
-    ("converge", "calls"),
-    [(False, ["drop"]), (True, ["drop", "reconcile", "backfill"])],
-)
-async def test_only_the_periodic_sweep_reconciles_and_backfills(
-    monkeypatch: pytest.MonkeyPatch, converge: bool, calls: list[str]
+async def test_the_sweep_drops_then_reconciles_and_backfills(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The boot's sweep drops what it removed but leaves the long Bambuddy passes to
-    the periodic sweep, so an unreachable Bambuddy never holds up the start."""
+    """The Schedule's sweep is the only one (review #1095 1): it drops what it removed,
+    then converges with the store."""
     remote = _Remote()
     monkeypatch.setattr(main, "sweep_assets", lambda state: ["a1"])
     state = SimpleNamespace(store=SimpleNamespace(remote_assets=remote), assets=object())
-    await main._sweep_assets_logged(state, converge=converge)  # type: ignore[arg-type]
-    assert remote.calls == calls
+    await main._sweep_assets_logged(state)  # type: ignore[arg-type]
+    assert remote.calls == ["drop", "reconcile", "backfill"]
 
 
 @pytest.mark.parametrize("content", [False, True])

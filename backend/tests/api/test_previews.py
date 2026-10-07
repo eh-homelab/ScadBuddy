@@ -539,7 +539,6 @@ def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
 
     assert closed == ["previews", "queue"]
     assert isinstance(booted.render, RenderService)
-    assert booted.render._pruner is None
     assert booted.projection is not None and booted.projection.pool.closed
 
 

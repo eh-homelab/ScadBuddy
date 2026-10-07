@@ -164,10 +164,9 @@ updates:
           - "@types/node"
 
   # The AI agent service (#261). `@anthropic-ai/claude-agent-sdk` is pinned to
-  # an exact version, and the Claude Code binary it bundles moves with it. The
-  # `agent` job's tests run that binary, so an SDK bump PR is red where the
-  # harness no longer behaves as they measured; the facts AI spec §3 cites need
-  # re-measuring before it merges (#1540).
+  # an exact version, and it bundles the Claude Code binary the harness runs.
+  # The `agent` job's tests run that binary against a fake endpoint, so an SDK
+  # bump that changes what the harness relies on reds the job on its PR (#1540).
   - package-ecosystem: "npm"
     directory: "/agent"
     schedule:

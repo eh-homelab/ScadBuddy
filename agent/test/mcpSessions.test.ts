@@ -102,9 +102,9 @@ describe('graceful shutdown with open /mcp sessions', () => {
   it('ends the sessions first, so the server drains and the exit is clean', async () => {
     const { app } = testApp({ settings: { mode: 'disabled' } })
     const { closeServer } = await listening(app)
-    const started = Date.now()
+    const started = performance.now()
     expect(await shutdown({ closeSessions: () => app.close(), closeServer, timeoutMs: 3000 })).toBe('clean')
-    expect(Date.now() - started).toBeLessThan(3000)
+    expect(performance.now() - started).toBeLessThan(3000)
   })
 
   it('without ending them, a standing SSE stream holds the drain until the deadline', async () => {

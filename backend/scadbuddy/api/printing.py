@@ -21,7 +21,6 @@ from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 
-from scadbuddy.api.analyzers import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
@@ -64,7 +63,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.operations.component import OperationsDep
@@ -235,9 +234,17 @@ def put_printer_rack_algorithm(
             if rolled_back
             else "could not confirm the save; check the setting before resending"
         )
+        # Say which failure it was (#1283): a full pool, a statement cut off, or a
+        # connection that failed, rather than calling each one a timeout.
+        if isinstance(error, PoolTimeout):
+            cause = "no database connection came free in time"
+        elif isinstance(error, psycopg.errors.QueryCanceled):
+            cause = "the database did not answer in time"
+        else:
+            cause = "the connection to the database failed"
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"{outcome}: the database did not answer in time ({type(error).__name__})",
+            f"{outcome}: {cause} ({type(error).__name__})",
             type_=DATABASE_UNAVAILABLE_PROBLEM,
         ) from None
     return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)

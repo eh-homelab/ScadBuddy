@@ -39,10 +39,10 @@ covers the same ground more briefly.
   `claude/`, `work/` and `plugins/` (the plugin package cache) and checks all three are
   writable. If it cannot, the process exits 1
   with a message naming the directory (`main.ts`).
-- **Pinned Claude Code.** The Claude Code binary is the one the exactly pinned Agent
-  SDK bundles and declares (`claudeCodeVersion`). The build runs
-  `node dist/check-cli-version.js` and fails when the binary for the platform being
-  built is missing or reports another version
+- **Pinned Claude Code.** `agent/package.json` pins the Agent SDK exactly and its lockfile
+  pins the Claude Code binary the SDK bundles, for each platform. The build runs
+  `node dist/check-cli-version.js`, which fails when that binary is missing or its
+  `--version` differs from the version the SDK declares
   ([`Dockerfile`](../../Dockerfile); [`agent/src/check-cli-version.ts`](../../agent/src/check-cli-version.ts)).
   The measurement behind this is in spec §3.1 ("Measured in PR #319").
 - **Container healthcheck.** `HEALTHCHECK` fetches `http://127.0.0.1:8081/healthz`

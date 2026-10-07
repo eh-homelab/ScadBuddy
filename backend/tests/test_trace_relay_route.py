@@ -456,3 +456,56 @@ def test_the_route_matcher_prefers_a_full_match_and_never_names_the_pages_mount(
     assert match("/models/box") == "/models/{slug}"
     assert match("/m/box") is None
     assert match("/") is None
+
+
+def test_a_rate_limited_batch_is_counted() -> None:
+    """#1161: a 429 loses the batch (the page does not retry), so it is counted."""
+    relay = make_relay(limits=RelayLimits(client_burst=1, client_per_second=0.01))
+    with TestClient(relay_app(relay)) as client:
+        assert client.post(PATH, content=export(span()), headers=UI).status_code == 204
+        assert client.post(PATH, content=export(span()), headers=UI).status_code == 429
+    assert outcome(relay, "rate_limited") == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "headers", "status"),
+    [
+        (b"{", UI, 400),
+        (json.dumps({"resourceSpans": [{} for _ in range(17)]}).encode(), UI, 413),
+        (export(span()), {**UI, "Content-Type": "text/plain"}, 415),
+    ],
+    ids=["400", "413", "415"],
+)
+def test_a_rejected_batch_is_counted(
+    client: TestClient, relay: TraceRelay, body: bytes, headers: dict[str, str], status: int
+) -> None:
+    assert client.post(PATH, content=body, headers=headers).status_code == status
+    assert outcome(relay, "rejected") == 1
+
+
+def test_a_request_not_from_the_page_is_not_counted(client: TestClient, relay: TraceRelay) -> None:
+    response = client.post(
+        PATH, content=export(span()), headers={**UI, "Origin": "https://x.example"}
+    )
+    assert response.status_code == 403
+    for name in ("rejected", "rate_limited", "shutdown", "failed"):
+        assert outcome(relay, name) == 0
+
+
+def test_a_batch_refused_while_closing_counts_shutdown(
+    client: TestClient, relay: TraceRelay
+) -> None:
+    relay.forwarder.closing = True
+    assert client.post(PATH, content=export(span()), headers=UI).status_code == 503
+    assert outcome(relay, "shutdown") == 1
+
+
+def test_a_dead_forwarder_answers_503_and_counts_failed(
+    client: TestClient, relay: TraceRelay
+) -> None:
+    """#1176: not a silent 204 while the queue fills behind a dead task."""
+    relay.forwarder.dead = True
+    response = client.post(PATH, content=export(span()), headers=UI)
+    assert_problem(response, 503, "the relay's forwarder has stopped")
+    assert outcome(relay, "failed") == 1
+    assert outcome(relay, "queue_full") == 0

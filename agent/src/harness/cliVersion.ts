@@ -7,13 +7,14 @@ import { promisify } from 'node:util'
 
 // The Agent SDK "runs the Claude Code binary"
 // (https://code.claude.com/docs/en/agent-sdk/overview), shipped as a per-platform
-// optional dependency. The image build asserts that binary is the version the
-// SDK declares (#261, spec §4.4; check-cli-version.ts, #1540), and these
-// helpers are how the build and the tests read both.
+// optional dependency. The image build checks that binary against the version
+// the SDK declares (check-cli-version.ts; #261, spec §4.4), and these helpers
+// are how the build and the tests read both.
 //
 // Measured on @anthropic-ai/claude-agent-sdk 0.3.283, 2026-09-27, and again on
-// 0.3.287, 2026-10-06 (the values below are 0.3.287's):
-//   - the SDK's package.json declares `"claudeCodeVersion": "2.1.287"`;
+// 0.3.287, 2026-10-06 (#1540):
+//   - the SDK's package.json declares `"claudeCodeVersion": "2.1.287"` (2.1.283
+//     on 0.3.283);
 //   - the SDK resolves the binary as
 //     `@anthropic-ai/claude-agent-sdk-<platform>-<arch>[-musl]/claude`
 //     relative to itself (read from its bundled sdk.mjs);

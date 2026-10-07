@@ -72,11 +72,26 @@ async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
     check_origin(request.headers, settings)
     if relay.forwarder.off:
         return Response(status_code=204, headers={TRACING_HEADER: "off"})
-    if relay.forwarder.closing:
+    # From here every refusal loses a batch the page sent (it never retries), so each
+    # is counted (#1161); one from another origin is not the page's, and is not.
+    forwarder = relay.forwarder
+    if forwarder.closing:
+        forwarder.count("shutdown")
         raise ApiError(503, "the relay is shutting down")
-    check_content_type(request.headers)
+    if forwarder.dead:
+        forwarder.count("failed")
+        raise ApiError(503, "the relay's forwarder has stopped")
+    try:
+        check_content_type(request.headers)
+    except ApiError:
+        forwarder.count("rejected")
+        raise
     peer = request.client.host if request.client is not None else None
-    relay.limits.take(relay_client(request.headers, peer, relay.trusted_proxies))
+    try:
+        relay.limits.take(relay_client(request.headers, peer, relay.trusted_proxies))
+    except ApiError:
+        forwarder.count("rate_limited")
+        raise
     try:
         batch = await asyncio.to_thread(
             prepare,
@@ -89,11 +104,13 @@ async def relay_traces(request: Request, relay: TraceRelayDep) -> Response:
             ),
         )
     except BatchTooLargeError as error:
+        forwarder.count("rejected")
         raise ApiError(413, str(error)) from error
     except PayloadError as error:
+        forwarder.count("rejected")
         raise ApiError(400, "the body is not an OTLP/JSON trace export") from error
     if batch is not None:
-        relay.forwarder.offer(batch)
+        forwarder.offer(batch)
     return Response(status_code=204)
 
 

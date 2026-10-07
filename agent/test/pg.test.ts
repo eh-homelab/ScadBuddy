@@ -306,9 +306,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
         })
         try {
           await Promise.all([isLocked, isContending])
-          const started = Date.now()
+          const started = performance.now()
           expect(await waiting.ready()).toBe(false)
-          expect(Date.now() - started).toBeLessThan(5000)
+          expect(performance.now() - started).toBeLessThan(5000)
           expect(String(errors[0])).toMatch(/lock timeout/i)
           release()
           await held
