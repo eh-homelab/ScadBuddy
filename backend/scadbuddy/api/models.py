@@ -92,7 +92,7 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
-from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.outputs import OutputStore, release_parts
 from scadbuddy.library.patch import (
     MAX_EDITS,
     PatchError,
@@ -1266,6 +1266,15 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
             await state.print_links.delete_outputs(output_ids)
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
+        # Their Parts go with them, or no sweep ever removes them (blob_refs, spec §7).
+        # Best effort, like the records above: the model is gone either way.
+        try:
+            for output_id in output_ids:
+                await asyncio.to_thread(release_parts, state.refs, output_id)
+        except psycopg.Error:
+            logger.exception(
+                "could not release a deleted model's output Parts", extra={"slug": slug}
+            )
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 

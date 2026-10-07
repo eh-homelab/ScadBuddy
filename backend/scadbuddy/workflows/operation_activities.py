@@ -3,6 +3,8 @@ run under its own name, ``op.<kind>.check`` and ``op.<kind>.run``.
 
 A kind's ``ApiError`` leaves as a non-retryable ``ApplicationError`` carrying the
 problem the route answers with, ``REFUSED`` from the check and ``FAILED`` from the run.
+The one exception is a transient Bambuddy failure in the run of a kind that may run
+again (``run_attempts`` above 1): it is retryable, so Temporal tries it again (#1144).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import Any
 from fastapi import status
 from temporalio import activity
 
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
@@ -176,6 +178,7 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
                     kind.run(input.request, input.checked), where=str(kind.where)
                 )
         except ApiError as error:
-            raise raised_as(error, FAILED) from None
+            again = kind.run_attempts > 1 and is_transient(error)
+            raise raised_as(error, FAILED, non_retryable=not again) from None
 
     return [check, run]

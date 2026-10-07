@@ -18,6 +18,7 @@ import asyncio
 import io
 import os
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path as FilePath
 from typing import IO, Annotated, Any
@@ -395,6 +396,9 @@ THUMBNAIL_VERSION = 1
 #: How many thumbnails are decoded at once: a 50 MP PNG costs some 200 MB, and a
 #: gallery strip asks for every item's thumbnail together (#1420).
 MAX_CONCURRENT_THUMBNAILS = 2
+#: How many thumbnails are kept in memory once made, so a source is decoded once
+#: rather than on every request (#1420). A WebP of `THUMBNAIL_SIDE` is some 10 kB.
+THUMBNAIL_CACHE_ITEMS = 512
 #: Square, so an EXIF orientation of 5 to 8, which swaps width and height, fits it
 #: either way round: the image is shrunk before it is turned upright, and the
 #: full-size copy `exif_transpose` would make is never made (#1426).
@@ -454,16 +458,65 @@ def _thumbnail_of(path: FilePath, content_type: str) -> _Thumbnail:
         return _Thumbnail(file.read(), content_type, stat)
 
 
+def _cache_key(path: FilePath, stat: os.stat_result) -> tuple[object, ...]:
+    """Which file, and which content of it: an item replaced in place (the legacy
+    one) or renamed over (a thumbnail PUT) changes its inode, size or times."""
+    return (
+        str(path),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+class _ThumbnailCache:
+    """The WebPs made most recently, by `_cache_key`; only touched on the loop."""
+
+    def __init__(self, size: int = THUMBNAIL_CACHE_ITEMS) -> None:
+        self.size = size
+        self._items: OrderedDict[tuple[object, ...], _Thumbnail] = OrderedDict()
+
+    def get(self, key: tuple[object, ...]) -> _Thumbnail | None:
+        thumbnail = self._items.get(key)
+        if thumbnail is not None:
+            self._items.move_to_end(key)
+        return thumbnail
+
+    def put(self, path: FilePath, thumbnail: _Thumbnail) -> None:
+        key = _cache_key(path, thumbnail.stat)
+        self._items[key] = thumbnail
+        self._items.move_to_end(key)
+        while len(self._items) > self.size:
+            self._items.popitem(last=False)
+
+
 async def _bounded_thumbnail_of(request: Request, path: FilePath, content_type: str) -> _Thumbnail:
-    """`_thumbnail_of`, at most `MAX_CONCURRENT_THUMBNAILS` at a time. A request
-    waiting its turn holds no thread. The semaphore is the app's, made on first use,
-    so it belongs to the loop that serves the app."""
-    decodes: asyncio.Semaphore | None = getattr(request.app.state, "thumbnail_decodes", None)
+    """`_thumbnail_of`, at most `MAX_CONCURRENT_THUMBNAILS` at a time, and once per
+    content of a file: a WebP made is kept (#1420), while a file served as it is is
+    not. A request waiting its turn holds no thread, and finds the WebP a request
+    ahead of it made. The semaphore and the cache are the app's, made on first use,
+    so they belong to the loop that serves the app."""
+    state = request.app.state
+    decodes: asyncio.Semaphore | None = getattr(state, "thumbnail_decodes", None)
     if decodes is None:
         decodes = asyncio.Semaphore(MAX_CONCURRENT_THUMBNAILS)
-        request.app.state.thumbnail_decodes = decodes
+        state.thumbnail_decodes = decodes
+    cache: _ThumbnailCache | None = getattr(state, "thumbnail_cache", None)
+    if cache is None:
+        cache = _ThumbnailCache()
+        state.thumbnail_cache = cache
+    key = _cache_key(path, await asyncio.to_thread(path.stat))
+    if (kept := cache.get(key)) is not None:
+        return kept
     async with decodes:
-        return await asyncio.to_thread(_thumbnail_of, path, content_type)
+        if (kept := cache.get(key)) is not None:
+            return kept
+        thumbnail = await asyncio.to_thread(_thumbnail_of, path, content_type)
+    if thumbnail.media_type == "image/webp":
+        cache.put(path, thumbnail)
+    return thumbnail
 
 
 def _legacy_etag(stat: os.stat_result) -> str:

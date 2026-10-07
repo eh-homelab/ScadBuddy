@@ -230,6 +230,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     name: z.string().min(1),
     input: z.record(z.string(), z.unknown()),
     risk: RiskSchema,
+    /** A subagent's call (#1108): the id of the session's `Agent` call that spawned it. */
+    parent: z.string().min(1).optional(),
   }),
   z.object({
     v,
@@ -266,8 +268,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
   }),
   /**
    * #940 — the agent asks the user; the turn waits (`waiting_input`) for the answer.
-   * `tool` is the AskUserQuestion or `ask_user` tool_use id; a subagent's call
-   * has no `tool.call` in the feed (#1108).
+   * `tool` is the AskUserQuestion or `ask_user` tool_use id, a `tool.call` in the
+   * feed (a subagent's, tagged with `parent`, since #1108).
    */
   z.object({
     v,
