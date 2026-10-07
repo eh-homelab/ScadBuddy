@@ -876,6 +876,24 @@ export const settings: Settings = {
       source: 'env',
       reason: 'A build stamp that /healthz reports, not a setting.',
     },
+    // #1035 — the two that ran the About table off the page: an unbroken comma-joined
+    // value and the longest variable name.
+    {
+      name: 'allowed_origins',
+      env_var: 'SCADBUDDY_ALLOWED_ORIGINS',
+      value: 'https://scadbuddy.internal.nullreference.io,https://scadbuddy.sso.nullreference.io',
+      source: 'env',
+      reason:
+        "Which pages may open the realtime socket and make writes. Like the agent's trusted proxies, it decides who can reach the server, so it belongs to the deployment.",
+    },
+    {
+      name: 'temporal_task_queue_render',
+      env_var: 'SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER',
+      value: 'scadbuddy-render',
+      source: 'default',
+      reason:
+        'Paired with the Temporal address: the API and the render workers must name the same queue, and only the deployment sets both.',
+    },
   ],
   about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
 }
