@@ -59,7 +59,9 @@ class CopyProgress(BaseModel):
 class PrintProgress(BaseModel):
     """What the send bar shows until every copy is queued, failed or cancelled."""
 
-    route: PrintRoute
+    #: ``run`` is a print whose run failed before it queued anything (#1049): there is
+    #: no slice job or queue item, only the run's own refusal in ``error_message``.
+    route: PrintRoute | Literal["run"]
     stage: Stage = "unknown"
     #: True when nothing further will change without another print. Polling stops here.
     settled: bool = False
@@ -88,6 +90,25 @@ QUEUED_THEN_FAILED_FIX = (
     "The queue entry was created and then refused. Check the filament mapping and the "
     "loaded spools, then retry it from Bambuddy's queue."
 )
+
+
+#: A run that failed before queueing anything (#1049): nothing reached Bambuddy's queue.
+RUN_FAILED_FIX = "Nothing was queued. Fix what it says, then print again."
+
+
+def from_failed_run(detail: str, *, bambuddy_url: str) -> PrintProgress:
+    """The progress of a print whose run failed before it queued anything (#1049).
+
+    Such a run records no print route on the output, so without this the output reads
+    as never printed, and the failure is in a row only its run id finds."""
+    return PrintProgress(
+        route="run",
+        stage="failed",
+        settled=True,
+        error_message=detail,
+        fix=RUN_FAILED_FIX,
+        bambuddy_url=bambuddy_url,
+    )
 
 
 def from_queue(
