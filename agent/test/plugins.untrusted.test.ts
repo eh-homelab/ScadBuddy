@@ -263,9 +263,9 @@ describe('plugin replies the rewrite cannot mark', () => {
 
 /** Waits for `check`, at most `timeoutMs`. */
 async function until(check: () => boolean, timeoutMs = 3000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   while (!check()) {
-    if (Date.now() > deadline) throw new Error('timed out')
+    if (performance.now() > deadline) throw new Error('timed out')
     await new Promise((r) => setTimeout(r, 5))
   }
 }

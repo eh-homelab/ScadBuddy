@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import SettledHook
 from scadbuddy.bambuddy.models import ArchiveDetail, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import Usage, rack_serials
@@ -123,6 +124,7 @@ class RackUsageStore:
                 "autocommit": True,
                 "row_factory": dict_row,
                 "connect_timeout": max(1, int(connect_timeout)),
+                **TCP_KEEPALIVE,
             },
             # Set per connection rather than as ``options``, which would replace any the
             # conninfo already carries (a search_path, say). It only ever lowers one.

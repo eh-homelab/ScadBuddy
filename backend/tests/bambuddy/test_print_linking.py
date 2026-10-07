@@ -22,6 +22,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import (
     ARCHIVE_OVERLAP,
     ARCHIVE_PAGE,
+    LIBRARY_LINK_BACKSTOP,
     MAX_ARCHIVE_PAGES,
     SCAN_AFTER,
     SCAN_BEFORE,
@@ -426,7 +427,9 @@ async def _library_items(links: PrintLinkStore, *ids: int) -> None:
 
 
 async def _pending(links: PrintLinkStore) -> set[int]:
-    return {row.queue_item_id for row in await links.pending_library(50)}
+    return {
+        row.queue_item_id for row in await links.pending_library(50, max_age=LIBRARY_LINK_BACKSTOP)
+    }
 
 
 @respx.mock
@@ -452,8 +455,19 @@ async def test_a_library_run_queued_long_ago_is_still_linked_once_dispatched(
 async def test_a_library_item_settled_without_an_archive_is_not_read_again(
     bambuddy: BambuddyClient, links: PrintLinkStore
 ) -> None:
-    await _library_items(links, 51, 52, 53)
-    for item_id, item_status in ((51, "cancelled"), (52, "pending"), (53, "skipped")):
+    """#1705: Bambuddy commits a library item's ``archive_id`` before the item can be
+    ``printing``, so one that settles without it failed or was cancelled before
+    dispatch. The status is read the way `stages.stage_of` reads it, any case (#1704)."""
+    statuses = {
+        51: "cancelled",
+        52: "pending",
+        53: "Completed",
+        54: " FAILED ",
+        55: "Aborted",
+        56: "printing",
+    }
+    await _library_items(links, *statuses)
+    for item_id, item_status in statuses.items():
         respx.get(f"{API}/queue/{item_id}").mock(
             return_value=httpx.Response(
                 200, json=queue_item(item_id, status=item_status, archive_id=None)
@@ -462,7 +476,75 @@ async def test_a_library_item_settled_without_an_archive_is_not_read_again(
 
     await link_library_prints(bambuddy, links)
 
+    assert await _pending(links) == {52, 56}
+
+
+@respx.mock
+async def test_a_skipped_library_item_is_read_on_and_linked_once_resumed(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    """#1704/#1705: Bambuddy's resume-after-failure puts a skipped item back to
+    ``pending``, so ``skipped``, in any case, does not mark it gone."""
+    await _library_items(links, 51, 52)
+    routes = {
+        item_id: respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status=item_status, archive_id=None)
+            )
+        )
+        for item_id, item_status in ((51, "skipped"), (52, "Skipped"))
+    }
+
+    await link_library_prints(bambuddy, links)
+
+    assert await _pending(links) == {51, 52}
+    routes[51].mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="printing", archive_id=90))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    linked = await links.linked(90)
+    assert linked is not None and linked.library_file_id == 89
     assert await _pending(links) == {52}
+
+
+@respx.mock
+async def test_a_library_item_past_the_backstop_is_marked_gone_without_a_read(
+    bambuddy: BambuddyClient, links: PrintLinkStore, pool_store: JobProjection
+) -> None:
+    """#1703: an item that never settles stops costing a read once it is older than
+    `LIBRARY_LINK_BACKSTOP`; one just inside it is still read."""
+    await _library_items(links, 51, 52)
+    days = LIBRARY_LINK_BACKSTOP.days
+    with pool_store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE library_bambuddy_prints SET first_seen = now() - make_interval(days => %s)"
+            " WHERE queue_item_id = 51",
+            (days + 1,),
+        )
+        conn.execute(
+            "UPDATE library_bambuddy_prints SET first_seen = now() - make_interval(days => %s)"
+            " WHERE queue_item_id = 52",
+            (days - 1,),
+        )
+    old = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="pending", archive_id=None))
+    )
+    recent = respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json=queue_item(52, status="pending", archive_id=None))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    assert not old.called
+    assert recent.called
+    assert await _pending(links) == {52}
+    with pool_store.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT gone FROM library_bambuddy_prints WHERE queue_item_id = 51"
+        ).fetchone()
+    assert row is not None and row["gone"] is True
 
 
 @respx.mock
@@ -496,7 +578,7 @@ async def test_a_database_error_on_one_library_item_does_not_stop_the_others(
 async def test_a_database_error_reading_the_library_items_links_nothing_and_raises_nothing(
     bambuddy: BambuddyClient, links: PrintLinkStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def failing(limit: int) -> list[object]:
+    async def failing(limit: int, *, max_age: object) -> list[object]:
         raise psycopg.OperationalError("connection lost")
 
     monkeypatch.setattr(links, "pending_library", failing)

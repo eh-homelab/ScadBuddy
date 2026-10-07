@@ -409,7 +409,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
       return { hang: true }
     }
     const messages: SDKMessage[] = []
-    const started = Date.now()
+    const started = performance.now()
     const run = (async () => {
       for await (const m of runHarness({
         paths: { stateDir },
@@ -426,7 +426,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     await expect(run).rejects.toThrow(/error result/i)
     expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'error_during_execution' })
     expect(fake.messageCalls()).toHaveLength(1)
-    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(performance.now() - started).toBeLessThan(10_000)
   })
 
   describe('testConnection', () => {
