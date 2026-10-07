@@ -69,6 +69,13 @@ export const PENDING_CAP = 500
  */
 export const ATTENTION_RATE_LIMIT = 10
 export const ATTENTION_RATE_WINDOW_S = 600
+/**
+ * #1344: browser_* calls' tab waits (sessions/manager.ts waitForTab) across the
+ * user's sessions, per ATTENTION_RATE_WINDOW_S. TAB_WAITS_PER_TURN bounds one
+ * turn only; this bounds sessions or turns looping on a dead tab. Apart from the
+ * model's own limit, which tab waits never use up.
+ */
+export const TAB_WAIT_RATE_LIMIT = 10
 /** The advisory lock the rate limit's count and insert are taken under. */
 const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 
@@ -607,7 +614,7 @@ export class QuestionService {
       const { sessionId, turnId } = context
       const { attention } = request
       const asked = await this.atomically(sessionId, async (tx) => {
-        const none = { asked: false, superseded: [] as Resolved[] }
+        const none = { asked: false, superseded: [] as Resolved[], joined: undefined as string | undefined, limited: undefined as string | undefined }
         // Still this turn's, and still the user's: after a handoff mid-turn
         // the new owner is not asked, so nothing parks for them.
         const [owner] = await tx<{ owner_kind: string }[]>`
@@ -617,23 +624,63 @@ export class QuestionService {
         let superseded: Resolved[] = []
         let expiresAt: Date | null = null
         let summary: string | null = null
+        const own = request.tool === ATTENTION_TOOL
+        if (attention?.reason === 'tab_disconnected') {
+          // #1308, #815 §5: one card per disconnected tab. The model's own request and a
+          // browser_* call's wait join an open one of the other side rather than open a
+          // second; the joiner never moves that row (its timer and withdrawal are its own).
+          const [open] = await tx<{ id: string }[]>`
+            SELECT id FROM ai_questions
+            WHERE session_id = ${sessionId} AND turn_id = ${turnId} AND kind = 'attention'
+              AND attention_reason = 'tab_disconnected' AND outcome IS NULL AND (tool = ${ATTENTION_TOOL}) <> ${own}
+            ORDER BY created_at LIMIT 1`
+          if (open) return { value: { ...none, asked: true, joined: open.id }, events: [] }
+        }
         if (attention) {
           // #815 §5: a per-user rate limit (every session is the browser user's,
           // or the request was refused above), then one open request per reason.
           // The limit spans sessions and replicas, so its count and insert hold one
           // lock that does too (to commit), or two turns could each read 9 and insert.
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
-          // Only the model's own requests count, and only they are limited: a
-          // browser_* call's wait for its tab (sessions/manager.ts waitForTab) is
-          // ScadBuddy's, at most TAB_WAITS_PER_TURN per turn, and must not use up the model's.
-          // A done summary is outside the limit too, and a posted one (no timer) does not count.
-          if (request.tool === ATTENTION_TOOL && attention.reason !== 'done') {
+          // Only the model's own requests count against its limit: a browser_* call's
+          // wait for its tab (sessions/manager.ts waitForTab) is ScadBuddy's, at most
+          // TAB_WAITS_PER_TURN per turn and TAB_WAIT_RATE_LIMIT per window, and must not
+          // use up the model's. A done summary is outside the limit too, and a posted one
+          // (no timer) does not count.
+          if (own && attention.reason !== 'done') {
             const [recent] = await tx<{ n: number }[]>`
               SELECT count(*)::int AS n FROM ai_questions
               WHERE kind = 'attention' AND tool = ${ATTENTION_TOOL}
                 AND (attention_reason <> 'done' OR expires_at IS NOT NULL)
                 AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
-            if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) return { value: { ...none, limited: true }, events: [] }
+            if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) {
+              return {
+                value: {
+                  ...none,
+                  limited:
+                    `The user was not asked: at most ${ATTENTION_RATE_LIMIT} attention requests are sent in ` +
+                    `${ATTENTION_RATE_WINDOW_S / 60} minutes. Say what you need in your reply instead.`,
+                },
+                events: [],
+              }
+            }
+          }
+          if (!own && attention.reason === 'tab_disconnected') {
+            const [recent] = await tx<{ n: number }[]>`
+              SELECT count(*)::int AS n FROM ai_questions
+              WHERE kind = 'attention' AND attention_reason = 'tab_disconnected' AND tool <> ${ATTENTION_TOOL}
+                AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
+            if ((recent?.n ?? 0) >= TAB_WAIT_RATE_LIMIT) {
+              return {
+                value: {
+                  ...none,
+                  limited:
+                    `The user was not asked for the tab: at most ${TAB_WAIT_RATE_LIMIT} tab waits are opened in ` +
+                    `${ATTENTION_RATE_WINDOW_S / 60} minutes. Carry on without the tab.`,
+                },
+                events: [],
+              }
+            }
           }
           // A done summary that recorded unattended actions (`unattended`) is not replaced by a later
           // turn's: that record is the user's check on what ran while nobody answered,
@@ -647,8 +694,8 @@ export class QuestionService {
             WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = ${attention.reason}
               AND outcome IS NULL AND (NOT unattended OR turn_id = ${turnId})
               -- The model's own request and a browser_* call's wait for its tab
-              -- never replace each other: both end when the tab is back.
-              AND (tool = ${ATTENTION_TOOL}) = (${request.tool} = ${ATTENTION_TOOL})
+              -- never replace each other: in a turn one joins the other (above).
+              AND (tool = ${ATTENTION_TOOL}) = ${own}
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
@@ -691,7 +738,7 @@ export class QuestionService {
           }),
         )
         // A done summary waits for nobody: the session goes on as it was.
-        if (attention?.reason === 'done') return { value: { asked: true, superseded }, events: tail }
+        if (attention?.reason === 'done') return { value: { ...none, asked: true, superseded }, events: tail }
         // Only the parked turn itself moves the session to waiting_input, from
         // running or from an approval it is also waiting on (the latest wait is
         // shown; each refreshStatus hands back to whichever is still pending).
@@ -699,7 +746,7 @@ export class QuestionService {
           UPDATE ai_sessions SET status = 'waiting_input', updated_at = now()
           WHERE id = ${sessionId} AND turn_id = ${turnId} AND status <> 'waiting_input'`
         if (moved.count > 0) tail.push(event({ type: 'session.status', sessionId, status: 'waiting_input' }))
-        return { value: { asked: true, superseded }, events: tail }
+        return { value: { ...none, asked: true, superseded }, events: tail }
       })
       for (const r of asked.superseded) this.wake(r.id)
       await this.audited(
@@ -718,14 +765,7 @@ export class QuestionService {
           finishedAt: new Date(),
         })),
       )
-      if ('limited' in asked) {
-        return {
-          answered: false,
-          message:
-            `The user was not asked: at most ${ATTENTION_RATE_LIMIT} attention requests are sent in ` +
-            `${ATTENTION_RATE_WINDOW_S / 60} minutes. Say what you need in your reply instead.`,
-        }
-      }
+      if (asked.limited !== undefined) return { answered: false, message: asked.limited }
       if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
@@ -740,24 +780,34 @@ export class QuestionService {
       // (#1352). A failed check leaves the wait going on for the hub or the
       // timer to end. A settled check wakes the wait, which re-reads its row.
       const parked = new AbortController()
+      // The row this call waits on: its own, or the open one it joined.
+      const waitsOn = asked.joined ?? id
       if (attention?.onParked) {
         attention.onParked(parked.signal).then(
-          () => this.wake(id),
-          () => this.wake(id),
+          () => this.wake(waitsOn),
+          () => this.wake(waitsOn),
         )
       }
       let waited: Row | 'due' | undefined
       try {
-        waited = await this.waitFor(id, signal, deadline)
+        waited = await this.waitFor(waitsOn, signal, deadline)
       } finally {
         parked.abort()
       }
-      const resolved = waited === 'due' && attention ? await this.timeOut(sessionId, id, attention.onTimeout) : waited
+      // A joiner's own timer ends its own wait only; the row stays the other side's.
+      const timedOut = (onTimeout: OnTimeout): Promise<Row> =>
+        asked.joined === undefined
+          ? this.timeOut(sessionId, id, onTimeout)
+          : Promise.resolve({ id: waitsOn, session_id: sessionId, outcome: 'timed_out', answers: null, reason: `nobody replied in time (on_timeout: ${onTimeout})` })
+      const resolved = waited === 'due' && attention ? await timedOut(attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {
         // The SDK dropped this one call while the turn goes on: its card must not stay
         // answerable for an answer nobody would read, nor the session say it waits.
-        // (A turn that stopped cancels its questions as it finishes.)
-        if (!context.signal.aborted) await this.cancelPending(sessionId, 'the call was withdrawn', { questionId: id })
+        // (A turn that stopped cancels its questions as it finishes.) A joined card
+        // is the other side's, which still waits on it.
+        if (!context.signal.aborted && asked.joined === undefined) {
+          await this.cancelPending(sessionId, 'the call was withdrawn', { questionId: id })
+        }
         return { answered: false, message: 'The user did not answer: the turn stopped first.' }
       }
       if (resolved.outcome === 'reconnected') {

@@ -55,8 +55,9 @@ import {
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
-import { attentionCard, attentionSpec, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
+import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
+import { SERVER_NAME } from '../tools/projections.js'
 import type { TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
@@ -239,8 +240,10 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
     const wait = (async (): Promise<TabWait> => {
       const parsed = parseAttention({
         reason: 'tab_disconnected',
+        // Not named after `tool`: the turn's other calls share the card, and the one that
+        // opened it may stop waiting first (#1341). The row keeps the opener's id.
         message:
-          `I need your ScadBuddy tab for ${tool}, but it is not connected. Open ScadBuddy (or reload it) and open ` +
+          'I need your ScadBuddy tab, but it is not connected. Open ScadBuddy (or reload it) and open ' +
           'this chat in the assistant panel. When it is back I re-check the page before going on; without it I carry ' +
           'on with what needs no tab.',
         options: [IM_BACK, CARRY_ON],
@@ -252,7 +255,7 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       if (spec.reason === 'done') throw new Error('a tab wait is not a done summary')
       const card = attentionCard(parsed.input)
       const verdict = await gate({
-        tool: `mcp__scadbuddy__${tool}`,
+        tool: `mcp__${SERVER_NAME}__${tool}`,
         questions: [card],
         toolUseId: toolUseId ?? `tab-wait-${randomUUID()}`,
         // Withdrawn by the turn, or once no call waits on it any more.
@@ -270,8 +273,18 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           },
         },
       })
-      if ('reconnected' in verdict && verdict.reconnected) return { back: true, why: 'reconnected' }
-      // Only "I'm back" means try again. "Carry on" ends the turn's tab waits; any
+      if ('reconnected' in verdict && verdict.reconnected) {
+        // reconnected() runs on whichever replica saw the tab. Back on another one, it
+        // cannot be reached from here and nothing here will end a later wait but its
+        // timer (#1308), so the rest of the turn does not wait. A failed check does not latch.
+        if (!(await isBack(turn).catch(() => true))) {
+          gaveUp =
+            'The tab reconnected, but not to this agent replica, so it cannot be reached from here. Carry on ' +
+            'without the tab for the rest of this turn.'
+        }
+        return { back: true, why: 'reconnected' }
+      }
+      // Only "I'm back" (or "I'm here") means try again. "Carry on" ends the turn's tab waits; any
       // other reply is the user's own words, which the model must read, so the
       // call is not run and its error carries them. It ends the turn's tab waits
       // too, for the rest of the turn: the user is not asked twice in one turn,
@@ -279,8 +292,10 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       // again (the call that carried it already did).
       if (verdict.answered) {
         const reply = verdict.answers[card.question] ?? ''
-        if (reply === IM_BACK) return { back: true, why: 'user_back' }
-        if (reply !== CARRY_ON) {
+        // The model's own tab_disconnected card, which this wait may have joined
+        // (questions/service.ts gate), says the same in its own words.
+        if (BACK_REPLIES.includes(reply)) return { back: true, why: 'user_back' }
+        if (reply !== CARRY_ON && reply !== DEFAULT_REPLIES[1]) {
           gaveUp =
             `The user already replied ${JSON.stringify(reply)} when asked for the tab this turn, so the tab is not ` +
             'asked for again this turn and this call was not run. Carry on without the tab for the rest of this turn.'

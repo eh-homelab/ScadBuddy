@@ -197,7 +197,9 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   disconnected mid-call, or more than 8 calls waiting on one tab (`MAX_CALLS_PER_TAB`).
   In a session the browser user owns, `no browser attached` does not fail the call at
   once (#815 §2): the call parks as a `tab_disconnected` attention request (the panel's
-  card and the Assistant badge), and calls that fail together share one request. When
+  card and the Assistant badge), and calls that fail together share one request, as does
+  the model's own `request_user_attention(tab_disconnected)` in the same turn: whichever
+  asks second joins the open card rather than opening another. When
   the session has a connected tab again (its tab reconnects, or the user opens the chat
   from another tab, which pairs it), the hub resolves the request as `reconnected`; the
   user's "I'm back" reply also ends the wait. A read-tier call (`browser_snapshot`,
@@ -216,8 +218,11 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   with the hub's usual `no browser attached: …` error followed by why — "The tab
   reconnected, but not to this agent replica, so it cannot be reached from here." or
   "The user said they were back, but no tab is attached here yet." A turn waits for its
-  tab at most 3 times (`TAB_WAITS_PER_TURN`), and after "Carry on without the tab" or a
-  timeout it does not ask again that turn.
+  tab at most 3 times (`TAB_WAITS_PER_TURN`), and after "Carry on without the tab", a
+  typed reply, a timeout, or a reconnect to another replica it does not ask again that
+  turn. Across the user's sessions at most 10 tab waits are opened in 10 minutes
+  (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
+  fails at once with "The user was not asked for the tab: …".
   The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
   as `the tab answered <tool> with <code>: …`, with the tab's message in the
   untrusted-data envelope (#258), because it can quote the page.
