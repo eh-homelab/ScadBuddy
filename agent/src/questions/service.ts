@@ -507,7 +507,7 @@ export class QuestionService {
 
   /**
    * Waits until the question is resolved; undefined once `signal` aborts first,
-   * 'due' once `deadline` (epoch ms, an attention request's timer) passes first.
+   * 'due' once `deadline` (performance.now ms, an attention request's timer) passes first.
    *
    * The waiter is registered before the first read and stays for the whole
    * wait, so a wake() that lands while a read is in flight is kept, not lost:
@@ -531,7 +531,7 @@ export class QuestionService {
         const row = await this.row(id)
         if (!row) throw new Error(`question ${id} no longer exists`)
         if (row.outcome !== null) return row
-        const left = deadline === undefined ? this.pollMs : deadline - Date.now()
+        const left = deadline === undefined ? this.pollMs : deadline - performance.now()
         if (left <= 0) return 'due'
         if (woken) continue
         await new Promise<void>((resolve) => {
@@ -741,7 +741,7 @@ export class QuestionService {
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it (sessions/manager.ts finish).
       const signal = AbortSignal.any([context.signal, request.signal])
-      const deadline = attention ? Date.now() + attention.timeoutS * 1000 : undefined
+      const deadline = attention ? performance.now() + attention.timeoutS * 1000 : undefined
       // The check runs beside the wait, never before it: an answer, a reconnect
       // (wake), the timer or the abort ends the wait however long the check
       // takes, and a hung check (a pool or lock wait) cannot stall the call
