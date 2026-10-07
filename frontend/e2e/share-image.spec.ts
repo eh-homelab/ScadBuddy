@@ -36,6 +36,10 @@ test.describe('rendered image', () => {
   test('frames the image in the dialog without moving the viewer (#722)', async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toContainText('64.1')
+    // The bounding box is known before the model's GLB has loaded: until it has, the
+    // canvas shows only the plate and the Rendering chip, so a screenshot taken then
+    // differs from any taken later without the camera having moved (#1778).
+    await expect(page.getByText('Rendering')).toHaveCount(0)
     const canvas = page.getByTestId('preview-canvas').locator('canvas')
     const view = (await canvas.boundingBox())!
     const before = await canvas.screenshot()
