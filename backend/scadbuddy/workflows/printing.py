@@ -17,9 +17,9 @@ best effort and, like ``print_succeed``, retries without limit, so once every pl
 queued the run never ends ``failed``.
 
 ``print_plan`` uploads the 3MF and retries (``READ_RETRY``): ``ensure_uploaded`` reuses
-the copy ScadBuddy recorded, so a retry uploads again only when the attempt died after
-Bambuddy stored the file and before the copy was recorded. That leaves a spare library
-file, never a second print, and is tracked as a follow-up (review #1061).
+the copy ScadBuddy recorded, and a file an attempt uploaded but died before recording is
+found in the folder by its bytes and taken (``upload_output``, #1127), so a retry leaves
+no spare library file. The workflow's commands are unchanged.
 """
 
 from __future__ import annotations

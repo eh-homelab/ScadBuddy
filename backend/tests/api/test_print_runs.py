@@ -53,7 +53,7 @@ from tests.api.test_print_run_choices import (
     run_request,
     run_routes,
 )
-from tests.api.test_send import upload_route
+from tests.api.test_send import died_after_the_upload, stored_files, upload_route
 from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
@@ -134,6 +134,32 @@ def test_a_run_answers_202_before_the_slice_finishes_and_ends_with_its_result(
     assert ended["result"]["route"] == "slice_queue"
     assert isinstance(ended["result"]["warnings"], list)
     assert ended["result"]["bambuddy_url"].endswith("/queue")
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_plan_retried_after_its_upload_adopts_that_file_rather_than_uploading_again(
+    client: TestClient, model: str, gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1127: ``print_plan`` retries under ``READ_RETRY``. An attempt that died after
+    Bambuddy stored the upload, and before it was recorded, left the file in the inbox;
+    the retry records it rather than leaving a spare beside a second upload."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    stored_files(upload)
+    run_routes()
+    gated_slice_routes(gate)
+    gate.open()
+    queued = queue_route()
+    asked = died_after_the_upload(monkeypatch)
+
+    response = start(client, output_id, body())
+    assert response.status_code == 202, response.text
+    ended = follow_run(client, response.json()["id"])
+
+    assert ended["status"] == "succeeded", ended
+    assert upload.call_count == 1
+    assert asked == [41, 41]
     assert queued.call_count == 1
 
 
