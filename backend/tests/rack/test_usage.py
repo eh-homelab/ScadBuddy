@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.rack import usage
 from scadbuddy.rack.rank import Usage, rank_rack
 from scadbuddy.rack.usage import STATEMENT_TIMEOUT_MS, PickedHotend, RackUsageStore
@@ -157,6 +158,19 @@ async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> Non
     assert [row and row["statement_timeout"] for row in rows] == [
         f"{STATEMENT_TIMEOUT_MS // 1000}s"
     ] * 2
+
+
+async def test_every_pooled_connection_bounds_a_silent_peer(store: RackUsageStore) -> None:
+    """#1226: the settle hook reads through this pool too, and a half-open connection
+    never gets the server's ``statement_timeout`` cancel."""
+    await store.seen(1, [A])
+    pool = store._ready()
+    with pool.connection() as first, pool.connection() as second:
+        params = [conn.info.get_parameters() for conn in (first, second)]
+    for got in params:
+        assert {name: got.get(name) for name in TCP_KEEPALIVE} == {
+            name: str(value) for name, value in TCP_KEEPALIVE.items()
+        }
 
 
 async def test_a_lower_statement_timeout_in_the_conninfo_is_kept(pg_conninfo: str) -> None:

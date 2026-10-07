@@ -132,7 +132,6 @@ class RenderService:
         config: Config,
         paths: DataPaths,
         metrics: Metrics,
-        prune_interval: float = 300.0,
         search_attributes: bool = False,
     ) -> None:
         self.store = projection
@@ -143,12 +142,10 @@ class RenderService:
         self.config = config
         self.paths = paths
         self.metrics = metrics
-        #: How often settled rows are pruned: they hold their blobs' refs until they go.
-        self.prune_interval = prune_interval
         #: Upsert §4.2's Search Attributes (registered on the cluster first).
         self.search_attributes = search_attributes
-        self._pruner: asyncio.Task[None] | None = None
         self._listened_before = False
+        self._boot: asyncio.Task[None] | None = None
         metrics.store_info.labels(projection.backend).set(1)
         self._publish_limits()
 
@@ -165,14 +162,18 @@ class RenderService:
 
     async def start(self) -> None:
         self.store.listener(on_state=self._listener_state)
-        self._pruner = asyncio.create_task(self._prune_forever())
+        # The boot pass, in the background: the lifespan never waits on Temporal
+        # (review #1066 1.1). It contains its own failures; the housekeeping prune
+        # settles again (#1054).
+        self._boot = asyncio.create_task(self.settle())
 
     async def aclose(self) -> None:
-        if self._pruner is not None:
-            self._pruner.cancel()
+        """Only the boot pass runs in the background: housekeeping prunes (#1054)."""
+        if self._boot is not None:
+            self._boot.cancel()
             with suppress(asyncio.CancelledError):
-                await self._pruner
-            self._pruner = None
+                await self._boot
+            self._boot = None
 
     def _memo(self) -> dict[str, Any]:
         return {"activity_timeout": self.config.activity_timeout}
@@ -406,10 +407,10 @@ class RenderService:
         return answer.cancelled
 
     async def settle(self) -> None:
-        """In the background at start and on every prune: fail the rows nothing will
-        settle, which would otherwise hold their render key and count towards the queue
-        (review #1066 1.2). A failed pass is logged and counted; the next one tries
-        again."""
+        """In the background at start and on every housekeeping prune: fail the rows
+        nothing will settle, which would otherwise hold their render key and count
+        towards the queue (review #1066 1.2). A failed pass is logged and counted; the
+        next one tries again."""
         passes: tuple[tuple[SettlePass, Callable[[], Awaitable[list[str]]]], ...] = (
             ("legacy", self.settle_legacy),
             ("closed", self.settle_closed),
@@ -502,10 +503,15 @@ class RenderService:
             self._settled(job, "failed")
 
     async def prune(self) -> None:
-        """Settled jobs past `job_ttl` (and their blob refs), and revision exports."""
+        """Settled jobs past `job_ttl` (and their blob refs), and revision exports; then
+        the rows nothing will settle (review #1066 1.2), even when the prune fails
+        (review #1095b 1)."""
         ttl = self.config.job_ttl
-        await asyncio.to_thread(self.store.prune, ttl)
-        await asyncio.to_thread(prune_revision_exports, self.paths, ttl)
+        try:
+            await asyncio.to_thread(self.store.prune, ttl)
+            await asyncio.to_thread(prune_revision_exports, self.paths, ttl)
+        finally:
+            await self.settle()
 
     async def render_preview(self, slug: str, timeout: float) -> bytes:
         """``slug``'s default-render preview, rendered on the worker. A second request
@@ -599,18 +605,6 @@ class RenderService:
                 exc_info=True,
             )
             self.metrics.store_errors.labels("cancel_workflow").inc()
-
-    async def _prune_forever(self) -> None:
-        # The boot pass, here rather than in `start`: the lifespan never waits on
-        # Temporal (review #1066 1.1).
-        await self.settle()
-        while True:
-            await asyncio.sleep(self.prune_interval)
-            try:
-                await self.prune()
-            except Exception:
-                logger.exception("could not prune settled render jobs")
-            await self.settle()
 
     def _settled(self, job: Job, outcome: RenderOutcome) -> None:
         self.metrics.render_finished.labels(outcome).inc()

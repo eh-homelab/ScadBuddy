@@ -13,6 +13,7 @@ from typing import Any, Final
 from fastapi import APIRouter, FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
+from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -60,6 +61,12 @@ from scadbuddy.workflows.client import (
     reconcile_lost_runs,
 )
 from scadbuddy.workflows.follow import resume_followed
+from scadbuddy.workflows.housekeeping import (
+    HEARTBEAT_TIMEOUT,
+    SWEEPS,
+    ensure_schedules,
+    library_worker,
+)
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
@@ -217,36 +224,41 @@ async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: date
         await remote.drop(removed, cutoff=cutoff)
 
 
-async def _sweep_assets_logged(state: AppState, *, converge: bool = True) -> None:
-    # Best effort, like the boot's other sweeps: a store or volume error skips this
-    # sweep (removing nothing it could not prove unused) and the next one retries.
-    # The boot's sweep does not converge: reconcile and backfill talk to Bambuddy at
-    # length, so they run from the periodic sweep and never hold up the start.
+async def _sweep_assets_logged(state: AppState) -> None:
+    # Best effort: a store or volume error skips this sweep (removing nothing it could
+    # not prove unused) and the next one retries. Only the Schedule's sweep runs it, so
+    # a failure is logged and fails its activity, which reports it.
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
         removed = await asyncio.to_thread(sweep_assets, state)
         if remote is not None and cutoff is not None:
             await drop_swept_assets(state, removed, cutoff=cutoff)
-            if not converge:
-                return
             # What an earlier drop failed to remove, and what the store lost (a copy an
             # `ensure` dropped, a race with a delete): both converge here, per sweep.
             await remote.reconcile(state.assets, cutoff=cutoff)
             await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
+        raise
 
 
-async def _sweep_duplicate_staging_logged(state: AppState) -> None:
+async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = False) -> None:
+    """The boot skips a volume error; the Schedule's sweep (``reraise``) logs any error,
+    then fails its activity (review #1095b 4)."""
     try:
         await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
-    except OSError:
+    except Exception as error:
+        if not reraise and not isinstance(error, OSError):
+            raise
         logger.exception("could not sweep duplicate staging folders")
+        if reraise:
+            raise
 
 
 async def _sweep_blobs_logged(state: AppState) -> None:
-    """The Temporal path's blob store: the pieces no job references any more."""
+    """The Temporal path's blob store: the pieces no job references any more. Only
+    the Schedule's sweep runs it, so a failure is logged and fails its activity."""
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
@@ -260,34 +272,70 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 await asyncio.to_thread(state.store.blobs.evict)
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
-        return
+        raise
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
 
 
-async def _backfill_store_logged(state: AppState, *, uploads: bool) -> None:
+async def _backfill_store_logged(state: AppState, *, uploads: bool, fonts: bool = True) -> None:
     """The boot's mirror of what predates the store, in the background and best effort:
-    an unreachable Bambuddy never holds up or fails the start. Uploads only when no
-    periodic asset sweep runs (`SCADBUDDY_ASSET_SWEEP_INTERVAL` 0); otherwise that
-    sweep backfills them. Fonts always: nothing else mirrors a family installed before."""
+    an unreachable Bambuddy never holds up or fails the start. Uploads only when the
+    housekeeping Schedule's sweep does not backfill them: `SCADBUDDY_ASSET_SWEEP_INTERVAL`
+    0, or the Schedule paused (`_run_library_worker`, review #1095 2). Fonts on every
+    boot: nothing else mirrors a family installed before."""
     try:
         if uploads and state.store.remote_assets is not None:
             mirrored = await state.store.remote_assets.backfill(state.assets)
             logger.info("mirrored uploads", extra={"count": mirrored})
-        if state.store.fonts is not None:
+        if fonts and state.store.fonts is not None:
             logger.info("mirrored fonts", extra={"count": await state.store.fonts.backfill()})
     except Exception:
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
-async def _asset_sweeper(state: AppState) -> None:
-    while True:
-        await asyncio.sleep(state.config.asset_sweep_interval)
-        await _sweep_assets_logged(state)
-        await _sweep_blobs_logged(state)
-        # The periodic housekeeping pass: a crashed duplicate's staging otherwise
-        # waits for the next boot or duplicate (#397).
-        await _sweep_duplicate_staging_logged(state)
+#: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
+HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
+
+
+async def _heartbeating(work: Coroutine[Any, Any, None]) -> None:
+    """Run ``work`` in the current activity, heartbeating until it ends (review #1095
+    2): a worker lost mid-sweep is then noticed within the heartbeat timeout."""
+    running = asyncio.create_task(work)
+    try:
+        while not (await asyncio.wait({running}, timeout=HEARTBEAT_EVERY))[0]:
+            activity.heartbeat()
+    finally:
+        running.cancel()
+    await running
+
+
+def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The Schedule's sweeps (#1054), in `SWEEPS` order, each the loop's best-effort
+    call: it logs a failure, then fails the activity (review #1095 1), so the run
+    reports it; the other sweeps still run and the next tick tries again."""
+
+    @activity.defn(name=SWEEPS[0])
+    async def prune_jobs() -> None:
+        try:
+            await state.render.prune()
+        except Exception:
+            logger.exception("could not prune settled render jobs")
+            raise
+
+    @activity.defn(name=SWEEPS[1])
+    async def sweep_assets() -> None:
+        await _heartbeating(_sweep_assets_logged(state))
+
+    @activity.defn(name=SWEEPS[2])
+    async def sweep_blobs() -> None:
+        await _heartbeating(_sweep_blobs_logged(state))
+
+    @activity.defn(name=SWEEPS[3])
+    async def sweep_staging() -> None:
+        # A crashed duplicate's staging otherwise waits for the next boot (#397).
+        await _heartbeating(_sweep_duplicate_staging_logged(state, reraise=True))
+
+    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging]
 
 
 async def _prepare_catalogue(state: AppState) -> None:
@@ -504,26 +552,75 @@ async def _hand_off_watches(state: AppState, client: Client) -> None:
         logger.exception("could not hand the old watcher's prints to FollowPrint")
 
 
-async def _serve_until(
-    workers: Sequence[Worker], stop: asyncio.Event, alongside: Coroutine[Any, Any, None]
+async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
+    """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
+    sweeps need the data volume this process holds. Once connected it sets the
+    Schedule up; Temporal down at boot only delays that."""
+    client = await _connect_until(state, stop, "library")
+    if client is None:
+        return
+    settings = state.settings
+    queue = settings.temporal_task_queue_library
+
+    async def set_up() -> None:
+        paused = await _set_up_housekeeping(client, queue, state.config.asset_sweep_interval, stop)
+        if paused and state.store.content is not None:
+            # Its sweep would backfill the uploads (review #1095 2); paused, the start does.
+            await _backfill_store_logged(state, uploads=True, fonts=False)
+
+    schedules = asyncio.create_task(set_up())
+    activities = _housekeeping_activities(state)
+    try:
+        while not stop.is_set():
+            worker = library_worker(client, queue, activities)
+            if not await _serve_until([worker], stop, name="library"):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        schedules.cancel()
+
+
+async def _set_up_housekeeping(
+    client: Client, queue: str, interval: float, stop: asyncio.Event
 ) -> bool:
-    """Run ``workers`` and ``alongside`` until ``stop``: True. A worker that ends first,
-    failed or not, is said at once (review #1061: a poller that dies while running
+    """The housekeeping Schedules, retried until Temporal takes them: a frontend can
+    answer the connect before it can create one. True when the sweeps' one is paused."""
+    while not stop.is_set():
+        try:
+            return await ensure_schedules(client, queue, interval)
+        except Exception:
+            logger.warning("could not set up the housekeeping Schedules; retrying", exc_info=True)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    return False
+
+
+async def _serve_until(
+    workers: Sequence[Worker],
+    stop: asyncio.Event,
+    alongside: Coroutine[Any, Any, None] | None = None,
+    *,
+    name: str = "print",
+) -> bool:
+    """Run ``workers`` (and ``alongside``) until ``stop``: True. A worker that ends
+    first, failed or not, is said at once (review #1061: a poller that dies while running
     would otherwise leave the queue unpolled until the pod restarts), and the others
     are shut down so all start again together: False."""
     running = [asyncio.create_task(worker.run()) for worker in workers]
-    beside = asyncio.create_task(alongside)
+    beside = asyncio.create_task(alongside) if alongside is not None else None
     stopping = asyncio.create_task(stop.wait())
     try:
         await asyncio.wait({*running, stopping}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        beside.cancel()
+        if beside is not None:
+            beside.cancel()
         stopping.cancel()
     ended = [task for task in running if task.done()]
     for task in ended:
         error = task.exception()
         logger.error(
-            "the print worker failed; starting it again",
+            "the %s worker failed; starting it again",
+            name,
             exc_info=error if error is not None else RuntimeError("the worker stopped"),
         )
     for worker, task in zip(workers, running, strict=True):
@@ -557,15 +654,16 @@ async def _end_lost_runs_until(
             await asyncio.wait_for(stop.wait(), LOST_RUN_INTERVAL)
 
 
-async def _stop_print_worker(task: asyncio.Task[None] | None) -> None:
+async def _stop_queue_worker(task: asyncio.Task[None] | None, name: str) -> None:
+    """Wait for the ``name`` queue's worker task (print, library) to stop."""
     if task is None:
         return
     try:
         await asyncio.wait_for(task, PRINT_WORKER_STOP_TIMEOUT)
     except TimeoutError:
-        logger.warning("the print worker did not stop in time; cancelled it")
+        logger.warning("the %s worker did not stop in time; cancelled it", name)
     except Exception:
-        logger.exception("the print worker failed")
+        logger.exception("the %s worker failed", name)
 
 
 #: The worker's own graceful shutdown (30 s) and a margin.
@@ -633,7 +731,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Everything from here holds the render service's resources (the Postgres pool,
     # its pruner), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes them as a shutdown does, rather than leaking.
-    sweeper: asyncio.Task[None] | None = None
+    library: asyncio.Task[None] | None = None
+    stop_library = asyncio.Event()
     backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
@@ -656,10 +755,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             worker = (task, deps)
         # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
         printing = asyncio.create_task(_run_print_worker(state, stop_printing))
-        # After the projection has opened: the jobs in it are references too.
-        if state.config.asset_sweep_interval > 0:
-            await _sweep_assets_logged(state, converge=False)
-            sweeper = asyncio.create_task(_asset_sweeper(state))
+        # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
+        # run once at once (the boot's sweep of the uploads, converging with the store;
+        # review #1095 1: the boot no longer walks them itself first), then every interval.
+        library = asyncio.create_task(_run_library_worker(state, stop_library))
         if state.store.content is not None:
             backfill = asyncio.create_task(
                 _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
@@ -693,13 +792,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         unfollow()
         if state.previews is not None:
             await state.previews.aclose()
-        for background in (sweeper, backfill):
+        stop_library.set()
+        await _stop_queue_worker(library, "library")
+        for background in (backfill,):
             if background is not None:
                 background.cancel()
                 with suppress(asyncio.CancelledError):
                     await background
         stop_printing.set()
-        await _stop_print_worker(printing)
+        await _stop_queue_worker(printing, "print")
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)

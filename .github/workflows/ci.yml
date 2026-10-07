@@ -422,9 +422,10 @@ jobs:
   # The same shape as `frontend` (same Node major, corepack-pinned pnpm,
   # frozen lockfile), plus the sidecar image: `--target agent` is a separate
   # image with nothing in common with the OpenSCAD stages, so it is built and
-  # smoke-tested here rather than in `image`. The build itself asserts the
-  # Claude Code version the Agent SDK bundles (the Dockerfile's
-  # CLAUDE_CODE_VERSION), so an SDK bump that moves it reds this job on the PR.
+  # smoke-tested here rather than in `image`. The build itself checks that the
+  # Claude Code binary the Agent SDK bundles reports the version the SDK
+  # declares (agent/src/check-cli-version.ts). An SDK bump that changes what the
+  # harness relies on reds this job's tests, which run that binary (#1540).
   #
   # No test here calls Anthropic: test/run.test.ts points the SDK at a local
   # fake Anthropic-format endpoint as its gateway (ANTHROPIC_BASE_URL, #255).
@@ -568,9 +569,10 @@ jobs:
     needs: layout
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
-    # About 15 min on main, the pytest step 10 of it. `tests/api` rendering on
-    # Temporal (#546) costs about 15% more there, so 45 still leaves a wide margin.
-    timeout-minutes: 45
+    # The pytest step alone took 27 min on main (2026-10-04) and about 40 with the
+    # durable stack's operation tests (#1058), which go through Temporal one by one;
+    # 45 cancelled the job mid-e2e. `--durations` below names the slow tests.
+    timeout-minutes: 60
     # For the backend tests that need Postgres: every one that builds the app
     # (the settings live there, #401), the render queue's store, the `render_jobs`
     # projection the Temporal path writes (#424) and the other `requires_postgres`
@@ -659,7 +661,7 @@ jobs:
         run: >-
           docker run --rm --network host --shm-size=1g
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
+          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto --durations=30
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7

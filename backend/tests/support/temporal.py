@@ -36,6 +36,11 @@ TEST_TEMPORAL_ADDRESS = os.environ.get(TEST_TEMPORAL_ADDRESS_ENV) or None
 TEST_TEMPORAL_DEV_SERVER = os.environ.get(TEST_TEMPORAL_DEV_SERVER_ENV) or None
 #: One task queue per API test (see `temporal_server`), with room to spare.
 MAX_TASK_QUEUES_PER_VERSION = 100_000
+#: A Schedule interval that never ticks during a test (review #1095 2): interval ticks
+#: are aligned to the epoch, not to the Schedule's creation, so the shortest one that
+#: cannot fall inside a run (or a jump of this host's wall clock) is one whose first
+#: tick after 1970 is decades away. Only a trigger then starts a run.
+NO_TICK = 100 * 365 * 86400.0
 
 
 def namespace_not_found_error() -> RPCError:
@@ -158,6 +163,16 @@ async def terminate_open_workflows(client: Client, task_queue: str) -> None:
             await handle.terminate("the test that started it ended")
 
 
+async def delete_schedules(client: Client, *schedule_ids: str) -> None:
+    """Delete each Schedule a test's app made; one that never got made is fine."""
+    for schedule_id in schedule_ids:
+        try:
+            await client.get_schedule_handle(schedule_id).delete()
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+
+
 class WorkflowReaper:
     """Terminates what a test left open, for a whole session on ONE client: a
     temporalio `Client` has no close, so one per teardown would leak a connection per
@@ -185,6 +200,10 @@ class WorkflowReaper:
     def terminate(self, task_queue: str) -> None:
         assert self.client is not None, "use the reaper as a context manager"
         self._run(terminate_open_workflows(self.client, task_queue))
+
+    def delete_schedules(self, *schedule_ids: str) -> None:
+        assert self.client is not None, "use the reaper as a context manager"
+        self._run(delete_schedules(self.client, *schedule_ids))
 
     def _run[T](self, coro: Coroutine[object, object, T]) -> T:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=60)
