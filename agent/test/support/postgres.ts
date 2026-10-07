@@ -15,7 +15,10 @@ export async function throwawayDatabase(): Promise<{ db: Database; schema: strin
   const schema = `test_${randomUUID().replaceAll('-', '').slice(0, 12)}`
   const admin = postgres(url, { max: 1, onnotice: () => {} })
   await admin.unsafe(`CREATE SCHEMA "${schema}"`)
-  const db = connectDatabase(url, { searchPath: schema })
+  // Every throwaway schema migrates under the one advisory lock (db/migrations.ts), so
+  // parallel test files queue for it: on a loaded host the queue outlasts the service's
+  // 10 s lock_timeout, and `ready()` then fails a test that did nothing wrong.
+  const db = connectDatabase(url, { searchPath: schema, migrate: { lockTimeoutMs: 120_000 } })
   return {
     db,
     schema,
