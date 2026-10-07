@@ -148,6 +148,20 @@ async def test_the_output_is_matched_by_its_recorded_parts(tmp_path: Path) -> No
     assert choose_output(job, None) == written  # one output: that one
 
 
+async def test_the_output_is_matched_by_its_plate_too(tmp_path: Path) -> None:
+    """#1007: one Parts set laid out on two plates writes two outputs with the same Parts;
+    only the plate tells them apart."""
+    _, job, written = await finished_job(tmp_path, job_id="j1")
+    other_plate = written.model_copy(
+        update={"record": written.record.model_copy(update={"plate_key": "other-plate"})}
+    )
+    both = job.model_copy(update={"outputs": [other_plate, written]})
+    assert choose_output(both, written.record) == written
+    assert choose_output(both, other_plate.record) == other_plate
+    gone = written.record.model_copy(update={"plate_key": "no-such-plate"})
+    assert choose_output(both, gone) is None
+
+
 def _two_legacy(store: OutputStore, job: Job) -> tuple[str, str]:
     """A second output saved before manifests, of the same render, both waiting on it."""
     first = store.ids_for("demo")[0]
@@ -260,6 +274,27 @@ async def test_a_transient_failure_is_left_for_the_next_pass(
         monkeypatch.setattr(refs, "add", add)
         assert attach_backfills(store, refs, _jobs(job)) == 1
     assert store.manifest(flaky) == written.manifest
+
+
+@pytest.mark.requires_postgres
+async def test_a_job_that_does_not_validate_is_retried_not_failed(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1007: a ValidationError reading the job is not the output's fault; the next pass
+    tries again instead of marking the backfill failed for good."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+
+    def unreadable(job_id: str) -> Job:
+        Job.model_validate({"id": job_id})  # raises a ValidationError, a ValueError
+        raise AssertionError("unreachable")
+
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, unreadable) == 0
+        assert store.backfill(old.id) == BackfillState(job_id=job.id)  # still pending
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+    assert store.manifest(old.id) == written.manifest
 
 
 @pytest.mark.requires_postgres

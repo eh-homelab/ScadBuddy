@@ -34,14 +34,23 @@ logger = logging.getLogger(__name__)
 
 def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | None:
     """The re-render's output that is this output: the job's only one, else the one
-    built from the same Parts. A Part's key is its slug, revision, file and params, so
-    the same inputs at the same revision give the same keys."""
+    built from the same Parts on the same plate. A Part's key is its slug, revision, file
+    and params, so the same inputs at the same revision give the same keys; a pipeline
+    that lays one Parts set out on several plates writes an output per plate, which
+    only the plate tells apart (#1007)."""
     if len(job.outputs) == 1:
         return job.outputs[0]
     if record is None:
         return None
     wanted = set(record.parts)
-    return next((out for out in job.outputs if set(out.record.parts) == wanted), None)
+    return next(
+        (
+            out
+            for out in job.outputs
+            if set(out.record.parts) == wanted and out.record.plate_key == record.plate_key
+        ),
+        None,
+    )
 
 
 #: The events that settle a job: its re-render is attached, or marked with why not.
@@ -150,6 +159,12 @@ def _attach(
         job = read_job(job_id)
     except JobNotFoundError:
         outputs.fail_backfill(output_id, job_id, "the re-render is gone; try again")
+        return False
+    except ValueError:
+        # The job's row did not validate: not the output's fault, and not permanent (a
+        # row written by another release mid-deploy). Left for the next pass (#1007),
+        # where a ValueError here would otherwise mark the backfill failed.
+        logger.exception("could not read a re-render's job; retrying", extra={"id": output_id})
         return False
     if job.state in ("pending", "running"):
         return False

@@ -21,6 +21,32 @@ describe('backfillOutputs (#902)', () => {
     expect(reads.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 
+  // #1007: only the "already records its objects" 409 means the output is ready.
+  it('reads an output another backfill already finished, but fails on any other 409', async () => {
+    const done = { ...nova, manifest: [{ part: 'p', file: 'f', slug: 'name-keychain', revision: null }] } as Output
+    server.use(
+      http.post('/api/v1/outputs/:id/backfill', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'already records its objects', code: 'already_backfilled' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+      http.get('/api/v1/outputs/:id', () => HttpResponse.json(done)),
+    )
+    expect((await backfillOutputs([nova], { pollMs: 10 })).ready).toEqual([done])
+    server.use(
+      http.post('/api/v1/outputs/:id/backfill', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'something else' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { ready, failed } = await backfillOutputs([nova], { pollMs: 10 })
+    expect(ready).toEqual([])
+    expect(backfillFailures(failed)).toMatch(/could not be re-rendered: something else/)
+  })
+
   it('stops waiting after its limit and says the re-render is still running', async () => {
     server.use(
       http.get('/api/v1/jobs/:id', ({ params }) =>

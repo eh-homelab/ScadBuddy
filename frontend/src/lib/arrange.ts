@@ -124,6 +124,9 @@ export function backfillFailures(failed: Backfilled['failed']): string {
     .join(' ')
 }
 
+/** POST /outputs/{id}/backfill's 409 code: the output records its objects already. */
+const ALREADY_BACKFILLED = 'already_backfilled'
+
 const BACKFILL_POLL_MS = 500
 /** How long the dialog waits for one re-render; the server keeps going after it gives up. */
 export const BACKFILL_WAIT_MS = 5 * 60_000
@@ -160,8 +163,11 @@ export async function backfillOutputs(
     try {
       job = await api.backfillOutput(output.id)
     } catch (cause) {
-      // Re-rendered since the list was read (a closed dialog's backfill finished).
-      if (cause instanceof ApiError && cause.status === 409) return await api.getOutput(output.id)
+      // Re-rendered since the list was read (a closed dialog's backfill finished). By its
+      // code, not the status alone: another 409 is no sign the objects are there (#1007).
+      if (cause instanceof ApiError && cause.status === 409 && cause.problem['code'] === ALREADY_BACKFILLED) {
+        return await api.getOutput(output.id)
+      }
       throw cause
     }
     for (;;) {

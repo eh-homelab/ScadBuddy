@@ -17,10 +17,13 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.outputs import NEEDS_BACKFILL_PROBLEM
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library import backfill as backfill_module
 from scadbuddy.library.outputs import OUTPUT_HOLDER, BackfillState, OutputStore, release_parts
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.refs import BlobRefs
 from tests.api.conftest import wait_for_job
+from tests.support.operations import press
 from tests.support.store import store_pool
 
 Pool = ConnectionPool[Connection[DictRow]]
@@ -52,7 +55,9 @@ def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str
     """A saved output of a pasted template, made to look like one saved before phase 5:
     no manifest.json and no Parts held."""
     if client.get(f"/api/v1/models/{slug}").status_code == 404:
-        created = client.post("/api/v1/models", json={"name": slug, "source": "cube(10);\n"})
+        created = client.post(
+            "/api/v1/models", json={"name": slug, "source": "cube(10);\n"}, headers=press()
+        )
         assert created.status_code == 201, created.text
     queued = client.post(f"/api/v1/models/{slug}/render", json={"inputs": {"params": {}}})
     assert queued.status_code == 202, queued.text
@@ -118,11 +123,13 @@ def test_an_output_that_has_a_manifest_is_a_409(
     again = client.post(f"/api/v1/outputs/{output_id}/backfill")
     assert again.status_code == 409, again.text
     assert "already records its objects" in again.json()["detail"]
+    # Arrange's needs_backfill is a 409 as well: the code tells a client which (#1007).
+    assert again.json()["code"] == "already_backfilled"
 
 
 @pytest.mark.parametrize(
     ("version", "why"),
-    [(None, "records no revision"), ("0" * 40, "no longer in the template's history")],
+    [(None, "records no revision"), ("0" * 40, "no revision '" + "0" * 40)],
 )
 def test_an_output_whose_revision_cannot_be_rendered_again_is_a_422(
     client: TestClient, app: FastAPI, pool: Pool, version: str | None, why: str
@@ -193,3 +200,62 @@ def test_a_second_post_while_the_rerender_is_in_flight_answers_that_job(
     assert again.status_code == 202, again.text
     assert again.json()["id"] == first.json()["id"]
     assert _state(app).outputs.backfill(output_id) == BackfillState(job_id=first.json()["id"])
+
+
+def test_a_second_post_after_the_rerender_finished_but_before_its_attach_answers_that_job(
+    client: TestClient, app: FastAPI, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1007: the guard covered only a job in flight; one done and not yet attached
+    queued a second, wasted render."""
+    # Nothing attaches in this test: the window between done and attached stays open.
+    monkeypatch.setattr(backfill_module, "_attach", lambda *args, **kwargs: False)
+    output_id = legacy_output(client, app)
+    store = _state(app).render.store
+    read = store.read
+
+    def finished(job_id: str) -> Job:
+        return read(job_id).model_copy(update={"state": "done"})
+
+    monkeypatch.setattr(store, "read", finished)
+    first = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert first.status_code == 202, first.text
+
+    def no_render(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a second re-render was queued")
+
+    monkeypatch.setattr(outputs_api, "render_model", no_render)
+    again = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert again.status_code == 202, again.text
+    assert again.json()["id"] == first.json()["id"]
+
+
+@pytest.mark.parametrize(
+    ("raised", "code"),
+    [
+        (ApiError(404, "no library 'gone' for template 'pasted'"), None),
+        (ApiError(409, "no snapshot of pasted@abc and no history"), "snapshot_unavailable"),
+    ],
+)
+def test_a_render_that_cannot_start_is_a_422_that_says_why(
+    client: TestClient,
+    app: FastAPI,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+    raised: ApiError,
+    code: str | None,
+) -> None:
+    """#1007: the render's own detail, not always "revision gone"; and never a 409, which
+    here means the output already records its objects."""
+    output_id = legacy_output(client, app)
+
+    async def refuse(*args: object, **kwargs: object) -> None:
+        raise raised
+
+    monkeypatch.setattr(outputs_api, "render_model", refuse)
+    refused = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert refused.status_code == 422, refused.text
+    body = refused.json()
+    assert raised.detail in body["detail"]
+    assert "no longer in the template's history" not in body["detail"]
+    assert body.get("code") == code
+    assert _state(app).outputs.backfill(output_id) is None  # nothing queued
