@@ -64,12 +64,42 @@ export interface RenderBusy {
 export const TRANSIENT_RETRIES = 5
 
 /**
+ * #1040 — failed reads of a job in a row before the preview stops following it. A 5xx,
+ * a gateway's 502/504 or a dropped connection says nothing about the render, which goes
+ * on and settles on the server: the read is tried again after `readBackoffMs`, and the
+ * next event for the job reads it too. Only a 4xx (the job is gone) ends it at once.
+ */
+export const READ_RETRIES = 5
+
+/** The wait before a failed read's `n`th retry (0-based): 400 ms doubling, capped. */
+function readBackoffMs(n: number): number {
+  return Math.min(POLL_MS * 2 ** n, 8_000)
+}
+
+/** A read that says the job will never be readable: it is gone, or this is refused. */
+function definitive(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.status >= 400 && cause.status < 500 && cause.status !== 408 && cause.status !== 429
+}
+
+/**
+ * The preview stopped following a render it could not read (#1040). The render may well
+ * have finished, so the page offers "try again", which submits it once more.
+ */
+export class LostRenderError extends Error {
+  constructor(cause: Error) {
+    super(cause.message, { cause })
+    this.name = 'LostRenderError'
+  }
+}
+
+/**
  * Whether sending the render again may succeed, so the page offers "try again": an
  * outage it gave up waiting out, or a request that never got ScadBuddy's answer (a
  * dropped connection, a proxy's error, an offline browser). Never a refusal no retry
  * fixes (a 422, a 500) or a render that failed (review #1066 (13) 2).
  */
 export function canRetry(error: unknown): boolean {
+  if (error instanceof LostRenderError) return true
   if (error instanceof TypeError) return true // fetch's own network failure
   if (!(error instanceof ApiError)) return false
   const { type } = error.problem
@@ -176,6 +206,8 @@ export function useRenderJob(
       let reading = false
       let again = false
       let settled = false
+      let failures = 0
+      let retryTimer: ReturnType<typeof setTimeout> | undefined
 
       const finish = () => {
         settled = true
@@ -183,6 +215,7 @@ export function useRenderJob(
         unfollow?.()
         unfollow = undefined
         if (timer) clearTimeout(timer)
+        if (retryTimer) clearTimeout(retryTimer)
         setRendering(false)
         setSettledFor(params)
       }
@@ -197,11 +230,22 @@ export function useRenderJob(
         try {
           const next = await api.getJob(jobId)
           if (isStale()) return
+          failures = 0
           setJob(next)
           if (next.status === 'done' || next.status === 'failed' || next.status === 'cancelled') finish()
         } catch (cause) {
           if (isStale()) return
-          setError(cause instanceof Error ? cause : new Error(String(cause)))
+          if (!definitive(cause) && failures < READ_RETRIES) {
+            // Keep following: the next event reads it too, and this read is tried again.
+            const wait = readBackoffMs(failures++)
+            if (retryTimer) clearTimeout(retryTimer)
+            retryTimer = setTimeout(() => {
+              retryTimer = undefined
+              void read()
+            }, wait)
+            return
+          }
+          setError(new LostRenderError(cause instanceof Error ? cause : new Error(String(cause))))
           finish()
         } finally {
           reading = false
@@ -228,7 +272,8 @@ export function useRenderJob(
       const fallback = () => {
         timer = setTimeout(() => {
           if (settled || isStale()) return
-          if (realtime.status === 'unavailable') void read()
+          // A failed read's retry is already waiting: polling past it would spend the budget.
+          if (realtime.status === 'unavailable' && !retryTimer) void read()
           fallback()
         }, POLL_MS)
       }
