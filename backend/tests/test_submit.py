@@ -80,6 +80,8 @@ from scadbuddy.workflows.models import (
     RELEASE_UPDATE,
     RENDER_UNSTARTABLE,
     AcceptRender,
+    LoadedPipeline,
+    LoadRequest,
     MigrateRequest,
     MigrateResult,
     Projection,
@@ -1660,6 +1662,88 @@ async def test_a_release_while_an_input_problems_failure_waits_to_be_written_can
     stored = await asyncio.to_thread(projection.read, job.id)
     assert (stored.state, stored.error) == ("cancelled", SUPERSEDED_ERROR)
     assert answer.cancelled is not None and answer.cancelled.id == job.id
+
+
+class _HeldLoad(ProjectingActivities):
+    """`load_pipeline` waits for ``loaded``, after setting ``loading``."""
+
+    def __init__(self, deps: WorkerDeps, **kwargs: Any) -> None:
+        super().__init__(deps, **kwargs)
+        self.loading, self.loaded = asyncio.Event(), asyncio.Event()
+
+    @activity.defn(name="load_pipeline")
+    async def load_pipeline(self, req: LoadRequest) -> LoadedPipeline:
+        self.loading.set()
+        await self.loaded.wait()
+        return await super().load_pipeline(req)
+
+
+async def test_a_release_that_lands_with_the_piece_start_still_cancels(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """#1832: the release and the piece's child start in one workflow task. temporalio
+    drops the render task's cancel while the start is in flight, and the start then
+    resolves (ABANDON): the render must still be released, not wait on the piece.
+
+    Made deterministic by taking the workflow worker away while `load_pipeline`
+    answers and the release is sent, so the next worker's first task carries both."""
+    gate = asyncio.Event()  # the piece's main render: never answers in this test
+    acts = _HeldLoad(deps, block_main=gate)
+
+    def workflows() -> Worker:
+        # Not sticky: the next worker gets the task at once, not after a sticky timeout.
+        # The local activities run on the worker that runs the workflow.
+        return Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=[acts.render_accept, acts.render_claims, acts.project],
+            no_remote_activities=True,
+            max_cached_workflows=0,
+        )
+
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        activities = Worker(
+            client,
+            task_queue=queue,
+            activities=[
+                acts.cached_piece,
+                acts.prepare,
+                acts.render_main,
+                acts.render_solids,
+                acts.finish_piece,
+                acts.project,
+                acts.load_pipeline,
+                acts.pack,
+                acts.write_output,
+                acts.render_accept,
+                acts.render_claims,
+            ],
+        )
+        async with activities:
+            async with workflows():
+                job = await service.submit(SLUG, {"width": _w()})
+                await asyncio.wait_for(acts.loading.wait(), timeout=30)
+            assert job.workflow_id is not None
+            handle = client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
+            acts.loaded.set()  # its completion waits for a workflow worker
+            release = asyncio.create_task(
+                handle.execute_update(RELEASE_UPDATE, "superseded", result_type=ReleaseAnswer)
+            )
+            await asyncio.sleep(1)  # admitted, with the completion, before anyone polls
+            async with workflows():
+                # About 10 s even when it works: the stopped worker's poll is still open
+                # on the server, which hands it that task, so the task is only given to
+                # this worker once its 10 s timeout passes.
+                answer = await asyncio.wait_for(release, timeout=30)
+            gate.set()
+        await service.aclose()
+
+    assert answer.cancelled is not None and answer.cancelled.id == job.id
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert (stored.state, stored.error) == ("cancelled", SUPERSEDED_ERROR)
 
 
 async def test_a_missing_namespace_is_not_taken_for_a_closing_execution(
