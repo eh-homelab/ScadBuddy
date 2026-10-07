@@ -70,6 +70,19 @@ export class DurableStopped extends Error {
   override name = 'DurableStopped'
 }
 
+/**
+ * The DurableSession workflow's answers to a nudge whose message did not start
+ * (agent-durable models.py). STOPPING and ABANDONED come from a Stop: the message never
+ * runs. BUSY: another turn runs first, and the message stays queued in that run, which
+ * starts it after the turn. UNKNOWN_INPUT: the run did not find the message after looking
+ * again for a while; it is not abandoned either (lead ruling: only a Stop or a forget
+ * gives a message up).
+ */
+export const DURABLE_STOPPING = 'the session is stopping; send again'
+export const DURABLE_ABANDONED = 'this message was abandoned and will not run'
+export const DURABLE_BUSY = 'the session is busy'
+export const DURABLE_UNKNOWN_INPUT = 'no message with this id was committed for this session'
+
 /** A send's refusal when the stopped execution did not close within D (DurableSendOptions). */
 export const STILL_STOPPING = "this session's previous run is still stopping; send again"
 

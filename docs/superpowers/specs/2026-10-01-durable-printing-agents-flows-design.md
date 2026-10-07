@@ -1207,17 +1207,31 @@ Each phase is its own implementation plan and ships alone.
        stream's `send_attempt` while the message is still `pending`, and a replica takes
        over a delivery whose heartbeat stood still for 5×D (`resumeDurableSends`). With
        no answer within 5 s the send answers anyway and the log gets a non-fatal `error`
-       with code `worker_pending`, which the panel shows as a notice. A refused message
-       is abandoned and logged as `not_delivered`.
+       with code `worker_pending`, which the panel shows as a notice. Only a Stop or a
+       forget gives a message up (lead ruling): a refusal a Stop caused (`STOPPING`,
+       `ABANDONED`) abandons it and logs `not_delivered` (unless the Stop's own abandon
+       logged it `interrupted`); `busy` and an unknown id leave it `pending`, with the
+       notice "queued; this message will run when the agent is available".
      - **The workflow's messages** (`workflow.py`, `inputs.py`). A run loads the
        session's `pending` messages when it starts and when nudged (local activity
        `durable_load_inputs`), and takes each with a compare-and-set as its turn starts
-       (`durable_start_input`: `pending` → `run`, false when abandoned). So a lost nudge
+       (`durable_start_input`: `pending` → `run` with the take's token, false when
+       abandoned or taken by another take; `taken_by`,
+       `20261007T0435Z_durable_input_takes.sql`). The message being taken counts as known
+       to every nudge, so none loads it back into the inbox meanwhile. So a lost nudge
        (Temporal keeps an admitted Update in memory only) loses nothing, a repeated one
        never repeats a turn, and a message a Stop abandoned never runs. The nudge
        answers only once its message's turn started, or refuses it (`STOPPING` when a
        Stop came first, even in the same activation; `busy` when another message's turn
-       did); the stopped run returns its state only after those answers.
+       did, and the message stays queued in the run, which starts it after that turn).
+       A nudge for an id no load found looks again (0.5, 1, 2 and 4 s) before it answers
+       the unknown id, which is a race and abandons nothing. A Stop that cuts a take
+       short releases it (`durable_release_input`): the message is abandoned, if still
+       pending or taken by that take, with an `interrupted` error in the log, and its
+       nudge answers `ABANDONED`. The stopped run returns its state only after those
+       answers. When the plugin continues as new inside a turn (auto), it waits for every
+       handler first; a nudge then answers `busy` at once, and the next run loads the
+       still-`pending` message.
      - **Stop** cancels the running execution. The workflow catches the cancellation
        and *completes* with `agent.state()` (deviation 4), so the next message starts a
        new execution from that result. While the cancel is in progress the validator

@@ -10,7 +10,9 @@ import { context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { PayloadKeys } from '../temporal/payloadKeys.js'
 import {
+  DURABLE_ABANDONED,
   DURABLE_SEND_DEADLINE_MS,
+  DURABLE_STOPPING,
   DurableRefused,
   DurableStopped,
   type DurableSessionInput,
@@ -187,10 +189,28 @@ export const DURABLE_ACCEPT_WAIT_MS = 5_000
 export const DURABLE_WAITING_CODE = 'worker_pending'
 export const DURABLE_WAITING =
   'the durable worker has not picked up this message yet; it will run when a worker is available'
-/** The `error` a durable message that will never run is logged with (a refusal abandoned it). */
+/**
+ * The notice (code DURABLE_WAITING_CODE) for a durable message the run refused for now
+ * (another turn runs first, say): it stays queued, and runs when the agent is available.
+ */
+export const DURABLE_QUEUED = 'queued; this message will run when the agent is available'
+/**
+ * The `error` a durable message that will never run is logged with: only a Stop or a
+ * forget gives a message up (lead ruling), so only a Stop's refusal (STOPPING, ABANDONED)
+ * that abandoned it here logs it.
+ */
 export const NOT_DELIVERED_CODE = 'not_delivered'
 export function notDelivered(reason?: string): string {
   return reason ? `Your message was not delivered (${reason}); send it again.` : 'Your message was not delivered; send it again.'
+}
+/**
+ * A durable refusal that is not a Stop's: the message stays pending, and the run it is
+ * queued in, or the next one, starts it (lead ruling: only a Stop or a forget gives a
+ * message up). BUSY: another turn runs first. UNKNOWN_INPUT: the run did not see the
+ * committed message yet, a race, so neither is it abandoned.
+ */
+function stillQueued(err: unknown): boolean {
+  return err instanceof DurableRefused && err.message !== DURABLE_STOPPING && err.message !== DURABLE_ABANDONED
 }
 /** The `error` (code `interrupted`) for each durable message a Stop abandoned before it ran. */
 export const STOPPED_BEFORE_IT_RAN = 'stopped before it ran; this message was not delivered'
@@ -1238,6 +1258,12 @@ export class SessionManager {
       pendingShown = true
       await this.events.append(id, [event({ type: 'error', sessionId: id, code: DURABLE_WAITING_CODE, message: DURABLE_WAITING })])
     }
+    let queuedShown = false
+    const showQueued = async () => {
+      if (queuedShown) return
+      queuedShown = true
+      await this.events.append(id, [event({ type: 'error', sessionId: id, code: DURABLE_WAITING_CODE, message: DURABLE_QUEUED })])
+    }
     let freshShown = false
     // A Stop in this process aborts at once; one elsewhere abandons the message, which the
     // next attempt's heartbeat sees.
@@ -1268,7 +1294,7 @@ export class SessionManager {
             await this.events.append(id, [event({ type: 'error', sessionId: id, code: 'resumed_fresh', message: RESUMED_FRESH })])
           }
         },
-        (err: unknown) => this.undeliveredDurable(id, turnId, err),
+        (err: unknown) => (stillQueued(err) ? showQueued() : this.undeliveredDurable(id, turnId, err)),
       )
       .then(() => this.clearSending(id, turnId))
       .catch(report)
@@ -1302,10 +1328,12 @@ export class SessionManager {
   }
 
   /**
-   * A delivery that ended without its turn starting. Refused (busy, stopping, abandoned):
-   * the message is abandoned, so no run takes it later, and the log says it was not
-   * delivered. Given up (a Stop abandoned it, or a run took it after all): whoever abandoned
-   * it logged that; a run that took it logs its own turn.
+   * A delivery that ended without its turn starting, for a reason that gives the message
+   * up. Refused by a Stop (STOPPING, ABANDONED): the message is abandoned if it is still
+   * pending, so no run takes it later, and the log says it was not delivered (the Stop's
+   * own abandon logged `interrupted` for those it found first). Given up (a Stop abandoned
+   * it, or a run took it after all): whoever abandoned it logged that; a run that took it
+   * logs its own turn. Every other refusal keeps it queued (`stillQueued`).
    */
   private async undeliveredDurable(id: string, turnId: string, err: unknown): Promise<void> {
     if (err instanceof DurableStopped) return

@@ -643,7 +643,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `sending` mark and its `send_attempt` heartbeat), `ai_durable_snapshots` (the latest
   `AgentState`) and `ai_durable_inputs` (every message, committed before Temporal is
   asked anything: `pending`, `run` or `abandoned`) (`20261005T0120Z_durable_sessions.sql`,
-  `20261005T1629Z_durable_stream_chain.sql`, `20261007T0132Z_durable_inputs.sql`);
+  `20261005T1629Z_durable_stream_chain.sql`, `20261007T0132Z_durable_inputs.sql`, and
+  `20261007T0435Z_durable_input_takes.sql` for the take that marked one `run`);
   `ai_session_entries.owner_session_id` (`20261007T0238Z_session_entries_owner.sql`).
   `agent-durable` writes them and runs no migrations of its own.
 
@@ -903,13 +904,19 @@ session cannot be forked (`409` `unsupported`). It gets ScadBuddy's skills only:
   Claude conversation; calls that were cut off are reported to the model as
   interrupted, "whether it took effect is unknown"). A message sent while the stopped
   run is still closing waits for it, outside the chat socket's queue, and is delivered
-  once it closed.
+  once it closed. A message the run had taken but not started when the Stop came is
+  abandoned by the run itself, with the same `interrupted` error.
 - **A message is never dropped.** It is committed with its `user.turn` before Temporal
   is asked anything, and the Update is only a nudge with its id (the Update's id too).
   A timeout or a `DEADLINE_EXCEEDED`/`UNAVAILABLE` may have reached Temporal, so the
   agent sends the same id again until the turn starts or is refused, never a fresh
-  send; the workflow takes each message once (a compare-and-set as its turn starts). A
-  refused one is abandoned and logged (`error` code `not_delivered`). If the agent
+  send; the workflow takes each message once (a compare-and-set as its turn starts,
+  with a token per take). Only a Stop or a forget gives a message up: a refusal caused
+  by a Stop abandons it and is logged (`error` code `not_delivered`, unless the Stop
+  already logged it `interrupted`). Any other refusal (another turn runs first; the run
+  did not see the message yet) leaves it queued, and the log gets the notice "queued;
+  this message will run when the agent is available" (code `worker_pending`): the run
+  starts it after the current turn, or the next run loads it. If the agent
   replica sending it dies, another takes the delivery over once its heartbeat
   (`ai_durable_streams.send_attempt`) has stood still for 150 s
   (`DURABLE_TAKEOVER_MS`, on a monotonic clock; the session reaper's sweep).
