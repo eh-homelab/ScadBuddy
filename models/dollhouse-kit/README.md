@@ -16,7 +16,7 @@ The second picture is the hidden `preview = "room"` mode: one back corner of a
 **House designer.** ScadBuddy opens this template in its own designer (`ui/`).
 You enter a box house: modules wide and deep (at the Grid panel's module size), storeys, and windows
 per storey. It lists every piece that house needs, with counts. **Show** puts
-one piece in the preview on the one-module grid, and Generate keeps the piece
+one piece in the preview on the one-module grid, and the page's Generate keeps the piece
 shown, so a house is generated one piece at a time. The Grid sizes (module,
 course height, wall and floor thickness) and the style parameters (exterior,
 wallpaper, colours) stay editable and apply to every piece. Generating the whole house

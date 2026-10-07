@@ -146,6 +146,70 @@ export const mazeSchema: CustomizerSchema = {
   ],
 }
 
+/** #1737 — dollhouse-kit's parameters (models/dollhouse-kit/model.scad), enough of them
+ *  that its designer's side column is as long as the real one. */
+export const dollhouseSchema: CustomizerSchema = {
+  title: 'Dollhouse Kit',
+  source_sha256: 'd'.repeat(64),
+  groups: ['Piece', 'Grid', 'Exterior', 'Interior', 'Windows', 'Colours'],
+  parameters: [
+    param('Piece', {
+      name: 'piece',
+      type: 'select',
+      initial: 'wall_window',
+      caption: 'Piece',
+      options: [
+        { name: 'Wall', value: 'wall' },
+        { name: 'Wall with window', value: 'wall_window' },
+        { name: 'Door wall - lower course', value: 'wall_door_lower' },
+        { name: 'Door wall - upper course', value: 'wall_door_upper' },
+        { name: 'Door leaf - lower half', value: 'door_leaf_lower' },
+        { name: 'Door leaf - upper half', value: 'door_leaf_upper' },
+        { name: 'Corner post', value: 'corner_post' },
+        { name: 'Floor tile', value: 'floor_tile' },
+        { name: 'Roof panel', value: 'roof_panel' },
+        { name: 'Stairs - lower half', value: 'stairs_lower' },
+        { name: 'Stairs - upper half', value: 'stairs_upper' },
+        { name: 'Railing', value: 'railing' },
+        { name: 'Connectors (keys / pegs / hinge pins)', value: 'connectors' },
+      ],
+    }),
+    param('Piece', {
+      name: 'course',
+      type: 'select',
+      initial: 'upper',
+      caption: 'Course',
+      options: [
+        { name: 'Lower course', value: 'lower' },
+        { name: 'Upper course', value: 'upper' },
+      ],
+    }),
+    param('Grid', { name: 'module_size', type: 'slider', initial: 150, caption: 'Module size', min: 100, max: 150, step: 5 }),
+    param('Grid', { name: 'width_units', type: 'slider', initial: 1, caption: 'Width in modules', min: 0.5, max: 2, step: 0.5 }),
+    param('Grid', { name: 'depth_units', type: 'slider', initial: 2, caption: 'Depth in modules', min: 0.5, max: 2, step: 0.5 }),
+    param('Grid', { name: 'course_height', type: 'slider', initial: 210, caption: 'Course height', min: 180, max: 240, step: 5 }),
+    param('Exterior', {
+      name: 'exterior',
+      type: 'select',
+      initial: 'plain',
+      caption: 'Exterior',
+      options: ['plain', 'siding', 'brick', 'stone', 'stucco'].map((value) => ({ name: value, value })),
+    }),
+    param('Interior', {
+      name: 'wallpaper',
+      type: 'select',
+      initial: 'stripes',
+      caption: 'Wallpaper',
+      options: ['none', 'stripes', 'polka_dots', 'diamonds', 'hearts', 'stars'].map((value) => ({ name: value, value })),
+    }),
+    param('Interior', { name: 'wainscoting', type: 'boolean', initial: true, caption: 'Wainscoting' }),
+    param('Windows', { name: 'window_width', type: 'slider', initial: 70, caption: 'Window width', min: 40, max: 180, step: 5 }),
+    param('Windows', { name: 'shutters', type: 'boolean', initial: true, caption: 'Shutters' }),
+    param('Colours', { name: 'wall_color', type: 'color', initial: '#F3E9D2', caption: 'Walls' }),
+    param('Colours', { name: 'trim_color', type: 'color', initial: '#FFFFFF', caption: 'Trim' }),
+  ],
+}
+
 export const gridfinitySchema: CustomizerSchema = {
   title: 'Gridfinity Bin',
   source_sha256: 'a'.repeat(64),
@@ -229,6 +293,8 @@ export const UI_BROKEN_SLUG = 'ui-broken'
 export const UI_DEMO_VERSION = commit('f0e1d2c3b4a5')
 /** #425 — the bundled maze-puzzle, whose own panel hides the lid colour without a lid. */
 export const MAZE_SLUG = 'builtin:maze-puzzle'
+/** #1737 — the bundled dollhouse-kit, whose designer takes the whole page (slot `page`). */
+export const DOLLHOUSE_SLUG = 'builtin:dollhouse-kit'
 
 /**
  * #274 — each template's media, in order (the first is the cover). The keychain has
@@ -370,6 +436,21 @@ export const models: ModelSummary[] = [
     origin: 'builtin',
     version: commit('9a8b7c6d5e4f'),
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
+  },
+  {
+    slug: DOLLHOUSE_SLUG,
+    name: 'Dollhouse Kit',
+    description: 'A modular 1:6 playscale dollhouse printed as panels on one 150 mm grid.',
+    tags: ['custom-ui'],
+    updated_at: '2026-08-15T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'builtin',
+    version: commit('7d6c5b4a3f2e'),
+    ui: { module: 'ui/index.js', slot: 'page', api: 1 },
   },
 ]
 
@@ -529,6 +610,7 @@ export const schemas: Record<string, CustomizerSchema> = {
   [UI_DEMO_SLUG]: keychainSchema,
   [UI_BROKEN_SLUG]: keychainSchema,
   [MAZE_SLUG]: mazeSchema,
+  [DOLLHOUSE_SLUG]: dollhouseSchema,
 }
 
 export const fonts: FontFamily[] = [

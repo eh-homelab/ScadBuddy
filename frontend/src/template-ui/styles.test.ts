@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { adoptAppStyles } from './styles'
+import { adoptAppStyles, SHORT_WINDOW } from './styles'
 
 function shadowRoot(): ShadowRoot {
   const el = document.createElement('div')
@@ -25,8 +25,29 @@ describe('adoptAppStyles', () => {
     document.head.append(style)
     const root = shadowRoot()
     adoptAppStyles(root)
-    expect(root.adoptedStyleSheets).toHaveLength(1)
+    expect(root.adoptedStyleSheets).toHaveLength(2)
     expect(rulesOf(root)).toContain('.probe-rule')
+  })
+
+  // #1738 — a template's preview keeps the page's own bound on a short window.
+  it('bounds <sb-preview> on a short window, below any rule of the template', () => {
+    const root = shadowRoot()
+    adoptAppStyles(root)
+    const media = Array.from(root.adoptedStyleSheets[0]?.cssRules ?? []).find(
+      (rule): rule is CSSMediaRule => rule instanceof CSSMediaRule,
+    )
+    expect(media?.media.mediaText).toBe(SHORT_WINDOW)
+    expect(media?.cssRules[0]?.cssText).toMatch(/^:where\(sb-preview\) \{.*height: max\(16rem, 60vh\)/)
+  })
+
+  it("matches index.css's short variant", async () => {
+    // `node:fs` as ui/copies.test.ts reads it: vitest serves `.css?raw` empty.
+    const specifier: string = 'node:fs'
+    const fs = (await import(/* @vite-ignore */ specifier)) as { readFileSync(path: URL, encoding: 'utf8'): string }
+    // A variable, not a literal: vite rewrites `new URL('<literal>', import.meta.url)` to an http URL.
+    const path = '../index.css'
+    const indexCss = fs.readFileSync(new URL(path, import.meta.url), 'utf8')
+    expect(indexCss).toContain(`@custom-variant short (@media ${SHORT_WINDOW});`)
   })
 
   it('skips a sheet whose rules cannot be read and copies the rest', () => {

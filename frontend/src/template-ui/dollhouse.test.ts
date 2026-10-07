@@ -144,7 +144,8 @@ describe('the designer', () => {
   it('lists the pieces and shows the one picked', async () => {
     const { root, set, button } = await mounted({ params: {} })
     expect(root.querySelector('sb-preview')).not.toBeNull()
-    expect(root.querySelector('sb-generate')).not.toBeNull()
+    // The page's own Generate is the one (#1740).
+    expect(root.querySelector('sb-generate')).toBeNull()
     expect(root.querySelector('sb-param[name="exterior"]')).not.toBeNull()
     expect(root.querySelector('sb-param[name="piece"]')).toBeNull()
     // The Grid sizes are the user's; a piece's size in modules is the designer's.
