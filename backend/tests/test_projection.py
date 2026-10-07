@@ -13,6 +13,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.render import projection as projection_module
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import (
     CANCELLED_ERROR,
@@ -35,6 +36,7 @@ from scadbuddy.render.projection import (
     run_closed,
 )
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.store.refs import BlobRefs
 from tests.support.renders import legacy_row as _row
 from tests.support.renders import namespace_not_found
 
@@ -339,6 +341,62 @@ def test_a_result_stored_before_its_newer_fields_still_reads(
     assert (stored.diagnostics, stored.source_version) == ([], "")
 
 
+def test_the_latest_finished_render_is_never_an_arrange(projection: JobProjection) -> None:
+    # An arrange row carries a source output's slug; the model's diagnostics must still
+    # read its last render (final review M1).
+    key = render_key("demo", {"width": 2}, None)
+    render = projection.accept(_job(width=2), key, workflow_id=f"render-{key}", run_id="r")
+    render.state, render.result, render.finished_at = "done", _result(), datetime.now(UTC)
+    assert projection.finish(render)
+    arrange = Job(
+        id=uuid.uuid4().hex, slug="demo", kind="arrange", inputs={}, created_at=datetime.now(UTC)
+    )
+    arrange = projection.accept(arrange, "arrange-key", workflow_id="render-a", run_id="r")
+    arrange.state, arrange.error = "failed", "piece is not in the store"
+    arrange.finished_at = datetime.now(UTC) + timedelta(seconds=5)
+    assert projection.finish(arrange)
+    latest = projection.latest_finished("demo")
+    assert latest is not None and latest.id == render.id
+
+
+def test_a_pending_arrange_holds_its_parts_from_insertion(
+    projection: JobProjection, pg_conninfo: str
+) -> None:
+    # Deleting a source output while the arrange waits for a worker must not let a sweep
+    # take the Parts it will place (final review M2); the prune releases the hold.
+    refs = BlobRefs(projection.pool)
+    refs.add("pieces/a", "output", "o-1")
+    inputs = {"items": [{"part": {"piece_key": "pieces/a"}}, {"part": {"piece_key": "pieces/b"}}]}
+    job = Job(
+        id=uuid.uuid4().hex,
+        slug="demo",
+        kind="arrange",
+        inputs=inputs,
+        created_at=datetime.now(UTC),
+    )
+    first = projection.accept(job, "arrange-key", workflow_id="render-a", run_id="r")
+    # The execution's accept, retried: its row, nothing held twice.
+    again = projection.accept(
+        job.model_copy(update={"id": uuid.uuid4().hex}),
+        "arrange-key",
+        workflow_id="render-a",
+        run_id="r",
+    )
+    assert again.id == first.id
+    refs.drop_holder("output", "o-1")
+    assert {"pieces/a", "pieces/b"} <= refs.referenced()
+    with psycopg.connect(pg_conninfo) as conn:
+        holders = conn.execute(
+            "SELECT DISTINCT holder_id FROM blob_refs WHERE holder_kind = 'job'"
+        ).fetchall()
+    assert holders == [(first.id,)]
+    first.state, first.finished_at = "failed", datetime.now(UTC) - timedelta(days=30)
+    first.error = "x"
+    assert projection.finish(first)
+    projection.prune(1.0)
+    assert not {"pieces/a", "pieces/b"} & refs.referenced()
+
+
 def test_prune_can_use_the_settled_index(pg_conninfo: str, projection: JobProjection) -> None:
     """#606: prune's predicate, `coalesce(finished_at, created_at)` over every settled
     state, has an index to use as settled rows accumulate."""
@@ -509,3 +567,30 @@ async def test_an_execution_past_retention_is_gone() -> None:
     )
     assert await run_closed(client, _unsettled(), rpc_timeout=timedelta(seconds=1))
     assert await legacy_unrun(client, _unsettled(), rpc_timeout=timedelta(seconds=1))
+
+
+def _rendered(store: JobProjection, run_id: str, seconds: float, *, ago: float = 0.0) -> None:
+    """A job that rendered in ``seconds`` and finished ``ago`` seconds ago."""
+    job = _accept(store, run_id, width=uuid.uuid4().int % 10**9)
+    with store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE render_jobs SET state = 'done',"
+            " finished_at = now() - make_interval(secs => %s),"
+            " started_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (ago, ago + seconds, job.id),
+        )
+
+
+def test_recent_render_seconds_is_the_median_of_the_latest_renders(
+    projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#603: a full queue's `Retry-After` comes from how long renders take now, not a
+    constant. Only finished renders count, and only the latest `RECENT_RENDERS`."""
+    monkeypatch.setattr(projection_module, "RECENT_RENDERS", 3)
+    assert projection.recent_render_seconds() is None
+    # Older than the three below: past the latest three, so never counted.
+    _rendered(projection, "run-old", 900.0, ago=86400)
+    for index, seconds in enumerate((4.0, 6.0, 40.0)):
+        _rendered(projection, f"run-{index}", seconds)
+    _accept(projection, "run-pending", width=7)  # not finished: never counted
+    assert projection.recent_render_seconds() == pytest.approx(6.0, abs=0.1)

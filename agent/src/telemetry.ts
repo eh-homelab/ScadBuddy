@@ -9,7 +9,9 @@ import { register } from 'node:module'
 // the SDK is imported only after it: a static import would be hoisted above
 // `register()`. With OTEL_SDK_DISABLED=true (read as setup.ts tracingDisabled
 // reads it, which cannot be imported before the hook) neither is loaded: the
-// hook wraps every ESM module the app loads, a cost the kill switch removes.
+// hook wraps every ESM module the app loads, a cost the kill switch removes,
+// and setup.ts's SDK packages are never imported (main.ts imports only the
+// SDK-free telemetry/runtime.ts), so a fault in one cannot stop the agent.
 
 if (process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() !== 'true') {
   register('@opentelemetry/instrumentation/hook.mjs', import.meta.url)
