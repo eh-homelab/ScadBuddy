@@ -67,6 +67,13 @@ class PrintSource(Protocol):
         overrides; none for a file ScadBuddy did not render."""
         ...
 
+    @property
+    def lays_out(self) -> bool:
+        """Whether the run lays the file out for the printer (#105), so it states the
+        side the slicer may use (#834) and each side's flow (#484); a library file
+        prints as its author left it."""
+        ...
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile: ...
@@ -80,6 +87,7 @@ class PrintSource(Protocol):
         plan: FilamentPlan,
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
+        nozzle_volume_type: list[str] | None = None,
     ) -> PrintFile: ...
 
     async def record(
@@ -134,6 +142,10 @@ class OutputSource:
     def options_slug(self) -> str | None:
         return self.meta.slug
 
+    @property
+    def lays_out(self) -> bool:
+        return True
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         payload = await read_3mf(self.store, self.meta)
         return [plate.index for plate in plates_of(io.BytesIO(payload))]
@@ -151,6 +163,7 @@ class OutputSource:
         plan: FilamentPlan,
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
+        nozzle_volume_type: list[str] | None = None,
     ) -> PrintFile:
         # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
         target = await target_for(
@@ -160,6 +173,7 @@ class OutputSource:
             nozzle_diameter=nozzle_size,
             colours=await _spool_colours(client, self.meta, plan),
             nozzle_stats=nozzle_stats,
+            nozzle_volume_type=nozzle_volume_type,
         )
         # A project's folder replaces the one from Settings for this send, which is what
         # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload,
@@ -282,6 +296,10 @@ class LibrarySource:
     def print_settings(self) -> dict[str, str]:
         return {}
 
+    @property
+    def lays_out(self) -> bool:
+        return False
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)
 
@@ -297,6 +315,7 @@ class LibrarySource:
         plan: FilamentPlan,
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
+        nozzle_volume_type: list[str] | None = None,
     ) -> PrintFile:
         return PrintFile(self.file_id)
 

@@ -240,6 +240,37 @@ class TestReplate:
         assert settings["extruder_nozzle_stats"] == stats
         assert settings["extruder_nozzle_stats_new"] == stats
 
+    def test_replating_states_each_extruders_flow(self, written: Path) -> None:
+        """#484: the one key Bambu Studio 02.08.02.61 sets per extruder for High Flow,
+        in the slicer's order; the CLI keeps it because the H2C printer preset has
+        none. ``default_nozzle_volume_type`` is left alone (Studio keeps it Standard),
+        and ``slice_info.config`` stays the slicer's output."""
+        flows = ["High Flow", "Standard"]
+        moved = replate_3mf(
+            written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.4", nozzle_volume_type=flows
+        )
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+            names = archive.namelist()
+        assert settings["nozzle_volume_type"] == flows
+        assert "default_nozzle_volume_type" not in settings
+        assert "Metadata/slice_info.config" not in names
+        # The five keys the slicer dereferences are all still there.
+        for key in (
+            "printer_settings_id",
+            "print_settings_id",
+            "filament_settings_id",
+            "nozzle_diameter",
+            "printable_height",
+        ):
+            assert key in settings
+
+    def test_replating_without_a_flow_states_none(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.4")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert "nozzle_volume_type" not in settings
+
     def test_replating_without_nozzle_stats_states_none(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
         with zipfile.ZipFile(io.BytesIO(moved)) as archive:

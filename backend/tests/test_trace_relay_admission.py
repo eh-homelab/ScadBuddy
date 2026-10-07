@@ -172,3 +172,28 @@ def test_a_refusal_by_the_process_bucket_does_not_spend_the_clients_own() -> Non
     # "b" lost nothing to those refusals: both of its tokens are still there.
     assert limits._clients["b"].take()
     assert limits._clients["b"].take()
+
+
+def test_ipv6_clients_in_one_64_share_a_bucket() -> None:
+    """#1152: a host rotates its address within its /64 (privacy extensions, or on
+    purpose), so the /64 is the client."""
+    limits = RelayLimits(clock=lambda: 0.0, client_burst=1, client_per_second=0.01)
+    limits.take("2001:db8:1:2::1")
+    with pytest.raises(ApiError) as error:
+        limits.take("2001:db8:1:2:aaaa:bbbb:cccc:dddd")
+    assert refusal(error) == (429, "this client is over the relay's rate limit")
+    # Another /64 is another client, and so is every IPv4 address.
+    limits.take("2001:db8:1:3::1")
+    limits.take("203.0.113.9")
+    limits.take("203.0.113.10")
+    assert limits.tracked_clients == 4
+
+
+def test_an_ipv4_mapped_client_is_its_ipv4_address() -> None:
+    limits = RelayLimits(clock=lambda: 0.0, client_burst=1, client_per_second=0.01)
+    limits.take("203.0.113.9")
+    with pytest.raises(ApiError):
+        limits.take("::ffff:203.0.113.9")
+    # And a key that is no address at all is used as is.
+    limits.take("unknown")
+    assert limits.tracked_clients == 2
