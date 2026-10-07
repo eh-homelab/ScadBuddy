@@ -168,14 +168,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
         })
 
       async function gone(): Promise<boolean> {
-        const deadline = Date.now() + 60_000
+        const deadline = performance.now() + 60_000 // monotonic: the wall clock steps
         for (;;) {
           try {
             await env.client.workflow.getHandle(subject).describe()
           } catch (err) {
             return err instanceof WorkflowNotFoundError
           }
-          if (Date.now() > deadline) return false
+          if (performance.now() > deadline) return false
           await new Promise((r) => setTimeout(r, 200))
         }
       }
