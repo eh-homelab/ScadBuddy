@@ -9,7 +9,7 @@ import uuid
 import zipfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -357,7 +357,7 @@ class OutputStore:
             model_version=version,
             name=name or None,
             job_id=job.id,
-            created_at=datetime.now(UTC),
+            created_at=self._next_created_at(job.slug),
             bbox_mm=result.bbox_mm,
             colors=list(result.colors),
             parts=list(result.parts),
@@ -370,6 +370,19 @@ class OutputStore:
         self.forget_plate_cover(job.slug)
         self._changed(job.slug)
         return meta
+
+    def _next_created_at(self, slug: str) -> datetime:
+        """Now, or just after the model's newest output when the clock reads earlier.
+
+        Outputs are ordered by ``created_at`` (the cover is the oldest's, the list is
+        newest first), and a wall clock that steps back between two saves would put
+        the second before the first. Never earlier than an existing output keeps the
+        order the saves happened in; the stamp then runs ahead by the step."""
+        now = datetime.now(UTC)
+        existing = self._oldest_first(slug)
+        if existing and existing[-1].created_at >= now:
+            return existing[-1].created_at + timedelta(microseconds=1)
+        return now
 
     def bom(self, output_id: str) -> list[BomEntry]:
         path = self.directory(output_id) / BOM_NAME
