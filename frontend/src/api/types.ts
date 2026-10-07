@@ -117,6 +117,8 @@ export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
 /** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
 export type Operation = Schemas['Operation']
+/** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
+export type OperationAccepted = Schemas['OperationAccepted']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']

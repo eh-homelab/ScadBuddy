@@ -5,10 +5,11 @@ import { z } from 'zod'
 import { type Principal, tiersUpTo, TIERS } from '../src/auth/principal.js'
 import { principalFor } from '../src/auth/tokens.js'
 import { type BrowserTabs, TabHub, type TabConnection } from '../src/bridge/hub.js'
+import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { browserTools } from '../src/tools/browser.js'
+import { browserTools, tabBackNotRun } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
@@ -266,6 +267,32 @@ describe('the harness projection', () => {
   })
 })
 
+describe('the harness projection waits for the tab (#815)', () => {
+  it("hands the turn's waitForTab the call's tool_use id from Claude Code's _meta", async () => {
+    const hub = new TabHub()
+    const seen: (string | undefined)[] = []
+    const servers = harnessTools(services({ browser: hub })).mcpServers(
+      { id: 's1', owner: { kind: 'browser', id: 'browser', label: 'You' } },
+      undefined,
+      {
+        waitForTab: ({ toolUseId }) => {
+          seen.push(toolUseId)
+          return Promise.resolve({ back: false, message: 'nobody came back.' })
+        },
+      },
+    )
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await servers.scadbuddy!.instance.connect(serverSide)
+    const client = new Client({ name: 'harness-test', version: '0' })
+    await client.connect(clientSide)
+    const result = await client.callTool({ name: 'browser_snapshot', arguments: {}, _meta: { 'claudecode/toolUseId': 'toolu_meta1' } })
+    await client.close()
+    expect(result.isError).toBe(true)
+    expect(text(result as { content: unknown[] })).toMatch(/nobody came back\.$/)
+    expect(seen).toEqual(['toolu_meta1'])
+  })
+})
+
 describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
   function fakeSessions() {
     const sends: string[] = []
@@ -399,5 +426,174 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     expect((await callTool('browser_pair')).text).toMatch(/needs the "write" tier/)
     expect((await callTool('browser_click', { role: 'button', name: 'Render' })).text).toMatch(/needs the "write" tier/)
     expect(t.calls()).toEqual([])
+  })
+})
+
+// #815 §2: a call that finds no tab, in a session the user owns, waits for the
+// tab as an attention request (sessions/manager.ts `waitForTab`) and runs once
+// more when it is back. The Postgres side is test/attention.pg.test.ts.
+describe('waiting for the tab (#815)', () => {
+  it('tells the hub listener when a session has a connected tab again: a reconnect, or a pairing to a live tab', async () => {
+    const hub = new TabHub()
+    const back: string[] = []
+    hub.onSessionTab = (sessionId) => {
+      back.push(sessionId)
+      return Promise.resolve()
+    }
+    hub.pairSession('s1', TAB)
+    expect(back).toEqual([])
+    const first = await tab(hub)
+    expect(back).toEqual(['s1'])
+    first.conn.close()
+    await tab(hub, OTHER_TAB)
+    hub.pairSession('s2', OTHER_TAB)
+    expect(back).toEqual(['s1', 's2'])
+  })
+
+  it('logs a listener that fails, and pairs anyway', async () => {
+    const logged: string[] = []
+    const hub = new TabHub({ log: (m) => logged.push(m) })
+    hub.onSessionTab = () => Promise.reject(new Error('db down'))
+    await tab(hub)
+    hub.pairSession('s1', TAB)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(logged.join('\n')).toMatch(/db down/)
+    expect(hub.sessionHasTab('s1')).toBe(true)
+  })
+
+  it('waits on no tab, then runs a read call once the tab is back', async () => {
+    expect(tool('browser_snapshot').risk).toBe('read')
+    const hub = new TabHub()
+    const waits: { tool: string; toolUseId: string | undefined }[] = []
+    const c: ToolContext = {
+      ...ctx(hub.forSession('s1'), browser),
+      toolUseId: 'toolu_b1',
+      waitForTab: async ({ tool, toolUseId }) => {
+        waits.push({ tool, toolUseId })
+        await tab(hub, TAB, () => ({ ok: true, result: { snapped: true } }))
+        hub.pairSession('s1', TAB)
+        return { back: true, why: 'reconnected' as const }
+      },
+    }
+    const result = await runTool(tool('browser_snapshot'), {}, c)
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual({ snapped: true })
+    expect(waits).toEqual([{ tool: 'browser_snapshot', toolUseId: 'toolu_b1' }])
+  })
+
+  // A write or outward call is never re-run on a page that may have reloaded; the model re-checks and calls again.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call is not re-run when the tab is back: it says so and does nothing', async (tier, name, args) => {
+    expect(tool(name).risk).toBe(tier)
+    const hub = new TabHub()
+    let back: Awaited<ReturnType<typeof tab>> | undefined
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: async () => {
+        back = await tab(hub)
+        hub.pairSession('s1', TAB)
+        return { back: true, why: 'reconnected' as const }
+      },
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
+    expect(back!.calls()).toEqual([])
+  })
+
+  // #1393: reconnected() runs on whichever replica saw the tab, so a write call is not told to try again when
+  // this replica still has none: that retry could only open a wait that never ends reconnected here.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call whose wait ended reconnected on another replica says the tab is not here, not "call again"', async (_tier, name, args) => {
+    const hub = new TabHub()
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toMatch(/^no browser attached: .*The tab reconnected, but not to this agent replica, so it cannot be reached from here\.$/s)
+    expect(text(result)).not.toContain(`call ${name} again`)
+  })
+
+  // #1394: the check for a tab already back takes the wait's signal down to the pairing lookup it awaits.
+  it("hands the tab check's signal to the pairing lookup, so a hung lookup can be cancelled", async () => {
+    const seen: (AbortSignal | undefined)[] = []
+    const pairings: PairingStore = new InMemoryPairingStore()
+    pairings.pairedTab = (_principal, signal) => {
+      seen.push(signal)
+      return Promise.resolve(undefined)
+    }
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const parked = new AbortController()
+    await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), agent),
+      waitForTab: async ({ isBack }) => {
+        await isBack(parked.signal)
+        return { back: false, message: 'x' }
+      },
+    })
+    expect(seen).toContain(parked.signal)
+  })
+
+  it("words the not-run error by why the wait ended: the user's word is not a connected tab", async () => {
+    const hub = new TabHub()
+    const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'user_back' as const }),
+    })
+    expect(text(result)).toBe(tabBackNotRun('browser_set_param', 'user_back'))
+    expect(text(result)).toMatch(/^the user said they are back \(a tab may not be attached yet\), but browser_set_param was not run/)
+    expect(tabBackNotRun('browser_click', 'reconnected')).toMatch(/^the session has a connected tab again, but browser_click was not run/)
+    const read = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => Promise.resolve({ back: true, why: 'user_back' as const }),
+    })
+    expect(text(read)).toMatch(/The user said they were back, but no tab is attached here yet\.$/)
+  })
+
+  it('fails with the wait\'s outcome when the tab did not come back, and retries only once', async () => {
+    const hub = new TabHub()
+    let waited = 0
+    const timedOut = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited += 1
+        return Promise.resolve({ back: false, message: 'timed_out: the user did not reply within 300 s.' })
+      },
+    })
+    expect(text(timedOut)).toMatch(/^no browser attached: .*timed_out: the user did not reply within 300 s\.$/s)
+    // "Back" on a replica the tab is not on: the second call fails as usual, with no second wait.
+    const stillGone = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited += 1
+        return Promise.resolve({ back: true, why: 'reconnected' as const })
+      },
+    })
+    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session.*The tab reconnected, but not to this agent replica/s)
+    expect(waited).toBe(2)
+  })
+
+  it('only no_browser waits: a tab that does not answer fails as before', async () => {
+    const hub = new TabHub({ callTimeoutMs: 20 })
+    await tab(hub, TAB, () => undefined)
+    hub.pairSession('s1', TAB)
+    let waited = false
+    const result = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited = true
+        return Promise.resolve({ back: true, why: 'reconnected' as const })
+      },
+    })
+    expect(text(result)).toMatch(/did not answer/)
+    expect(waited).toBe(false)
   })
 })

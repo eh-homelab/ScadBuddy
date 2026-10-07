@@ -172,7 +172,7 @@ describe.skipIf(skip !== undefined)(`a durable turn through agent-durable${skip 
       pending: new PendingActionStore(),
       pollIntervalMs: 1000,
       renderWaitMs: 60_000,
-      operationFollowMs: 60_000,
+      commandFollowMs: 60_000,
       publicBaseUrl: undefined,
     }
     tools = AgentWorker.start({

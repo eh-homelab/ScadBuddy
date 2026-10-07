@@ -61,6 +61,7 @@ import type {
   PrintCheck,
   PrintRun,
   Operation,
+  OperationAccepted,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -194,6 +195,12 @@ export const AI_NOT_ROUTED = 'urn:scadbuddy:ai-not-routed'
 /** The `type` of the problem for a request the offline browser could not send. */
 export const OFFLINE = 'urn:scadbuddy:offline'
 /**
+ * The `type` of the problem `command()` writes when it stops following an operation
+ * still running after `printRunPoll.operationFollowMs`. The client writes it, so it is a
+ * `urn:scadbuddy:` type like `UNANSWERED`, not a server's `https://scadbuddy.dev/problems/`.
+ */
+export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
+/**
  * The backend's problem for a Bambuddy call that timed out, dropped or answered an
  * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
  * enqueue, and Bambuddy may have done it.
@@ -299,15 +306,21 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * Whether a failed request may still have done its work: the server's own answer never
  * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
  * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
- * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
- * browser all mean it did not. For a request with a physical effect (a print), retrying
- * one of these blind can do it twice. A failed print run (#470) says so itself: its
- * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
+ * Or the backend said its start may have reached Temporal (`may_have_started`, on a
+ * `temporal-unavailable` or `temporal-refused`), or an operation was still running when
+ * `command()` stopped following it. Any other problem the backend wrote, a 503 (nothing
+ * upstream took it) and an offline browser all mean it did not. For a request with a
+ * physical effect (a print), retrying one of these blind can do it twice. A failed print
+ * run (#470) says so itself: its `may_have_queued` is whether it had tried to queue,
+ * which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   // Its run may be checking still, and will print once it is accepted (#1052).
   if (error.problem.type === STILL_ACCEPTING) return true
+  // Temporal may hold a start of it: only the same key follows it (review #1316 (13) 1a).
+  if (error.problem.may_have_started === true) return true
+  if (error.problem.type === OPERATION_UNFINISHED) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -340,8 +353,10 @@ const seg = encodeURIComponent
  * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
  * longest run, `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend
  * `workflows/operation.py`) with 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s,
- * `main.py`) for the reconciler to end a lost one: 1203 s. The agent's
- * `operationFollowMs` is the same (agent/src/tools/registry.ts).
+ * `main.py`) for the reconciler to end a lost one: 1203 s. The agent does not follow
+ * that long: it follows for `COMMAND_FOLLOW_MS` (the backend's answer deadline plus a
+ * margin, agent/src/tools/command.ts), then hands back the running operation for
+ * `get_operation`.
  */
 export const printRunPoll = {
   intervalMs: 1000,
@@ -354,9 +369,11 @@ export const printRunPoll = {
 /**
  * How long the print dialog waits for one rack-algorithm save before counting it as
  * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
- * later one back (#1086 review). Aborting only stops the browser waiting: the server has
- * no shorter bound on this write, so a save given up on can still commit after the next
- * one and leave the printer on the earlier choice (tracked in #1129).
+ * later one back (#1086 review). Aborting only stops the browser waiting, so the server
+ * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, #1129): once
+ * a save reaches the store it commits or fails inside that bound. Time before it reaches
+ * the store is not bounded, so a save held up there can still land after the next one;
+ * ordering saves explicitly is #1216.
  */
 export const rackAlgorithmSave = { timeoutMs: 25_000 }
 
@@ -372,15 +389,19 @@ export function newRequestId(): string {
 
 /** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
 export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+/** Temporal did not answer: nothing was started, or a start that reached it is unknown. */
+export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-unavailable'
 
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
- * Or ScadBuddy answered that the same request is still being accepted.
+ * Or ScadBuddy answered that the same request is still being accepted, or that Temporal
+ * may hold a start of it (`may_have_started`, review #1066 (10) 4): the same key follows it.
  */
 function unanswered(caught: unknown): boolean {
   if (!(caught instanceof ApiError)) return false
   if (caught.problem.type === STILL_ACCEPTING) return true
+  if (caught.problem.may_have_started === true) return true
   return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
@@ -416,7 +437,8 @@ async function reattach<T>(
   signal?: AbortSignal,
   { bounded = false, finish = false, within }: { bounded?: boolean; finish?: boolean; within?: Within } = {},
 ): Promise<T> {
-  const began = Date.now()
+  // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
+  const began = performance.now()
   let last = false
   for (let tries = 0; ; ) {
     try {
@@ -431,13 +453,13 @@ async function reattach<T>(
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
       if (
         accepting && !bounded
-          ? Date.now() - began >= printRunPoll.acceptingMs
+          ? performance.now() - began >= printRunPoll.acceptingMs
           : tries++ >= printRunPoll.reattempts
       ) {
         throw caught
       }
-      // The server's Retry-After paces a still-accepting re-send (review #1061 4a).
-      const after = accepting && caught instanceof ApiError ? caught.problem.retry_after : undefined
+      // The server's Retry-After paces a re-send it answered (review #1061 4a).
+      const after = caught instanceof ApiError ? caught.problem.retry_after : undefined
       try {
         await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
       } catch (reason) {
@@ -463,7 +485,7 @@ export async function command<T>(
 ): Promise<T> {
   const signal = init.signal ?? undefined
   const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
-  const first = await reattach(() => requestWithStatus<T | Operation>(path, { ...init, headers }), signal)
+  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   return followOperation<T>(first, signal, operations)
 }
 
@@ -473,17 +495,17 @@ export async function command<T>(
  * would have answered.
  */
 async function followOperation<T>(
-  first: { status: number; body: T | Operation },
+  first: { status: number; body: T | OperationAccepted },
   signal?: AbortSignal,
   operations = '/operations',
 ): Promise<T> {
   if (first.status !== 202) return first.body as T
-  let op = first.body as Operation
-  const began = Date.now()
+  let op: Operation = first.body as OperationAccepted
+  const began = performance.now()
   while (op.status === 'running') {
-    if (Date.now() - began >= printRunPoll.operationFollowMs) {
+    if (performance.now() - began >= printRunPoll.operationFollowMs) {
       throw new ApiError({
-        type: 'urn:scadbuddy:operation-unfinished',
+        type: OPERATION_UNFINISHED,
         title: 'Still running',
         status: 504,
         detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,
@@ -526,9 +548,9 @@ async function followPrintRun(
     signal,
     { within },
   )
-  const began = Date.now()
+  const began = performance.now()
   while (run.status === 'running') {
-    if (Date.now() - began >= printRunPoll.followMs) {
+    if (performance.now() - began >= printRunPoll.followMs) {
       throw new ApiError({
         type: 'urn:scadbuddy:print-run-unfinished',
         title: 'Still preparing',
@@ -746,6 +768,15 @@ export const api = {
     item.poster ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster` : undefined,
 
   /**
+   * #624 — a small copy of an image or of a video's poster, for a strip of
+   * thumbnails; undefined for a video with no poster, which has none.
+   */
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+    item.kind === 'video' && !item.poster
+      ? undefined
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail`,
+
+  /**
    * #274 — adds an image or video as the template's last item. XHR rather than
    * `fetch`, which reports no upload progress; a video runs to a gigabyte.
    * `onProgress` gets the fraction sent, 0 to 1.
@@ -760,7 +791,7 @@ export const api = {
     // that never arrived, so the server adds the item once.
     const key = newRequestId()
     const send = () =>
-      new Promise<{ status: number; body: ModelSummary | Operation }>((resolve, reject) => {
+      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>((resolve, reject) => {
         const body = new FormData()
         body.append('file', file)
         if (options.caption) body.append('caption', options.caption)
@@ -774,7 +805,7 @@ export const api = {
         })
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
-            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | Operation })
+            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | OperationAccepted })
             return
           }
           reject(new ApiError(xhrProblem(xhr)))
@@ -896,11 +927,20 @@ export const api = {
    * hold a claim on a job, and that answer names the job the next render supersedes. A
    * request already sent is never aborted, for the same reason. Unanswered even then, the
    * claim is left to the render it made, which runs to its end (review #1066 1.1).
+   * `requestId` is the `Idempotency-Key`: a caller that sends the render again itself
+   * passes the same one, so the server counts every send as one claim (review #1066 (7) 3).
    */
-  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string, signal?: AbortSignal) => {
+  render: (
+    slug: string,
+    inputs: JsonObject,
+    version?: string,
+    supersedes?: string,
+    signal?: AbortSignal,
+    requestId: string = newRequestId(),
+  ) => {
     // Sent again while the server is still accepting it (#1053), with one
     // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
-    const headers = { 'Idempotency-Key': newRequestId() }
+    const headers = { 'Idempotency-Key': requestId }
     return reattach(
       () =>
         request<RenderAccepted>(`/models/${seg(slug)}/render`, {

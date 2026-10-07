@@ -93,6 +93,23 @@ describe('chatReducer', () => {
       sent,
     )
     expect(resolved.sessions.s1?.items[0]).toMatchObject({ state: 'approved', by: you })
+
+    // Refused by the respond route (#815): the buttons are live again, the reason beside them.
+    const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'Your decision was not taken: expired' }], sent)
+    expect(failed.sessions.s1?.items[0]).toMatchObject({ kind: 'approval', state: 'pending' })
+    expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your decision was not taken: expired' })
+    // A settled refusal (409/410) ends the card with its reason, without waiting on a
+    // resolve frame that may never come (#1385); no error row, the card says it.
+    const closed = run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'already denied', closed: 'it expired' }], sent)
+    expect(closed.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'approval', state: 'closed', reason: 'it expired' })])
+    // A resolve frame that does arrive still says how it really ended.
+    const late = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: you })], closed)
+    expect(late.sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
+    expect(late.sessions.s1?.items[0]).not.toHaveProperty('reason')
+    // The route's own 2xx resolves the card without the socket.
+    expect(run([{ type: 'responded', sessionId: 's1', id: 'a1', outcome: 'denied', by: you }], sent).sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
+    // A failure that lands after the server resolved it changes nothing on the card.
+    expect(run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x' }], resolved).sessions.s1?.items[0]).toMatchObject({ state: 'approved' })
   })
 
   it('moves a question pending → sent → answered, and shows a cancelled one as not answered (#940)', () => {
@@ -125,6 +142,20 @@ describe('chatReducer', () => {
     )
     expect(answered.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'], by: you })
 
+    // A replay while the answer is still on its way rebuilds the card as sent, so the
+    // route's 2xx still lands on it; once resolved, a later replay starts it pending (#1395).
+    const replayed = run(
+      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
+      sent,
+    )
+    expect(replayed.sessions.s1?.items).toEqual([expect.objectContaining({ id: 'q1', state: 'sent' })])
+    const took = run([{ type: 'responded', sessionId: 's1', id: 'q1', outcome: 'answered', answers: ['Approve'], by: you }], replayed)
+    expect(took.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'] })
+    expect(
+      run([{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })], took)
+        .sessions.s1?.items[0],
+    ).toMatchObject({ state: 'pending' })
+
     const cancelled = run(
       [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'interrupted by You' })],
       waiting,
@@ -132,16 +163,12 @@ describe('chatReducer', () => {
     expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
     expect(cancelled.sessions.s1?.items[0]).not.toHaveProperty('answers')
 
-    // Answered while offline: queued, and still not live after the reconnect's replay.
-    const queued = run([{ type: 'answered', sessionId: 's1', questionId: 'q1', queued: true }], waiting)
-    expect(queued.sessions.s1?.items[0]).toMatchObject({ state: 'queued' })
-    const replayed = run(
-      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
-      queued,
-    )
-    expect(replayed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+    // Refused by the respond route (#815): answerable again, with the reason beside it.
+    const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: stale' }], sent)
+    expect(failed.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
+    expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your answer was not taken: stale' })
 
-    // Refused by the agent: answerable again, with the error beside it.
+    // Refused by the agent over the socket (a panel loaded before #815): the same.
     const refused = run(
       [server({ type: 'error', sessionId: 's1', code: 'invalid', message: 'needs one answer each', questionId: 'q1' })],
       sent,
@@ -180,6 +207,28 @@ describe('chatReducer', () => {
       waiting,
     )
     expect(timedOut.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', attention })
+    expect(timedOut.sessions.s1?.items[0]).not.toHaveProperty('reconnected')
+    const back = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'the ScadBuddy tab is connected again', reconnected: true })],
+      waiting,
+    )
+    expect(back.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reconnected: true })
+
+    // A closed card's reason is not a later resolve frame's: one without a reason
+    // must not read "No reply: <the refusal's reason>" (#1401).
+    const closed = run(
+      [
+        { type: 'answered', sessionId: 's1', questionId: 'q1' },
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'x', closed: 'it is no longer waiting for a response' },
+      ],
+      waiting,
+    )
+    expect(closed.sessions.s1?.items[0]).toMatchObject({ state: 'closed', reason: 'it is no longer waiting for a response' })
+    const reasonless = run([server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false })], closed)
+    expect(reasonless.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled' })
+    expect(reasonless.sessions.s1?.items[0]).not.toHaveProperty('reason')
+    const late = run([server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ["I'm here"] })], closed)
+    expect(late.sessions.s1?.items[0]).not.toHaveProperty('reason')
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {

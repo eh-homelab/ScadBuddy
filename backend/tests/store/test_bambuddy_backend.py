@@ -21,6 +21,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
+from scadbuddy.render.pg_store import MIGRATIONS, migrate
 from scadbuddy.store.bambuddy import (
     BambuddyContentBackend,
     BambuddyTarget,
@@ -28,16 +29,21 @@ from scadbuddy.store.bambuddy import (
     RenderSettingsSource,
     folder_lock_key,
     folder_name,
+    instance_key,
 )
 from scadbuddy.store.content import BlobMissingError, BlobScope
 from scadbuddy.store.index import Pool
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.support.store import store_pool
 
 pytestmark = pytest.mark.requires_postgres
 API = f"{BASE_URL}/api/v1"
 INBOX = 1
 SCOPE = BlobScope(slug="dollhouse-kit", title="Dollhouse Kit")
+#: How `store_folders` keys the configured Bambuddy (#1437 item 5): rows are recorded
+#: under the normalised URL, never the raw one.
+HERE = instance_key(BASE_URL)
 
 
 def target(key: str = "narrow") -> Callable[[], Awaitable[BambuddyTarget]]:
@@ -161,9 +167,9 @@ async def test_delete_outside_a_work_folder_is_refused_without_a_request(pool: P
 async def test_a_delete_in_a_work_folder_of_another_inbox_is_refused(pool: Pool) -> None:
     with pool.connection() as conn:
         conn.execute(
-            "INSERT INTO store_folders (inbox_id, slug, role, folder_id)"
-            " VALUES (%s, 'old', 'work', 42)",
-            (INBOX + 1,),
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, 'old', 'work', 42)",
+            (HERE, INBOX + 1),
         )
     respx.get(f"{API}/library/files/78").mock(
         return_value=httpx.Response(
@@ -175,6 +181,222 @@ async def test_a_delete_in_a_work_folder_of_another_inbox_is_refused(pool: Pool)
     with pytest.raises(RefusedDeleteError):
         await backend.remove("78")
     assert not delete.called
+    await backend.aclose()
+
+
+OTHER = "https://other-bambuddy.test"
+THERE = instance_key(OTHER)
+
+
+def _record_folders(pool: Pool, instance: str, *rows: tuple[str, str, int]) -> None:
+    with pool.connection() as conn:
+        for slug, role, folder_id in rows:
+            conn.execute(
+                "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+                " VALUES (%s, %s, %s, %s, %s)",
+                (instance, INBOX, slug, role, folder_id),
+            )
+
+
+@respx.mock
+async def test_a_delete_in_a_work_folder_of_another_bambuddy_is_refused(pool: Pool) -> None:
+    """#683: the same inbox id on another Bambuddy is another folder. A Work folder
+    recorded there must not make this instance's folder of that id deletable."""
+    _record_folders(pool, THERE, ("old", "work", 42))
+    respx.get(f"{API}/library/files/78").mock(
+        return_value=httpx.Response(
+            200, json=shaped("FileResponse", id=78, filename="p", folder_id=42)
+        )
+    )
+    delete = respx.delete(f"{API}/library/files/78")
+    backend = BambuddyContentBackend(target(), pool)
+    with pytest.raises(RefusedDeleteError):
+        await backend.remove("78")
+    assert not delete.called
+    await backend.aclose()
+
+
+@respx.mock
+async def test_folders_recorded_on_another_bambuddy_are_not_uploaded_into(pool: Pool) -> None:
+    """#683: a repointed `bambuddy_url` finds or makes its own folders rather than
+    writing into whatever has the other instance's recorded ids."""
+    _record_folders(pool, THERE, (SCOPE.slug or "", "template", 70), (SCOPE.slug or "", "work", 71))
+    respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    created = respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
+    upload = respx.post(f"{API}/library/files").mock(return_value=uploaded())
+    backend = BambuddyContentBackend(target(), pool)
+    await backend.upload("piece", b"zip", name="piece-k.zip", scope=SCOPE)
+    assert created.call_count == 2
+    assert upload.calls[0].request.url.params["folder_id"] == "11"
+    await backend.aclose()
+
+
+def _placed_tree() -> httpx.Response:
+    """This instance's tree: template folder 40 under the inbox, its Work folder 42."""
+    return httpx.Response(
+        200,
+        json=[
+            folder_row(
+                id=INBOX,
+                name="ScadBuddy",
+                parent_id=None,
+                children=[
+                    folder_row(
+                        id=40,
+                        name="Old",
+                        parent_id=INBOX,
+                        children=[folder_row(id=42, name="Work", parent_id=40)],
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def _instances(pool: Pool) -> dict[int, str]:
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT folder_id, instance FROM store_folders").fetchall()
+    return {int(row["folder_id"]): row["instance"] for row in rows}
+
+
+def _file_in(folder_id: int, file_id: int = 78) -> None:
+    respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json=shaped("FileResponse", id=file_id, filename="p", folder_id=folder_id)
+        )
+    )
+
+
+def test_a_folder_recorded_without_an_instance_is_refused(pool: Pool) -> None:
+    """#1429: `instance` has no default any more, so a row that omits it fails rather
+    than recording a folder no Bambuddy owns."""
+    with pool.connection() as conn, pytest.raises(psycopg.errors.NotNullViolation):
+        conn.execute(
+            "INSERT INTO store_folders (inbox_id, slug, role, folder_id)"
+            " VALUES (%s, 'old', 'work', 42)",
+            (INBOX,),
+        )
+
+
+_DROP_LEGACY = next(
+    i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_store_folders_drop_legacy")
+)
+
+
+@respx.mock
+async def test_pre_instance_rows_are_dropped_and_their_folders_adopted_again(
+    pg_conninfo: str,
+) -> None:
+    """#1429: the migration drops the rows recorded before #683 ('') and keeps the
+    rest. The next find for a dropped slot adopts its folders again by name, so the
+    files already in its Work folder stay deletable."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:_DROP_LEGACY])
+        conn.execute(
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES ('', %s, 'old', 'template', 40), ('', %s, 'old', 'work', 42),"
+            " (%s, %s, 'kept', 'work', 60)",
+            (INBOX, INBOX, HERE, INBOX),
+        )
+        assert migrate(conn)[0] == MIGRATIONS[_DROP_LEGACY].id
+    with store_pool(pg_conninfo) as pool:
+        assert _instances(pool) == {60: HERE}
+        respx.get(f"{API}/library/folders").mock(return_value=_placed_tree())
+        created = respx.post(f"{API}/library/folders/")
+        upload = respx.post(f"{API}/library/files").mock(return_value=uploaded())
+        _file_in(42)
+        delete = respx.delete(f"{API}/library/files/78").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        backend = BambuddyContentBackend(target(), pool)
+        await backend.upload(
+            "piece", b"zip", name="p.zip", scope=BlobScope(slug="old", title="Old")
+        )
+        assert not created.called
+        assert upload.calls[0].request.url.params["folder_id"] == "42"
+        await backend.remove("78")
+        assert delete.called
+        assert _instances(pool) == {40: HERE, 42: HERE, 60: HERE}
+        await backend.aclose()
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("http://Host:80/", "http://host"),
+        ("HTTPS://bambuddy.lan:443", "https://bambuddy.lan/"),
+        ("http://host/bambuddy//", "http://host/bambuddy"),
+        ("http://[::1]:80/", "http://[::1]"),
+    ],
+)
+def test_respellings_of_one_url_are_one_instance(a: str, b: str) -> None:
+    """#1431: a cosmetic change to `bambuddy_url` must not orphan the Work files."""
+    assert instance_key(a) == instance_key(b)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("http://host", "https://host"),
+        ("http://host", "http://host:8000"),
+        ("http://host/a", "http://host/b"),
+        ("http://host", "http://other"),
+    ],
+)
+def test_another_scheme_port_path_or_host_is_another_instance(a: str, b: str) -> None:
+    assert instance_key(a) != instance_key(b)
+
+
+@respx.mock
+async def test_a_respelled_url_keeps_its_work_folders_deletable(pool: Pool) -> None:
+    """#1431: folders recorded under `https://bambuddy.test` stay ScadBuddy's when
+    Settings names the same Bambuddy as `HTTPS://Bambuddy.TEST:443`."""
+    _record_folders(pool, HERE, ("old", "work", 42))
+
+    async def respelled() -> BambuddyTarget:
+        return BambuddyTarget(
+            config=BambuddyConfig(base_url="HTTPS://Bambuddy.TEST:443", api_key="narrow"),
+            inbox_id=INBOX,
+        )
+
+    _file_in(42)
+    delete = respx.delete(f"{API}/library/files/78").mock(return_value=httpx.Response(200, json={}))
+    backend = BambuddyContentBackend(respelled, pool)
+    await backend.remove("78")
+    assert delete.called
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_live_switch_to_another_bambuddy_does_not_reuse_cached_folders(
+    pool: Pool,
+) -> None:
+    """#683 inside one process: Settings repoints the URL and the next call sees it
+    without a restart. The folder ids this process cached for the first instance must
+    not be used on the second."""
+    other_api = f"{OTHER}/api/v1"
+    current = [BASE_URL]
+
+    async def switching() -> BambuddyTarget:
+        return BambuddyTarget(
+            config=BambuddyConfig(base_url=current[0], api_key="narrow"), inbox_id=INBOX
+        )
+
+    for api in (API, other_api):
+        respx.get(f"{api}/library/folders").mock(return_value=inbox_tree())
+        respx.post(f"{api}/library/folders/").mock(side_effect=create_folder)
+    respx.post(f"{API}/library/files").mock(return_value=uploaded())
+    created_there = respx.post(f"{other_api}/library/folders/").mock(side_effect=create_folder)
+    upload_there = respx.post(f"{other_api}/library/files").mock(return_value=uploaded())
+    backend = BambuddyContentBackend(switching, pool)
+    await backend.upload("piece", b"a", name="a.zip", scope=SCOPE)
+    current[0] = OTHER
+    await backend.upload("piece", b"b", name="b.zip", scope=SCOPE)
+    assert created_there.call_count == 2  # its own template folder and Work
+    assert upload_there.called
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT DISTINCT instance FROM store_folders").fetchall()
+    assert {row["instance"] for row in rows} == {HERE, THERE}
     await backend.aclose()
 
 
@@ -337,7 +559,7 @@ async def test_a_find_cancelled_while_waiting_for_the_lock_leaves_none_held(
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
     respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
     respx.post(f"{API}/library/files").mock(return_value=uploaded())
-    key = folder_lock_key(INBOX, SCOPE.slug or "", "template")
+    key = folder_lock_key(HERE, INBOX, SCOPE.slug or "", "template")
     with psycopg.connect(pg_conninfo, autocommit=True) as holder:
         holder.execute("SELECT pg_advisory_lock(%s)", (key,))
         assert _advisory_locks(pg_conninfo, key) == 1  # the key maps onto pg_locks as assumed

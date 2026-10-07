@@ -30,6 +30,10 @@ from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CommandClosedError,
+    TemporalBusyError,
+    TemporalRefusedError,
+    TemporalUnavailableError,
+    TemporalUnreachableError,
     start_command,
 )
 
@@ -186,6 +190,26 @@ def test_without_a_key_each_request_is_its_own_operation(
     assert counts.runs == 2
 
 
+def test_only_a_request_with_a_key_reads_the_record_first(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1063 fourth review 3: a keyless request's key is new, so no record can
+    match it; reading one would only spend the answer's deadline."""
+    store = getattr(app.state, STATE_ATTR).components.get(OPERATIONS).store
+    real = type(store).find
+    reads: list[str] = []
+
+    async def find(self: Any, key: str) -> Any:
+        reads.append(key)
+        return await real(self, key)
+
+    monkeypatch.setattr(type(store), "find", find)
+    assert post(client, {"a": 1}).status_code == 200
+    assert reads == []
+    assert post(client, {"a": 1}, key=PRESS_7).status_code == 200
+    assert len(reads) == 1
+
+
 def test_a_refusal_answers_the_routes_problem_and_writes_nothing(
     client: TestClient, pg_conninfo: str
 ) -> None:
@@ -251,8 +275,17 @@ def test_a_slow_done_command_answers_202_and_is_followed(
         assert time.monotonic() < resend_until, started.text
         started = post(client, {"delay": 20}, key=PRESS_4)
     assert started.status_code == 202, started.text
+    assert started.json()["repeated"] is False
     op = follow(client, started.json()["id"], timeout=60)
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
+    # Review #1063 r6 4: `repeated` belongs to a route's 202, never to the record.
+    assert "repeated" not in op
+
+
+def test_only_the_202_documents_repeated(app: FastAPI) -> None:
+    schemas = app.openapi()["components"]["schemas"]
+    assert "repeated" not in schemas["Operation"]["properties"]
+    assert "repeated" in schemas["OperationAccepted"]["properties"]
 
 
 def test_get_operation_404s_an_unknown_id(client: TestClient) -> None:
@@ -363,3 +396,68 @@ def test_the_run_commits_as_the_requests_agent_author(client: TestClient) -> Non
     assert response.json() == {"principal": "token:abc123", "session": "s-1"}
     plain = client.post("/api/v1/test-op?kind=test_author", json={"again": 1})
     assert plain.json() == {"principal": None, "session": None}
+
+
+def test_a_refusing_temporal_is_a_500_as_the_reconciler_reads_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (12) 1: the route reads a failed start as the lost-operation
+    reconciler does (`temporal_failure`): a refusal is a misconfiguration, never "try
+    again shortly", as the print-run routes answer it."""
+
+    async def refused_start(*args: Any, **kwargs: Any) -> Any:
+        raise TemporalRefusedError("op-x")
+
+    monkeypatch.setattr(operations_api, "start_command", refused_start)
+    response = post(client, {})
+    assert response.status_code == 500, response.text
+    assert response.json()["type"] == operations_api.TEMPORAL_REFUSED_PROBLEM
+    assert "try again shortly" not in response.text
+    assert response.json()["may_have_started"] is True
+
+
+@pytest.mark.parametrize(
+    ("error", "nothing_done"),
+    [
+        (TemporalUnreachableError("op-x"), True),
+        (TemporalUnavailableError("op-x"), False),
+        (TemporalBusyError("op-x"), False),
+    ],
+)
+def test_only_a_failed_connect_says_nothing_was_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception, nothing_done: bool
+) -> None:
+    """Review #1316 (9) 1a, as the print-run routes: only a failed first connect wrote
+    nothing. Any other 503 may follow a persisted start, which the same key follows."""
+
+    async def failing_start(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(operations_api, "start_command", failing_start)
+    response = post(client, {})
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert ("Nothing was done" in response.text) is nothing_done
+    assert response.json()["may_have_started"] is not nothing_done
+    if not nothing_done:
+        assert "Idempotency-Key" in response.json()["detail"]
+    assert ("cannot reach" in response.text) is not isinstance(error, TemporalBusyError)
+
+
+def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
+    """Review #1316 (13) 2a: every route on `run_operation` answers these, so its
+    `OPERATION_RESPONSES` says so, quoting the details it sends."""
+    responses = app.openapi()["paths"]["/api/v1/outputs/{output_id}/send"]["post"]["responses"]
+    assert operations_api.TEMPORAL_REFUSED_PROBLEM in responses["500"]["description"]
+    assert operations_api.OPERATION_REFUSED_DETAIL in responses["500"]["description"]
+    for detail in (
+        operations_api.OPERATION_UNREACHABLE_DETAIL,
+        operations_api.OPERATION_DOWN_DETAIL,
+        operations_api.OPERATION_BUSY_DETAIL,
+        operations_api.OPERATION_STILL_CHECKING_DETAIL,
+    ):
+        assert detail in responses["503"]["description"]
+    assert "may_have_started" in responses["503"]["description"]
+    assert operations_api.RECORD_GONE_PROBLEM in responses["default"]["description"]
+    schema = responses["503"]["content"]["application/problem+json"]["schema"]
+    assert "may_have_started" in schema["properties"]

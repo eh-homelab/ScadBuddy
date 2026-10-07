@@ -29,7 +29,6 @@ export async function toolManifest(tools: readonly Tool[] = ALL_TOOLS): Promise<
     pending: new PendingActionStore(),
     pollIntervalMs: 1000,
     renderWaitMs: 0,
-    operationFollowMs: 0,
   })
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
   await server.connect(serverSide)

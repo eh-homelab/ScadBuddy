@@ -14,8 +14,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
@@ -43,7 +45,9 @@ from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
+    ACCEPT_TRANSIENT,
     CLAIMS_ACTIVITY,
+    LEGACY_PENDING,
     QUEUE_FULL,
     AcceptRender,
     Failure,
@@ -501,6 +505,7 @@ class RenderActivities:
                     workflow_id=accept.workflow_id,
                     run_id=accept.run_id,
                     max_pending=start.max_pending,
+                    supersedes=start.supersedes,
                 )
             except LegacyPendingError as waiting:
                 # An older build's row holds the key: retried until that build runs it,
@@ -511,7 +516,7 @@ class RenderActivities:
                 if not await legacy_unrun(
                     activity.client(), waiting.job, rpc_timeout=LEGACY_DESCRIBE
                 ):
-                    raise
+                    raise ApplicationError(str(waiting), type=LEGACY_PENDING) from None
                 orphaned = waiting.job.id
             return await asyncio.to_thread(
                 self.deps.projection.accept,
@@ -520,12 +525,18 @@ class RenderActivities:
                 workflow_id=accept.workflow_id,
                 run_id=accept.run_id,
                 max_pending=start.max_pending,
+                supersedes=start.supersedes,
                 orphaned=orphaned,
             )
         except QueueFullError as error:
             raise ApplicationError(
                 str(error), error.depth, type=QUEUE_FULL, non_retryable=True
             ) from None
+        except (psycopg.OperationalError, RPCError) as error:
+            # Postgres out of reach (a pool timeout is one too), or Temporal unable to
+            # say whether the older row's workflow runs: states that pass (review #1066
+            # (11)).
+            raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
     @activity.defn(name=CLAIMS_ACTIVITY)
     async def render_claims(self, job_id: str, claims: int) -> None:

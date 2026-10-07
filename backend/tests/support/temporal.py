@@ -12,8 +12,13 @@ import tempfile
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
+from google.protobuf.any_pb2 import Any as Any_
+from temporalio.api.common.v1 import GrpcStatus
+from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
@@ -36,6 +41,38 @@ MAX_TASK_QUEUES_PER_VERSION = 100_000
 #: cannot fall inside a run (or a jump of this host's wall clock) is one whose first
 #: tick after 1970 is decades away. Only a trigger then starts a run.
 NO_TICK = 100 * 365 * 86400.0
+
+
+def namespace_not_found_error() -> RPCError:
+    """What Temporal answers a call to a namespace it does not have: NOT_FOUND, with a
+    `NamespaceNotFoundFailure` in its details (as #1066's `namespace_not_found`)."""
+    status = GrpcStatus(
+        code=RPCStatusCode.NOT_FOUND,
+        message="Namespace nope is not found.",
+        details=[
+            Any_(type_url=f"type.googleapis.com/{NamespaceNotFoundFailure.DESCRIPTOR.full_name}")
+        ],
+    )
+    return RPCError(status.message, RPCStatusCode.NOT_FOUND, status.SerializeToString())
+
+
+class DownClient:
+    """A client whose every describe fails as Temporal down does (``describe`` given),
+    counting the calls and the ``rpc_timeout`` each was given."""
+
+    def __init__(self, describe: Any) -> None:
+        self.describe = describe
+        self.timeouts: list[timedelta | None] = []
+
+    def get_workflow_handle(self, workflow_id: str, *, run_id: str | None = None) -> Any:
+        client = self
+
+        class Handle:
+            async def describe(self, *, rpc_timeout: timedelta | None = None) -> Any:
+                client.timeouts.append(rpc_timeout)
+                return await client.describe()
+
+        return Handle()
 
 
 def temporal_available() -> bool:

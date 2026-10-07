@@ -36,6 +36,13 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     context: PageContextSchema,
     /** #1056: a new session's mode; refused with a `sessionId` (the mode is fixed at start). */
     mode: z.enum(['classic', 'durable']).optional(),
+    /**
+     * The browser's W3C traceparent for this turn (spec 2026-10-01 §4: a
+     * WebSocket cannot carry headers, so it rides in the turn's first frame).
+     * Optional; a malformed one is ignored (routes/chat.ts), never refused:
+     * one that is not a string of at most 256 characters is dropped here.
+     */
+    traceparent: z.string().max(256).optional().catch(undefined),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (questions/service.ts).

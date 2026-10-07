@@ -170,6 +170,23 @@ subprocess never inherits the service's environment. `buildQueryOptions()` in
 `env` holding only `CLAUDE_CONFIG_DIR`, `HOME` and `PATH`. The pinned SDK's `sdk.d.ts`
 says `env` "REPLACES the subprocess environment entirely" (quoted in that file).
 
+Tracing (#988) is configured by the standard OpenTelemetry variables only, read by
+[`agent/src/telemetry/setup.ts`](../../agent/src/telemetry/setup.ts) when the process
+starts under `node --import ./dist/telemetry.js` (the image's `CMD`):
+`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (the latter used
+verbatim, the former with `/v1/traces` appended; `OTEL_EXPORTER_OTLP_HEADERS` and
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS` add collector headers; neither endpoint set, or
+`OTEL_TRACES_EXPORTER=none`: spans are created, so context propagates, and dropped;
+`OTEL_TRACES_EXPORTER` unset, empty or a list containing `otlp`, any case, exports as
+configured, and any other value, `console` say, is off with one warning naming it), `OTEL_SDK_DISABLED=true` (the kill switch: no spans at all),
+`OTEL_TRACES_SAMPLER` (replaces the default, which drops parentless client spans) and
+`OTEL_RESOURCE_ATTRIBUTES`. `SCADBUDDY_VERSION` and `SCADBUDDY_REVISION` are stamped
+into the image by `build-image.yml` and become `service.version` and
+`scadbuddy.revision`. None of these reach the Claude Code subprocess, whose `env` is
+explicit (above). Only the backend client sends `traceparent`; plugins, `http_request`,
+the headless browser and Anthropic never get one. Design:
+`docs/superpowers/specs/2026-10-01-distributed-tracing-design.md` §5.4.
+
 ## 3. The key-encryption key
 
 The Claude credential is stored with envelope encryption (spec §9; see
@@ -320,10 +337,10 @@ uses them; the `/entries` and `/order` routes manage every credential (#1093).
 
 | Route | Guarded | What it does |
 |---|---|---|
-| `GET /api/v1/ai/credentials` | No | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
+| `GET /api/v1/ai/credentials` | Read guard (#989) | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
 | `PUT /api/v1/ai/credentials` | Yes | Body `{ kind, base_url?, secret? }`, strict (`PutBody`). A `gateway` needs `base_url`, and `anthropic_api_key` and `claude_oauth_token` must not have one. `base_url` must be http(s), with no userinfo, query or fragment. It is normalised without a trailing slash (`normaliseBaseUrl()`). A gateway host is checked against the egress rules first (§5 of [security.md](security.md#egress-check-on-gateway-urls)). The secret must not contain whitespace. **Omitting `secret` keeps the stored one only if `kind` and `base_url` are unchanged**; otherwise the route answers `409` (`planPut()`). |
 | `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential and answers with the one that moved up into its place (`configured: false` when none is left). |
-| `GET /api/v1/ai/credentials/entries` | No | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
+| `GET /api/v1/ai/credentials/entries` | Read guard (#989) | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
 | `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret }`; adds a credential last in priority and answers `201` with its entry. At most 100 are stored (`MAX_CREDENTIALS`); past that it answers `409`. |
 | `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, every credential's id exactly once, first to last; otherwise `409`. Answers with the list. |
 | `PUT /api/v1/ai/credentials/entries/{id}` | Yes | Same body and rules as `PUT /api/v1/ai/credentials`, for one credential. A new secret makes it `active` again. |
@@ -595,6 +612,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
   prepares (#471, `20260928T0734Z_approvals.sql`; see
   [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
+  `traceparent` is the parked call's tool span and `decision_traceparent` the decision's
+  `agent.approval` span (#988); both are internal and never in an approval view.
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
   name, tier, `created_at`, `expires_at`, `revoked_at`, `last_used_at` and
   `approval_grant` (#300, `20260929T0249Z_mcp_token_approval_grant.sql`: off by default,

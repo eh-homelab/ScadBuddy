@@ -1,17 +1,30 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
 import psycopg
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from google.protobuf.duration_pb2 import Duration
 from psycopg.types.json import Jsonb
+from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 
+from scadbuddy.api import operations as operations_api
+from scadbuddy.api import settings as settings_api
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.workflows.client import connect, connect_lazily
+from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
@@ -176,6 +189,66 @@ def test_a_retention_under_a_day_is_refused(client: TestClient, field: str, valu
     that succeeded into a second print."""
     response = client.put("/api/v1/settings", json={field: value})
     assert response.status_code == 422
+
+
+@pytest.fixture
+def three_day_namespace(app: FastAPI, temporal_address: str) -> Iterator[None]:
+    """The operations client on a namespace that keeps a closed execution 3 days."""
+    namespace = f"retention-{uuid.uuid4().hex[:12]}"
+
+    async def register() -> None:
+        temporal = await connect(temporal_address, "default")
+        await temporal.workflow_service.register_namespace(
+            RegisterNamespaceRequest(
+                namespace=namespace,
+                workflow_execution_retention_period=Duration(seconds=3 * 86400),
+            )
+        )
+
+    asyncio.run(register())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily(temporal_address, namespace))
+    )
+    yield
+    state.components.override(OPERATIONS, ops)
+
+
+@pytest.mark.usefixtures("three_day_namespace")
+def test_an_operation_retention_below_temporals_is_refused_beside_the_field(
+    client: TestClient, settings: Settings
+) -> None:
+    """Review #1063 r6 2: a record pruned before Temporal forgets the execution turns a
+    keyed retry of a recorded outcome into "may have been done"."""
+    refused = client.put("/api/v1/settings", json={"operation_retention_seconds": 2 * 86400})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == ["body", "operation_retention_seconds"]
+    assert "3 days" in refused.json()["errors"][0]["msg"]
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+    saved = client.put("/api/v1/settings", json={"operation_retention_seconds": 3 * 86400})
+    assert saved.status_code == 200, saved.text
+
+
+def test_an_operation_retention_is_refused_while_temporal_cannot_say(
+    client: TestClient, app: FastAPI, settings: Settings
+) -> None:
+    """Unchecked, it could be below Temporal's: refused, as a command is, until it answers."""
+    state: AppState = getattr(app.state, STATE_ATTR)
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    )
+    try:
+        response = client.put("/api/v1/settings", json={"operation_retention_seconds": 604800})
+        # A field that does not depend on Temporal still saves.
+        other = client.put("/api/v1/settings", json={"printer_id": 3})
+    finally:
+        state.components.override(OPERATIONS, ops)
+    assert response.status_code == 503
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+    assert other.status_code == 200
 
 
 def test_an_unknown_display_unit_is_refused(client: TestClient) -> None:
@@ -366,3 +439,23 @@ def test_resetting_what_the_bambuddy_store_needs_while_on_it_is_refused(
     assert client.get("/api/v1/settings").json()["bambuddy_url"] == "http://bambuddy.test"
     assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
     assert client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]}).status_code == 200
+
+
+def test_an_operation_retention_temporal_refuses_to_check_is_a_500(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (12) 1: the check reads a failed `DescribeNamespace` as the routes and
+    the reconcilers do (`temporal_failure`): a refusal is a misconfiguration, never "try
+    again shortly"."""
+
+    async def refused(client: object) -> None:
+        raise TemporalRefusedError("default")
+
+    monkeypatch.setattr(settings_api, "namespace_retention", refused)
+    response = client.put("/api/v1/settings", json={"operation_retention_seconds": 604800})
+    assert response.status_code == 500, response.text
+    assert response.json()["type"] == operations_api.TEMPORAL_REFUSED_PROBLEM
+    # A describe starts nothing: no `may_have_started` to act on.
+    assert "may_have_started" not in response.json()
+    assert "try again shortly" not in response.text
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None

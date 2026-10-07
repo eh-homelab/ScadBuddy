@@ -104,6 +104,15 @@ Controls marked user-only on `main` (`grep -rn "{...USER_ONLY}" frontend/src`):
 | [`HistoryPage.tsx`](../../frontend/src/pages/HistoryPage.tsx) | Delete output |
 | [`SettingsPage.tsx`](../../frontend/src/pages/SettingsPage.tsx) | Test connection button, WebMCP toggle, Add to Bambuddy sidebar, Save changes |
 
+A confirmation of a change that stays in the page is not outward and carries no
+`USER_ONLY`: the assistant can press "Replace my changes", which a preset pick over
+unsaved edits asks for (#359). Nothing in the page tells whose edits those are, so the
+guard is the instruction, not the code: when `fill` leaves a control's value unchanged
+because it opened a dialog, its result carries a `confirm` note naming the dialog and
+telling the agent to ask the user before confirming over changes the user made
+(#1445). The `customize` skill says the same. A dialog that was already open when
+`fill` ran never produces the note.
+
 **When you add an outward confirmation**, spread `{...USER_ONLY}` on it, or on a wrapper
 around it. `isUserOnly()` uses `closest()`, so a wrapper covers everything inside.
 
@@ -186,6 +195,29 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   browser attached: …` (with why: no tab for this session, no pairing for this caller,
   the paired tab is not connected, or no database for pairing), a timeout, a tab that
   disconnected mid-call, or more than 8 calls waiting on one tab (`MAX_CALLS_PER_TAB`).
+  In a session the browser user owns, `no browser attached` does not fail the call at
+  once (#815 §2): the call parks as a `tab_disconnected` attention request (the panel's
+  card and the Assistant badge), and calls that fail together share one request. When
+  the session has a connected tab again (its tab reconnects, or the user opens the chat
+  from another tab, which pairs it), the hub resolves the request as `reconnected`; the
+  user's "I'm back" reply also ends the wait. A read-tier call (`browser_snapshot`,
+  `browser_get_params`, …) then runs once more. A write or outward call (`browser_click`,
+  `browser_set_param`, `browser_open_print_dialog`, …) is never re-run: the page may have
+  reloaded or changed while the tab was away, and an outward call's approval was given for
+  the page as it was. It fails with "the session has a connected tab again, but <tool> was
+  not run …" (or, after "I'm back", "the user said they are back (a tab may not be
+  attached yet), but <tool> was not run …"), ending "Re-check the page (browser_status,
+  then browser_snapshot) and call <tool> again if it is still what you want", and the
+  model decides. Any other typed reply is passed to the model as the user's words ("The
+  user replied "…" instead; the call was not run. Act on their reply."), and the call is
+  not run. After 5 minutes with no reply the call fails with `timed_out`, and the agent
+  carries on with what needs no tab; a timeout never approves anything. A call already
+  aborted opens no wait. Only once per call: a read retry that still finds no tab fails
+  with the hub's usual `no browser attached: …` error followed by why — "The tab
+  reconnected, but not to this agent replica, so it cannot be reached from here." or
+  "The user said they were back, but no tab is attached here yet." A turn waits for its
+  tab at most 3 times (`TAB_WAITS_PER_TURN`), and after "Carry on without the tab" or a
+  timeout it does not ask again that turn.
   The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
   as `the tab answered <tool> with <code>: …`, with the tab's message in the
   untrusted-data envelope (#258), because it can quote the page.

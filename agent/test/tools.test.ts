@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { ACCEPTING_MS } from '../src/tools/command.js'
+import { ACCEPTING_MS, COMMAND_FOLLOW_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
@@ -85,6 +85,13 @@ describe('validateParams', () => {
       logo: 'must be "" (none), the default ("default-logo.svg"), a sample file ("default-logo.svg", "star.svg"), or an asset id from upload_asset',
       nope: 'is not a parameter of this model',
     })
+  })
+})
+
+describe('validateParams: max_length counts characters as the backend and the customizer do (#920)', () => {
+  it('counts an emoji as one character, not two UTF-16 units', () => {
+    expect(validateParams(SCHEMA as never, { label: 'ab🦄cd' }).valid).toBe(true)
+    expect(validateParams(SCHEMA as never, { label: 'ab🦄cde' }).valid).toBe(false)
   })
 })
 
@@ -241,6 +248,53 @@ describe('render_model', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it.each([
+    [503, 'https://scadbuddy.dev/problems/temporal-unavailable'],
+    [500, 'https://scadbuddy.dev/problems/render-unstartable'],
+  ])('re-sends a %i that may have started, with the same key (review #1066 (10) 3)', async (status, type) => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? HttpResponse.json(
+              { type, title: 'Unavailable', status, detail: 'Send the same request again.', may_have_started: true },
+              { status },
+            )
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('does not re-send a problem that started nothing (review #1066 (10) 3)', async () => {
+    let posts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+        posts += 1
+        return HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+            title: 'Service Unavailable',
+            status: 503,
+            detail: 'Nothing was queued; try again shortly.',
+            may_have_started: false,
+          },
+          { status: 503 },
+        )
+      }),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(posts).toBe(1)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())
@@ -297,11 +351,11 @@ describe('render_model', () => {
         }),
       ),
     )
-    const started = Date.now()
+    const started = performance.now()
     // A generous renderWaitMs: settling on `cancelled` must return well before it
     // elapses, the way it already does for `failed` -- not poll until the deadline.
     const result = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 5000 }))
-    expect(Date.now() - started).toBeLessThan(1000)
+    expect(performance.now() - started).toBeLessThan(1000)
     expect(result.isError).toBe(true)
     expect(firstText(result)).toMatchObject({
       status: 'cancelled',
@@ -519,8 +573,8 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     it("waits the still-accepting answer's Retry-After before re-sending (review #1061 4a)", async () => {
       const sent: number[] = []
       const { ids, handler } = posts([
-        () => (sent.push(Date.now()), accepting('0.2')()),
-        () => (sent.push(Date.now()), HttpResponse.json(running, { status: 202 })),
+        () => (sent.push(performance.now()), accepting('0.2')()),
+        () => (sent.push(performance.now()), HttpResponse.json(running, { status: 202 })),
       ])
       server.use(handler, done)
       const result = await tool('print_output').execute(args, ctx())
@@ -539,6 +593,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(result.isError).toBeFalsy()
       expect(ids).toHaveLength(RUN_REATTEMPTS + 4)
       expect(new Set(ids).size).toBe(1)
+    })
+
+    it('re-sends the same request_id after a temporal-unavailable that may have started it (review #1316 (13) 1a)', async () => {
+      const { ids, handler } = posts([
+        () =>
+          HttpResponse.json(
+            { type: 'https://scadbuddy.dev/problems/temporal-unavailable', title: 'Service Unavailable', status: 503, detail: 'Send it again.', may_have_started: true },
+            { status: 503 },
+          ),
+        () => HttpResponse.json(running, { status: 202 }),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
     })
 
     it("never re-sends a problem the backend wrote, even a 503", async () => {
@@ -1258,6 +1328,44 @@ describe('Bambuddy writes as operations (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  // Review #1316 (13) 1a: a start that may have reached Temporal is followed only by the
+  // same key; a new one would do it twice.
+  const temporalProblem = (type: string, status: number, mayHaveStarted: boolean) =>
+    HttpResponse.json(
+      { type: `https://scadbuddy.dev/problems/${type}`, title: 'Unavailable', status, detail: 'Send it again.', may_have_started: mayHaveStarted },
+      { status },
+    )
+
+  it.each([
+    ['temporal-unavailable', 503],
+    ['temporal-refused', 500],
+  ])('print_again re-sends the same Idempotency-Key after a %s that may have started it', async (type, status) => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2 ? temporalProblem(type, status, true) : HttpResponse.json(again, { status: 201 })
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('print_again does not re-send a temporal-unavailable that started nothing', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return temporalProblem('temporal-unavailable', 503, false)
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(keys).toHaveLength(1)
+  })
+
   it('follows a 202 to the operation result', async () => {
     let reads = 0
     server.use(
@@ -1272,7 +1380,7 @@ describe('Bambuddy writes as operations (#1053)', () => {
     expect(JSON.stringify(result.content)).toContain('51')
   })
 
-  it('follows a 202 past renderWaitMs, to the operation follow window (review #1063 3)', async () => {
+  it('follows a 202 past renderWaitMs, within the command follow window (review #1063 3)', async () => {
     let reads = 0
     server.use(
       http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
@@ -1282,14 +1390,29 @@ describe('Bambuddy writes as operations (#1053)', () => {
         return HttpResponse.json(reads < 4 ? op : { ...op, status: 'succeeded', result: again })
       }),
     )
-    const result = await runTool(
-      { ...tool('print_again'), gated: false },
-      { archive_id: 35 },
-      ctx({ renderWaitMs: 20, operationFollowMs: 5000 }),
-    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx({ renderWaitMs: 20 }))
     expect(result.isError).toBeFalsy()
     expect(reads).toBe(4)
     expect(JSON.stringify(result.content)).toContain('51')
+  })
+
+  it('hands back a still-running operation after a short follow, for get_operation (review #1063 r6 3)', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json(op)),
+    )
+    const started = performance.now()
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx({ commandFollowMs: 50 }))
+    expect(performance.now() - started).toBeLessThan(5000)
+    expect(result.isError).toBeFalsy()
+    const body = firstText(result)
+    expect(body).toMatchObject({ status: 'running', operation_id: 'op-1' })
+    expect(JSON.stringify(body)).toContain('get_operation')
+  })
+
+  it('the default follow is the backend deadline plus a margin, not the browser window', () => {
+    expect(COMMAND_FOLLOW_MS).toBeLessThanOrEqual(30_000)
+    expect(COMMAND_FOLLOW_MS).toBeGreaterThan(10_000)
   })
 
   it('a failed operation is the tool error, in the backend words', async () => {

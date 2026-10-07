@@ -39,12 +39,20 @@ export type QuestionView = {
 }
 
 /** #815: what makes a `question.asked` an attention request. */
-export type AttentionView = {
-  reason: 'tab_disconnected' | 'question' | 'blocked' | 'done'
-  /** What the timer does at `expiresAt` (ISO 8601): it never answers. */
-  onTimeout: 'proceed' | 'wait' | 'stop'
-  expiresAt: string
-}
+export type AttentionView =
+  | {
+      reason: 'tab_disconnected' | 'question' | 'blocked' | 'done'
+      /** What the timer does at `expiresAt` (ISO 8601): it never answers. */
+      onTimeout: 'proceed' | 'wait' | 'stop'
+      expiresAt: string
+    }
+  /**
+   * A `done` summary (#815 §4): no timer, nothing waits on it, and it stays
+   * until the user dismisses it. `summary` is ScadBuddy's record of what the
+   * turn touched (Markdown, questions/doneSummary.ts). A replica on an older
+   * image sends a done request in the shape above.
+   */
+  | { reason: 'done'; summary: string }
 
 export type SessionSummary = {
   sessionId: string
@@ -104,6 +112,8 @@ export type ServerEvent = V &
         answers?: string[]
         by?: Owner
         reason?: string
+        /** #815 §2: a `tab_disconnected` attention request ended because the session's tab is connected again. */
+        reconnected?: true
       }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }

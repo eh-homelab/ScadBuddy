@@ -7,10 +7,12 @@
  *
  * It plays one realistic session: streamed text, a `write` tool call whose result
  * cites its sources and links the version it made, then an `outward` send that pauses
- * on `approval.required` and goes nowhere until the panel sends `approval.decision`
- * (spec §8.2). A first message that mentions a draft gets a question instead (#940):
- * a draft to approve, which waits on `question.asked` until the panel sends
- * `question.answer`. It also lists a session an external MCP agent owns, so the picker's
+ * on `approval.required` and goes nowhere until the panel decides it (spec §8.2). A
+ * first message that mentions a draft gets a question instead (#940): a draft to
+ * approve, which waits on `question.asked` until the panel answers. The panel answers
+ * both over HTTP (`POST /api/v1/ai/pending-input/{id}`, #815: `features/pendingInput.ts`
+ * calls `respond` below); the socket's `approval.decision` and `question.answer` still
+ * work, as the real agent's do. It also lists a session an external MCP agent owns, so the picker's
  * "controlled by …" badge and Take over have something to act on.
  *
  * Each chat has a budget (#790, `budgetUsd`, $1.00 by default) that every turn spends
@@ -20,6 +22,7 @@
  * `mockAgentSessions()`.
  */
 import type { ChatTransport, TransportHandlers } from '../agent/chat/transport'
+import type { RespondBody } from '../agent/respond'
 import {
   PROTOCOL_VERSION,
   type ClientMessage,
@@ -54,6 +57,11 @@ export interface MockAgentSessions {
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
+  /**
+   * #815 — `POST /api/v1/ai/pending-input/{id}`: answers the approval or question a
+   * session's script is parked on, or the error to answer with.
+   */
+  respond(requestId: string, body: RespondBody): { ok: true } | { error: string; status: number }
 }
 
 let openAgent: MockAgentSessions | null = null
@@ -206,7 +214,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         })
         setStatus(s, 'waiting_approval')
       },
-      // Parked. Only `approval.decision` moves the script on.
+      // Parked. Only a respond (or `approval.decision`) moves the script on.
     ]
   }
 
@@ -245,7 +253,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         emit({ type: 'question.asked', sessionId: s.sessionId, id: questionId, tool: askId, questions })
         setStatus(s, 'waiting_input')
       },
-      // Parked. Only `question.answer` moves the script on.
+      // Parked. Only a respond (or `question.answer`) moves the script on.
     ]
   }
 
@@ -439,6 +447,22 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     },
     has(sessionId) {
       return sessions.has(sessionId)
+    },
+    respond(requestId, body) {
+      const [store, id] = requestId.split(/:(.*)/s)
+      for (const s of sessions.values()) {
+        if (store === 'approval' && s.pending?.id === id) {
+          if (body.kind !== 'approval') return { error: `${requestId} is an approval`, status: 400 }
+          resolveApproval(s, body.decision === 'approve')
+          return { ok: true }
+        }
+        if (store === 'question' && s.asking?.id === id) {
+          if (body.kind !== 'answer') return { error: `${requestId} asks for an answer`, status: 400 }
+          resolveQuestion(s, 'answers' in body ? Object.values(body.answers) : ['choice' in body ? body.choice : body.text])
+          return { ok: true }
+        }
+      }
+      return { error: `no pending input ${requestId}: it is stale or was never asked`, status: 404 }
     },
     raise(sessionId, addUsd) {
       const s = sessions.get(sessionId)

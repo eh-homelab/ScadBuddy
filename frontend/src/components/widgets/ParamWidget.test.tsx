@@ -100,6 +100,72 @@ describe('number and integer', () => {
   })
 })
 
+// #1323: a number box keeps what is typed as a draft and commits only a parseable number.
+describe.each([
+  {
+    kind: 'number field',
+    param: { group: 'Main', name: 'thickness', type: 'number', initial: 3, caption: 'Thickness' } as Param,
+    label: 'Thickness',
+  },
+  {
+    kind: 'slider box',
+    param: {
+      group: 'Main',
+      name: 'thickness',
+      type: 'slider',
+      initial: 3,
+      caption: 'Thickness',
+      min: -10,
+      max: 20,
+      step: 0.5,
+    } as Param,
+    label: 'Thickness value',
+  },
+])('the $kind draft (#1323)', ({ param, label }) => {
+  const field = () => screen.getByRole('spinbutton', { name: label })
+
+  it('keeps a cleared field empty and commits nothing', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    expect(field()).toHaveValue(null)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('commits a negative number typed into a cleared field', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '-')
+    expect(onChange).not.toHaveBeenCalled()
+    await user.type(field(), '3')
+    expect(onChange.mock.calls).toEqual([[-3]])
+    expect(field()).toHaveValue(-3)
+  })
+
+  it('commits an exponent only once it is complete', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '1e1')
+    expect(onChange).toHaveBeenLastCalledWith(10)
+    expect(onChange.mock.calls.flat()).not.toContain(0)
+  })
+
+  it('goes back to the last valid value when left empty', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.tab()
+    expect(field()).toHaveValue(3)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('goes back to the last valid value on Enter', async () => {
+    const { onChange, user } = setup(param, 3)
+    await user.clear(field())
+    await user.type(field(), '-{Enter}')
+    expect(field()).toHaveValue(3)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+})
+
 describe('string', () => {
   const param: Param = {
     group: 'Main',
@@ -110,11 +176,37 @@ describe('string', () => {
     max_length: 20,
   }
 
-  it('enforces maxLength and shows the count', () => {
+  it('shows the count', () => {
     setup(param, 'Reagan')
-    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
-    expect(input).toHaveAttribute('maxlength', '20')
     expect(screen.getByText('6/20')).toBeInTheDocument()
+  })
+
+  it('counts characters as OpenSCAD does, an emoji as one (#920)', () => {
+    setup(param, 'Zoë 🦄 ß')
+    expect(screen.getByText('7/20')).toBeInTheDocument()
+  })
+
+  it('stops at max_length characters, not UTF-16 units (#920)', async () => {
+    const { onChange, user } = setup({ ...param, max_length: 3 }, '')
+    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
+    expect(input).not.toHaveAttribute('maxlength')
+    // Four UTF-16 units, two characters: under a maxlength of 3 only one would fit.
+    await user.type(input, '🦄🦄')
+    expect(onChange).toHaveBeenLastCalledWith('🦄🦄')
+    await user.type(input, '🦄🦄')
+    expect(onChange).toHaveBeenLastCalledWith('🦄🦄🦄')
+    expect(input).toHaveValue('🦄🦄🦄')
+  })
+
+  it('refuses an edit past max_length wherever the caret is, keeping the name whole (#920)', async () => {
+    const { onChange, user } = setup({ ...param, max_length: 6 }, 'Reagan')
+    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.click(input)
+    await user.keyboard('{Home}X')
+    expect(onChange).not.toHaveBeenCalled()
+    expect(input).toHaveValue('Reagan')
+    await user.paste('XY')
+    expect(input).toHaveValue('Reagan')
   })
 
   it('reports each keystroke', async () => {

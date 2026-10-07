@@ -83,6 +83,24 @@ def test_a_chunked_body_is_cut_off_at_the_limit(client: TestClient) -> None:
     assert "most this API reads" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("path", ["/api/v1/models/check", "/api/v1/lsp/diagnostics"])
+def test_a_chunked_json_body_is_a_413_on_a_pydantic_route(client: TestClient, path: str) -> None:
+    """#1315: FastAPI reads a pydantic body itself and turns any error raised while
+    reading into a 400 "error parsing the body", so the gate's own exception never
+    reached it. The refusal is the same 413 a declared length gets."""
+
+    def chunks() -> object:
+        yield b'{"source": "'
+        for _ in range(MAX_TEXT_BODY_BYTES // (1024 * 1024) + 4):
+            yield b"a" * (1024 * 1024)
+        yield b'"}'
+
+    response = client.post(path, content=chunks(), headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "most this API reads" in response.json()["detail"]
+
+
 def test_an_oversized_upload_is_refused_like_a_paste(client: TestClient) -> None:
     """Starlette spools a file part to disk with no total, and the route then reads it
     whole, so multipart is gated too -- with the same 413 problem the pastes get."""

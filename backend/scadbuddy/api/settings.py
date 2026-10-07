@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
 from typing import Any, Literal, Self
 
 from fastapi import APIRouter, Response, status
@@ -13,6 +15,8 @@ from scadbuddy.api.operations import (
     IdempotencyKey,
     operation_answer,
     run_operation,
+    temporal_refused,
+    temporal_unavailable,
 )
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
@@ -36,10 +40,16 @@ from scadbuddy.library.settings_store import (
     SettingSource,
     SettingsPatch,
     SettingsSnapshot,
+    SettingsStore,
     StoredSettings,
     StoreNotReadyError,
 )
-from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.component import OperationCommands, OperationsDep
+from scadbuddy.workflows.commands import (
+    TemporalRefusedError,
+    TemporalUnavailableError,
+    namespace_retention,
+)
 
 router = APIRouter(tags=["settings"])
 
@@ -313,16 +323,63 @@ def get_settings(store: SettingsStoreDep, state: StateDep) -> SettingsView:
     return _view(store.snapshot(), state)
 
 
+def _span(retention: timedelta) -> str:
+    days, rest = divmod(int(retention.total_seconds()), 86400)
+    return f"{days} days" if rest == 0 else f"{retention.total_seconds() / 3600:g} hours"
+
+
+async def _check_operation_retention(
+    store: SettingsStore, ops: OperationCommands, seconds: float
+) -> None:
+    """Review #1063 r6 2: a record pruned while Temporal still holds the closed execution
+    answers a keyed retry "may have been done" instead of its outcome, so the setting is
+    at least the namespace's retention. Unchecked, it could be below it: while Temporal
+    cannot say, it is refused as a command is (503), and the other fields still save."""
+    if seconds == (await asyncio.to_thread(store.load)).operation_retention_seconds:
+        return
+    try:
+        temporal = await namespace_retention(ops.client)
+    except TemporalRefusedError:
+        raise temporal_refused(
+            "a retention check",
+            "Temporal refused to say how long it keeps a finished operation; see ScadBuddy's"
+            " logs. Nothing was saved.",
+            may_have_started=None,
+        ) from None
+    except TemporalUnavailableError:
+        # A describe starts nothing, and the save is refused whole.
+        raise temporal_unavailable(
+            "a retention check",
+            "ScadBuddy could not ask Temporal how long it keeps a finished operation, so"
+            " nothing was saved; try again shortly.",
+            may_have_started=None,
+        ) from None
+    if seconds < temporal.total_seconds():
+        msg = (
+            f"Keep them at least as long as Temporal keeps a finished operation "
+            f"({_span(temporal)}): a retry after the record is gone cannot tell what it did."
+        )
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            msg,
+            errors=[{"loc": ["body", "operation_retention_seconds"], "msg": msg}],
+        )
+
+
 @router.put("/settings", response_model=SettingsView, summary="Update the settings")
-def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep) -> SettingsView:
+async def put_settings(
+    patch: SettingsPatch, store: SettingsStoreDep, state: StateDep, ops: OperationsDep
+) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
     ``settings.changed``) on every other replica."""
+    if patch.operation_retention_seconds is not None:
+        await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     try:
-        store.save(patch)
+        await asyncio.to_thread(store.save, patch)
     except StoreNotReadyError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    snapshot = store.snapshot()
+    snapshot = await asyncio.to_thread(store.snapshot)
     apply_runtime(state, snapshot.runtime)
     # This process sees its own write at once; workers within the source's TTL.
     state.store.source.invalidate()

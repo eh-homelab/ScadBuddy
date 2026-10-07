@@ -276,6 +276,17 @@ def _part_sources(
     )
 
 
+#: What OpenSCAD logs when the render it is asked to export draws nothing.
+EMPTY_TOP_LEVEL = "Current top level object is empty."
+
+
+def _empty_plate(index: int, count: int) -> str:
+    return (
+        f"plate {index} of {count} rendered no geometry: the template asks for "
+        f"echo(plates = {count}) but draws nothing when $plate = {index}"
+    )
+
+
 async def plate_layout(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -322,8 +333,11 @@ async def plate_layout(
         try:
             await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
         except OpenSCADError as error:
+            # OpenSCAD will not export an empty top-level object: it exits 1
+            # before there is a 3MF to find empty (#1328).
+            empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
             raise OpenSCADError(
-                f"plate {index} of {count}: {error}",
+                _empty_plate(index, count) if empty else f"plate {index} of {count}: {error}",
                 error.log_tail,
                 error.returncode,
                 diagnostics=error.diagnostics,
@@ -331,7 +345,7 @@ async def plate_layout(
             ) from error
         split = split_by_material(raw)
         if not split:
-            raise OpenSCADError(f"plate {index} of {count} rendered no geometry", [])
+            raise OpenSCADError(_empty_plate(index, count), [])
         for part in split:
             if part.colour not in colours:
                 colours.append(part.colour)
@@ -622,6 +636,16 @@ touch_export = _touch
 
 class SnapshotUnavailableError(RuntimeError):
     """No snapshot is stored and this process has no git history to make one."""
+
+
+class SnapshotPendingError(RuntimeError):
+    """A revision's snapshot is still being stored past the request's wait for it
+    (`SnapshotStore.pin`, #686). The store carries on; a retry after ``retry_after``
+    seconds finds it stored, or joins it."""
+
+    def __init__(self, message: str, *, retry_after: int) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = None) -> list[str]:

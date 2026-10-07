@@ -32,14 +32,14 @@ ARG CLAUDE_CODE_VERSION=2.1.283
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-09-28@sha256:992508950d86ed5ea6a6ed19934e7d65aa6b1959df69823666f575e9c1579b49 AS base
+FROM openscad/openscad:dev.2026-10-05@sha256:6c1a07342e37afcd7e360d1cfa98d0e1cad3f32f2ac91a2943691e117ce4d3b4 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -279,11 +279,21 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
     HOME=/var/lib/scadbuddy-agent \
     CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
 
+# Build provenance for the trace resource (service.version, scadbuddy.revision;
+# agent/src/telemetry/setup.ts), passed by build-image.yml like the runtime
+# image's.
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
 USER 10001:10001
 EXPOSE 8081
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/main.js"]
+# --import loads OpenTelemetry before the app (agent/src/telemetry.ts, #988):
+# the ESM loader hook must be registered before node:http is imported.
+CMD ["node", "--import", "./dist/telemetry.js", "dist/main.js"]
 
 # No curl in this image; node's fetch is the probe. Exec form, like the
 # backend's, so the exit status is the signal.
@@ -431,7 +441,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.09.28
+ARG OPENSCAD_VERSION=2026.10.05
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.

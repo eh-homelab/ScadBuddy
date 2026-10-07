@@ -103,6 +103,14 @@ describe('buildHarnessOptions', () => {
     expect(options.hooks?.PreToolUse).toHaveLength(1)
   })
 
+  it('adds the trace hooks after the permission seam (#988)', () => {
+    const traceHooks = { PreToolUse: [{ hooks: [() => Promise.resolve({})] }], PostToolUse: [{ hooks: [() => Promise.resolve({})] }] }
+    const options = buildHarnessOptions({ ...base, traceHooks })
+    expect(options.hooks?.PreToolUse).toHaveLength(2)
+    expect(options.hooks?.PreToolUse?.[1]).toBe(traceHooks.PreToolUse[0])
+    expect(options.hooks?.PostToolUse).toEqual(traceHooks.PostToolUse)
+  })
+
   it("loads ScadBuddy's own plugin first, with Skill and Agent at read and no other built-in (#896)", () => {
     const options = buildHarnessOptions({ ...base, ownPlugin: OWN_PLUGIN_DIR, pluginPaths: ['../plugins/scadbuddy'] })
     expect(options.plugins).toEqual([
@@ -413,8 +421,11 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
         messages.push(m)
       }
     })()
-    await expect(run).rejects.toThrow(/abort/i)
-    expect(messages.some((m) => m.type === 'result')).toBe(false)
+    // Interrupted first (run.ts stopFirst, #1168): Claude Code ends the turn
+    // with an error result, and the SDK throws on it.
+    await expect(run).rejects.toThrow(/error result/i)
+    expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'error_during_execution' })
+    expect(fake.messageCalls()).toHaveLength(1)
     expect(Date.now() - started).toBeLessThan(10_000)
   })
 

@@ -1,9 +1,10 @@
 # msw's install script only copies its browser service worker into a web app's
 # public directory (package.json "msw.workerDirectory"). The agent uses msw from
 # node, in vitest (msw/node), and has no such directory, so the script is not run.
-# @temporalio/worker (#1055) brings two more: @swc/core's only checks that its
-# platform binding loaded (an optional dependency, @swc/core-<platform>, ships it),
-# and protobufjs's only warns about its own version. Neither builds anything.
+# protobufjs (via @opentelemetry/sdk-node's gRPC exporters, #988, and @temporalio/worker,
+# #1055) runs a CLI version check on install; the agent never constructs a gRPC exporter.
+# @swc/core (via @temporalio/worker) only checks that its platform binding loaded (an
+# optional dependency, @swc/core-<platform>, ships it). Neither builds anything.
 allowBuilds:
   '@swc/core': false
   msw: false

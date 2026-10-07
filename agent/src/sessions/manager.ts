@@ -6,6 +6,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk'
+import { context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { PayloadKeys } from '../temporal/payloadKeys.js'
 import {
@@ -64,7 +65,9 @@ import {
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
-import { isQuestionTool } from '../harness/questions.js'
+import { attentionCard, attentionSpec, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
+import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
+import type { TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -84,6 +87,7 @@ import {
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
+import { TurnTrace } from '../telemetry/turn.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -206,6 +210,135 @@ export function cents(amount: number): number {
 
 /** abortAll()'s abort reason: a shutdown, which leaves pending approvals pending. */
 export const SHUTTING_DOWN = 'shutting down'
+
+/**
+ * #815 §2: how a turn's browser_* call that found no tab waits for it, as a
+ * `tab_disconnected` attention request on the turn's question gate: shown on the
+ * panel and the badge, resolved `reconnected` when the session's tab is back
+ * (bridge/hub.ts `onSessionTab`), or by the user's reply, or by its timer, which
+ * lets the agent carry on without the tab (never approving anything). Calls that
+ * fail together wait on one request, not one each (#815 §5 would supersede them).
+ */
+export const TAB_WAIT_S = 300
+/**
+ * How many tab waits one turn may open. A tab back on another replica answers
+ * `reconnected` while this replica still has none, so each retry can fail and
+ * wait again; this bounds that, and tab waits are outside the model's own rate
+ * limit (questions/service.ts).
+ */
+export const TAB_WAITS_PER_TURN = 3
+const CARRY_ON = 'Carry on without the tab'
+
+export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: () => Promise<unknown>): WaitForTab {
+  let open: { wait: Promise<TabWait>; waiters: number; stop: AbortController } | undefined
+  // Once the user said to carry on, typed a reply of their own, or nobody came
+  // back in time, the rest of the turn does not ask again: each later call that
+  // finds no tab fails at once. The latch lasts until the turn ends, never less.
+  let gaveUp: string | undefined
+  let started = 0
+  return ({ tool, toolUseId, signal, isBack }) => {
+    // A call already stopped opens nothing: no row, no card, no use of the turn's waits.
+    if (signal.aborted) return Promise.resolve({ back: false, message: 'The call stopped before it waited for the tab.' })
+    if (gaveUp !== undefined) return Promise.resolve({ back: false, message: gaveUp })
+    if (!open && started >= TAB_WAITS_PER_TURN) {
+      // Neutral on purpose (#1393): the waits counted here may have ended any
+      // way (a reconnect to this replica or another, a withdrawn call), and this
+      // replica cannot tell which, so the message names no cause.
+      gaveUp =
+        `The tab was waited for ${TAB_WAITS_PER_TURN} times this turn and is not attached here now. Carry on without ` +
+        'the tab for the rest of this turn.'
+      return Promise.resolve({ back: false, message: gaveUp })
+    }
+    if (!open) started += 1
+    // One wait for the turn's calls: a call that stops waiting (its own signal)
+    // leaves the others waiting, and the last one to stop withdraws the request.
+    open ??= start(tool, toolUseId, isBack)
+    const shared = open
+    shared.waiters += 1
+    return new Promise<TabWait>((resolve, reject) => {
+      const withdrawn = () => {
+        resolve({ back: false, message: 'The call stopped while it waited for the tab.' })
+        shared.waiters -= 1
+        if (shared.waiters === 0) {
+          // Withdrawn: a call that comes after must open a wait of its own, not join this one.
+          if (open === shared) open = undefined
+          shared.stop.abort()
+        }
+      }
+      if (signal.aborted) return withdrawn()
+      signal.addEventListener('abort', withdrawn, { once: true })
+      shared.wait.then(resolve, reject).finally(() => signal.removeEventListener('abort', withdrawn))
+    })
+  }
+
+  function start(tool: string, toolUseId: string | undefined, isBack: (signal: AbortSignal) => Promise<boolean>): NonNullable<typeof open> {
+    const stop = new AbortController()
+    const wait = (async (): Promise<TabWait> => {
+      const parsed = parseAttention({
+        reason: 'tab_disconnected',
+        message:
+          `I need your ScadBuddy tab for ${tool}, but it is not connected. Open ScadBuddy (or reload it) and open ` +
+          'this chat in the assistant panel. When it is back I re-check the page before going on; without it I carry ' +
+          'on with what needs no tab.',
+        options: [IM_BACK, CARRY_ON],
+        timeout_s: TAB_WAIT_S,
+      })
+      if (!parsed.ok) throw new Error(parsed.error)
+      const spec = attentionSpec(parsed.input)
+      // A tab wait is never a done summary; this narrows the spec to one that waits.
+      if (spec.reason === 'done') throw new Error('a tab wait is not a done summary')
+      const card = attentionCard(parsed.input)
+      const verdict = await gate({
+        tool: `mcp__scadbuddy__${tool}`,
+        questions: [card],
+        toolUseId: toolUseId ?? `tab-wait-${randomUUID()}`,
+        // Withdrawn by the turn, or once no call waits on it any more.
+        signal: AbortSignal.any([turn, stop.signal]),
+        attention: {
+          ...spec,
+          // The tab may have come back between the failed call and the row: the
+          // hub saw nothing to resolve then, so look once now that there is one.
+          // A check that outlives the wait does nothing: reconnected() ends every
+          // open tab wait of the session, which by then may be a later one. The
+          // check gets the same signal, so one that hangs (#1352) is cancelled
+          // with the wait rather than held for the life of the process.
+          onParked: async (parked) => {
+            if ((await isBack(parked)) && !parked.aborted) await reconnected()
+          },
+        },
+      })
+      if ('reconnected' in verdict && verdict.reconnected) return { back: true, why: 'reconnected' }
+      // Only "I'm back" means try again. "Carry on" ends the turn's tab waits; any
+      // other reply is the user's own words, which the model must read, so the
+      // call is not run and its error carries them. It ends the turn's tab waits
+      // too, for the rest of the turn: the user is not asked twice in one turn,
+      // and a later call says so without telling the model to act on the reply
+      // again (the call that carried it already did).
+      if (verdict.answered) {
+        const reply = verdict.answers[card.question] ?? ''
+        if (reply === IM_BACK) return { back: true, why: 'user_back' }
+        if (reply !== CARRY_ON) {
+          gaveUp =
+            `The user already replied ${JSON.stringify(reply)} when asked for the tab this turn, so the tab is not ` +
+            'asked for again this turn and this call was not run. Carry on without the tab for the rest of this turn.'
+          return { back: false, message: `The user replied ${JSON.stringify(reply)} instead; the call was not run. Act on their reply.` }
+        }
+        gaveUp = `The user replied ${JSON.stringify(reply)}: carry on without the tab for the rest of this turn.`
+        return { back: false, message: gaveUp }
+      }
+      if ('timedOut' in verdict && verdict.timedOut) {
+        gaveUp = timedOutText(TAB_WAIT_S)
+        return { back: false, message: gaveUp }
+      }
+      return { back: false, message: verdict.message }
+    })()
+    const handle = { wait, waiters: 0, stop }
+    void wait.finally(() => {
+      if (open === handle) open = undefined
+    }).catch(() => undefined)
+    return handle
+  }
+}
 
 function abortMessage(signal: AbortSignal): string {
   const reason: unknown = signal.reason
@@ -398,7 +531,12 @@ export type SessionManagerDeps = {
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
-  mcpServers?: (session: SessionRecord, turn: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
+  mcpServers?: (
+    session: SessionRecord,
+    turn: TurnPrincipal,
+    /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
+    extras?: { waitForTab?: WaitForTab },
+  ) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
   /** ScadBuddy's own plugin (harness/ownPlugin.ts, #896); its Skill and Agent tools come with it. */
   ownPlugin?: string
@@ -1316,296 +1454,344 @@ export class SessionManager {
     const shownTierOf: TierResolver = (name, input) =>
       asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
     const mapper = new SdkEventMapper(id, shownTierOf)
-    let lost = false
-    /** Redacted from everything this turn writes to the durable event log. */
-    let secrets: string[] = []
-    // One audit row per tool call of this turn (#258, audit/turn.ts).
-    const auditor = this.deps.audit
-      ? new TurnAuditor(this.deps.audit, {
-          sessionId: id,
-          turnId,
-          actor: session.owner,
-          tierOf: shownTierOf,
-          secrets: () => secrets,
-        })
-      : undefined
-
-    // Lease renewal, and the interrupt flag from other replicas.
-    let renewing: Promise<unknown> = Promise.resolve()
-    const renew = setInterval(() => {
-      renewing = sql<{ interrupt_requested: boolean }[]>`
-        UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
-        WHERE id = ${id} AND turn_id = ${turnId}
-        RETURNING interrupt_requested`
-        .then((rows) => {
-          if (rows.length === 0) {
-            lost = true
-            controller.abort(new Error('lost the turn claim'))
-          } else if (rows[0]?.interrupt_requested) {
-            controller.abort(new Error('the turn was interrupted'))
-          }
-        })
-        .catch(() => {
-          // A database blip: keep running; the lease covers several misses.
-        })
-    }, this.renewMs)
-
+    // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
+    // whatever started it (the browser's traceparent from the chat frame, an
+    // MCP call, or the decision an orphan resumes under), else a root.
+    const traced = new TurnTrace({
+      sessionId: id,
+      turnId,
+      parent: otelContext.active(),
+      // Each tool's tier for its span (TierResolver takes an optional input).
+      tierOf: (name) => eventTierOf(name) ?? 'outward',
+    })
+    // The turn's span ends whatever happens below, even if a cleanup step or
+    // finish() throws: segment 0 and its tool bindings never outlive the turn.
     let result: SDKResultMessage | undefined
-    let failure: string | undefined
-    /** The failed model request the turn ended on, as fallback.ts judged it (`onRefused`). */
-    let refused: Refused | undefined
-    /**
-     * Claude Code's synthetic "API Error: …" messages, held until it is known
-     * whether the turn ended on them (#1101): then the result's error event
-     * says it, and they are dropped; otherwise they are shown as they came.
-     */
-    const heldErrors: SDKMessage[] = []
-    const show = async (message: SDKMessage) => {
-      await pluginCheck?.(message)
-      const events = mapper.map(message)
-      if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
-      if (auditor) for (const e of events) await auditor.observe(e)
-    }
-    const flushErrors = async () => {
-      for (const m of heldErrors.splice(0)) await show(m)
-    }
-    let forwarded: PluginsForRun | undefined
-    let packages: PackagesForRun | undefined
-    let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
-    /** Whether this turn wrote headless-browser folders, removed when it ends. */
-    let browserDirs = false
+    let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
     try {
-      // The credentials first, and into `secrets` at once: whatever fails
-      // after this point is redacted before it reaches the event log. Every
-      // candidate's, since the turn may fall back to any of them.
-      const candidates = await this.deps.credentials.candidates()
-      secrets = candidates.map((c) => c.credential.secret)
-      forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
-      const remotePlugins = forwarded?.plugins ?? []
-      // Plugin header values (and their bare tokens) are redacted from the
-      // event log like the credential. Claude Code never holds them (the
-      // forwarder adds them), but a plugin could echo one in a tool result.
-      secrets.push(...(forwarded?.secrets ?? []))
-      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-      const ownPlugin = this.deps.ownPlugin
-      const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
-      eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
-      // A plugin left out of this turn is said so in the session, not only in the log.
-      const unavailable = (message: string) =>
-        this.events.append(id, [
-          scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
-        ])
-      for (const problem of forwarded?.problems ?? []) {
-        this.deps.stderr?.(`${problem}\n`)
-        await unavailable(problem)
-      }
-      packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
-      for (const problem of packages?.problems ?? []) {
-        this.deps.stderr?.(`${problem}\n`)
-        await unavailable(problem)
-      }
-      const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
-      pluginCheck = async (message: SDKMessage) => {
-        if (message.type !== 'system' || message.subtype !== 'init') return
-        // The SDK skips a plugin it cannot load; the init message lists what it did load
-        // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
-        const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
-        const loaded = new Set(listed.map((p) => path.resolve(p.path)))
-        if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
-          await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
-        }
-        for (const dir of packages?.paths ?? []) {
-          if (!loaded.has(path.resolve(dir))) {
-            await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
-          }
-        }
-        for (const plugin of remotePlugins) {
-          const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
-          if (status !== 'connected') {
-            await unavailable(
-              `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
-            )
-          }
-        }
-      }
-      const [cwd, resume, model, browserSetting, httpSetting] = await Promise.all([
-        ensureSessionDir(this.deps.paths, id),
-        this.store.exists(id),
-        this.deps.settings?.get<string>(SETTING_MODEL),
-        this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
-        this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
-      ])
-      // The http_request tool (#827): on unless the setting is `false`. Its
-      // saved bodies live in the session's own directory, and it never sees
-      // the turn's secrets except to refuse a request that carries one.
-      const http =
-        this.deps.httpRequest && httpRequestEnabled(httpSetting)
-          ? httpRequestServer({
-              saveDir: path.join(cwd, 'http'),
-              secrets: () => secrets,
-              audit: this.deps.audit,
-              actor: session.owner,
-              sessionId: id,
-              turnId,
-              signal: controller.signal,
-              ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
-              ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
-            })
-          : undefined
-      const hb = this.deps.headlessBrowser
-      const gate = this.approvals.gate({
-        sessionId: id,
-        turnId,
-        requestedBy: session.owner,
-        ...(principal.tiers ? { requestedTiers: principal.tiers } : {}),
-        secrets: () => secrets,
-        signal: controller.signal,
-      })
-      const sandbox =
-        this.deps.headlessBrowser?.sandbox && browserSetting === true
-          ? await this.deps.headlessBrowser.sandbox()
-          : false
-      const browser =
-        hb && browserSetting === true
-          ? {
-              ...(sandbox ? { sandbox: true } : {}),
-              sessionId: id,
-              backendUrl: hb.backendUrl,
-              ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
-              ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
-              ...(hb.browserAllowedOrigins
-                ? {
-                    browserAllowedOrigins: hb.browserAllowedOrigins,
-                    // Approved once per origin per session, in Postgres, so a
-                    // later turn (on any replica) does not ask again.
-                    approvedOrigins: await loadApprovedOrigins(sql, id),
-                    rememberOrigin: (origin: string, approvalId: string | undefined) =>
-                      rememberApprovedOrigin(sql, id, origin, approvalId),
-                  }
-                : {}),
-              dir: sessionBrowserDir(this.deps.paths, id),
-              tmpDir: sessionBrowserTmpDir(id),
-              ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
+      let lost = false
+      /** Redacted from everything this turn writes to the durable event log. */
+      let secrets: string[] = []
+      // One audit row per tool call of this turn (#258, audit/turn.ts).
+      const auditor = this.deps.audit
+        ? new TurnAuditor(this.deps.audit, {
+            sessionId: id,
+            turnId,
+            actor: session.owner,
+            tierOf: shownTierOf,
+            secrets: () => secrets,
+          })
+        : undefined
+
+      // Lease renewal, and the interrupt flag from other replicas.
+      let renewing: Promise<unknown> = Promise.resolve()
+      const renew = setInterval(() => {
+        renewing = sql<{ interrupt_requested: boolean }[]>`
+          UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
+          WHERE id = ${id} AND turn_id = ${turnId}
+          RETURNING interrupt_requested`
+          .then((rows) => {
+            if (rows.length === 0) {
+              lost = true
+              controller.abort(new Error('lost the turn claim'))
+            } else if (rows[0]?.interrupt_requested) {
+              controller.abort(new Error('the turn was interrupted'))
             }
-          : undefined
-      browserDirs = browser !== undefined
-      const run: Omit<HarnessRun, 'credential'> = {
-        paths: this.deps.paths,
-        prompt,
-        cwd,
-        sessionStore: this.store,
-        includePartialMessages: true,
-        maxTurns: session.maxTurns,
-        maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
-        signal: controller.signal,
-        tierOf,
-        approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-        // AskUserQuestion (#940): only the user in the panel answers, so only
-        // a session the browser user owns is given the tool. Any other
-        // owner's turn would wait on someone who is not asked.
-        ...(asksUser
-          ? {
-              questionGate: this.questions.gate({
+          })
+          .catch(() => {
+            // A database blip: keep running; the lease covers several misses.
+          })
+      }, this.renewMs)
+
+      let failure: string | undefined
+      /** The failed model request the turn ended on, as fallback.ts judged it (`onRefused`). */
+      let refused: Refused | undefined
+      /**
+       * Claude Code's synthetic "API Error: …" messages, held until it is known
+       * whether the turn ended on them (#1101): then the result's error event
+       * says it, and they are dropped; otherwise they are shown as they came.
+       */
+      const heldErrors: SDKMessage[] = []
+      const show = async (message: SDKMessage) => {
+        await pluginCheck?.(message)
+        const events = mapper.map(message)
+        if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+        for (const e of events) traced.observe(e)
+        if (auditor) for (const e of events) await auditor.observe(e)
+      }
+      const flushErrors = async () => {
+        for (const m of heldErrors.splice(0)) await show(m)
+      }
+      let forwarded: PluginsForRun | undefined
+      let packages: PackagesForRun | undefined
+      let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
+      /** Whether this turn wrote headless-browser folders, removed when it ends. */
+      let browserDirs = false
+      try {
+        // The credentials first, and into `secrets` at once: whatever fails
+        // after this point is redacted before it reaches the event log. Every
+        // candidate's, since the turn may fall back to any of them.
+        const candidates = await this.deps.credentials.candidates()
+        secrets = candidates.map((c) => c.credential.secret)
+        forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
+        const remotePlugins = forwarded?.plugins ?? []
+        // Plugin header values (and their bare tokens) are redacted from the
+        // event log like the credential. Claude Code never holds them (the
+        // forwarder adds them), but a plugin could echo one in a tool result.
+        secrets.push(...(forwarded?.secrets ?? []))
+        const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
+        const ownPlugin = this.deps.ownPlugin
+        const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
+        eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
+        // A plugin left out of this turn is said so in the session, not only in the log.
+        const unavailable = (message: string) =>
+          this.events.append(id, [
+            scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
+          ])
+        for (const problem of forwarded?.problems ?? []) {
+          this.deps.stderr?.(`${problem}\n`)
+          await unavailable(problem)
+        }
+        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        for (const problem of packages?.problems ?? []) {
+          this.deps.stderr?.(`${problem}\n`)
+          await unavailable(problem)
+        }
+        const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
+        pluginCheck = async (message: SDKMessage) => {
+          if (message.type !== 'system' || message.subtype !== 'init') return
+          // The SDK skips a plugin it cannot load; the init message lists what it did load
+          // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
+          const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
+          const loaded = new Set(listed.map((p) => path.resolve(p.path)))
+          if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
+            await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
+          }
+          for (const dir of packages?.paths ?? []) {
+            if (!loaded.has(path.resolve(dir))) {
+              await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+            }
+          }
+          for (const plugin of remotePlugins) {
+            const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
+            if (status !== 'connected') {
+              await unavailable(
+                `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
+              )
+            }
+          }
+        }
+        const [cwd, resume, model, browserSetting, httpSetting] = await Promise.all([
+          ensureSessionDir(this.deps.paths, id),
+          this.store.exists(id),
+          this.deps.settings?.get<string>(SETTING_MODEL),
+          this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
+          this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
+        ])
+        // The http_request tool (#827): on unless the setting is `false`. Its
+        // saved bodies live in the session's own directory, and it never sees
+        // the turn's secrets except to refuse a request that carries one.
+        const http =
+          this.deps.httpRequest && httpRequestEnabled(httpSetting)
+            ? httpRequestServer({
+                saveDir: path.join(cwd, 'http'),
+                secrets: () => secrets,
+                audit: this.deps.audit,
+                actor: session.owner,
                 sessionId: id,
                 turnId,
-                secrets: () => secrets,
                 signal: controller.signal,
-                // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
-                stopTurn: (why) => controller.abort(new Error(why)),
-              }),
-            }
-          : {}),
-        // The data/instruction boundary (#258, safety/untrusted.ts): only the
-        // user's messages are instructions; tool results are data. Then which
-        // browser each browser_* tool drives.
-        systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
-        ...(browser ? { headlessBrowser: browser } : {}),
-        // First turn: the SDK session gets OUR id; later turns resume it.
-        ...(resume ? { resume: id } : { sessionId: id }),
-        ...(typeof model === 'string' && model ? { model } : {}),
-        ...(this.deps.mcpServers || browser || http
-          ? {
-              mcpServers: {
-                ...(this.deps.mcpServers ? this.deps.mcpServers(session, principal) : {}),
-                ...(http ? { [HTTP_SERVER]: http } : {}),
-                // The one way past the backend's agent-actor gate: a human
-                // approves one exact outward request (harness/headlessGrants.ts).
-                ...(browser
+                ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
+                ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
+              })
+            : undefined
+        const hb = this.deps.headlessBrowser
+        const gate = this.approvals.gate({
+          sessionId: id,
+          turnId,
+          requestedBy: session.owner,
+          ...(principal.tiers ? { requestedTiers: principal.tiers } : {}),
+          secrets: () => secrets,
+          signal: controller.signal,
+          trace: traced,
+        })
+        const sandbox =
+          this.deps.headlessBrowser?.sandbox && browserSetting === true
+            ? await this.deps.headlessBrowser.sandbox()
+            : false
+        const browser =
+          hb && browserSetting === true
+            ? {
+                ...(sandbox ? { sandbox: true } : {}),
+                sessionId: id,
+                backendUrl: hb.backendUrl,
+                ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
+                ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
+                ...(hb.browserAllowedOrigins
                   ? {
-                      [GRANT_SERVER]: headlessGrantServer({
-                        sql,
-                        sessionId: id,
-                        turnId,
-                        hash: (tool, input) => this.approvals.hash(tool, input),
-                      }),
+                      browserAllowedOrigins: hb.browserAllowedOrigins,
+                      // Approved once per origin per session, in Postgres, so a
+                      // later turn (on any replica) does not ask again.
+                      approvedOrigins: await loadApprovedOrigins(sql, id),
+                      rememberOrigin: (origin: string, approvalId: string | undefined) =>
+                        rememberApprovedOrigin(sql, id, origin, approvalId),
                     }
                   : {}),
-              },
-            }
-          : {}),
-        ...(pluginPaths.length ? { pluginPaths } : {}),
-        ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-        ...(remotePlugins.length ? { remotePlugins } : {}),
-        ...(memory ? { memoryHooks: memory.hooks } : {}),
-        ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
-      }
-      const turn = runWithFallback(run, {
-        candidates,
-        report: this.deps.credentials.reporter({ sessionId: id, turnId }),
-        run: this.run,
-        ...(this.deps.probe ? { probe: this.deps.probe } : {}),
-        // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
-        ...(resume ? { priorCostUsd: session.costUsd } : {}),
-        onRefused: (evidence, judged) => {
-          refused = { evidence, ...judged }
-        },
-      })
-      for await (const message of turn) {
-        if (message.type === 'assistant' && message.error) {
-          heldErrors.push(message)
-          continue
+                dir: sessionBrowserDir(this.deps.paths, id),
+                tmpDir: sessionBrowserTmpDir(id),
+                ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
+              }
+            : undefined
+        browserDirs = browser !== undefined
+        // AskUserQuestion (#940): only the user in the panel answers, so only a
+        // session the browser user owns is given the tool. Any other owner's turn
+        // would wait on someone who is not asked.
+        const questionGate = asksUser
+          ? this.questions.gate({
+              sessionId: id,
+              turnId,
+              secrets: () => secrets,
+              signal: controller.signal,
+              // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
+              stopTurn: (why) => controller.abort(new Error(why)),
+              // The claim set updated_at = now(): the turn's start by the database's clock.
+              turnStartedAt: new Date(session.updatedAt),
+            })
+          : undefined
+        const run: Omit<HarnessRun, 'credential'> = {
+          paths: this.deps.paths,
+          prompt,
+          cwd,
+          sessionStore: this.store,
+          includePartialMessages: true,
+          maxTurns: session.maxTurns,
+          maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
+          signal: controller.signal,
+          tierOf,
+          approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
+          ...(questionGate ? { questionGate } : {}),
+          // The data/instruction boundary (#258, safety/untrusted.ts): only the
+          // user's messages are instructions; tool results are data. Then which
+          // browser each browser_* tool drives.
+          systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
+          ...(browser ? { headlessBrowser: browser } : {}),
+          // First turn: the SDK session gets OUR id; later turns resume it.
+          ...(resume ? { resume: id } : { sessionId: id }),
+          ...(typeof model === 'string' && model ? { model } : {}),
+          ...(this.deps.mcpServers || browser || http
+            ? {
+                mcpServers: {
+                  ...(this.deps.mcpServers
+                    ? this.deps.mcpServers(
+                        session,
+                        principal,
+                        questionGate
+                          ? { waitForTab: waitForTab(questionGate, controller.signal, () => this.questions.reconnected(id)) }
+                          : {},
+                      )
+                    : {}),
+                  ...(http ? { [HTTP_SERVER]: http } : {}),
+                  // The one way past the backend's agent-actor gate: a human
+                  // approves one exact outward request (harness/headlessGrants.ts).
+                  ...(browser
+                    ? {
+                        [GRANT_SERVER]: headlessGrantServer({
+                          sql,
+                          sessionId: id,
+                          turnId,
+                          hash: (tool, input) => this.approvals.hash(tool, input),
+                        }),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(pluginPaths.length ? { pluginPaths } : {}),
+          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
+          ...(remotePlugins.length ? { remotePlugins } : {}),
+          ...(memory ? { memoryHooks: memory.hooks } : {}),
+          traceHooks: traced.hooks(),
+          ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
         }
-        if (message.type === 'result') {
-          result = message
-          local.settling = true
-          // onRefused runs before fallback.ts yields what it held.
-          if (refused) heldErrors.length = 0
+        const turn = runWithFallback(run, {
+          candidates,
+          report: this.deps.credentials.reporter({ sessionId: id, turnId }),
+          // Each attempt's query starts inside the turn's span (runHarness starts it at once).
+          run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
+          ...(this.deps.probe ? { probe: this.deps.probe } : {}),
+          // A resumed query's total includes what the session spent before (fallback.ts `Spend`).
+          ...(resume ? { priorCostUsd: session.costUsd } : {}),
+          onRefused: (evidence, judged) => {
+            refused = { evidence, ...judged }
+          },
+        })
+        for await (const message of turn) {
+          if (message.type === 'assistant' && message.error) {
+            heldErrors.push(message)
+            continue
+          }
+          if (message.type === 'result') {
+            result = message
+            local.settling = true
+            // onRefused runs before fallback.ts yields what it held.
+            if (refused) heldErrors.length = 0
+          }
+          await flushErrors()
+          await show(message)
         }
         await flushErrors()
-        await show(message)
-      }
-      await flushErrors()
-    } catch (err) {
-      if (!refused) await flushErrors().catch(() => {})
-      // For an error result the SDK yields the result and then throws
-      // ("Claude Code returned an error result", test/run.test.ts); the
-      // result is what counts then.
-      if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
-    } finally {
-      forwarded?.release()
-      packages?.release()
-      local.settling = true
-      clearInterval(renew)
-      await renewing
-      await auditor?.finish(
-        controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
-      )
-      // The query has ended, and with it the playwright server and Chromium:
-      // its screenshots and profile go now, not when the volume fills.
-      if (browserDirs) {
-        await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
-          this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
+      } catch (err) {
+        if (!refused) await flushErrors().catch(() => {})
+        // For an error result the SDK yields the result and then throws
+        // ("Claude Code returned an error result", test/run.test.ts); the
+        // result is what counts then.
+        if (!result && !controller.signal.aborted) {
+          failure = redact(describe(err), secrets)
+          traced.fail(err)
+        }
+      } finally {
+        forwarded?.release()
+        packages?.release()
+        local.settling = true
+        clearInterval(renew)
+        await renewing
+        await auditor?.finish(
+          controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
         )
+        // The query has ended, and with it the playwright server and Chromium:
+        // its screenshots and profile go now, not when the volume fills.
+        if (browserDirs) {
+          await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
+            this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
+          )
+        }
       }
+      // The loop has ended only after the SDK's last transcript append (measured:
+      // `last-prompt` and `cost-state` entries arrive after the `result`
+      // message), so releasing the claim here means the next turn, on any
+      // replica, resumes from a complete transcript.
+      if (lost) {
+        outcome = { kind: 'lost_claim' }
+        return outcome
+      }
+      const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
+      // A turn stopped after its refusal was reported is still the caller's.
+      outcome = await this.finish(
+        session,
+        turnId,
+        stopped,
+        result,
+        result && stopped === undefined ? refused : undefined,
+        failure,
+        secrets,
+      )
+      return outcome
+    } catch (err) {
+      traced.fail(err)
+      throw err
+    } finally {
+      traced.finish(outcome, result)
     }
-    // The loop has ended only after the SDK's last transcript append (measured:
-    // `last-prompt` and `cost-state` entries arrive after the `result`
-    // message), so releasing the claim here means the next turn, on any
-    // replica, resumes from a complete transcript.
-    if (lost) return { kind: 'lost_claim' }
-    const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
-    // A turn stopped after its refusal was reported is still the caller's.
-    return this.finish(session, turnId, stopped, result, result && stopped === undefined ? refused : undefined, failure, secrets)
   }
 
   /**
@@ -1725,8 +1911,9 @@ export class SessionManager {
     // 0.3.283 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
     // is pending fails that call ("Tool permission request failed: AbortError:
     // Tool permission stream closed before response received"), and Claude
-    // Code may still reach the model and end with a `result` before it exits,
-    // so either outcome below can follow. The tool never runs.
+    // Code may still reach the model and end with a `result` before it exits;
+    // so the harness interrupts first (harness/run.ts stopFirst, #1168), which
+    // ends the turn with no model call. The tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
     // A question never outlives its turn (questions/service.ts), shutdown or not.
@@ -1738,7 +1925,19 @@ export class SessionManager {
     } else {
       await this.approvals.revokeUnused(id, 'the turn ended')
     }
-    if (result) {
+    if (result && stopped !== undefined) {
+      // Stopped, and Claude Code still reported a result: the interrupt's
+      // `error_during_execution` (harness/run.ts stopFirst), or a result that
+      // raced the stop. The turn reads interrupted either way (#1168); what it
+      // spent before it stopped is still counted (see below).
+      const total = result.total_cost_usd
+      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      turns = session.turns + result.num_turns
+      status = 'idle'
+      tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      outcome = { kind: 'interrupted' }
+    } else if (result) {
       // `total_cost_usd` of a RESUMED query already includes the earlier
       // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
       // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The

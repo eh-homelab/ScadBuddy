@@ -2,15 +2,15 @@
   "events": [
     {
       "eventId": "1",
-      "eventTime": "2026-10-04T18:22:39.963029886Z",
+      "eventTime": "2026-10-04T17:53:03.146869195Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
-      "taskId": "1049153",
+      "taskId": "1048843",
       "workflowExecutionStartedEventAttributes": {
         "workflowType": {
           "name": "PrintRun"
         },
         "taskQueue": {
-          "name": "gen-cc33e3f8",
+          "name": "gen-3ec7565f",
           "kind": "TASK_QUEUE_KIND_NORMAL"
         },
         "input": {
@@ -24,9 +24,9 @@
           ]
         },
         "workflowTaskTimeout": "10s",
-        "originalExecutionRunId": "01a10827-5d5b-706e-a10c-f3e7b531bc81",
-        "identity": "2428790@newoldboy",
-        "firstExecutionRunId": "01a10827-5d5b-706e-a10c-f3e7b531bc81",
+        "originalExecutionRunId": "01a1080c-40aa-7d3b-9389-d283df2c38bd",
+        "identity": "2356446@newoldboy",
+        "firstExecutionRunId": "01a1080c-40aa-7d3b-9389-d283df2c38bd",
         "attempt": 1,
         "firstWorkflowTaskBackoff": "0s",
         "workflowId": "print-ce624a6460044f51a3c8cf7240ca36be",
@@ -35,12 +35,12 @@
     },
     {
       "eventId": "2",
-      "eventTime": "2026-10-04T18:22:39.963236356Z",
+      "eventTime": "2026-10-04T17:53:03.147024625Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
-      "taskId": "1049154",
+      "taskId": "1048844",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "gen-cc33e3f8",
+          "name": "gen-3ec7565f",
           "kind": "TASK_QUEUE_KIND_NORMAL"
         },
         "startToCloseTimeout": "10s",
@@ -49,30 +49,30 @@
     },
     {
       "eventId": "3",
-      "eventTime": "2026-10-04T18:22:39.972898976Z",
+      "eventTime": "2026-10-04T17:53:03.170150475Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
-      "taskId": "1049158",
+      "taskId": "1048848",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "2",
-        "identity": "2428790@newoldboy",
-        "requestId": "c35264e8-95a6-43fa-bf3a-b58a4b7f4bde",
-        "historySizeBytes": "641",
+        "identity": "2356446@newoldboy",
+        "requestId": "56437004-60aa-4383-acfd-c3e239fd6b4e",
+        "historySizeBytes": "639",
         "workerVersion": {
-          "buildId": "307e786afa5f9fae4c06b14710280895"
+          "buildId": "332c36ceadd37cfa0973fba1ba81f739"
         }
       }
     },
     {
       "eventId": "4",
-      "eventTime": "2026-10-04T18:22:40.009083586Z",
+      "eventTime": "2026-10-04T17:53:03.198276815Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
-      "taskId": "1049162",
+      "taskId": "1048852",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "2",
         "startedEventId": "3",
-        "identity": "2428790@newoldboy",
+        "identity": "2356446@newoldboy",
         "workerVersion": {
-          "buildId": "307e786afa5f9fae4c06b14710280895"
+          "buildId": "332c36ceadd37cfa0973fba1ba81f739"
         },
         "sdkMetadata": {
           "coreUsedFlags": [
@@ -88,17 +88,17 @@
     },
     {
       "eventId": "5",
-      "eventTime": "2026-10-04T18:22:40.009202606Z",
+      "eventTime": "2026-10-04T17:53:03.198397375Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED",
-      "taskId": "1049163",
+      "taskId": "1048853",
       "workflowExecutionUpdateAcceptedEventAttributes": {
-        "protocolInstanceId": "e8382add-c394-4f30-968c-f71abce2889d",
-        "acceptedRequestMessageId": "e8382add-c394-4f30-968c-f71abce2889d/request",
+        "protocolInstanceId": "53d069bb-0f6f-4f6d-b62c-8676f71c2baa",
+        "acceptedRequestMessageId": "53d069bb-0f6f-4f6d-b62c-8676f71c2baa/request",
         "acceptedRequestSequencingEventId": "2",
         "acceptedRequest": {
           "meta": {
-            "updateId": "e8382add-c394-4f30-968c-f71abce2889d",
-            "identity": "2428790@newoldboy"
+            "updateId": "53d069bb-0f6f-4f6d-b62c-8676f71c2baa",
+            "identity": "2356446@newoldboy"
           },
           "input": {
             "name": "accepted"
@@ -108,16 +108,16 @@
     },
     {
       "eventId": "6",
-      "eventTime": "2026-10-04T18:22:40.009269046Z",
+      "eventTime": "2026-10-04T17:53:03.198457105Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
-      "taskId": "1049164",
+      "taskId": "1048854",
       "activityTaskScheduledEventAttributes": {
         "activityId": "1",
         "activityType": {
           "name": "print_check"
         },
         "taskQueue": {
-          "name": "gen-cc33e3f8",
+          "name": "gen-3ec7565f",
           "kind": "TASK_QUEUE_KIND_NORMAL"
         },
         "header": {},
@@ -127,7 +127,7 @@
               "metadata": {
                 "encoding": "anNvbi9wbGFpbg=="
               },
-              "data": "eyJpbnB1dCI6eyJzdWJqZWN0Ijoib29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb28iLCJzbHVnIjoiZGVtbyIsImtleSI6ImNlNjI0YTY0NjAwNDRmNTFhM2M4Y2Y3MjQwY2EzNmJlIiwic291cmNlIjp7ImtpbmQiOiJvdXRwdXQiLCJvdXRwdXRfaWQiOiJvb29vb29vb29vb29vb29vb29vb29vb29vb29vb29vbyIsImZpbGVfaWQiOm51bGwsInN0ZW0iOm51bGwsInByaW50X3NldHRpbmdzIjp7fX0sInJlcXVlc3QiOnsiZmlsYW1lbnRfcGxhbiI6eyJzbG90cyI6W119LCJjaG9pY2VzIjp7Im5venpsZXMiOlt7InNpemUiOiIwLjQifV19fSwicmVwZWF0X3dpbmRvd19zIjowLjAsInNlYXJjaF9hdHRyaWJ1dGVzIjpmYWxzZX0sInN0YXJ0ZWRfYXQiOiIyMDI2LTEwLTA0VDE4OjIyOjM5Ljk2MzAyOVoifQ=="
+              "data": "eyJpbnB1dCI6eyJzdWJqZWN0Ijoib29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb28iLCJzbHVnIjoiZGVtbyIsImtleSI6ImNlNjI0YTY0NjAwNDRmNTFhM2M4Y2Y3MjQwY2EzNmJlIiwic291cmNlIjp7ImtpbmQiOiJvdXRwdXQiLCJvdXRwdXRfaWQiOiJvb29vb29vb29vb29vb29vb29vb29vb29vb29vb29vbyIsImZpbGVfaWQiOm51bGwsInN0ZW0iOm51bGwsInByaW50X3NldHRpbmdzIjp7fX0sInJlcXVlc3QiOnsiZmlsYW1lbnRfcGxhbiI6eyJzbG90cyI6W119LCJjaG9pY2VzIjp7Im5venpsZXMiOlt7InNpemUiOiIwLjQifV19fSwicmVwZWF0X3dpbmRvd19zIjowLjAsInNlYXJjaF9hdHRyaWJ1dGVzIjpmYWxzZX0sInN0YXJ0ZWRfYXQiOiIyMDI2LTEwLTA0VDE3OjUzOjAzLjE0Njg2OVoifQ=="
             }
           ]
         },
@@ -148,28 +148,28 @@
     },
     {
       "eventId": "7",
-      "eventTime": "2026-10-04T18:22:40.015067916Z",
+      "eventTime": "2026-10-04T17:53:03.205869565Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
-      "taskId": "1049170",
+      "taskId": "1048860",
       "activityTaskStartedEventAttributes": {
         "scheduledEventId": "6",
-        "identity": "2428790@newoldboy",
-        "requestId": "c9964568-fba0-4075-8e3f-0195815e082d",
+        "identity": "2356446@newoldboy",
+        "requestId": "18a36a46-130d-409e-83d1-fc58f306a0ee",
         "attempt": 1,
         "workerVersion": {
-          "buildId": "307e786afa5f9fae4c06b14710280895"
+          "buildId": "332c36ceadd37cfa0973fba1ba81f739"
         }
       }
     },
     {
       "eventId": "8",
-      "eventTime": "2026-10-04T18:22:40.030494536Z",
+      "eventTime": "2026-10-04T17:53:03.223269035Z",
       "eventType": "EVENT_TYPE_ACTIVITY_TASK_FAILED",
-      "taskId": "1049171",
+      "taskId": "1048861",
       "activityTaskFailedEventAttributes": {
         "failure": {
           "message": "no plates",
-          "stackTrace": "  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 351, in _handle_start_activity_task\n    result = await self._execute_activity(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 681, in _execute_activity\n    return await impl.execute_activity(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 889, in execute_activity\n    return await input.fn(*input.args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/tests/test_print_workflow.py\", line 134, in check\n    raise ApplicationError(REFUSAL.detail, REFUSAL, type=REFUSED, non_retryable=True)\n",
+          "stackTrace": "  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 351, in _handle_start_activity_task\n    result = await self._execute_activity(\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 681, in _execute_activity\n    return await impl.execute_activity(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_activity.py\", line 889, in execute_activity\n    return await input.fn(*input.args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/tests/test_print_workflow.py\", line 121, in check\n    raise ApplicationError(REFUSAL.detail, REFUSAL, type=REFUSED, non_retryable=True)\n",
           "applicationFailureInfo": {
             "type": "PrintRefused",
             "nonRetryable": true,
@@ -187,20 +187,20 @@
         },
         "scheduledEventId": "6",
         "startedEventId": "7",
-        "identity": "2428790@newoldboy",
+        "identity": "2356446@newoldboy",
         "retryState": "RETRY_STATE_NON_RETRYABLE_FAILURE"
       }
     },
     {
       "eventId": "9",
-      "eventTime": "2026-10-04T18:22:40.030525336Z",
+      "eventTime": "2026-10-04T17:53:03.223337895Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
-      "taskId": "1049172",
+      "taskId": "1048862",
       "workflowTaskScheduledEventAttributes": {
         "taskQueue": {
-          "name": "2428790@newoldboy-a173b91d0fe84a2783592d470bb977da",
+          "name": "2356446@newoldboy-24a12dea947246ec97623ba2fbc3594a",
           "kind": "TASK_QUEUE_KIND_STICKY",
-          "normalName": "gen-cc33e3f8"
+          "normalName": "gen-3ec7565f"
         },
         "startToCloseTimeout": "10s",
         "attempt": 1
@@ -208,30 +208,30 @@
     },
     {
       "eventId": "10",
-      "eventTime": "2026-10-04T18:22:40.035332776Z",
+      "eventTime": "2026-10-04T17:53:03.229402525Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
-      "taskId": "1049176",
+      "taskId": "1048866",
       "workflowTaskStartedEventAttributes": {
         "scheduledEventId": "9",
-        "identity": "2428790@newoldboy",
-        "requestId": "4ed5eeb2-d11d-4b26-a503-8ce30814ecf8",
-        "historySizeBytes": "2998",
+        "identity": "2356446@newoldboy",
+        "requestId": "9fd2c7b4-9dd0-429a-a62d-6fb1e0a953c4",
+        "historySizeBytes": "2991",
         "workerVersion": {
-          "buildId": "307e786afa5f9fae4c06b14710280895"
+          "buildId": "332c36ceadd37cfa0973fba1ba81f739"
         }
       }
     },
     {
       "eventId": "11",
-      "eventTime": "2026-10-04T18:22:40.065611816Z",
+      "eventTime": "2026-10-04T17:53:03.249064145Z",
       "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
-      "taskId": "1049180",
+      "taskId": "1048870",
       "workflowTaskCompletedEventAttributes": {
         "scheduledEventId": "9",
         "startedEventId": "10",
-        "identity": "2428790@newoldboy",
+        "identity": "2356446@newoldboy",
         "workerVersion": {
-          "buildId": "307e786afa5f9fae4c06b14710280895"
+          "buildId": "332c36ceadd37cfa0973fba1ba81f739"
         },
         "sdkMetadata": {},
         "meteringMetadata": {}
@@ -239,13 +239,13 @@
     },
     {
       "eventId": "12",
-      "eventTime": "2026-10-04T18:22:40.065831706Z",
+      "eventTime": "2026-10-04T17:53:03.249230575Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_COMPLETED",
-      "taskId": "1049181",
+      "taskId": "1048871",
       "workflowExecutionUpdateCompletedEventAttributes": {
         "meta": {
-          "updateId": "e8382add-c394-4f30-968c-f71abce2889d",
-          "identity": "2428790@newoldboy"
+          "updateId": "53d069bb-0f6f-4f6d-b62c-8676f71c2baa",
+          "identity": "2356446@newoldboy"
         },
         "outcome": {
           "success": {
@@ -264,13 +264,13 @@
     },
     {
       "eventId": "13",
-      "eventTime": "2026-10-04T18:22:40.066052476Z",
+      "eventTime": "2026-10-04T17:53:03.249354325Z",
       "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED",
-      "taskId": "1049182",
+      "taskId": "1048872",
       "workflowExecutionFailedEventAttributes": {
         "failure": {
           "message": "no plates",
-          "stackTrace": "  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 2750, in _run_top_level_workflow_function\n    await coro\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 1153, in run_workflow\n    result = await self._inbound.execute_workflow(input)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/testing/_workflow.py\", line 584, in execute_workflow\n    return await super().execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_interceptor.py\", line 401, in execute_workflow\n    return await self.next.execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 3144, in execute_workflow\n    return await input.run_fn(*args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1053c/backend/scadbuddy/workflows/printing.py\", line 164, in run\n    raise ApplicationError(refusal.detail, type=REFUSED, non_retryable=True) from None\n",
+          "stackTrace": "  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 2750, in _run_top_level_workflow_function\n    await coro\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 1153, in run_workflow\n    result = await self._inbound.execute_workflow(input)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/testing/_workflow.py\", line 584, in execute_workflow\n    return await super().execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_interceptor.py\", line 401, in execute_workflow\n    return await self.next.execute_workflow(input)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/.venv/lib/python3.12/site-packages/temporalio/worker/_workflow_instance.py\", line 3144, in execute_workflow\n    return await input.run_fn(*args)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\n\n  File \"/home/elan/repos/eh-homelab/ScadBuddy-1052/backend/scadbuddy/workflows/printing.py\", line 167, in run\n    raise ApplicationError(refusal.detail, type=REFUSED, non_retryable=True) from None\n",
           "applicationFailureInfo": {
             "type": "PrintRefused",
             "nonRetryable": true

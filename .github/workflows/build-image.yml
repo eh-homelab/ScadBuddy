@@ -262,6 +262,23 @@ jobs:
             org.opencontainers.image.title=ScadBuddy agent
             org.opencontainers.image.description=AI agent service sidecar for ScadBuddy
 
+      # The same label the `build` job stamps into the API image (see "Pick the
+      # deploy label" there): `X.Y.Z` for a `vX.Y.Z` tag, `sha-<short>` otherwise.
+      # It becomes the agent's trace `service.version` (#988).
+      - name: Pick the version label
+        id: label
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            version="sha-${SHA:0:7}"
+          fi
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
       # The build runs the Dockerfile's CLAUDE_CODE_VERSION assertion once per
       # platform, against that platform's bundled binary (arm64 under QEMU).
       #
@@ -277,6 +294,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SCADBUDDY_REVISION=${{ github.sha }}
+            SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
           cache-from: type=gha,scope=agent
           cache-to: type=gha,scope=agent,mode=max

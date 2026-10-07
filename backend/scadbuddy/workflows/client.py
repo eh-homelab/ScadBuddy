@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -21,6 +23,14 @@ from scadbuddy.bambuddy.follow import FOLLOW_SLOTS
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.workflows.activities import RenderActivities
+from scadbuddy.workflows.commands import (
+    CONNECT_MARGIN_SECONDS,
+    DESCRIBE_SECONDS,
+    TemporalRefusedError,
+    TemporalUnavailableError,
+    namespace_not_found,
+    temporal_failure,
+)
 from scadbuddy.workflows.follow import FollowPrint, VersionedFollowPrint, follow_queue
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
@@ -32,6 +42,8 @@ DEPLOYMENT_NAME = "scadbuddy-render"
 #: The print worker's deployment (#1060, spec 2026-10-01 §5.5): `--queue bambuddy`.
 PRINT_DEPLOYMENT_NAME = "scadbuddy-print"
 RPC_TIMEOUT = timedelta(seconds=10)
+
+logger = logging.getLogger(__name__)
 
 
 async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client:
@@ -118,7 +130,10 @@ def bambuddy_worker(
     the release that adds them needs a ``Recreate`` rollout (or the old replicas scaled
     to 0 first). #1053 is one: it adds ``Operation`` and its ``op_*`` and
     ``op.<kind>.*`` activities, and ``FollowPrint`` with its ``follow_print`` activity
-    on the follow queue (README, "Bambuddy writes on the ``bambuddy`` queue")."""
+    on the follow queue (README, "Bambuddy writes on the ``bambuddy`` queue").
+    Rolled anyway, an unregistered workflow task only stalls, but an activity's failure
+    counts against its retry policy: an effect that runs once is recorded ``failed``
+    ("may have been done") without reaching Bambuddy, and a check can answer 500."""
     return Worker(
         client,
         task_queue=task_queue,
@@ -244,14 +259,64 @@ LOST_RUN_GRACE = timedelta(minutes=1)
 
 
 async def _running(client: Client, workflow_id: str, run_id: str | None) -> bool:
-    """Whether that run (or, with no run id, the workflow's latest) is running."""
+    """Whether that run (or, with no run id, the workflow's latest) is running. Any
+    other failure is about Temporal, read as the routes read it (``temporal_failure``):
+    ``TemporalUnavailableError`` (or a subclass) when it did not answer within the
+    bound, could not answer now or has no such namespace, ``TemporalRefusedError`` when
+    it refused. A lazy client's first connect retries for minutes on its own, so the
+    call is bounded (review #1316 (10) 1). Only an execution's NOT_FOUND says the run is
+    gone: a missing namespace answers NOT_FOUND too, and must never end a live row."""
     try:
-        described = await client.get_workflow_handle(workflow_id, run_id=run_id).describe()
-    except RPCError as error:
-        if error.status != RPCStatusCode.NOT_FOUND:
+        async with asyncio.timeout(DESCRIBE_SECONDS + CONNECT_MARGIN_SECONDS):
+            described = await client.get_workflow_handle(workflow_id, run_id=run_id).describe(
+                rpc_timeout=timedelta(seconds=DESCRIBE_SECONDS)
+            )
+    except (TimeoutError, RPCError, RuntimeError) as error:
+        if (
+            isinstance(error, RPCError)
+            and error.status == RPCStatusCode.NOT_FOUND
+            and not namespace_not_found(error)
+        ):
+            return False
+        if (failure := temporal_failure(error, workflow_id)) is None:
             raise
-        return False
+        raise failure from error
     return described.status == WorkflowExecutionStatus.RUNNING
+
+
+async def _end_closed(
+    client: Client,
+    rows: list[tuple[str, str, str]],
+    end: Callable[[str], Awaitable[bool]],
+    what: str,
+) -> int:
+    """End (``end``, true when it ended it) each row whose execution is neither running
+    under its run id nor under a later one. One row that cannot be ended is logged and
+    left for the next pass (review #1316 (9) 3a). A failure about Temporal stops the
+    pass with one log line, since every other row would fail the same way (review #1316
+    (11) 2, 3; (12) 1): a warning while it is unavailable, an error once it refused."""
+    ended = 0
+    for row_id, workflow_id, workflow_run_id in rows:
+        try:
+            if await _running(client, workflow_id, workflow_run_id) or await _running(
+                client, workflow_id, None
+            ):
+                continue
+            if await end(row_id):
+                ended += 1
+        except TemporalUnavailableError:
+            logger.warning(
+                "Temporal did not answer; no lost %s is ended this pass", what, exc_info=True
+            )
+            break
+        except TemporalRefusedError:
+            logger.error(
+                "Temporal refused to describe; no lost %s is ended this pass", what, exc_info=True
+            )
+            break
+        except Exception:
+            logger.exception("could not end a lost %s", what, extra={"id": row_id})
+    return ended
 
 
 async def reconcile_lost_runs(
@@ -261,16 +326,29 @@ async def reconcile_lost_runs(
     #1061): terminated in the Temporal UI, it never runs ``print_fail``. One still
     running is left to end its row itself, and so is one whose workflow still runs
     under a later run id: a reset continues the same row there. Returns how many it
-    ended."""
-    ended = 0
-    for run_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
-        if await _running(client, workflow_id, workflow_run_id) or await _running(
-            client, workflow_id, None
-        ):
-            continue
-        if (await store.fail_lost(run_id)).status == "failed":
-            ended += 1
-    return ended
+    ended.
+
+    First, a row a pre-#1052 pod inserted and stopped beating is ended too (review #1061
+    (3) 2), as one that may have queued: a stalled pod may yet queue it (review #1316
+    2a). Those never had an execution, so they are logged here and not counted (review
+    #1316 (11) 4)."""
+    upgraded = 0
+    # One row that cannot be ended is logged and left for the next pass; the rest are
+    # still ended (review #1316 (9) 3a). The pre-#1052 rows need only Postgres, so a
+    # Temporal that does not answer never holds them up (review #1316 (10) 1).
+    for run_id in await store.stale_pre_1052_runs():
+        try:
+            if (await store.fail_pre_1052(run_id)).status == "failed":
+                upgraded += 1
+        except Exception:
+            logger.exception("could not end a pre-#1052 print run", extra={"run_id": run_id})
+    if upgraded:
+        logger.warning("ended print runs a pre-#1052 pod left running", extra={"count": upgraded})
+
+    async def end(run_id: str) -> bool:
+        return (await store.fail_lost(run_id)).status == "failed"
+
+    return await _end_closed(client, await store.running_executions(older_than), end, "print run")
 
 
 async def reconcile_lost_operations(
@@ -280,12 +358,8 @@ async def reconcile_lost_operations(
     #1063 1): terminated after ``op_insert``, or past a timeout, it never runs
     ``op_finish``. The same rule as :func:`reconcile_lost_runs`. Returns how many it
     ended."""
-    ended = 0
-    for op_id, workflow_id, workflow_run_id in await store.running_executions(older_than):
-        if await _running(client, workflow_id, workflow_run_id) or await _running(
-            client, workflow_id, None
-        ):
-            continue
-        if (await store.finish(op_id, error=OPERATION_LOST)).status == "failed":
-            ended += 1
-    return ended
+
+    async def end(op_id: str) -> bool:
+        return (await store.finish(op_id, error=OPERATION_LOST)).status == "failed"
+
+    return await _end_closed(client, await store.running_executions(older_than), end, "operation")

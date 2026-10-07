@@ -1,14 +1,15 @@
 """The Bambuddy writes as operations (#1053, spec 2026-10-01 §4.3): each route's
 refusals as its kind's check, and its effect as its run, moved here unchanged.
 
-Every check and run loads the stored settings itself (they hold the Bambuddy key, which
-must not enter history) and takes only JSON. An effect Bambuddy does not dedupe runs
-once; the send (the inbox copy is reused) and the sidebar link (an upsert by name) may
-run again.
+Every check and run loads the stored settings itself, off the event loop (they hold the
+Bambuddy key, which must not enter history) and takes only JSON. An effect Bambuddy
+does not dedupe runs once; the send (the inbox copy is reused) and the sidebar link (an
+upsert by name) may run again.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
@@ -77,7 +78,7 @@ def bambuddy_kinds_over(
         return {}
 
     async def send_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        settings = settings_store.load()
+        settings = await asyncio.to_thread(settings_store.load)
         meta = await require(outputs, request["output_id"])
         async with client_for(settings) as client:
             return _json(await send_output(client, outputs, uploads, meta, settings))
@@ -87,7 +88,7 @@ def bambuddy_kinds_over(
         return {"stem": (await outputs.naming(meta)).stem}
 
     async def project_file_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        settings = settings_store.load()
+        settings = await asyncio.to_thread(settings_store.load)
         meta = await require(outputs, request["output_id"])
         async with client_for(settings) as client:
             filed = await file_into_project(
@@ -104,13 +105,13 @@ def bambuddy_kinds_over(
     async def create_project_run(
         request: dict[str, Any], checked: dict[str, Any]
     ) -> dict[str, Any]:
-        async with client_for(settings_store.load()) as client:
+        async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             return _json(await ensure_project(client, ProjectRequest.model_validate(request)))
 
     async def attach_check(request: dict[str, Any]) -> dict[str, Any]:
         await require(outputs, request["output_id"])
         body = ProjectAttach.model_validate(request["body"])
-        project_id = chosen_project(body, settings_store.load())
+        project_id = chosen_project(body, await asyncio.to_thread(settings_store.load))
         if project_id is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
@@ -125,7 +126,7 @@ def bambuddy_kinds_over(
             [plate.queue_item_id for plate in meta.plates]
             or ([meta.queue_item_id] if meta.queue_item_id else [])
         )
-        async with client_for(settings_store.load()) as client:
+        async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             # The body's ids are filed under the project as asked, but only the output's
             # own items are linked to it: a caller-named item would open its archive's media.
             linkable = (
@@ -153,7 +154,9 @@ def bambuddy_kinds_over(
     async def reprint_check(request: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
         link = await _linked(archive_id)
-        async with waiting_on_bambuddy(), client_for(settings_store.load()) as client:
+        # Off the loop, and before the wait on Bambuddy: a slow Postgres read is not its.
+        settings = await asyncio.to_thread(settings_store.load)
+        async with waiting_on_bambuddy(), client_for(settings) as client:
             archive = await cache.archive(client, archive_id)
         if archive is None:
             raise ApiError(
@@ -171,7 +174,7 @@ def bambuddy_kinds_over(
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
-        async with client_for(settings_store.load()) as client:
+        async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             item = await client.enqueue(
                 QueueItemCreate(
                     archive_id=archive_id,
@@ -190,7 +193,9 @@ def bambuddy_kinds_over(
     async def timelapse_check(request: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
         await _linked(archive_id)
-        async with waiting_on_bambuddy(), client_for(settings_store.load()) as client:
+        # Off the loop, and before the wait on Bambuddy: a slow Postgres read is not its.
+        settings = await asyncio.to_thread(settings_store.load)
+        async with waiting_on_bambuddy(), client_for(settings) as client:
             if await cache.archive(client, archive_id) is None:
                 raise ApiError(
                     status.HTTP_409_CONFLICT,
@@ -201,7 +206,7 @@ def bambuddy_kinds_over(
 
     async def timelapse_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
-        async with client_for(settings_store.load()) as client:
+        async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             await client.select_timelapse(archive_id, request["filename"])
             cache.forget(client, archive_id)
         return {}
@@ -211,13 +216,13 @@ def bambuddy_kinds_over(
         inbox go before its files do. A failure here keeps the output for a retry."""
         meta = await require(outputs, request["output_id"])
         if await uploads.for_output(meta.id):
-            settings = settings_store.load()
+            settings = await asyncio.to_thread(settings_store.load)
             async with client_for(settings) as client:
                 await delete_inbox_copies(client, uploads, meta, settings)
         return {}
 
     async def sidebar_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        settings = settings_store.load()
+        settings = await asyncio.to_thread(settings_store.load)
         async with client_for(settings) as client:
             return _json(await register_sidebar(client, settings))
 

@@ -198,6 +198,11 @@ class ModelExistsError(ValueError):
     pass
 
 
+class ModelNameTakenError(ValueError):
+    """A rename onto the name another model has (#947); ``args`` is that model's slug
+    and name."""
+
+
 class StaleVersionError(RuntimeError):
     """An edit made against a revision the model has since moved past (#252): the
     caller read ``expected`` and the model is at ``current`` now."""
@@ -500,6 +505,11 @@ class ModelRecord(ModelMeta):
     # The commit this model is currently at, or None when history is unavailable
     # (no git binary). Outputs stamp this as their ``model_version``.
     version: str | None = None
+    #: The last commit that touched the template's ``ui/`` (#846): what its interface
+    #: is keyed on, so a commit to anything else (details, README, media) leaves a
+    #: mounted UI alone. None for a template that declares no ``ui``, in a listing, or
+    #: when history is unavailable.
+    ui_version: str | None = None
     # Where a duplicate stands against its upstream (#157); None for a template
     # that is not one, or when history is unavailable.
     upstream_state: UpstreamState | None = None
@@ -650,6 +660,16 @@ class Catalogue:
             logger.exception("could not read the revision", extra={"slug": slug})
             return None
 
+    def ui_version(self, slug: str) -> str | None:
+        """The last commit that touched ``slug``'s ``ui/`` directory (#846)."""
+        if self.history is None or not self.history.available:
+            return None
+        try:
+            return self.history.last_commit(f"{model_path(slug)}/ui")
+        except (GitError, OSError):
+            logger.exception("could not read the interface's revision", extra={"slug": slug})
+            return None
+
     def versions(self) -> dict[str, str]:
         """Every model's revision in one git call, for listing the catalogue."""
         if self.history is None or not self.history.available:
@@ -770,7 +790,7 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
 
     def record(self, slug: str) -> ModelRecord:
-        return self._record(slug, self.version, self._has_history)
+        return self._record(slug, self.version, self._has_history, ui_version_of=self.ui_version)
 
     def print_settings(self, slug: str) -> dict[str, str]:
         """The template's ``print_settings`` as its model.json has them now (#770);
@@ -785,6 +805,7 @@ class Catalogue:
         history: bool,
         media_of: Callable[[str], list[MediaItem]] | None = None,
         cover_of: Callable[[str], str | None] | None = None,
+        ui_version_of: Callable[[str], str | None] | None = None,
     ) -> ModelRecord:
         """``version_of`` answers a template's revision -- per call, or from the one
         walk a listing makes -- and is asked for an upstream's as well as this one's.
@@ -817,6 +838,9 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
+        # A metadata edit writes model.json alone, and is as much a change (#947).
+        with contextlib.suppress(FileNotFoundError):
+            modified = max(modified, self.paths.model_meta(slug).stat().st_mtime)
         media, media_cover = self._media_listing(slug, meta, media_of, cover_of)
         thumbnail = self.thumbnail_source(slug, media)
         return ModelRecord(
@@ -833,6 +857,9 @@ class Catalogue:
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
+            ui_version=ui_version_of(slug)
+            if ui_version_of is not None and meta.ui is not None
+            else None,
             upstream_state=upstream_state,
             invalid_libraries=invalid_entries(raw.get("libraries")),
         )
@@ -1146,6 +1173,8 @@ class Catalogue:
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
+            if patch.name is not None:
+                self._require_name_free(slug, self._meta(slug, raw).name, patch.name)
             raw.update(patch.model_dump(exclude_none=True))
             self.write_raw_meta(slug, raw, presets=patch.presets is not None)
             if patch.presets is not None:
@@ -1157,6 +1186,23 @@ class Catalogue:
 
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
+
+    def _require_name_free(self, slug: str, current: str, name: str) -> None:
+        """:class:`ModelNameTakenError` when ``name`` renames ``slug`` onto another
+        model's name, ignoring case (#947). Keeping its own name is no rename, so a
+        model that already shares one (a seeded copy has its built-in's) still saves."""
+        wanted = name.casefold()
+        if wanted == current.casefold():
+            return
+        for other in self.slugs():
+            if other == slug:
+                continue
+            try:
+                taken = self._meta(other, self.read_raw_meta(other)).name
+            except (InvalidModelMetaError, OSError):
+                continue
+            if taken.casefold() == wanted:
+                raise ModelNameTakenError(other, taken)
 
     def pin_library(
         self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
