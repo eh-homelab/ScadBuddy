@@ -454,7 +454,9 @@ the whole wait. That is the failure §4 rejects session-long traces for. So:
 - When the call goes ahead, the rest of the turn is traced as
   `agent.turn.resume`, a child of the decision span: the tool's execution, its
   backend calls, and the turn's remaining tool calls. An expired approval
-  records `agent.approval` with `outcome=expired` and the same link.
+  records `agent.approval` with `outcome=expired` and the same link. A decision
+  whose transaction rolls back ends its span with `outcome=rolled_back` and an
+  error status, never the decision it did not commit (#1266).
 - **A turn can park any number of times.** Each park ends the segment that is
   open (`agent.turn` the first time, the current `agent.turn.resume` after
   that), together with its tool span, with `outcome=parked`. Each decision is
