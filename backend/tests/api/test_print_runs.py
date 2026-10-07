@@ -26,6 +26,7 @@ import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.api.enums.v1 import EventType
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import operations as operations_api
@@ -45,6 +46,7 @@ from scadbuddy.workflows.commands import (
     temporal_failure,
 )
 from scadbuddy.workflows.print_models import AcceptAnswer
+from scadbuddy.workflows.printing import CANCELLED_QUEUEING, CANCELLED_UNQUEUED
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
     API,
@@ -65,11 +67,15 @@ class Gate:
 
     def __init__(self) -> None:
         self._open = threading.Event()
+        #: Set once a slice job's poll is held. respx records a call only after it is
+        #: answered, so a held poll never shows as ``called``.
+        self.reached = threading.Event()
 
     def open(self) -> None:
         self._open.set()
 
     async def slice_job(self, request: httpx.Request) -> httpx.Response:
+        self.reached.set()
         # Async, so the app's loop keeps serving the status route while this waits.
         while not self._open.is_set():
             await asyncio.sleep(0.01)
@@ -939,3 +945,143 @@ def test_the_run_routes_document_their_temporal_problems(app: FastAPI, path: str
     assert "may_have_started" in responses["500"]["description"]
     # The check's refusals pass through with their own status.
     assert "own status" in responses["default"]["description"]
+
+
+def wait_for(condition: Any, timeout: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting"
+        time.sleep(0.02)
+
+
+def cancel_run(reaper: WorkflowReaper, conninfo: str, run_id: str) -> None:
+    """Cancel the run's execution, as the Temporal UI does, and wait until its history
+    holds the request."""
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute("SELECT workflow_id FROM print_runs WHERE id = %s", (run_id,)).fetchone()
+    assert row is not None and reaper.client is not None
+    handle = reaper.client.get_workflow_handle(row[0])
+    reaper._run(handle.cancel())
+
+    def requested() -> bool:
+        history = reaper._run(handle.fetch_history())
+        return any(
+            event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+            for event in history.events
+        )
+
+    wait_for(requested)
+
+
+@respx.mock
+def test_a_cancel_before_anything_is_queued_is_a_409_that_says_so(
+    client: TestClient, model: str, gate: Gate, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """#1312: a cancel while the slice runs, before any enqueue, is recorded as a
+    cancel (409), never the 500 "failed unexpectedly while preparing"."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(gate)
+    queued = queue_route()
+
+    run = start(client, output_id, body()).json()
+    assert gate.reached.wait(60)
+    cancel_run(workflow_reaper, pg_conninfo, run["id"])
+    gate.open()
+    ended = follow_run(client, run["id"])
+
+    assert ended["status"] == "failed"
+    assert ended["error"]["status"] == 409
+    assert ended["error"]["detail"] == CANCELLED_UNQUEUED.detail
+    assert ended["may_have_queued"] is False
+    assert not queued.called
+
+
+@respx.mock
+def test_a_cancel_after_plate_1_is_queued_says_it_may_be_queued_and_queues_no_more(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    gate: Gate,
+    pg_conninfo: str,
+    workflow_reaper: WorkflowReaper,
+) -> None:
+    """#1312: all plates; plate 1 is queued, then the run is cancelled while plate 2
+    slices. The run is a 409 that says a plate may be queued, and plate 2 is not."""
+    output_id = prepared(client, model)
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(path, 2)
+    upload_route()
+    run_routes()
+    respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
+        side_effect=[
+            httpx.Response(202, json={"job_id": 9, "status": "pending"}),
+            httpx.Response(202, json={"job_id": 10, "status": "pending"}),
+        ]
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.get(f"{API}/slice-jobs/10").mock(side_effect=gate.slice_job)
+    queued = queue_route()
+
+    run = start(client, output_id, run_request(all_plates=True)).json()
+    assert gate.reached.wait(60)
+    assert queued.call_count == 1
+    cancel_run(workflow_reaper, pg_conninfo, run["id"])
+    gate.open()
+    ended = follow_run(client, run["id"])
+
+    assert ended["status"] == "failed"
+    assert ended["may_have_queued"] is True
+    assert ended["error"]["status"] == 409
+    assert ended["error"]["detail"] == CANCELLED_QUEUEING.detail
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_cancel_while_the_last_plate_is_queued_still_ends_succeeded(
+    client: TestClient, model: str, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """#1312: the cancel arrives while the only plate's ``POST /queue/`` is in flight.
+    That POST is not undone, so the run is recorded as it queued: ``succeeded``."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(opened := Gate())
+    opened.open()
+    queue_gate = threading.Event()
+    reached = threading.Event()
+
+    async def slow_queue(request: httpx.Request) -> httpx.Response:
+        reached.set()
+        while not queue_gate.is_set():
+            await asyncio.sleep(0.01)
+        return httpx.Response(
+            200,
+            json={
+                "id": 51,
+                "printer_id": 1,
+                "library_file_id": 77,
+                "position": 1,
+                "status": "queued",
+                "plate_id": 1,
+            },
+        )
+
+    queued = respx.post(f"{API}/queue/").mock(side_effect=slow_queue)
+    try:
+        run = start(client, output_id, body()).json()
+        assert reached.wait(60)
+        cancel_run(workflow_reaper, pg_conninfo, run["id"])
+    finally:
+        queue_gate.set()
+    ended = follow_run(client, run["id"])
+
+    assert ended["status"] == "succeeded", ended
+    assert ended["error"] is None
+    assert ended["result"]["queue_item_ids"] == [51]
+    assert queued.call_count == 1

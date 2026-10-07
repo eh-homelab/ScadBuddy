@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -19,9 +19,15 @@ from fastapi import status
 from temporalio import activity
 
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
+from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind
+from scadbuddy.operations.kinds import (
+    CHECK_ON_BAMBUDDY,
+    THREAD_STEPS,
+    OperationKind,
+    ThreadSteps,
+)
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.workflows.operation_models import (
     FINISH_ACTIVITY,
@@ -32,7 +38,7 @@ from scadbuddy.workflows.operation_models import (
     check_activity,
     run_activity,
 )
-from scadbuddy.workflows.print_activities import heartbeating, raised_as
+from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import FAILED, REFUSED
 
 #: Below the check activity's 8 s start-to-close (`workflows/operation.py` CHECK_TIMEOUT).
@@ -73,6 +79,62 @@ def operation_activities(
     return activities
 
 
+#: How often a run tells Temporal it is alive (the workflow's ``RUN_HEARTBEAT`` is 30 s).
+HEARTBEAT_EVERY = 5.0
+
+
+#: How long a cancelled run is given to unwind (its locks released) before the activity
+#: returns; a run still waiting on a thread then finishes unwinding on its own.
+CANCEL_GRACE = 30.0
+
+
+#: How long before the run's start-to-close a run still in a thread answers for itself,
+#: so its answer reaches the record before Temporal's own timeout does.
+LANDING_MARGIN = 1.0
+
+
+async def _heartbeating[T](work: Awaitable[T], *, where: str) -> T:
+    """Await ``work``, heartbeating: the Python SDK delivers a timeout or a cancel to an
+    activity only through a heartbeat, so without one a run past its timeout would go
+    on to its next step after the record already calls it failed. A step already in a
+    thread cannot be stopped: one under ``operations.kinds.to_thread_to_end`` keeps its
+    locks until it returns, and its effect (a commit in flight) can still land. A run
+    still in such a step just before its timeout fails saying so (review #1119 2-4),
+    rather than as the timeout's unexpected failure, and is left to unwind."""
+    steps = ThreadSteps()
+    token = THREAD_STEPS.set(steps)
+    try:
+        task = asyncio.ensure_future(work)  # copies the context, and so ``steps``
+    finally:
+        THREAD_STEPS.reset(token)
+    loop = asyncio.get_running_loop()
+    limit = activity.info().start_to_close_timeout
+    landing = None if limit is None else loop.time() + limit.total_seconds() - LANDING_MARGIN
+    left = False
+    try:
+        while True:
+            wait = HEARTBEAT_EVERY
+            if landing is not None and loop.time() < landing:
+                wait = min(wait, landing - loop.time())
+            done, _ = await asyncio.wait({task}, timeout=wait)
+            if done:
+                return task.result()
+            if landing is not None and loop.time() >= landing and steps.running:
+                left = True
+                raise ApiError(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "This ran out of time while a step that cannot be stopped was still "
+                    f"running, so it may have been done. Reload and check {where} before "
+                    "trying again.",
+                )
+            activity.heartbeat()
+    finally:
+        if not task.done():
+            task.cancel()
+            if not left:
+                await asyncio.wait({task}, timeout=CANCEL_GRACE)
+
+
 def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
     @activity.defn(name=check_activity(kind.name))
     async def check(request: dict[str, Any]) -> dict[str, Any]:
@@ -104,9 +166,16 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
 
     @activity.defn(name=run_activity(kind.name))
     async def run(input: RunOp) -> dict[str, Any]:
+        author = input.author
         try:
-            # Heartbeats, so a run on a worker that died ends at the heartbeat timeout.
-            return await heartbeating(kind.run(input.request, input.checked))
+            # Set before the run's task is made, which copies the context: its commits,
+            # in threads, are the agent's that asked (#252).
+            with authored_as(
+                None if author is None else AgentAuthor(author.principal, author.session)
+            ):
+                return await _heartbeating(
+                    kind.run(input.request, input.checked), where=str(kind.where)
+                )
         except ApiError as error:
             again = kind.run_attempts > 1 and is_transient(error)
             raise raised_as(error, FAILED, non_retryable=not again) from None

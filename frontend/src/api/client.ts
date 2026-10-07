@@ -375,8 +375,9 @@ export const printRunPoll = {
  * How long the print dialog waits for one rack-algorithm save before counting it as
  * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
  * later one back (#1086 review). Aborting only stops the browser waiting, so the server
- * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, #1129): once
- * a save reaches the store it commits or fails inside that bound. Time before it reaches
+ * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, 5 s, #1129):
+ * once a save reaches the store it commits or fails within twice that bound, one for
+ * the pool wait and one for the write (#1264). Time before it reaches
  * the store is not bounded, so a save held up there can still land after the next one;
  * ordering saves explicitly is #1216.
  */
@@ -1264,9 +1265,10 @@ export const api = {
   /**
    * Clones the library at `ref` server-side and pins the resolved commit into this
    * model only. `url`/`ref` default to the catalogue's; re-pinning is the same call.
+   * A command (#1054): a clone past the server's deadline is followed to the model.
    */
   pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
@@ -1291,14 +1293,14 @@ export const api = {
 
   /** #169 — re-pins from the URL the model already pins, at `ref`; one commit per model. */
   repinModelLibrary: (slug: string, name: string, body: LibraryRepinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
-    request<ModelSummary>(
+    command<ModelSummary>(
       `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
       { method: 'DELETE' },
     ),

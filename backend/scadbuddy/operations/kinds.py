@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
+
+#: Which worker runs a kind (§4.3): the one that holds what its effect needs.
+Queue = Literal["bambuddy", "library"]
+#: What a user checks when a kind's effect may have happened unrecorded, by queue.
+WHERE: dict[Queue, str] = {"bambuddy": "Bambuddy", "library": "the model and its libraries"}
 
 #: The route's refusals: raises ``ApiError`` to refuse, writes nothing, and returns what
 #: ``run`` needs (JSON).
@@ -28,11 +36,19 @@ class OperationKind:
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
     #: Above 1, a transient Bambuddy failure is retried too, not only a crash (#1144).
     run_attempts: int = 1
+    queue: Queue = "bambuddy"
+    #: How long one run may take; the workflow's ``RUN_TIMEOUT`` when None.
+    run_timeout: timedelta | None = None
+    #: What to check before repeating an effect that may have happened ("Check
+    #: Bambuddy ..."); its queue's ``WHERE`` when None.
+    where: str | None = None
 
     def __post_init__(self) -> None:
         # Temporal reads `maximum_attempts=0` as unlimited (review #1063 fourth review 2).
         if self.run_attempts < 1:
             raise ValueError(f"{self.name!r}: run_attempts must be at least 1")
+        if self.where is None:
+            object.__setattr__(self, "where", WHERE[self.queue])
 
 
 #: Set by the check activity; true while its check waits on Bambuddy, and left true when
@@ -88,3 +104,44 @@ def operation_key(kind: str, subject: str, request: dict[str, Any], request_id: 
     """The kind, its subject, the canonical body and the client's key (§4.2 step 1)."""
     canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{kind}\n{subject}\n{canonical}\n{request_id}".encode()).hexdigest()
+
+
+class ThreadSteps:
+    """How many of a run's ``to_thread_to_end`` steps are in their threads now."""
+
+    def __init__(self) -> None:
+        self.running = 0
+
+
+#: The run's steps, set by the run's activity (`workflows/operation_activities.py`);
+#: None outside one.
+THREAD_STEPS: ContextVar[ThreadSteps | None] = ContextVar("thread_steps", default=None)
+
+
+async def to_thread_to_end[T](fn: Callable[[], T], landed: Callable[[T], None] | None = None) -> T:
+    """``asyncio.to_thread``, except that a cancel raises only once the thread has
+    returned: a thread cannot be stopped, so a lock held around this stays held for as
+    long as the thread runs. Its effect (a commit, say) still lands, so it is counted
+    in the run's ``THREAD_STEPS`` while it runs, and ``landed`` (its events, say) is
+    called with what the thread returned, cancelled or not."""
+    future = asyncio.ensure_future(asyncio.to_thread(fn))
+    steps = THREAD_STEPS.get()
+    if steps is not None:
+        steps.running += 1
+
+        def ended(_: object) -> None:
+            steps.running -= 1
+
+        future.add_done_callback(ended)
+    try:
+        result = await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({future})
+        if landed is not None and future.exception() is None:
+            landed(future.result())
+        raise
+    if landed is not None:
+        landed(result)
+    return result

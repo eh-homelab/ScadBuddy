@@ -107,8 +107,7 @@ def raised_as(error: ApiError, kind: str, *, non_retryable: bool = True) -> Appl
 
 
 async def heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
-    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive.
-    The operation activities beat with it too."""
+    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive."""
     task = asyncio.create_task(work)
     try:
         while True:

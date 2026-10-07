@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import textwrap
 from collections.abc import AsyncIterator, Iterator
@@ -15,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import scadbuddy
-from scadbuddy.api import deps
+from scadbuddy.api import components, deps
 from scadbuddy.api.components import component_dep, getter_for
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.core.components import (
@@ -400,3 +401,16 @@ def test_a_kind_whose_effect_could_retry_forever_is_refused(attempts: int) -> No
 
     with pytest.raises(ValueError, match="run_attempts"):
         OperationKind("send", step, step, run_attempts=attempts)
+
+
+def test_the_docstrings_example_alias_exists() -> None:
+    """The module docstring shows a real feature's alias, not a removed one (#1706)."""
+    example = re.search(r"^\s+(\w+Dep) = Annotated\[", components.__doc__ or "", re.MULTILINE)
+    assert example is not None
+    aliases = {
+        line.split(" = ")[0]
+        for path in Path(scadbuddy.__file__).parent.glob("*/component.py")
+        for line in path.read_text().splitlines()
+        if " = Annotated[" in line
+    }
+    assert example.group(1) in aliases
