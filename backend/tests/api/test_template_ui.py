@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from tests.support.operations import press
 
 UI = {"module": "ui/index.js", "slot": "panel", "api": 1}
 
@@ -101,7 +102,12 @@ def test_a_malformed_ui_costs_only_the_ui(client: TestClient, model: str, paths:
 
 def test_a_patch_keeps_ui(client: TestClient, model: str, paths: DataPaths) -> None:
     _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
-    assert client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"}).status_code == 200
+    assert (
+        client.patch(
+            f"/api/v1/models/{model}", json={"name": "Renamed"}, headers=press()
+        ).status_code
+        == 200
+    )
     assert json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["ui"] == UI
     assert "ui_error" not in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
 
@@ -116,6 +122,7 @@ def test_an_uploaded_unreadable_ui_is_kept_and_reported(
             "file": ("uploaded.scad", b"cube(1);\n", "application/octet-stream"),
             "meta": ("model.json", json.dumps({"ui": declared}).encode(), "application/json"),
         },
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     slug = response.json()["slug"]
@@ -247,7 +254,12 @@ def test_ui_version_moves_only_with_ui(client: TestClient, model: str, paths: Da
     page keeps the mounted interface."""
     _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
     ui = _commit(paths, "ui")
-    assert client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"}).status_code == 200
+    assert (
+        client.patch(
+            f"/api/v1/models/{model}", json={"name": "Renamed"}, headers=press()
+        ).status_code
+        == 200
+    )
     record = client.get(f"/api/v1/models/{model}").json()
     assert record["version"] != ui
     assert record["ui_version"] == ui
