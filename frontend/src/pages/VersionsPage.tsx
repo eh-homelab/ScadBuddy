@@ -171,7 +171,9 @@ export function VersionsPage() {
         )}
 
         {versions && versions.length > 0 && (
-          <div className="grid gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
+          // #1036 — `grid-cols-1` below `lg`: the implicit `auto` track sized to the longest
+          // commit message, so the list ran off a phone's screen and `truncate` never did.
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
             <ul data-testid="versions" aria-label="Revisions" className="space-y-2">
               {versions.map((version) => (
                 <VersionRow
@@ -195,12 +197,14 @@ export function VersionsPage() {
             <section className="min-w-0 rounded-[6px] border border-line bg-surface">
               <header className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
                 <h2 className="text-[12px] font-medium">Changes</h2>
-                <label className="ml-auto flex items-center gap-2 text-[12px] text-muted">
+                {/* #1036 — may shrink: the select is as wide as its longest option, a whole
+                    commit message, and ran past the card on a phone. */}
+                <label className="ml-auto flex min-w-0 max-w-full items-center gap-2 text-[12px] text-muted">
                   Compare with
                   <select
                     value={base}
                     onChange={(event) => setBase(event.target.value)}
-                    className="rounded-[6px] border border-line bg-surface-2 px-2 py-1 text-[12px] text-ink"
+                    className="min-w-0 max-w-full rounded-[6px] border border-line bg-surface-2 px-2 py-1 text-[12px] text-ink"
                   >
                     <option value={PARENT}>Previous revision</option>
                     {versions

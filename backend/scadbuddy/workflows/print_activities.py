@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-import psycopg
 from fastapi import status
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
@@ -45,7 +44,8 @@ from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSo
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputStore, PlateSend, require_output
@@ -87,7 +87,7 @@ class PrintDeps:
     observer: ProgressObserver
     #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
     rack: RackUsage | None = None
-    #: Where a library file's queue items are recorded for the print history (#976).
+    #: Where every run's queue items are recorded by subject (#976, #1750).
     links: PrintLinkStore | None = None
 
 
@@ -131,7 +131,7 @@ class PrintActivities:
     ) -> PrintSource:
         if spec.kind == "library":
             assert spec.file_id is not None
-            return await LibrarySource.load(client, spec.file_id)
+            return await LibrarySource.load(client, spec.file_id, sends=self.d.links)
         return self._output_source(spec, settings)
 
     def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
@@ -143,6 +143,7 @@ class PrintActivities:
             settings,
             stem=spec.stem,
             print_settings=spec.print_settings,
+            sends=self.d.links,
         )
 
     @activity.defn(name="print_check")
@@ -196,7 +197,7 @@ class PrintActivities:
         retention = self._settings().print_run_retention_seconds
         return await self.d.store.insert_accepted(
             uuid.uuid4().hex,
-            subject=input.input.subject,
+            subject=PrintSubject.from_run_subject(input.input.subject),
             key=input.input.key,
             slug=input.input.slug,
             workflow_id=info.workflow_id,
@@ -261,42 +262,28 @@ class PrintActivities:
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
-        """One plate's queue items on the output, as soon as it is queued (#83)."""
-        if input.source.kind == "library":
-            await self._record_library(input)
-            return input.sent
-        settings = self._settings()
+        """One plate's queue items recorded by its subject as soon as it is queued (#83,
+        #1750), for either source."""
+        spec = input.source
         try:
-            async with client_for(settings) as client:
-                source = await self._source(client, input.source, settings)
-                return await source.record(
-                    input.library_file_id,
-                    input.plate_id,
-                    input.outcome,
-                    input.project_id,
-                    input.sent,
+            if spec.kind == "library":
+                assert spec.file_id is not None
+                # Recording reads nothing of the file, so nothing is read back from
+                # Bambuddy for it: a plate already queued is not failed over a read.
+                source: PrintSource = LibrarySource(
+                    file_id=spec.file_id, colours=[], plates=[], sends=self.d.links
                 )
+            else:
+                source = self._output_source(spec, self._settings())
+            return await source.record(
+                input.library_file_id,
+                input.plate_id,
+                input.outcome,
+                input.project_id,
+                input.sent,
+            )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
-
-    async def _record_library(self, input: RecordInput) -> None:
-        """A library file's queue items, so its archives reach the print history
-        (#976). Best effort: the plate is queued, and failing the run over its history
-        would tell the user it was not."""
-        links = self.d.links
-        if links is None or not links.available:
-            return
-        assert input.source.file_id is not None
-        try:
-            for queue_item_id in input.outcome.queue_item_ids:
-                await links.record_library(
-                    input.source.file_id,
-                    queue_item_id,
-                    plate_id=input.plate_id,
-                    printer_id=input.outcome.printer_id,
-                )
-        except (psycopg.Error, DatabaseRequiredError):
-            logger.exception("could not record library file %s's print", input.source.file_id)
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:

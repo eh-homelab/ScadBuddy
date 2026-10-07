@@ -150,7 +150,8 @@ describe('ArrangeDialog', () => {
       expect(lastArrangeRequest()?.objects).toEqual([{ output_id: nova.id, part: 'piece-body', count: 1 }])
       expect(onArranged).toHaveBeenCalledWith(
         expect.objectContaining({
-          skipped: 'Workshop could not be re-rendered: revision abc is no longer in the template history.',
+          skipped:
+            'Workshop could not be re-rendered: revision abc is no longer in the template history. It was left out of the arrange.',
         }),
       )
     })
@@ -189,7 +190,7 @@ describe('ArrangeDialog', () => {
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
       await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
       expect(onArranged).toHaveBeenCalledWith(
-        expect.objectContaining({ skipped: 'Nova could not be re-rendered: revision abc is gone.' }),
+        expect.objectContaining({ skipped: 'Nova could not be re-rendered: revision abc is gone. It was left out of the arrange.' }),
       )
       expect(lastArrangeRequest()?.objects).toEqual([{ output_id: first.id, part: 'piece-wall', count: 2 }])
     })

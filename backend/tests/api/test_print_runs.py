@@ -47,7 +47,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.print_models import AcceptAnswer
 from scadbuddy.workflows.printing import CANCELLED_QUEUEING, CANCELLED_UNQUEUED
-from tests.api.test_print_filaments import prepared, queue_route
+from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -303,6 +303,59 @@ def test_a_slot_error_found_after_the_upload_is_the_runs_failure(
     assert run["error"]["status"] == 422
     assert "Slot 1 has no spool chosen." in run["error"]["detail"]
     assert not sliced.called
+
+
+@respx.mock
+def test_a_run_that_failed_after_its_202_is_the_outputs_progress(
+    client: TestClient, model: str
+) -> None:
+    """#1049: a run that failed before it queued anything recorded no print route, so
+    ``/progress`` answered ``null`` ("never printed") and the failure lived only in a
+    row nothing outside the dialog could find. It is now the output's progress."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    assert client.get(f"/api/v1/print/outputs/{output_id}/progress").json() is None
+
+    response = start(client, output_id, {**body(), "filament_plan": {"slots": []}})
+    run = follow_run(client, response.json()["id"])
+    assert run["status"] == "failed"
+
+    progress = client.get(f"/api/v1/print/outputs/{output_id}/progress")
+
+    assert progress.status_code == 200, progress.text
+    answer = progress.json()
+    assert answer["route"] == "run"
+    assert answer["stage"] == "failed"
+    assert answer["settled"] is True
+    assert answer["error_message"] == run["error"]["detail"]
+    assert answer["queue_item_id"] is None
+
+
+@respx.mock
+def test_a_print_after_a_failed_run_is_the_progress_again(client: TestClient, model: str) -> None:
+    """#1049: the failure is the progress only while it is the output's latest run."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 51, "printer_id": 1, "printer_name": "3DP-31B-598", "status": "pending"},
+        )
+    )
+
+    failed = start(client, output_id, {**body(), "filament_plan": {"slots": []}})
+    assert follow_run(client, failed.json()["id"])["status"] == "failed"
+    printed = start(client, output_id, body())
+    assert follow_run(client, printed.json()["id"])["status"] == "succeeded"
+
+    progress = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
+
+    assert progress["route"] == "slice_queue"
+    assert progress["error_message"] is None
 
 
 @respx.mock
@@ -865,7 +918,10 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
     budget under the proxy's 15 s, or the request is answered still-accepting."""
     output_id = prepared(client, model)
     ended_run = PrintRun(
-        id="run-old", output_id=output_id, status="succeeded", created_at=datetime.now(UTC)
+        id="run-old",
+        subject=f"output:{output_id}",
+        status="succeeded",
+        created_at=datetime.now(UTC),
     )
     starts: list[timedelta] = []
 

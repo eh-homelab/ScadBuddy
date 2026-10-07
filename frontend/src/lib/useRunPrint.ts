@@ -25,8 +25,12 @@ interface RunInput {
   planChanged: boolean
   /** `null` leaves the quantity to the remembered options (#124). */
   copies: number | null
-  /** #79 — the Bambuddy project this print is filed under. */
-  projectId: number | null
+  /**
+   * #79 — the Bambuddy project this print is filed under; `null` is "No project".
+   * `undefined` while the project list is unknown leaves the field out, so the server
+   * applies the remembered `last_project_id` rather than an explicit "No project" (#1045).
+   */
+  projectId: number | null | undefined
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   options: PrintOptions
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
@@ -146,7 +150,7 @@ export function useRunPrint({
         ...(copies === null ? {} : { copies }),
         plate_id: plate === 'all' ? 1 : plate,
         all_plates: plate === 'all',
-        project_id: projectId,
+        ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,

@@ -13,6 +13,12 @@ export interface ProjectList {
    */
   reload: () => Promise<void>
   /**
+   * #1045 — reads the list again after a failed read. Until one read has succeeded (or
+   * a project was created and chosen) it also reports `last_project_id`, as the first
+   * read would have, since the parent never got it; after that it is {@link reload}.
+   */
+  retry: () => void
+  /**
    * Re-reads the list because `projectId` is not in it, once per id for every picker
    * sharing the list, so two pickers noticing the same missing project (together, or
    * one mounted later) fetch it once, and a project deleted in Bambuddy does not
@@ -46,13 +52,20 @@ export function useProjectList(
     report.current = onLoaded
   })
 
+  /**
+   * Whether the parent's value is settled: a read reported `last_project_id`, or a
+   * project was created (`add`) and chosen. Either way a later read must not seed it.
+   */
+  const seeded = useRef(false)
   const fetchList = useCallback(async (seed: boolean) => {
     if (seed) setLoading(true)
     setError(null)
     try {
       const next = await api.getProjects()
       setChoices(next)
-      if (seed) report.current?.(next.last_project_id ?? null)
+      // A create while this read was in flight already chose the value (#1045 review).
+      if (seed && !seeded.current) report.current?.(next.last_project_id ?? null)
+      seeded.current = true
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Could not list the projects.')
     } finally {
@@ -66,12 +79,19 @@ export function useProjectList(
 
   /** A re-read in flight, which a second caller joins rather than starting another. */
   const inFlight = useRef<Promise<void> | null>(null)
-  const reload = useCallback(() => {
-    inFlight.current ??= fetchList(false).finally(() => {
-      inFlight.current = null
-    })
-    return inFlight.current
-  }, [fetchList])
+  const read = useCallback(
+    (seed: boolean) => {
+      inFlight.current ??= fetchList(seed).finally(() => {
+        inFlight.current = null
+      })
+      return inFlight.current
+    },
+    [fetchList],
+  )
+  const reload = useCallback(() => read(false), [read])
+  const retry = useCallback(() => {
+    void read(!seeded.current)
+  }, [read])
   const reread = useRef(new Set<number>())
   const rereadFor = useCallback(
     (projectId: number) => {
@@ -82,6 +102,8 @@ export function useProjectList(
     [reload],
   )
   const add = useCallback((project: ProjectView) => {
+    // The parent chooses the project it made: no later read seeds over it (#1045 review).
+    seeded.current = true
     // The POST answers with the whole view, folder included, so re-listing would only
     // fetch back what is already in hand.
     setChoices((choice) =>
@@ -90,7 +112,7 @@ export function useProjectList(
   }, [])
 
   return useMemo(
-    () => ({ choices, loading, error, reload, rereadFor, add }),
-    [choices, loading, error, reload, rereadFor, add],
+    () => ({ choices, loading, error, reload, retry, rereadFor, add }),
+    [choices, loading, error, reload, retry, rereadFor, add],
   )
 }

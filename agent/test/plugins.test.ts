@@ -28,6 +28,15 @@ describe('plugin vetting (spec §8.6, "command hooks refused")', () => {
     ])
   })
 
+  it('refuses a hooks module, beside hooks or alone, in hooks/hooks.json or a file the manifest names', () => {
+    // Claude Code 2.1.287 runs a hooks file's `modules` (JavaScript with
+    // $.env, $.process and $.http) by default; its prompt hook alone is fine.
+    expect(pluginProblems(fixture('hooks-module'))).toEqual([
+      'hooks/hooks.json: names a hooks module, which runs JavaScript inside Claude Code',
+      './config/more-hooks.json: names a hooks module, which runs JavaScript inside Claude Code',
+    ])
+  })
+
   it('refuses a stdio MCP server in .mcp.json', () => {
     expect(pluginProblems(fixture('stdio-mcp'))).toEqual(['.mcp.json: MCP server "local" is a local (stdio) server'])
   })

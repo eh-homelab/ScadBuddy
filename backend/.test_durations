@@ -4604,6 +4604,7 @@
     "tests/test_trace_scrub.py::test_a_chained_exception_leaves_no_message_anywhere": 0.004201386999966417,
     "tests/test_trace_scrub.py::test_a_clean_span_passes_through_unchanged": 0.004107574999807184,
     "tests/test_trace_scrub.py::test_a_dotted_name_is_checked_segment_by_segment": 0.0033912799997324328,
+    "tests/test_trace_scrub.py::test_a_failed_workflows_completion_span_survives_the_sandbox": 0.9,
     "tests/test_trace_scrub.py::test_a_frame_line_with_anything_but_a_function_name_does_not_survive": 0.003484914999717148,
     "tests/test_trace_scrub.py::test_a_frozen_module_must_be_one": 0.00422395499981576,
     "tests/test_trace_scrub.py::test_a_message_cannot_open_a_traceback_of_its_own": 0.004538267000043561,
