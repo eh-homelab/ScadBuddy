@@ -9,7 +9,7 @@ from temporalio import workflow
 from temporalio.claude_agent_sdk import AgentState
 
 with workflow.unsafe.imports_passed_through():
-    from scadbuddy_durable.models import Message, SessionInput
+    from scadbuddy_durable.models import SessionInput
     from scadbuddy_durable.workflow import DurableSession
 
 AFTER_EVENTS = 40
@@ -18,17 +18,13 @@ AFTER_EVENTS = 40
 @workflow.defn(name="DurableSessionShortRuns")
 class ShortRuns(DurableSession):
     @workflow.init
-    def __init__(
-        self, inp: SessionInput, state: AgentState | None = None, inbox: list[Message] | None = None
-    ) -> None:
-        super().__init__(inp, state, inbox)
+    def __init__(self, inp: SessionInput, state: AgentState | None = None) -> None:
+        super().__init__(inp, state)
         self.agent._continue_as_new_after_events = AFTER_EVENTS
 
     @workflow.run
-    async def run(
-        self, inp: SessionInput, state: AgentState | None = None, inbox: list[Message] | None = None
-    ) -> AgentState:
-        return await super().run(inp, state, inbox)
+    async def run(self, inp: SessionInput, state: AgentState | None = None) -> AgentState:
+        return await super().run(inp, state)
 
 
 @workflow.defn(name="DurableSessionLongStop")
@@ -37,14 +33,10 @@ class LongStop(DurableSession):
     production), so a test can send while it stops."""
 
     @workflow.init
-    def __init__(
-        self, inp: SessionInput, state: AgentState | None = None, inbox: list[Message] | None = None
-    ) -> None:
-        super().__init__(inp, state, inbox)
+    def __init__(self, inp: SessionInput, state: AgentState | None = None) -> None:
+        super().__init__(inp, state)
         self.agent._linger = timedelta(minutes=1)
 
     @workflow.run
-    async def run(
-        self, inp: SessionInput, state: AgentState | None = None, inbox: list[Message] | None = None
-    ) -> AgentState:
-        return await super().run(inp, state, inbox)
+    async def run(self, inp: SessionInput, state: AgentState | None = None) -> AgentState:
+        return await super().run(inp, state)

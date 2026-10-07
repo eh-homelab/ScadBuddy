@@ -56,7 +56,7 @@ async def unused_pool() -> AsyncIterator[AsyncConnectionPool]:
 
 
 @pytest.mark.requires_temporal
-async def test_build_worker_registers_the_workflow_and_two_activities(
+async def test_build_worker_registers_the_workflow_and_its_activities(
     temporal_env: Client, unused_pool: AsyncConnectionPool, tmp_path: Path
 ) -> None:
     deps = WorkerDeps(pool=unused_pool, keks=[KEK], prompt_append="policy", cwd=str(tmp_path))
@@ -72,7 +72,12 @@ async def test_build_worker_registers_the_workflow_and_two_activities(
         for d in (activity._Definition.from_callable(a) for a in config.get("activities", []))  # pyright: ignore[reportPrivateUsage]
         if d is not None
     )
-    assert names == ["durable_save_snapshot", "run_claude_segment"]
+    assert names == [
+        "durable_load_inputs",
+        "durable_save_snapshot",
+        "durable_start_input",
+        "run_claude_segment",
+    ]
     assert not {t.name for t in TOOLS} & set(names)  # tool stubs are served by TypeScript
     codec = w.client.data_converter.payload_codec
     assert isinstance(codec, SubjectPayloadCodec)

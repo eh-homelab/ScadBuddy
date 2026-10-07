@@ -25,6 +25,7 @@ from temporalio.worker import Worker
 from scadbuddy_durable.codec import data_converter
 from scadbuddy_durable.config import Config, ConfigError, load_config
 from scadbuddy_durable.credentials import CredentialSource
+from scadbuddy_durable.inputs import Inputs, make_input_activities
 from scadbuddy_durable.models import TASK_QUEUE
 from scadbuddy_durable.payload_keys import PayloadKeys
 from scadbuddy_durable.projector import Projector
@@ -77,7 +78,7 @@ def build_worker(client: Client, deps: WorkerDeps) -> Worker:
         task_queue=TASK_QUEUE,
         workflows=[DurableSession],
         # The tools' activities are served by the TypeScript agent-tools worker.
-        activities=[make_save_snapshot(Snapshots(deps.pool))],
+        activities=[make_save_snapshot(Snapshots(deps.pool)), *make_input_activities(Inputs(deps.pool))],
         plugins=[ClaudeAgentPlugin(runner)],
         max_concurrent_activities=MAX_CONCURRENT_ACTIVITIES,
         graceful_shutdown_timeout=GRACEFUL_SHUTDOWN,

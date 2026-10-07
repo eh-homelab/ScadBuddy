@@ -22,7 +22,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.worker import Worker
 
 from scadbuddy_durable.credentials import credential_aad
-from scadbuddy_durable.models import TASK_QUEUE, Message, SessionInput
+from scadbuddy_durable.models import SEND_UPDATE, TASK_QUEUE, Nudge, SessionInput
 from scadbuddy_durable.payload_keys import data_key_context
 from scadbuddy_durable.projector import Projector
 from scadbuddy_durable.secrets import Kek, seal_bytes
@@ -128,16 +128,24 @@ async def test_a_turn_on_the_real_engine(
     async with build_worker(client, deps), Worker(client, task_queue=TOOL_QUEUE, activities=[get_settings]):
         projecting = asyncio.create_task(projector.run(stop))
         try:
+            # Committed before Temporal is asked anything, as the agent service does.
+            message_id = str(uuid.uuid4())
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO ai_durable_inputs (id, session_id, text)"
+                    " VALUES (%s, %s, 'Read my settings')",
+                    (message_id, sid),
+                )
             op: WithStartWorkflowOperation[Any, Any] = WithStartWorkflowOperation(
                 DurableSession.run,
-                args=[SessionInput(session_id=sid, max_turns=7, approval_expiry_seconds=3600), None, None],
+                args=[SessionInput(session_id=sid, max_turns=7, approval_expiry_seconds=3600), None],
                 id=wid,
                 task_queue=TASK_QUEUE,
                 id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             )
             await client.execute_update_with_start_workflow(
-                DurableSession.send_message, Message("Read my settings"), start_workflow_operation=op
+                SEND_UPDATE, Nudge(message_id), id=message_id, start_workflow_operation=op
             )
 
             async def done() -> dict[str, Any]:

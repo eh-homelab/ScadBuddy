@@ -16,9 +16,10 @@ over the offset and chain it read or last committed. So a follower of an older r
 neither read a new run from its old offset nor write over the agent service's reset
 (ruling 9), however the two interleave.
 
-A session that says it runs while no run runs (terminated, failed, or a claim whose sender
-died before its start) is settled idle (`_settle_if_stale`), but never while the agent
-service's send is still starting its run (`ai_durable_streams.sending`).
+A session that says it runs while no run runs (terminated, failed, stopped) is settled idle
+(`_settle_if_stale`), but never while a committed message waits for a run
+(`ai_durable_inputs`, status pending): the agent service's send (or another replica that
+takes it over) starts the run that takes it, and settling would drop it.
 """
 
 from __future__ import annotations
@@ -59,11 +60,14 @@ RETURNING session_id, next_offset, chain
 """
 
 # Settling a session whose run is gone: its row moves to idle only if nothing was logged
-# and no send began since the projector looked (event_seq, sending).
+# since the projector looked (event_seq) and no committed message waits to run.
 _SETTLE = """
 WITH s AS (
   UPDATE ai_sessions SET event_seq = event_seq + %(n)s, status = 'idle', updated_at = now()
   WHERE id = %(id)s AND status IN ('running', 'waiting_approval') AND event_seq = %(seq)s
+    AND NOT EXISTS (
+      SELECT 1 FROM ai_durable_inputs WHERE session_id = %(id)s AND status = 'pending'
+    )
   RETURNING event_seq - %(n)s AS base
 )
 INSERT INTO ai_session_events (session_id, seq, event)
@@ -74,10 +78,6 @@ RETURNING seq
 
 # What a settled session's open approvals resolve with, unless a Stop ended its run.
 RUN_ENDED = "the session's run ended"
-
-# The agent service's update-with-start deadline, D (agent/src/durable/client.ts
-# DURABLE_SEND_DEADLINE_MS): a send's mark unchanged for 2 x D is from a send that is gone.
-SEND_DEADLINE_S = 30.0
 
 _APPEND = """
 WITH s AS (
@@ -121,7 +121,8 @@ class StreamRow:
 
     status: str
     event_seq: int
-    sending: str | None
+    #: A committed message waits for a run to take it.
+    pending: bool
 
 
 class LeaseLost(Exception):
@@ -199,21 +200,20 @@ async def settle_idle(
     *,
     holder: str,
     event_seq: int,
-    sending: str | None,
 ) -> int | None:
     """Moves a session whose run is gone to idle with `events`, in one transaction.
 
-    Only while `holder` holds the lease, the stream's `sending` is still `sending` (no send
-    began or finished since) and the session's `event_seq` is still `event_seq` (nothing was
-    logged since). Clears `sending`. Returns the last seq, or None when nothing changed.
+    Only while `holder` holds the lease, the session's `event_seq` is still `event_seq`
+    (nothing was logged since: a claim logs its `user.turn`) and no committed message is
+    pending. Clears the stream's `sending`. Returns the last seq, or None when nothing
+    changed.
     """
     texts = [json.dumps(e, ensure_ascii=False, separators=(",", ":")) for e in events]
     seqs: list[int] = []
     async with conn.transaction():
         cur = await conn.execute(
-            "UPDATE ai_durable_streams SET sending = NULL"
-            " WHERE session_id = %s AND holder = %s AND sending IS NOT DISTINCT FROM %s",
-            (session_id, holder, sending),
+            "UPDATE ai_durable_streams SET sending = NULL WHERE session_id = %s AND holder = %s",
+            (session_id, holder),
         )
         if cur.rowcount == 0:
             return None
@@ -313,7 +313,6 @@ class Projector:
         lease_s: float = 20,
         renew_s: float = 5,
         poll_s: float = 0.5,
-        send_deadline_s: float = SEND_DEADLINE_S,
         tiers: Mapping[str, str] = TIERS,
     ) -> None:
         self._pool = pool
@@ -324,11 +323,6 @@ class Projector:
         self._poll_s = poll_s
         self._tiers = tiers
         self._followers: dict[str, asyncio.Task[None]] = {}
-        # A session that says it runs with no run running, and a send's mark on it: what the
-        # claims saw, and since when (the event loop's clock, which is monotonic). See
-        # `_settle_if_stale`.
-        self._send_deadline_s = send_deadline_s
-        self._stale: dict[str, tuple[tuple[Any, ...], float]] = {}
 
     @property
     def following(self) -> set[str]:
@@ -424,8 +418,8 @@ class Projector:
         wid = f"session-{session_id}"
         try:
             while True:
-                # Read before the describe: a start that lands, and clears its mark, after
-                # this read then fails the settle's compare-and-set on these values.
+                # Read before the describe: a claim that commits after this read then fails
+                # the settle's compare-and-set (its `user.turn` moves event_seq).
                 row = await self._stream_row(session_id)
                 latest = await self._latest(wid)
                 if latest is None or not latest.running:
@@ -434,7 +428,6 @@ class Projector:
                     await self._settle_if_stale(session_id, wid, latest, row)
                     await self._release(session_id)
                     return
-                self._stale.pop(session_id, None)
                 # Rebuilt from the log each time: the stream is re-read from the committed offset.
                 open_ids, resolved = await self._open_approvals(session_id)
                 translator = Translator(session_id, self._tiers, open_ids, resolved)
@@ -475,50 +468,37 @@ class Projector:
     async def _stream_row(self, session_id: str) -> StreamRow | None:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT s.status, s.event_seq, d.sending FROM ai_sessions s"
-                " JOIN ai_durable_streams d ON d.session_id = s.id WHERE s.id = %s",
+                "SELECT s.status, s.event_seq, EXISTS (SELECT 1 FROM ai_durable_inputs i"
+                "  WHERE i.session_id = s.id AND i.status = 'pending')"
+                " FROM ai_sessions s JOIN ai_durable_streams d ON d.session_id = s.id WHERE s.id = %s",
                 (session_id,),
             )
             row = await cur.fetchone()
         if row is None:
             return None
-        return StreamRow(str(row[0]), int(row[1]), None if row[2] is None else str(row[2]))
+        return StreamRow(str(row[0]), int(row[1]), bool(row[2]))
 
     async def _settle_if_stale(
         self, session_id: str, wid: str, latest: LatestRun | None, row: StreamRow | None
     ) -> None:
         """A session that says `running` or `waiting_approval` with no run running goes idle.
 
-        Its run was stopped, terminated or failed, or the agent service died between its
-        claim and its start. `row` was read BEFORE `latest` was described, and the settle is
-        a compare-and-set on it (`settle_idle`), so a start that lands after the read (and
-        clears the mark) makes the settle refuse.
+        Its run was stopped, terminated or failed. `row` was read BEFORE `latest` was
+        described, and the settle is a compare-and-set on it (`settle_idle`), so a claim that
+        commits after the read makes the settle refuse.
 
-        The stream's `sending` is the agent service's mark of a send in flight: set by its
-        claim, cleared once its update-with-start answered (manager.ts `clearSending`), and
-        kept when that RPC hit its deadline D (`DURABLE_SEND_DEADLINE_MS`), because the
-        start may still land. While it is set, the run it starts may simply not exist yet.
-        The RPC never outlives D, so a mark that claims saw unchanged (same run, event_seq,
-        sending) for more than 2 x D (`send_deadline_s`, by the event loop's monotonic
-        clock, so the host's wall-clock jumps do not count) is from a send that is gone.
-        With `sending` clear, no send is in flight, and the session settles at once.
+        Never while a committed message is pending (`ai_durable_inputs`): no run took it yet,
+        and the agent service's send, or the replica that takes over a send whose sender is
+        gone (manager.ts `resumeDurableSends`), starts the run that will. A message is never
+        dropped by a settle; one that will not run is abandoned by whoever says so (a Stop,
+        a refusal), with an `error` in the log.
 
         A run a Stop closed resolves its open approvals as a stop does (the `cancelled`
         event's translation, decisions from DECISIONS_QUERY or the log); any other end, or no
         run at all, as RUN_ENDED.
         """
-        if row is None or row.status not in ("running", "waiting_approval"):
-            self._stale.pop(session_id, None)
+        if row is None or row.status not in ("running", "waiting_approval") or row.pending:
             return
-        if row.sending is not None:
-            seen = (None if latest is None else latest.run_id, row.event_seq, row.sending)
-            now = asyncio.get_running_loop().time()
-            previous = self._stale.get(session_id)
-            since = previous[1] if previous and previous[0] == seen else now
-            self._stale[session_id] = (seen, since)
-            if now - since <= 2 * self._send_deadline_s:
-                return
-        self._stale.pop(session_id, None)
         open_ids, resolved = await self._open_approvals(session_id)
         if latest is not None and latest.stopped:
             translator = Translator(session_id, self._tiers, open_ids, resolved)
@@ -540,7 +520,7 @@ class Projector:
             events.append({"v": 1, "type": "session.status", "sessionId": session_id, "status": "idle"})
         async with self._pool.connection() as conn:
             settled = await settle_idle(
-                conn, session_id, events, holder=self._holder, event_seq=row.event_seq, sending=row.sending
+                conn, session_id, events, holder=self._holder, event_seq=row.event_seq
             )
         if settled is not None:
             log.info("projector %s: settled %s, whose run is gone, to idle", self._holder, session_id)

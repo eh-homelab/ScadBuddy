@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,10 +18,13 @@ from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, ToolOutco
 from temporalio.claude_agent_sdk.testing import ScriptedClaude
 from temporalio.client import (
     Client,
+    WithStartWorkflowOperation,
     WorkflowHandle,
     WorkflowHistory,
     WorkflowUpdateFailedError,
 )
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
@@ -34,6 +38,7 @@ from scadbuddy_durable.models import (
     WORKFLOW_NAME,
     InFlight,
     Message,
+    Nudge,
     Restored,
     SessionInput,
     render_prompt,
@@ -41,7 +46,7 @@ from scadbuddy_durable.models import (
 )
 from scadbuddy_durable.workflow import DurableSession
 from tests.short_runs import LongStop, ShortRuns
-from tests.support import WAIT, Rig, Seen, make_policy, rig_on
+from tests.support import WAIT, FakeInputs, Rig, Seen, make_policy, rig_on
 
 HISTORIES = Path(__file__).parent / "histories"
 BROWSER = "browser:browser"
@@ -89,8 +94,9 @@ def test_names() -> None:
 
 
 def test_render_prompt_keeps_the_page_context_for_the_model() -> None:
-    assert render_prompt(Message("hello")) == "hello"
-    assert render_prompt(Message("hello", "page: /models/x")) == "hello\n\npage: /models/x"
+    assert render_prompt(Message("m", "hello")) == "hello"
+    assert render_prompt(Message("m", "hello", "page: /models/x")) == "hello\n\npage: /models/x"
+    assert render_prompt(Message("m", "hello", None, "lost: x")) == "hello\n\nlost: x"
 
 
 def _state(**kw: Any) -> AgentState:
@@ -178,8 +184,9 @@ async def test_a_second_message_while_busy_is_refused_before_history(rig: Rig) -
     wid, inp = rig.new()
     handle = await rig.send(wid, inp, "read slow")
     await rig.started("get_model")
+    another = await rig.inputs.commit(inp.session_id, "another")
     with pytest.raises(WorkflowUpdateFailedError) as err:
-        await handle.execute_update(DurableSession.send_message, Message("another"))
+        await handle.execute_update(SEND_UPDATE, Nudge(another))
     assert "the session is busy" in str(err.value.cause)
     gate.set()
     await rig.event(wid, "done")
@@ -188,11 +195,39 @@ async def test_a_second_message_while_busy_is_refused_before_history(rig: Rig) -
 
 
 @temporal
-async def test_an_empty_message_is_refused(rig: Rig) -> None:
+async def test_a_nudge_for_no_committed_message_is_refused(rig: Rig) -> None:
     wid, inp = rig.new()
     with pytest.raises(WorkflowUpdateFailedError) as err:
-        await rig.send(wid, inp, "   ")
-    assert "the message is empty" in str(err.value.cause)
+        await rig.nudge(wid, inp, "never-committed")
+    assert "no message with this id was committed" in str(err.value.cause)
+
+
+@temporal
+async def test_a_repeated_nudge_never_runs_the_message_twice(rig: Rig) -> None:
+    # The agent service sends the same id again after a timeout or an UNAVAILABLE: the
+    # Update id dedupes it in a run, the message id across runs.
+    wid, inp = rig.new()
+    message_id = await rig.inputs.commit(inp.session_id, "read once")
+    handle = await rig.nudge(wid, inp, message_id)
+    await rig.event(wid, "done")
+    await rig.nudge(wid, inp, message_id)
+    await handle.execute_update(SEND_UPDATE, Nudge(message_id), id=f"{message_id}-other")
+    state = await cancel_result(rig, wid)
+    await rig.nudge(wid, inp, message_id, state)  # a new run: the record says it ran
+    assert [p for p, _ in rig.seen.calls].count("read once") == 2  # the call, then the answer
+    assert rig.fake.takes == [message_id]
+    assert rig.stubs.ids("get_model") and len(rig.stubs.ids("get_model")) == 1
+
+
+@temporal
+async def test_an_abandoned_message_never_runs(rig: Rig) -> None:
+    wid, inp = rig.new()
+    message_id = await rig.inputs.commit(inp.session_id, "read never")
+    rig.fake.abandon(message_id)  # a Stop before any run took it
+    with pytest.raises(WorkflowUpdateFailedError) as err:
+        await rig.nudge(wid, inp, message_id)
+    assert "abandoned" in str(err.value.cause)
+    assert rig.seen.calls == [] and rig.fake.takes == []
 
 
 @temporal
@@ -308,12 +343,28 @@ async def test_continue_as_new_keeps_the_conversation(rig: Rig) -> None:
 
 
 @temporal
-async def test_a_message_carried_in_the_inbox_is_answered(rig: Rig) -> None:
+async def test_a_message_whose_nudge_was_lost_runs_when_a_run_starts(rig: Rig) -> None:
+    # Committed, and its Update lost (Temporal restarted while no worker ran, say): the next
+    # run of the session loads it.
     wid, inp = rig.new()
-    await rig.client.start_workflow(
-        DurableSession.run, args=[inp, None, [Message("hello")]], id=wid, task_queue=TASK_QUEUE
-    )
+    message_id = await rig.inputs.commit(inp.session_id, "hello")
+    await rig.client.start_workflow(DurableSession.run, args=[inp, None], id=wid, task_queue=TASK_QUEUE)
     assert (await rig.event(wid, "done"))["result"] == "answer to hello"
+    assert rig.fake.status(message_id) == "run"
+
+
+@temporal
+async def test_a_message_whose_nudge_was_lost_runs_on_the_next_nudge_of_a_live_run(rig: Rig) -> None:
+    # The run was live and idle, and the Update was lost before a worker accepted it: the
+    # agent service sends the same id again, and the run loads the message then.
+    wid, inp = rig.new()
+    await rig.send(wid, inp, "first")
+    await rig.event(wid, "done")
+    lost = await rig.inputs.commit(inp.session_id, "lost one")
+    await rig.nudge(wid, inp, lost)
+    await rig.event(wid, "done", 2)
+    assert rig.fake.takes[1:] == [lost]
+    assert [p for p, _ in rig.seen.calls] == ["first", "lost one"]
 
 
 @temporal
@@ -369,10 +420,59 @@ async def test_a_message_sent_while_a_stop_closes_the_run_is_refused(rig: Rig) -
     await rig.started("get_model")
     await handle.cancel()
     await rig.event(wid, "cancelled")  # the plugin ended the task; the run is still open
+    after = await rig.inputs.commit(inp.session_id, "after stop")
     with pytest.raises(WorkflowUpdateFailedError) as err:
-        await handle.execute_update(DurableSession.send_message, Message("after stop"))
+        await handle.execute_update(SEND_UPDATE, Nudge(after))
     assert "the session is stopping" in str(err.value.cause)
     await handle.terminate("test over")
+    assert rig.fake.status(after) == "pending"  # the agent service abandons it
+
+
+@temporal
+async def test_a_nudge_and_a_stop_in_one_activation_refuse_the_message(
+    temporal_env: Client, tmp_path: Path
+) -> None:
+    # The Update and the cancel reach the run together (no worker polled while both were
+    # sent): accepted, the message would be dropped by the Stop. It must be refused.
+    queue = f"agent-{uuid.uuid4()}"
+    inputs = FakeInputs()
+    sid = str(uuid.uuid4())
+    wid = f"session-{sid}"
+    inp = SessionInput(session_id=sid, max_turns=7, approval_expiry_seconds=3600)
+    message_id = await inputs.commit(sid, "read never")
+    op: WithStartWorkflowOperation[Any, AgentState] = WithStartWorkflowOperation(
+        DurableSession.run,
+        args=[inp, None],
+        id=wid,
+        task_queue=queue,
+        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+        id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+    )
+    sending = asyncio.create_task(
+        temporal_env.execute_update_with_start_workflow(
+            SEND_UPDATE, Nudge(message_id), id=message_id, start_workflow_operation=op
+        )
+    )
+    handle = temporal_env.get_workflow_handle_for(DurableSession.run, wid)
+
+    async def admitted() -> None:
+        while True:
+            try:
+                await handle.describe()
+                return
+            except RPCError:
+                await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(admitted(), WAIT)  # started, with the Update admitted, no worker yet
+    await handle.cancel()
+    async with rig_on(temporal_env, tmp_path / "sessions", task_queue=queue, inputs=inputs) as rig:
+        rig.ids.append(wid)
+        with pytest.raises(WorkflowUpdateFailedError) as err:
+            await asyncio.wait_for(sending, WAIT)
+        assert "the session is stopping" in str(err.value.cause)
+        await asyncio.wait_for(handle.result(), WAIT)
+        assert rig.seen.calls == [] and inputs.takes == []
+        assert inputs.status(message_id) == "pending"
 
 
 @temporal

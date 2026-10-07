@@ -28,7 +28,7 @@ from scadbuddy_durable.projector import (
 )
 from scadbuddy_durable.translate import Batch
 from scadbuddy_durable.workflow import DurableSession
-from tests.support import WAIT, Rig, rig_on
+from tests.support import WAIT, PgInputs, Rig, rig_on
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -55,13 +55,14 @@ async def pool(pg_conninfo: str) -> AsyncIterator[AsyncConnectionPool]:
 
 
 @pytest_asyncio.fixture
-async def rig(temporal_env: Client, tmp_path: Path) -> AsyncIterator[Rig]:
-    async with rig_on(temporal_env, tmp_path / "sessions") as r:
+async def rig(temporal_env: Client, tmp_path: Path, pool: AsyncConnectionPool) -> AsyncIterator[Rig]:
+    async with rig_on(temporal_env, tmp_path / "sessions", inputs=PgInputs(pool)) as r:
         yield r
 
 
-async def make_session(pool: AsyncConnectionPool, status: str = "running") -> str:
-    """A durable session; a running one as the agent service's claim leaves it (its send in flight)."""
+async def make_session(pool: AsyncConnectionPool, status: str = "running", *, claim: bool = True) -> str:
+    """A durable session; a running one as the agent service's claim leaves it: its stream
+    row, and (`claim`) its message committed, whose text the test's `rig.send` fills in."""
     sid = str(uuid.uuid4())
     async with pool.connection() as conn:
         await conn.execute(
@@ -71,9 +72,12 @@ async def make_session(pool: AsyncConnectionPool, status: str = "running") -> st
             (sid, status),
         )
         if status == "running":
-            await conn.execute(
-                "INSERT INTO ai_durable_streams (session_id, sending) VALUES (%s, 'agent-send')", (sid,)
-            )
+            await conn.execute("INSERT INTO ai_durable_streams (session_id) VALUES (%s)", (sid,))
+            if claim:
+                await conn.execute(
+                    "INSERT INTO ai_durable_inputs (id, session_id, text) VALUES (%s, %s, '')",
+                    (str(uuid.uuid4()), sid),
+                )
     return sid
 
 
@@ -132,9 +136,6 @@ def logged_type(pool: AsyncConnectionPool, sid: str, kind: str) -> Callable[[], 
 async def projecting(
     pool: AsyncConnectionPool, client: Client, holder: str, **kw: Any
 ) -> AsyncIterator[tuple[Projector, asyncio.Task[None]]]:
-    # A short send deadline: most tests leave the claim's mark set (as the agent service's
-    # claim does), so a closed run settles after 2 x D of polls.
-    kw.setdefault("send_deadline_s", 2.0)
     projector = Projector(pool, client, holder=holder, poll_s=0.2, **kw)
     stop = asyncio.Event()
     task = asyncio.create_task(projector.run(stop))
@@ -547,13 +548,33 @@ async def test_a_terminated_run_is_never_read_into_the_next_runs_turn(
     no_repeats(events)
 
 
-async def mark_sending(pool: AsyncConnectionPool, sid: str, turn: str | None) -> None:
-    """What the agent service's claim does (manager.ts claimDurable), and its answer clears."""
+async def commit_input(pool: AsyncConnectionPool, sid: str) -> str:
+    """A message the agent service's claim committed (its text filled in by `rig.send`)."""
+    message_id = str(uuid.uuid4())
     async with pool.connection() as conn:
         await conn.execute(
-            "INSERT INTO ai_durable_streams (session_id, sending) VALUES (%s, %s)"
-            " ON CONFLICT (session_id) DO UPDATE SET sending = excluded.sending",
-            (sid, turn),
+            "INSERT INTO ai_durable_inputs (id, session_id, text) VALUES (%s, %s, '')", (message_id, sid)
+        )
+    return message_id
+
+
+async def log_claim(pool: AsyncConnectionPool, sid: str) -> None:
+    """The claim's `user.turn` (manager.ts claimDurable logs it with the commit)."""
+    event = json.dumps({"v": 1, "type": "user.turn", "sessionId": sid, "text": "hi"})
+    async with pool.connection() as conn:
+        await conn.execute(
+            "WITH s AS (UPDATE ai_sessions SET event_seq = event_seq + 1 WHERE id = %s RETURNING event_seq)"
+            " INSERT INTO ai_session_events (session_id, seq, event) SELECT %s, s.event_seq, %s FROM s",
+            (sid, sid, event),
+        )
+
+
+async def abandon_all(pool: AsyncConnectionPool, sid: str) -> None:
+    """What a Stop does to the session's pending messages (manager.ts interruptDurable)."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE ai_durable_inputs SET status = 'abandoned' WHERE session_id = %s AND status = 'pending'",
+            (sid,),
         )
 
 
@@ -582,11 +603,11 @@ async def claims_seen(pool: AsyncConnectionPool, sid: str) -> bool | None:
 
 
 async def test_a_send_in_flight_is_not_settled(pool: AsyncConnectionPool, rig: Rig) -> None:
-    """Claimed and running, its run not started yet: the projector waits for it, and follows it."""
+    """Claimed and running, its message committed and its run not started yet: the projector
+    waits for it, and follows it."""
     sid = await make_session(pool)
     wid, inp = rig.new(sid=sid)
-    await mark_sending(pool, sid, "turn-1")
-    async with projecting(pool, rig.client, "a", send_deadline_s=1000) as (projector, _):
+    async with projecting(pool, rig.client, "a") as (projector, _):
         polls = 0
         latest = projector._latest
 
@@ -600,35 +621,53 @@ async def test_a_send_in_flight_is_not_settled(pool: AsyncConnectionPool, rig: R
         assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "running"
         assert await logged(pool, sid) == []
         await rig.send(wid, inp, "print 1")
-        await mark_sending(pool, sid, None)
         await until(logged_type(pool, sid, "approval.required"))
         await approve(rig, wid)
         await until(status_is(pool, sid, "idle"))
     assert [e["type"] for e in await logged(pool, sid)] == PRINT_APPROVED
 
 
-async def test_a_claim_whose_sender_died_settles_after_the_polls(pool: AsyncConnectionPool, rig: Rig) -> None:
-    """The claim committed, the agent service died before its start: no run will come."""
+async def test_a_committed_message_whose_sender_died_is_never_settled(
+    pool: AsyncConnectionPool, rig: Rig
+) -> None:
+    """The claim committed its message, and the agent service died before any run took it:
+    settling would drop it. It stays running until a run takes it, or it is abandoned (and
+    the abandoner logs why); then the session settles."""
     sid = await make_session(pool)
-    await mark_sending(pool, sid, "turn-1")
-    # D is the agent service's update-with-start deadline; a mark stable for 2 x D is stale.
-    async with projecting(pool, rig.client, "a", send_deadline_s=0.5):
+    async with projecting(pool, rig.client, "a") as (projector, _):
+        polls = 0
+        latest = projector._latest
+
+        async def counted(wid: str) -> LatestRun | None:
+            nonlocal polls
+            polls += 1
+            return await latest(wid)
+
+        projector._latest = counted  # type: ignore[method-assign]
+        await until(lambda: asyncio.sleep(0, polls >= 10 or None))
+        assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "running"
+        assert await logged(pool, sid) == []
+        await abandon_all(pool, sid)
         await until(status_is(pool, sid, "idle"))
     assert await logged(pool, sid) == [{"v": 1, "type": "session.status", "sessionId": sid, "status": "idle"}]
-    assert await one(pool, "SELECT sending FROM ai_durable_streams WHERE session_id = %s", sid) is None
 
 
-async def test_the_settle_refuses_once_a_send_began_or_logged(pool: AsyncConnectionPool) -> None:
-    sid = await make_session(pool)
-    await mark_sending(pool, sid, "turn-1")
+async def test_the_settle_refuses_once_a_claim_logged_or_a_message_is_pending(
+    pool: AsyncConnectionPool,
+) -> None:
+    sid = await make_session(pool, claim=False)
     async with pool.connection() as conn:
         await conn.execute("UPDATE ai_durable_streams SET holder = 'me' WHERE session_id = %s", (sid,))
         idle = [{"v": 1, "type": "session.status", "sessionId": sid, "status": "idle"}]
-        # Another send's marker, or an event logged since the projector looked: nothing changes.
-        assert await settle_idle(conn, sid, idle, holder="me", event_seq=0, sending="turn-0") is None
-        assert await settle_idle(conn, sid, idle, holder="me", event_seq=4, sending="turn-1") is None
+        # An event logged since the projector looked: nothing changes.
+        assert await settle_idle(conn, sid, idle, holder="me", event_seq=4) is None
+        # Another holder: nothing changes.
+        assert await settle_idle(conn, sid, idle, holder="other", event_seq=0) is None
+    await commit_input(pool, sid)
+    async with pool.connection() as conn:
+        # A committed message waits: nothing changes.
+        assert await settle_idle(conn, sid, idle, holder="me", event_seq=0) is None
     assert await logged(pool, sid) == []
-    assert await one(pool, "SELECT sending FROM ai_durable_streams WHERE session_id = %s", sid) == "turn-1"
     assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "running"
 
 
@@ -650,33 +689,33 @@ async def test_a_follower_of_another_chain_starts_at_zero(pool: AsyncConnectionP
     assert await one(pool, "SELECT chain FROM ai_durable_streams WHERE session_id = %s", sid) == chain
 
 
-async def test_a_start_that_lands_between_describe_and_read_is_not_settled(
+async def test_a_claim_that_commits_between_read_and_describe_is_not_settled(
     pool: AsyncConnectionPool, rig: Rig
 ) -> None:
-    """The projector finds no run; the send's start then lands and clears its mark; the
-    projector must not take the cleared mark for "no send in flight" and settle a live turn."""
-    sid = await make_session(pool)
+    """The projector reads the session (nothing pending), finds no run; a claim then commits
+    its message and its start lands: the settle must not drop that turn."""
+    sid = await make_session(pool, claim=False)
     workflow_id, inp = rig.new(sid=sid)
-    await mark_sending(pool, sid, "turn-1")
-    async with projecting(pool, rig.client, "a", send_deadline_s=1000) as (projector, _):
+    async with projecting(pool, rig.client, "a") as (projector, _):
         latest = projector._latest
         landed = False
 
-        async def describe_then_land(wid: str) -> LatestRun | None:
+        async def describe_then_claim(wid: str) -> LatestRun | None:
             nonlocal landed
             found = await latest(wid)
             if found is None and not landed:
-                landed = True  # exactly here: the start lands, the agent service clears its mark
+                landed = True  # exactly here: a claim commits, and its start lands
+                await commit_input(pool, sid)
+                await log_claim(pool, sid)
                 await rig.send(workflow_id, inp, "print 1")
-                await mark_sending(pool, sid, None)
             return found
 
-        projector._latest = describe_then_land  # type: ignore[method-assign]
+        projector._latest = describe_then_claim  # type: ignore[method-assign]
         await until(logged_type(pool, sid, "approval.required"))
         await approve(rig, workflow_id)
         await until(status_is(pool, sid, "idle"))
     assert landed
-    assert [e["type"] for e in await logged(pool, sid)] == PRINT_APPROVED
+    assert [e["type"] for e in await logged(pool, sid)] == ["user.turn", *PRINT_APPROVED]
 
 
 async def test_a_turn_whose_mark_is_cleared_is_projected_and_never_settled(
@@ -687,7 +726,6 @@ async def test_a_turn_whose_mark_is_cleared_is_projected_and_never_settled(
     wid, inp = rig.new(sid=sid)
     async with projecting(pool, rig.client, "a"):
         await rig.send(wid, inp, "print 1")
-        await mark_sending(pool, sid, None)
         await until(status_is(pool, sid, "waiting_approval"))
         await asyncio.sleep(1)  # several claims of a live run with no mark
         assert await one(pool, "SELECT status FROM ai_sessions WHERE id = %s", sid) == "waiting_approval"
@@ -702,7 +740,6 @@ async def test_a_stop_nobody_drained_resolves_as_a_stop(pool: AsyncConnectionPoo
     wid, inp = rig.new(sid=sid)
     async with projecting(pool, rig.client, "a"):
         await rig.send(wid, inp, "print 1")
-        await mark_sending(pool, sid, None)
         await until(status_is(pool, sid, "waiting_approval"))
     pending: list[dict[str, Any]] = await rig.handle(wid).query(PENDING_QUERY)
     await rig.handle(wid).cancel()

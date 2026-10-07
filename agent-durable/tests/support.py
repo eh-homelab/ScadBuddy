@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from psycopg_pool import AsyncConnectionPool
 from temporalio import activity
 from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, follow_agent
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
@@ -18,7 +19,21 @@ from temporalio.client import Client, WithStartWorkflowOperation, WorkflowHandle
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.worker import Worker
 
-from scadbuddy_durable.models import PENDING_QUERY, TASK_QUEUE, Message, SessionInput, SnapshotInput
+from scadbuddy_durable.inputs import Inputs, make_input_activities
+from scadbuddy_durable.models import (
+    LOAD_INPUTS,
+    PENDING_QUERY,
+    SEND_UPDATE,
+    START_INPUT,
+    TASK_QUEUE,
+    Loaded,
+    LoadInputs,
+    Message,
+    Nudge,
+    SessionInput,
+    SnapshotInput,
+    StartInput,
+)
 from scadbuddy_durable.segments import SAVE_SNAPSHOT
 from scadbuddy_durable.tools import TOOL_QUEUE, TOOLS
 from scadbuddy_durable.workflow import DurableSession
@@ -114,18 +129,91 @@ class Snaps:
         return [s for s in self.saved if s.session_id == session_id][-1]
 
 
+class FakeInputs:
+    """`ai_durable_inputs` in memory: the agent service's commits, and the runs' takes."""
+
+    def __init__(self) -> None:
+        # message id -> (session id, message, status), in commit order
+        self.rows: dict[str, tuple[str, Message, str]] = {}
+        self.takes: list[str] = []
+
+        @activity.defn(name=LOAD_INPUTS)
+        async def load_inputs(inp: LoadInputs) -> Loaded:
+            pending = [m for sid, m, st in self.rows.values() if sid == inp.session_id and st == "pending"]
+            row = self.rows.get(inp.asked or "")
+            return Loaded(pending, None if row is None or row[0] != inp.session_id else row[2])
+
+        @activity.defn(name=START_INPUT)
+        async def start_input(inp: StartInput) -> bool:
+            row = self.rows.get(inp.id)
+            if row is None or row[0] != inp.session_id or row[2] == "abandoned":
+                return False
+            self.rows[inp.id] = (row[0], row[1], "run")
+            self.takes.append(inp.id)
+            return True
+
+        self.activities: list[Callable[..., Any]] = [load_inputs, start_input]
+
+    async def commit(self, session_id: str, text: str, context: str | None = None) -> str:
+        message = Message(str(uuid.uuid4()), text, context)
+        self.rows[message.id] = (session_id, message, "pending")
+        return message.id
+
+    def abandon(self, message_id: str) -> None:
+        sid, message, status = self.rows[message_id]
+        if status == "pending":
+            self.rows[message_id] = (sid, message, "abandoned")
+
+    def status(self, message_id: str) -> str:
+        return self.rows[message_id][2]
+
+
+class PgInputs:
+    """The real `ai_durable_inputs` and activities (inputs.py), for tests on Postgres. A
+    send fills in the message a claim committed (`make_session`'s, text ''), if one waits."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+        self.activities: list[Callable[..., Any]] = list(make_input_activities(Inputs(pool)))
+
+    async def commit(self, session_id: str, text: str, context: str | None = None) -> str:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE ai_durable_inputs SET text = %s, context = %s"
+                " WHERE id = (SELECT id FROM ai_durable_inputs WHERE session_id = %s AND status = 'pending'"
+                " AND text = '' ORDER BY seq LIMIT 1) RETURNING id",
+                (text, context, session_id),
+            )
+            row = await cur.fetchone()
+            if row is not None:
+                return str(row[0])
+            message_id = str(uuid.uuid4())
+            await conn.execute(
+                "INSERT INTO ai_durable_inputs (id, session_id, text, context) VALUES (%s, %s, %s, %s)",
+                (message_id, session_id, text, context),
+            )
+            return message_id
+
+
 @dataclass
 class Rig:
     client: Client
     seen: Seen
     stubs: Stubs
     snaps: Snaps
+    inputs: FakeInputs | PgInputs
+    task_queue: str = TASK_QUEUE
     ids: list[str] = field(default_factory=list)
 
     def new(self, *, expiry: int = 3600, sid: str | None = None) -> tuple[str, SessionInput]:
         sid = sid or str(uuid.uuid4())
         self.ids.append(f"session-{sid}")
         return f"session-{sid}", SessionInput(session_id=sid, max_turns=7, approval_expiry_seconds=expiry)
+
+    @property
+    def fake(self) -> FakeInputs:
+        assert isinstance(self.inputs, FakeInputs)
+        return self.inputs
 
     def handle(self, wid: str) -> WorkflowHandle[Any, AgentState]:
         return self.client.get_workflow_handle_for(DurableSession.run, wid)
@@ -140,17 +228,36 @@ class Rig:
         context: str | None = None,
         workflow: Any = DurableSession,
     ) -> WorkflowHandle[Any, AgentState]:
-        """Update-with-start, as the agent service sends every message (ruling 6)."""
-        op: WithStartWorkflowOperation[Any, AgentState] = WithStartWorkflowOperation(
+        """Commits the message, then nudges with update-with-start, as the agent service sends
+        every message (ruling 6)."""
+        message_id = await self.inputs.commit(inp.session_id, text, context)
+        return await self.nudge(wid, inp, message_id, state, workflow=workflow)
+
+    def operation(
+        self, wid: str, inp: SessionInput, state: AgentState | None = None, *, workflow: Any = DurableSession
+    ) -> WithStartWorkflowOperation[Any, AgentState]:
+        return WithStartWorkflowOperation(
             workflow.run,
-            args=[inp, state, None],
+            args=[inp, state],
             id=wid,
-            task_queue=TASK_QUEUE,
+            task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         )
+
+    async def nudge(
+        self,
+        wid: str,
+        inp: SessionInput,
+        message_id: str,
+        state: AgentState | None = None,
+        *,
+        workflow: Any = DurableSession,
+    ) -> WorkflowHandle[Any, AgentState]:
+        """The nudge for a committed message, with the message id as the Update's id."""
+        op = self.operation(wid, inp, state, workflow=workflow)
         await self.client.execute_update_with_start_workflow(
-            DurableSession.send_message, Message(text, context), start_workflow_operation=op
+            SEND_UPDATE, Nudge(message_id), id=message_id, start_workflow_operation=op
         )
         return await op.workflow_handle()
 
@@ -193,17 +300,23 @@ class Rig:
 
 
 @asynccontextmanager
-async def rig_on(client: Client, state_dir: Path) -> AsyncIterator[Rig]:
-    seen, stubs, snaps = Seen(), Stubs(), Snaps()
+async def rig_on(
+    client: Client,
+    state_dir: Path,
+    *,
+    task_queue: str = TASK_QUEUE,
+    inputs: FakeInputs | PgInputs | None = None,
+) -> AsyncIterator[Rig]:
+    seen, stubs, snaps, inputs = Seen(), Stubs(), Snaps(), inputs or FakeInputs()
     runner = ScriptedClaude(make_policy(seen), state_dir)
-    rig = Rig(client, seen, stubs, snaps)
+    rig = Rig(client, seen, stubs, snaps, inputs, task_queue)
     try:
         async with (
             Worker(
                 client,
-                task_queue=TASK_QUEUE,
+                task_queue=task_queue,
                 workflows=[DurableSession, ShortRuns, LongStop],
-                activities=[snaps.activity],
+                activities=[snaps.activity, *inputs.activities],
                 plugins=[ClaudeAgentPlugin(runner, heartbeat_every=1.0)],
             ),
             Worker(client, task_queue=TOOL_QUEUE, activities=stubs.activities()),
