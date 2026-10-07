@@ -333,7 +333,9 @@ def test_an_output_records_the_revision_it_was_rendered_from(client: TestClient)
     assert finished["model_version"] == second
 
     output = client.post(
-        f"/api/v1/models/{SLUG}/outputs", json={"job_id": job["job_id"], "name": "now"}
+        f"/api/v1/models/{SLUG}/outputs",
+        json={"job_id": job["job_id"], "name": "now"},
+        headers=press(),
     )
     assert output.status_code == 201
     assert output.json()["model_version"] == second

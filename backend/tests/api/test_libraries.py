@@ -820,16 +820,16 @@ def test_a_preset_save_fetches_a_checkout_that_is_gone(
     presets = f"/api/v1/models/{SLUG}/presets"
 
     shutil.rmtree(checkout)
-    created = lib_client.post(presets, json={"name": "Small", "params": {}})
+    created = lib_client.post(presets, json={"name": "Small", "params": {}}, headers=press())
     assert created.status_code == 201, created.text
     assert (checkout / "BOSL2").is_dir()
     preset = f"{presets}/{created.json()['id']}"
     shutil.rmtree(checkout)
-    updated = lib_client.patch(preset, json={"params": {}})
+    updated = lib_client.patch(preset, json={"params": {}}, headers=press())
     assert updated.status_code == 200, updated.text
     assert (checkout / "BOSL2").is_dir()
     shutil.rmtree(checkout)
-    duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"})
+    duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"}, headers=press())
     assert duplicated.status_code == 201, duplicated.text
     assert (checkout / "BOSL2").is_dir()
 

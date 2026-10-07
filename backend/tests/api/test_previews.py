@@ -134,7 +134,9 @@ def _generate(client: TestClient, paths: DataPaths, cover: bytes) -> str:
     ).json()["job_id"]
     wait_for_job(client, job_id)
     set_plate_image(client, job_id, cover)
-    response = client.post(f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id})
+    response = client.post(
+        f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]
     return output_id
@@ -257,7 +259,7 @@ def test_a_generated_output_outranks_the_preview_until_it_is_deleted(
     # Nothing left for it to stand in for.
     assert scheduler(state).store.record(SLUG) is None
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     settle(client, state)
     assert _model(client)["thumbnail_source"] == "preview"
 

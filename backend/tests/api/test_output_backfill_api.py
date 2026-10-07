@@ -64,7 +64,9 @@ def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str
     queued = client.post(f"/api/v1/models/{slug}/render", json={"inputs": {"params": {}}})
     assert queued.status_code == 202, queued.text
     assert wait_for_job(client, queued.json()["job_id"])["status"] == "done"
-    saved = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": queued.json()["job_id"]})
+    saved = client.post(
+        f"/api/v1/models/{slug}/outputs", json={"job_id": queued.json()["job_id"]}, headers=press()
+    )
     assert saved.status_code == 201, saved.text
     output_id: str = saved.json()["id"]
     state = _state(app)

@@ -454,6 +454,8 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run.
+ * A still-accepting answer is re-sent for up to `acceptingMs`, unless `bounded`: then it
+ * counts toward `reattempts` like any other, for a body too large to send that often.
  * With `finish`, `signal` aborting between re-sends sends once more, at once, instead of
  * giving up: the request may already hold a claim, and that answer names it (review #1066
  * 1.1). Still unanswered then, it gives up. `within` wraps each attempt.
@@ -461,8 +463,7 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 async function reattach<T>(
   attempt: () => Promise<T>,
   signal?: AbortSignal,
-  finish = false,
-  within?: Within,
+  { bounded = false, finish = false, within }: { bounded?: boolean; finish?: boolean; within?: Within } = {},
 ): Promise<T> {
   // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
   const began = performance.now()
@@ -478,7 +479,11 @@ async function reattach<T>(
         continue
       }
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
-      if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+      if (
+        accepting && !bounded
+          ? performance.now() - began >= printRunPoll.acceptingMs
+          : tries++ >= printRunPoll.reattempts
+      ) {
         throw caught
       }
       // The server's Retry-After paces a re-send it answered (review #1061 4a).
@@ -504,6 +509,18 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
   const signal = init.signal ?? undefined
   const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
+  return followOperation<T>(first, signal)
+}
+
+/**
+ * A command's first answer to its end: the route's own body, or a 202's operation
+ * followed through `GET /operations/{id}` to its result, or to the problem the route
+ * would have answered.
+ */
+async function followOperation<T>(
+  first: { status: number; body: T | OperationAccepted },
+  signal?: AbortSignal,
+): Promise<T> {
   if (first.status !== 202) return first.body as T
   let op: Operation = first.body as OperationAccepted
   const began = performance.now()
@@ -551,8 +568,7 @@ async function followPrintRun(
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
-    false,
-    within,
+    { within },
   )
   const began = performance.now()
   while (run.status === 'running') {
@@ -645,20 +661,20 @@ export const api = {
   listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
 
   createPreset: (slug: string, body: ParamPresetCreate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
 
   updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   /** Copies any preset, shipped or saved, to a new saved one with the same values. */
   duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -794,50 +810,58 @@ export const api = {
     file: File,
     options: { caption?: string; poster?: File } = {},
     onProgress?: (fraction: number) => void,
-  ) =>
-    new Promise<ModelSummary>((resolve, reject) => {
-      const body = new FormData()
-      body.append('file', file)
-      if (options.caption) body.append('caption', options.caption)
-      if (options.poster) body.append('poster', options.poster)
-      const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-      xhr.setRequestHeader('Accept', 'application/json')
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-      })
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText) as ModelSummary)
-          return
+  ): Promise<ModelSummary> => {
+    // A command (#1054): one key for this upload, kept on a re-send after an answer
+    // that never arrived, so the server adds the item once.
+    const key = newRequestId()
+    const send = () =>
+      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>((resolve, reject) => {
+        const body = new FormData()
+        body.append('file', file)
+        if (options.caption) body.append('caption', options.caption)
+        if (options.poster) body.append('poster', options.poster)
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
+        xhr.setRequestHeader('Accept', 'application/json')
+        xhr.setRequestHeader('Idempotency-Key', key)
+        xhr.upload.addEventListener('progress', (event) => {
+          if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+        })
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | OperationAccepted })
+            return
+          }
+          reject(new ApiError(xhrProblem(xhr)))
         }
-        reject(new ApiError(xhrProblem(xhr)))
-      }
-      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-      // have landed, and `mayHaveRun` says so.
-      xhr.onerror = () =>
-        reject(
-          new ApiError({
-            type: UNANSWERED,
-            title: 'The upload failed',
-            status: 0,
-            detail: 'The upload failed',
-          }),
-        )
-      xhr.onabort = () =>
-        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-      xhr.send(body)
-    }),
+        // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+        // have landed, and `mayHaveRun` says so.
+        xhr.onerror = () =>
+          reject(
+            new ApiError({
+              type: UNANSWERED,
+              title: 'The upload failed',
+              status: 0,
+              detail: 'The upload failed',
+            }),
+          )
+        xhr.onabort = () =>
+          reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+        xhr.send(body)
+      })
+    // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
+    return reattach(send, undefined, { bounded: true }).then((first) => followOperation<ModelSummary>(first))
+  },
 
   patchMedia: (slug: string, id: string, caption: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify({ caption }),
     }),
 
   /** `ids` names every item once, in the new order; the first is the cover. */
   reorderMedia: (slug: string, ids: string[]) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/order`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/order`, {
       method: 'PUT',
       body: JSON.stringify({ ids }),
     }),
@@ -848,13 +872,13 @@ export const api = {
    * it ships.
    */
   setMediaCover: (slug: string, id: string | null) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
       method: 'PUT',
       body: JSON.stringify({ id }),
     }),
 
   deleteMedia: (slug: string, id: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
@@ -863,7 +887,7 @@ export const api = {
   uploadAsset: (slug: string, file: File) => {
     const body = new FormData()
     body.append('file', file)
-    return request<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
+    return command<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
   },
 
   getAsset: (slug: string, id: string) =>
@@ -953,7 +977,7 @@ export const api = {
           }),
         }),
       signal,
-      true,
+      { finish: true },
     )
   },
 
@@ -978,7 +1002,7 @@ export const api = {
 
   /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
   createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
-    request<Output>(`/models/${seg(slug)}/outputs`, {
+    command<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
       body: JSON.stringify({
         job_id: jobId,
@@ -1008,7 +1032,7 @@ export const api = {
 
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
-    request<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
+    command<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
       method: 'DELETE',
     }),
 
@@ -1046,7 +1070,7 @@ export const api = {
   putThumbnail: (outputId: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
-    return request<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
+    return command<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
   },
 
   /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
@@ -1290,7 +1314,7 @@ export const api = {
 
   /** Downloads the family onto the data volume so the renderer can resolve it. */
   installFont: (family: string) =>
-    request<InstalledFamily>('/fonts/install', {
+    command<InstalledFamily>('/fonts/install', {
       method: 'POST',
       body: JSON.stringify({ family }),
     }),

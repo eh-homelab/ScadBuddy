@@ -18,6 +18,7 @@ from scadbuddy.render.job_models import Job
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, job_file, wait_for_job
 from tests.conftest import read_png
+from tests.support.operations import press
 
 ERROR = Diagnostic(
     severity="error",
@@ -141,7 +142,9 @@ def test_a_saved_output_is_drawn_from_a_named_view(
 ) -> None:
     job_id = _render(client, model)
     _real_preview(client, job_id)
-    created = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert created.status_code == 201, created.text
     output_id = created.json()["id"]
 

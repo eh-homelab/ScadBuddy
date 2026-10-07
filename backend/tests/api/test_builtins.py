@@ -90,7 +90,9 @@ def test_a_built_in_renders_and_keeps_its_outputs(client: TestClient, paths: Dat
     job_id = _finished_job(client, BUILTIN)
 
     created = client.post(
-        f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id, "name": "Blue"}
+        f"/api/v1/models/{BUILTIN}/outputs",
+        json={"job_id": job_id, "name": "Blue"},
+        headers=press(),
     )
     assert created.status_code == 201, created.text
     output = created.json()
@@ -126,7 +128,9 @@ def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
     outputs = {}
     for model_id, job_id in jobs.items():
         response = client.post(
-            f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id, "name": "Blue"}
+            f"/api/v1/models/{model_id}/outputs",
+            json={"job_id": job_id, "name": "Blue"},
+            headers=press(),
         )
         assert response.status_code == 201, response.text
         outputs[model_id] = response.json()
@@ -327,7 +331,9 @@ def test_a_built_in_without_a_thumbnail_shows_its_first_plate_image(
         assert client.get(f"/api/v1/models/{BUILTIN}").json()["has_thumbnail"] is False
         job_id = _finished_job(client, BUILTIN)
         set_plate_image(client, job_id, cover)
-        saved = client.post(f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id})
+        saved = client.post(
+            f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id}, headers=press()
+        )
         assert saved.status_code == 201, saved.text
 
         record = client.get(f"/api/v1/models/{BUILTIN}").json()

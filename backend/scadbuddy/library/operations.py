@@ -295,19 +295,35 @@ def library_kinds(state: Core, components: Components) -> list[OperationKind]:
 
 
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
-    """The pins, and a model's lifecycle (``model_operations.py``). Imported here, as it
-    imports this module. Its runs are the routes' former bodies, which take the whole
-    ``AppState`` and read services the ``Core`` does not name, so any other core is
-    refused here rather than failing inside an operation (review #1126 1.2)."""
+    """The pins, a model's lifecycle and edits (``model_operations.py``), its media
+    (``media_operations.py``), its outputs (``output_operations.py``), the uploads
+    for its file parameters (``asset_operations.py``), font installs
+    (``font_operations.py``) and preset writes (``preset_operations.py``). Imported
+    here, as they import this module. Their runs are the routes' former bodies, which
+    take the whole ``AppState`` and read services the ``Core`` does not name, so any
+    other core is refused here rather than failing inside an operation (review #1126 1.2)."""
     from scadbuddy.api.deps import AppState
+    from scadbuddy.library.asset_operations import asset_kinds
+    from scadbuddy.library.font_operations import font_kinds
+    from scadbuddy.library.media_operations import media_kinds
     from scadbuddy.library.model_operations import model_kinds
+    from scadbuddy.library.output_operations import output_kinds
+    from scadbuddy.library.preset_operations import preset_kinds
 
     if not isinstance(core, AppState):
         raise TypeError(
             "the model operation kinds run the routes' bodies, which need the API's "
             f"AppState, not a {type(core).__name__}"
         )
-    return [*library_kinds(core, components), *model_kinds(core)]
+    return [
+        *library_kinds(core, components),
+        *model_kinds(core),
+        *media_kinds(core),
+        *output_kinds(core),
+        *asset_kinds(core),
+        *font_kinds(core),
+        *preset_kinds(core),
+    ]
 
 
 OPERATION_KINDS: KindsBuild = _kinds

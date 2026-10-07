@@ -77,7 +77,7 @@ def _upload(
     if poster is not None:
         files["poster"] = ("poster.png", poster, "image/png")
     data = {"caption": caption} if caption is not None else None
-    return client.post(f"/api/v1/models/{slug}/media", files=files, data=data)
+    return client.post(f"/api/v1/models/{slug}/media", files=files, data=data, headers=press())
 
 
 def _media(client: TestClient, slug: str) -> list[dict[str, Any]]:
@@ -588,7 +588,7 @@ def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: s
 
 
 def test_an_upload_that_is_not_multipart_is_refused(client: TestClient, model: str) -> None:
-    response = client.post(f"/api/v1/models/{model}/media", content=PNG)
+    response = client.post(f"/api/v1/models/{model}/media", content=PNG, headers=press())
 
     assert response.status_code == 422, response.text
 
@@ -653,16 +653,23 @@ def test_an_item_answers_304_to_its_etag(client: TestClient, model: str) -> None
 
 def test_an_unknown_item_is_a_404(client: TestClient, model: str) -> None:
     assert client.get(f"/api/v1/models/{model}/media/abcdefabcdef").status_code == 404
-    assert client.delete(f"/api/v1/models/{model}/media/abcdefabcdef").status_code == 404
     assert (
-        client.patch(f"/api/v1/models/{model}/media/abcdefabcdef", json={"caption": "x"})
+        client.delete(f"/api/v1/models/{model}/media/abcdefabcdef", headers=press()).status_code
+        == 404
+    )
+    assert (
+        client.patch(
+            f"/api/v1/models/{model}/media/abcdefabcdef", json={"caption": "x"}, headers=press()
+        )
     ).status_code == 404
 
 
 def test_a_caption_is_edited(client: TestClient, model: str) -> None:
     item = _upload(client, model, PNG).json()["media"][0]
 
-    response = client.patch(f"/api/v1/models/{model}/media/{item['id']}", json={"caption": "Top"})
+    response = client.patch(
+        f"/api/v1/models/{model}/media/{item['id']}", json={"caption": "Top"}, headers=press()
+    )
 
     assert response.status_code == 200, response.text
     assert response.json()["media"][0]["caption"] == "Top"
@@ -672,7 +679,9 @@ def test_a_caption_is_edited(client: TestClient, model: str) -> None:
 def test_the_order_is_set_by_a_permutation(client: TestClient, model: str) -> None:
     ids = [_upload(client, model, payload).json()["media"][-1]["id"] for payload in (PNG, JPEG)]
 
-    response = client.put(f"/api/v1/models/{model}/media/order", json={"ids": ids[::-1]})
+    response = client.put(
+        f"/api/v1/models/{model}/media/order", json={"ids": ids[::-1]}, headers=press()
+    )
 
     assert response.status_code == 200, response.text
     assert [item["id"] for item in response.json()["media"]] == ids[::-1]
@@ -689,7 +698,9 @@ def test_an_order_that_is_not_a_permutation_is_refused(
         "unknown": [ids[0], "abcdefabcdef"],
     }[change]
 
-    response = client.put(f"/api/v1/models/{model}/media/order", json={"ids": wrong})
+    response = client.put(
+        f"/api/v1/models/{model}/media/order", json={"ids": wrong}, headers=press()
+    )
 
     assert response.status_code == 422, response.text
     assert [item["id"] for item in _media(client, model)] == ids
@@ -704,7 +715,7 @@ def test_a_delete_removes_the_file_and_the_entry(
         [item["file"], item["poster"]]
     )
 
-    response = client.delete(f"/api/v1/models/{model}/media/{item['id']}")
+    response = client.delete(f"/api/v1/models/{model}/media/{item['id']}", headers=press())
 
     assert response.status_code == 200, response.text
     assert response.json()["media"] == []
@@ -737,10 +748,15 @@ def test_the_legacy_id_can_be_reordered_and_removed(client: TestClient, model: s
     converted = added[0]["id"]
 
     reordered = client.put(
-        f"/api/v1/models/{model}/media/order", json={"ids": [added[1]["id"], converted]}
+        f"/api/v1/models/{model}/media/order",
+        json={"ids": [added[1]["id"], converted]},
+        headers=press(),
     )
     assert reordered.status_code == 200, reordered.text
-    assert client.delete(f"/api/v1/models/{model}/media/{converted}").status_code == 200
+    assert (
+        client.delete(f"/api/v1/models/{model}/media/{converted}", headers=press()).status_code
+        == 200
+    )
     assert [item["id"] for item in _media(client, model)] == [added[1]["id"]]
 
 
@@ -749,7 +765,7 @@ def test_a_legacy_item_is_deleted_by_its_legacy_id(
 ) -> None:
     (paths.model_dir(model) / "thumbnail.png").write_bytes(PNG)
 
-    response = client.delete(f"/api/v1/models/{model}/media/thumbnail")
+    response = client.delete(f"/api/v1/models/{model}/media/thumbnail", headers=press())
 
     assert response.status_code == 200, response.text
     assert response.json()["media"] == []
@@ -762,7 +778,11 @@ def test_the_cover_follows_the_order(client: TestClient, model: str) -> None:
     second = _upload(client, model, JPEG).json()["media"][1]
     assert client.get(f"/api/v1/models/{model}/thumbnail").content == PNG
 
-    client.put(f"/api/v1/models/{model}/media/order", json={"ids": [second["id"], first["id"]]})
+    client.put(
+        f"/api/v1/models/{model}/media/order",
+        json={"ids": [second["id"], first["id"]]},
+        headers=press(),
+    )
 
     cover = client.get(f"/api/v1/models/{model}/thumbnail")
     assert cover.content == JPEG
@@ -825,7 +845,7 @@ def test_a_video_whose_file_is_gone_is_reported_missing(
     assert listed["missing"] is True
     assert listed["size"] is None
     assert client.get(f"/api/v1/models/{model}/media/{item['id']}").status_code == 404
-    removed = client.delete(f"/api/v1/models/{model}/media/{item['id']}")
+    removed = client.delete(f"/api/v1/models/{model}/media/{item['id']}", headers=press())
     assert removed.status_code == 200, removed.text
     assert removed.json()["media"] == []
 
@@ -854,7 +874,7 @@ def test_a_restore_brings_back_a_file_but_not_its_row(
     file with no row is ignored."""
     image = _upload(client, model, PNG).json()["media"][0]
     commit = client.get(f"/api/v1/models/{model}/versions").json()[0]["commit"]
-    client.delete(f"/api/v1/models/{model}/media/{image['id']}")
+    client.delete(f"/api/v1/models/{model}/media/{image['id']}", headers=press())
 
     restored = client.post(f"/api/v1/models/{model}/versions/{commit}/restore", headers=press())
 
@@ -869,8 +889,10 @@ def test_a_built_ins_shipped_media_is_served_and_read_only(client: TestClient) -
     assert client.get(f"/api/v1/models/{BUILTIN}/media/front").content == PNG
 
     writes = [
-        client.patch(f"/api/v1/models/{BUILTIN}/media/front", json={"caption": "x"}),
-        client.delete(f"/api/v1/models/{BUILTIN}/media/front"),
+        client.patch(
+            f"/api/v1/models/{BUILTIN}/media/front", json={"caption": "x"}, headers=press()
+        ),
+        client.delete(f"/api/v1/models/{BUILTIN}/media/front", headers=press()),
     ]
 
     for response in writes:
@@ -906,15 +928,17 @@ def test_media_is_added_to_a_built_in_without_moving_its_revision(
     assert poster.content == JPEG
 
     caption = client.patch(
-        f"/api/v1/models/{BUILTIN}/media/{added['id']}", json={"caption": "Keys"}
+        f"/api/v1/models/{BUILTIN}/media/{added['id']}", json={"caption": "Keys"}, headers=press()
     )
     assert caption.status_code == 200, caption.text
     order = client.put(
-        f"/api/v1/models/{BUILTIN}/media/order", json={"ids": [video["id"], added["id"]]}
+        f"/api/v1/models/{BUILTIN}/media/order",
+        json={"ids": [video["id"], added["id"]]},
+        headers=press(),
     )
     assert order.status_code == 200, order.text
     assert [item["id"] for item in order.json()["media"]] == ["front", video["id"], added["id"]]
-    removed = client.delete(f"/api/v1/models/{BUILTIN}/media/{video['id']}")
+    removed = client.delete(f"/api/v1/models/{BUILTIN}/media/{video['id']}", headers=press())
     assert removed.status_code == 200, removed.text
     assert [item["caption"] for item in removed.json()["media"]] == ["", "Keys"]
     assert client.get(f"/api/v1/models/{BUILTIN}").json()["version"] == before["version"]
@@ -923,7 +947,9 @@ def test_media_is_added_to_a_built_in_without_moving_its_revision(
 def test_a_built_ins_cover_is_chosen_not_ordered(client: TestClient) -> None:
     added = _upload(client, BUILTIN, JPEG).json()["media"][1]
 
-    response = client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]})
+    response = client.put(
+        f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]}, headers=press()
+    )
 
     assert response.status_code == 200, response.text
     record = response.json()
@@ -933,10 +959,12 @@ def test_a_built_ins_cover_is_chosen_not_ordered(client: TestClient) -> None:
     listed = {model["slug"]: model for model in client.get("/api/v1/models").json()}
     assert listed[BUILTIN]["media_cover"] == added["id"]
 
-    reset = client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": None})
+    reset = client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": None}, headers=press())
     assert reset.json()["media_cover"] is None
     assert [item["id"] for item in reset.json()["media"]] == ["front", added["id"]]
-    unknown = client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": "abcdefabcdef"})
+    unknown = client.put(
+        f"/api/v1/models/{BUILTIN}/media/cover", json={"id": "abcdefabcdef"}, headers=press()
+    )
     assert unknown.status_code == 404
 
 
@@ -944,17 +972,19 @@ def test_a_cover_of_mine_is_its_first_item(client: TestClient, model: str) -> No
     first = _upload(client, model, PNG).json()["media"][0]
     second = _upload(client, model, JPEG).json()["media"][1]
 
-    response = client.put(f"/api/v1/models/{model}/media/cover", json={"id": second["id"]})
+    response = client.put(
+        f"/api/v1/models/{model}/media/cover", json={"id": second["id"]}, headers=press()
+    )
 
     assert response.status_code == 200, response.text
     assert [item["id"] for item in response.json()["media"]] == [second["id"], first["id"]]
-    none = client.put(f"/api/v1/models/{model}/media/cover", json={"id": None})
+    none = client.put(f"/api/v1/models/{model}/media/cover", json={"id": None}, headers=press())
     assert none.status_code == 422
 
 
 def test_a_duplicate_of_a_built_in_takes_what_was_added_to_it(client: TestClient) -> None:
     added = _upload(client, BUILTIN, JPEG, caption="Mine").json()["media"][1]
-    client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]})
+    client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]}, headers=press())
 
     response = client.post(
         f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
@@ -1030,19 +1060,10 @@ def test_a_mine_model_json_media_entry_is_not_the_list(
 
 
 @pytest.fixture
-def small_limit_client(
-    data_dir: Path, seed_dir: Path, fake_openscad: str, model: str, pg_conninfo: str
-) -> Iterator[TestClient]:
-    settings = Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-        media_upload_max_bytes=1024 * 1024,
-        database_url=pg_conninfo,
-        temporal_address=UNUSED_TEMPORAL_ADDRESS,
-    )
-    with TestClient(create_app(settings)) as test_client:
+def small_limit_client(settings: Settings, model: str) -> Iterator[TestClient]:
+    # On the api tests' Temporal: a write is a `library` operation (#1054).
+    limited = settings.model_copy(update={"media_upload_max_bytes": 1024 * 1024})
+    with TestClient(create_app(limited)) as test_client:
         yield test_client
 
 

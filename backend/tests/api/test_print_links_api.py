@@ -59,7 +59,7 @@ def test_deleting_an_output_forgets_its_links(client: TestClient, model: str) ->
         )
     )
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
 
     assert asyncio.run(links.output_for(18)) is None
 

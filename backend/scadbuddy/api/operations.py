@@ -34,6 +34,7 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation, OperationAccepted
+from scadbuddy.render.inputs import nul_at
 from scadbuddy.workflows.commands import (
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
@@ -170,6 +171,11 @@ def temporal_refused(what: str, detail: str, *, may_have_started: bool | None) -
     )
 
 
+#: The problems after which the operation may still run, so its claims are kept, as
+#: they are after any whose ``MAY_HAVE_STARTED`` is true (a refused start, #1316).
+_MAY_STILL_RUN = frozenset({STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM})
+
+
 #: The client's key for one deliberate press (§4.2 step 1).
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
 
@@ -303,10 +309,24 @@ async def run_operation(
 ) -> dict[str, Any] | OperationAccepted:
     """Run ``kind`` as an operation; its result body, or 202 with the operation.
     A refusal or a recorded failure is raised as the problem the route answers with.
-    ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
-    the operation may still run. ``before_start`` is a route's own refusal, made only
-    when no record answers and the same request is not still running: a repeat is its
-    first answer whatever has changed since (§4.2)."""
+    ``claimed`` is dropped once the answer is final: not on a 202, on a 503 that says
+    the operation may still run (a recorded 503 is final, review #1194 1.1), or on a
+    refused start that may have reached Temporal.
+    ``before_start`` is a route's own refusal, made only when no record answers and the
+    same request is not still running: a repeat is its first answer whatever has changed
+    since (§4.2). Its refusal, 503 included, releases ``claimed`` too: nothing started
+    (review 3e final I1)."""
+    refused = False
+
+    async def refuse() -> None:
+        nonlocal refused
+        assert before_start is not None
+        try:
+            await before_start()
+        except ApiError:
+            refused = True
+            raise
+
     try:
         result = await _run_operation(
             ops,
@@ -315,10 +335,13 @@ async def run_operation(
             subject=subject,
             request=request,
             idempotency_key=idempotency_key,
-            before_start=before_start,
+            before_start=refuse if before_start is not None else None,
         )
     except ApiError as error:
-        if claimed is not None and error.status != status.HTTP_503_SERVICE_UNAVAILABLE:
+        may_still_run = (
+            error.type in _MAY_STILL_RUN or error.extensions.get(MAY_HAVE_STARTED) is True
+        )
+        if claimed is not None and (refused or not may_still_run):
             await _release(ops, claimed)
         raise
     if claimed is not None and not (
@@ -352,6 +375,11 @@ async def _run_operation(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"This request is {size} bytes; at most {MAX_REQUEST_BYTES} are accepted here.",
         )
+    nul = nul_at(body, "request")
+    if nul is not None:
+        # The record's jsonb holds none: its insert would fail, as a 503 every retry
+        # repeats (#965).
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{nul} contains a NUL byte")
     key = operation_key(kind.name, subject, body, idempotency_key)
     recorded = await ops.store.find(key)
     if recorded is not None:

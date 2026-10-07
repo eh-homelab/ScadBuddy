@@ -49,6 +49,7 @@ from tests.api.test_send import (
     upload_route,
 )
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 from tests.test_bambu3mf import add_plate
 
 # A run and the dialog both read or record the output's upload copies (#316), which
@@ -736,7 +737,9 @@ def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
         "job_id"
     ]
     wait_for_job(client, job_id)
-    output_id = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()["id"]
+    output_id = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    ).json()["id"]
     upload = upload_route()
     slice_routes()
     queue_route()
