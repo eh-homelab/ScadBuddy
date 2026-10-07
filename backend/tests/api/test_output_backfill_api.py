@@ -21,6 +21,7 @@ from scadbuddy.library.outputs import OUTPUT_HOLDER, BackfillState, OutputStore,
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.refs import BlobRefs
 from tests.api.conftest import wait_for_job
+from tests.support.operations import press
 from tests.support.store import store_pool
 
 Pool = ConnectionPool[Connection[DictRow]]
@@ -52,7 +53,9 @@ def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str
     """A saved output of a pasted template, made to look like one saved before phase 5:
     no manifest.json and no Parts held."""
     if client.get(f"/api/v1/models/{slug}").status_code == 404:
-        created = client.post("/api/v1/models", json={"name": slug, "source": "cube(10);\n"})
+        created = client.post(
+            "/api/v1/models", json={"name": slug, "source": "cube(10);\n"}, headers=press()
+        )
         assert created.status_code == 201, created.text
     queued = client.post(f"/api/v1/models/{slug}/render", json={"inputs": {"params": {}}})
     assert queued.status_code == 202, queued.text
