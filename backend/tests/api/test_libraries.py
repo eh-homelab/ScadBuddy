@@ -115,7 +115,7 @@ def lib_client(libraries_app: FastAPI) -> Iterator[TestClient]:
 
 
 def create_model(client: TestClient, name: str = SLUG) -> dict[str, Any]:
-    response = client.post("/api/v1/models", json={"name": name, "source": SOURCE})
+    response = client.post("/api/v1/models", json={"name": name, "source": SOURCE}, headers=press())
     assert response.status_code == 201, response.text
     created: dict[str, Any] = response.json()
     return created
@@ -242,7 +242,9 @@ def test_the_metadata_patch_takes_no_libraries(lib_client: TestClient) -> None:
     """A pin is a fetched commit; it is set by the pin route, never typed in."""
     create_model(lib_client)
 
-    patched = lib_client.patch(f"/api/v1/models/{SLUG}", json={"libraries": ["BOSL2"]})
+    patched = lib_client.patch(
+        f"/api/v1/models/{SLUG}", json={"libraries": ["BOSL2"]}, headers=press()
+    )
 
     assert patched.status_code == 200
     assert patched.json()["libraries"] == []
@@ -612,7 +614,7 @@ def test_an_imported_model_takes_pins_like_any_other(
     _, commits = upstream
     raw = "https://raw.githubusercontent.com/someone/models/main/widget.scad"
     respx.get(raw).mock(return_value=httpx.Response(200, text=SOURCE))
-    imported = lib_client.post("/api/v1/models/import", json={"url": raw})
+    imported = lib_client.post("/api/v1/models/import", json={"url": raw}, headers=press())
     assert imported.status_code == 201, imported.text
     log = tmp_path / "openscadpath.log"
     set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
@@ -906,6 +908,7 @@ def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Respons
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
         },
+        headers=press(),
     )
     return response
 
@@ -1426,7 +1429,7 @@ def test_the_sweep_keeps_every_checkout_any_revision_pins(
     pin(lib_client, "BOSL2", ref="v2")  # v2: pinned live
     # MCAD: pinned only by a model that has since been deleted.
     pin(lib_client, "MCAD", "gadget", url=other_url, ref="x1")
-    assert lib_client.delete("/api/v1/models/gadget").status_code == 204
+    assert lib_client.delete("/api/v1/models/gadget", headers=press()).status_code == 204
     for entry in lib_client.get("/api/v1/libraries/installed").json():
         _age(paths.libraries / entry["name"] / entry["commit"])
     unpinned = _fake_checkout(paths, "BOSL2", "c" * 40)
@@ -1944,7 +1947,9 @@ def test_a_pin_on_the_library_worker_holds_off_another_processs_removal(
             removal.append(None)
 
     with ThreadPoolExecutor(2) as threads:
-        pinned = threads.submit(lib_client.put, f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+        pinned = threads.submit(
+            lib_client.put, f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press()
+        )
         assert cloned.wait(60)
         checkouts = list((state.paths.libraries / "BOSL2").iterdir())
         assert checkouts
