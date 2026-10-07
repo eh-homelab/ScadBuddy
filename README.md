@@ -202,6 +202,12 @@ on shutdown.
     `Recreate` rollout, or the old replicas scaled to 0 first: a replica still on the
     old build takes the new sweep's task and fails it as unregistered, and since a
     sweep is not retried, that sweep waits for the next tick (a day, by default).
+  - **This release adds a sweep**, `housekeeping_attach_backfills` (#902's backstop:
+    an output re-render whose `job.done` no API replica heard), so it needs that
+    `Recreate` rollout. Each replica attaches a finished re-render to its output when
+    it hears the job settle, and every API start runs one backstop pass whatever the
+    interval, so with 0 a re-render missed while every replica was down waits for the
+    next start.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
@@ -226,10 +232,12 @@ on shutdown.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
     (`render_jobs`), so accepted renders survive a restart. A row is written by its
     workflow's first activity, so it exists only once Temporal has the render; with
-    Temporal unreachable a render is refused (503 `temporal-unavailable`). At start and
-    every five minutes the API fails the rows nothing will settle: one whose workflow
-    closed without settling it (terminated by hand, say), and a pending or running one
-    an older release left with no workflow running. Each pass lists the open
+    Temporal unreachable a render is refused (503 `temporal-unavailable`). A job's
+    workflow is bounded (4 × `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT`), so a template
+    pipeline that never yields times out. At start and every five minutes the API fails
+    the rows nothing will settle: one whose workflow closed without settling it
+    (terminated by hand, or timed out), and a pending or running one an older release
+    left with no workflow running. Each pass lists the open
     `TemplatePipeline` runs from Visibility once and describes only rows over 30 s old
     that the listing leaves out; `scadbuddy_render_settle_failed_total` and
     `scadbuddy_render_settle_errors_total` count what it failed and the passes that

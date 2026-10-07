@@ -162,6 +162,25 @@ async def test_events_published_before_start_are_sent_on_start(pg_conninfo: str)
 
 
 @pytest.mark.requires_postgres
+async def test_a_bus_hears_what_it_publishes_as_soon_as_it_has_started(
+    pg_conninfo: str,
+) -> None:
+    # #1745: `start` returned before the listener's LISTEN, so an event published
+    # straight after it (an app's first request) could commit its NOTIFY to nobody.
+    _migrated(pg_conninfo)
+    listener = PgListener(pg_conninfo, check_interval=1.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
+    subscription = bus.subscribe()
+    await bus.start()
+    try:
+        assert listener.backend_pid is not None
+        bus.publish(_model("first"))
+        assert _slugs([await _next(subscription)]) == ["first"]
+    finally:
+        await bus.aclose()
+
+
+@pytest.mark.requires_postgres
 async def test_starting_before_the_store_migrated_says_so(pg_conninfo: str) -> None:
     """The ordering the lifespan relies on, asserted: an unmigrated database is a
     clear error at start, not `relation "events" does not exist` in every write."""
@@ -368,16 +387,34 @@ async def test_the_log_replays_after_a_seq_in_pages(make_bus: BusFactory) -> Non
 
 @pytest.mark.requires_postgres
 async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
-    make_bus: BusFactory, pg_conninfo: str
+    make_bus: BusFactory, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The bus's own pruner prunes once when it starts (#1787): under load that first
+    prune came after the events below were logged and pruned them itself, so the
+    test's prune had nothing left to remove. Here it is held until they are heard,
+    and the totals are what is checked, whichever prune removed the rows."""
+    heard = asyncio.Event()
+    pruner = PgNotifyEventBus._pruner
+
+    async def late_pruner(self: PgNotifyEventBus) -> None:
+        await heard.wait()
+        await pruner(self)
+
+    monkeypatch.setattr(PgNotifyEventBus, "_pruner", late_pruner)
     bus = await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
     subscription = bus.subscribe()
     for n in range(5):
         bus.publish(_model(f"m{n}"))
     for _ in range(5):
         await _next(subscription)
+    heard.set()
 
-    assert await bus.prune_log() == 2  # by rows
+    def pruned() -> float:
+        return _sample(bus.metrics, "scadbuddy_event_log_pruned_total")
+
+    await bus.prune_log()  # by rows
+    await _until(lambda: pruned() >= 2)
+    assert pruned() == 2
     replay = await bus.replay(0)
     assert _slugs([logged.event for logged in replay.events]) == ["m2", "m3", "m4"]
     assert replay.gap  # m0 and m1 are gone: a client resuming from 0 must resync
@@ -388,9 +425,33 @@ async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
             "UPDATE events SET logged_at = now() - interval '2 hours' WHERE seq = %s",
             (replay.events[0].seq,),
         )
-    assert await bus.prune_log() == 1  # by age
+    await bus.prune_log()  # by age
+    await _until(lambda: pruned() >= 3)
+    assert pruned() == 3
     assert _slugs([logged.event for logged in (await bus.replay(0)).events]) == ["m3", "m4"]
-    assert _sample(bus.metrics, "scadbuddy_event_log_pruned_total") == 3
+
+
+@pytest.mark.requires_postgres
+async def test_prune_log_returns_the_rows_it_removed(
+    make_bus: BusFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no pruner of the bus's own (#1787), each `prune_log` is the only one: what
+    it returns is what it removed, and what the metric counts."""
+
+    async def no_pruner(self: PgNotifyEventBus) -> None:
+        return None
+
+    monkeypatch.setattr(PgNotifyEventBus, "_pruner", no_pruner)
+    bus = await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
+    subscription = bus.subscribe()
+    for n in range(5):
+        bus.publish(_model(f"m{n}"))
+    for _ in range(5):
+        await _next(subscription)
+
+    assert await bus.prune_log() == 2
+    assert await bus.prune_log() == 0
+    assert _sample(bus.metrics, "scadbuddy_event_log_pruned_total") == 2
 
 
 @pytest.mark.requires_postgres
