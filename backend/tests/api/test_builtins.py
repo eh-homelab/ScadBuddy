@@ -19,6 +19,7 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -108,7 +109,9 @@ def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
     client: TestClient, paths: DataPaths
 ) -> None:
     """`builtin:keychain` and `keychain` share a slug, never jobs, outputs or history (#206)."""
-    created = client.post("/api/v1/models", json={"name": "keychain", "source": "width = 5;\n"})
+    created = client.post(
+        "/api/v1/models", json={"name": "keychain", "source": "width = 5;\n"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     mine = created.json()["slug"]
     assert mine == "keychain"
@@ -196,7 +199,10 @@ def test_a_built_in_cannot_be_changed(
     commit = _versions(client, BUILTIN)[0]["commit"]
 
     response = client.request(
-        method, f"/api/v1/models/{BUILTIN}{suffix.format(commit=commit)}", json=body
+        method,
+        f"/api/v1/models/{BUILTIN}{suffix.format(commit=commit)}",
+        json=body,
+        headers=press(),
     )
 
     assert response.status_code == 403, response.text
@@ -259,7 +265,9 @@ def test_the_mirror_is_never_a_template_of_mine(client: TestClient) -> None:
     assert client.get("/api/v1/models/_builtin").status_code == 422
     assert client.get("/api/v1/models/builtin:_builtin").status_code == 422
 
-    created = client.post("/api/v1/models", json={"name": "_builtin", "source": SOURCE})
+    created = client.post(
+        "/api/v1/models", json={"name": "_builtin", "source": SOURCE}, headers=press()
+    )
 
     assert created.status_code == 201, created.text
     assert created.json()["slug"] == "builtin"

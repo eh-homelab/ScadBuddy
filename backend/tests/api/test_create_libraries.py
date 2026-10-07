@@ -22,6 +22,7 @@ from scadbuddy.library.libraries import LibraryStore
 from tests.api import test_libraries as shared
 from tests.api.conftest import set_fake_env
 from tests.api.test_libraries import SLUG, SOURCE, create_model, pin
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -55,6 +56,7 @@ def test_a_paste_pins_its_libraries_in_its_first_revision_and_checks_with_them(
     created = lib_client.post(
         "/api/v1/models",
         json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2", "BOSL2"]},
+        headers=press(),
     )
 
     assert created.status_code == 201, created.text
@@ -76,6 +78,7 @@ def test_an_upload_pins_the_libraries_its_form_names(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
         data={"libraries": ["BOSL2"]},
+        headers=press(),
     )
 
     assert created.status_code == 201, created.text
@@ -92,6 +95,7 @@ def test_a_create_naming_a_library_outside_the_catalogue_clones_nothing(
         refused = lib_client.post(
             "/api/v1/models",
             json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2", "NopeSCAD"]},
+            headers=press(),
         )
 
     assert refused.status_code == 422, refused.text
@@ -113,11 +117,13 @@ def test_a_create_naming_more_libraries_than_the_cap_clones_nothing(
                 "/api/v1/models",
                 files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
                 data={"libraries": [*names, "BOSL2"]},
+                headers=press(),
             )
         else:
             refused = lib_client.post(
                 "/api/v1/models",
                 json={"name": "Widget", "source": SOURCE, "libraries": [*names, "BOSL2"]},
+                headers=press(),
             )
 
     assert refused.status_code == 422, refused.text
@@ -134,6 +140,7 @@ def test_a_create_naming_as_many_libraries_as_the_cap_is_not_refused_for_it(
         refused = lib_client.post(
             "/api/v1/models",
             json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2", *unknown]},
+            headers=press(),
         )
 
     # Past the cap, to the catalogue check.
@@ -150,6 +157,7 @@ def test_a_create_naming_something_that_is_not_a_library_name_is_a_422(
         refused = lib_client.post(
             "/api/v1/models",
             json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2", "../etc", "../etc"]},
+            headers=press(),
         )
 
     assert refused.status_code == 422, refused.text
@@ -166,6 +174,7 @@ def test_a_malformed_library_name_keeps_the_bodys_other_errors(
         refused = lib_client.post(
             "/api/v1/models",
             json={"source": SOURCE, "libraries": ["BOSL2", "../etc", "../etc"]},
+            headers=press(),
         )
 
     assert refused.status_code == 422, refused.text
@@ -190,11 +199,13 @@ def test_a_create_that_would_conflict_clones_nothing(
                 "/api/v1/models",
                 files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
                 data={"libraries": ["BOSL2"]},
+                headers=press(),
             )
         else:
             refused = lib_client.post(
                 "/api/v1/models",
                 json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2"]},
+                headers=press(),
             )
 
     assert refused.status_code == 409, refused.text
@@ -230,6 +241,7 @@ def test_a_create_with_a_nul_byte_clones_nothing(
         refused = lib_client.post(
             "/api/v1/models",
             json={"name": "Widget", "source": "cube(1);\x00\n", "libraries": ["BOSL2"]},
+            headers=press(),
         )
 
     assert refused.status_code == 422, refused.text
@@ -247,6 +259,7 @@ def test_an_upload_naming_something_that_is_not_a_library_name_is_a_422(
             "/api/v1/models",
             files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
             data={"libraries": ["BOSL2", "../etc"]},
+            headers=press(),
         )
 
     assert refused.status_code == 422, refused.text
@@ -262,7 +275,9 @@ def test_a_create_whose_library_cannot_be_fetched_is_a_502_and_creates_nothing(
     store.catalogue["BOSL2"] = store.catalogue["BOSL2"].model_copy(update={"ref": "v9"})
 
     refused = lib_client.post(
-        "/api/v1/models", json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2"]}
+        "/api/v1/models",
+        json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2"]},
+        headers=press(),
     )
 
     assert refused.status_code == 502, refused.text
@@ -290,6 +305,7 @@ def test_a_dropped_model_json_pin_wins_over_a_named_library(
                 ),
             },
             data={"libraries": ["BOSL2"]},
+            headers=press(),
         )
 
     assert created.status_code == 201, created.text
@@ -311,7 +327,9 @@ def test_a_create_holds_the_checkout_gate_until_it_has_recorded_the_pin(
 
     with patch.object(state.catalogue, "create", side_effect=create):
         created = lib_client.post(
-            "/api/v1/models", json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2"]}
+            "/api/v1/models",
+            json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2"]},
+            headers=press(),
         )
 
     assert created.status_code == 201, created.text
