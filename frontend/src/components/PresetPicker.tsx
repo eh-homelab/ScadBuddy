@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { Markdown } from '../agent/chat/Markdown'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
@@ -19,6 +19,7 @@ import {
   presetInputs,
   presetTagsProblem,
 } from '../lib/presets'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -38,6 +39,17 @@ interface Props {
    * Null means they could not be, and the caller has said so; nothing is applied.
    */
   migrate?: (inputs: JsonObject) => JsonObject | null | Promise<JsonObject | null>
+  /**
+   * #355 — the page customizes an old revision. A preset belongs to the template and
+   * is checked against its current revision, which refuses this one's own parameters,
+   * so the values on screen can be neither saved nor updated into a preset.
+   */
+  pinned?: boolean
+  /**
+   * #350 — changes whenever the page resets the values to the defaults, which leaves
+   * them no preset's: the selection is cleared, so Update cannot empty the preset.
+   */
+  resetKey?: number
 }
 
 interface Selection {
@@ -60,6 +72,21 @@ function message(caught: unknown): string {
   return caught instanceof ApiError ? caught.detail : String(caught)
 }
 
+/** #357 — what a preset deleted in another tab, or by the assistant, leaves to say. */
+const DELETED_ELSEWHERE = 'That preset was deleted elsewhere.'
+
+function gone(caught: unknown): boolean {
+  return caught instanceof ApiError && caught.status === 404
+}
+
+/** The server's longest preset name (`library/presets.py`), in code points as it counts. */
+const MAX_NAME = 80
+
+/** `base` with `suffix`, the base cut short so the whole fits the name limit (#350). */
+function prefill(base: string, suffix: string): string {
+  return [...base].slice(0, MAX_NAME - [...suffix].length).join('') + suffix
+}
+
 const FIELD =
   'w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong'
 
@@ -69,7 +96,16 @@ const FIELD =
  * from there only the value that differs this time — a name, a colour — needs changing.
  * Saving stores only what differs from the defaults.
  */
-export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: Props) {
+export function PresetPicker({
+  slug,
+  schema,
+  values,
+  extra,
+  onApply,
+  migrate,
+  pinned = false,
+  resetKey,
+}: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
   const shipped = presets.filter((preset) => preset.origin === 'template')
@@ -94,6 +130,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
    * or the tags when they are refused here, else the name, which only the server judges.
    */
   const [invalidField, setInvalidField] = useState<'name' | 'description' | 'tags' | null>(null)
+  const nameInput = useRef<HTMLInputElement>(null)
   const descriptionInput = useRef<HTMLTextAreaElement>(null)
   const tagsInput = useRef<HTMLInputElement>(null)
   const dialogErrorId = useId()
@@ -102,6 +139,52 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
   const [pending, setPending] = useState<ParamPreset | null>(null)
   /** #358 — an Update would drop the skipped values for good, so it asks first. */
   const [confirmingUpdate, setConfirmingUpdate] = useState(false)
+
+  /**
+   * #357 — the presets changed elsewhere (another tab, the assistant): read them again.
+   * The selected one follows its new details; gone, it is let go, with the values it
+   * put on screen kept. A resync means changes may have been missed, so it reads too.
+   */
+  useSubscription(`model:${slug}`, (signal) => {
+    if (signal !== 'resync' && signal.kind !== 'presets.changed') return
+    presetsState.refresh((list) => {
+      setSelection((current) => {
+        if (!current) return current
+        const now = list.find((preset) => preset.id === current.preset.id)
+        if (now) return now === current.preset ? current : { ...current, preset: now }
+        setSkipped([])
+        setError(DELETED_ELSEWHERE)
+        return null
+      })
+      return true
+    })
+  })
+
+  /** #357 — a write found the selected preset gone: drop it and say why. */
+  function lost(id: string) {
+    presetsState.setData(presets.filter((preset) => preset.id !== id), { supersede: true })
+    setSelection(null)
+    setSkipped([])
+    setNaming(null)
+    setError(DELETED_ELSEWHERE)
+  }
+
+  // #350 — a reset puts the defaults on screen: no preset's values any more.
+  const [seenReset, setSeenReset] = useState(resetKey)
+  if (resetKey !== seenReset) {
+    setSeenReset(resetKey)
+    setSelection(null)
+    setSkipped([])
+    setError(null)
+  }
+
+  // #350 — the prefill selected, so typing replaces it rather than appending to it.
+  // After the dialog's own effect, which focuses its panel.
+  useEffect(() => {
+    if (naming === null) return
+    nameInput.current?.focus()
+    nameInput.current?.select()
+  }, [naming])
 
   const selected = selection?.preset
   const modified = selection !== null && !sameValues(values, selection.applied)
@@ -154,7 +237,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
   }
 
   function openSaveAs() {
-    setName(selected && modified ? `${selected.name} (variant)` : '')
+    setName(selected && modified ? prefill(selected.name, ' (variant)') : '')
     setDescription('')
     setTagsText('')
     setNameError(null)
@@ -164,7 +247,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
 
   function openDuplicate() {
     if (!selected) return
-    setName(`${selected.name} copy`)
+    setName(prefill(selected.name, ' copy'))
     setNameError(null)
     setInvalidField(null)
     setNaming('duplicate')
@@ -212,6 +295,12 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
     setInvalidField('name')
   }
 
+  /** An edit answers whatever the error said, so it goes (#350). */
+  function edited() {
+    setNameError(null)
+    setInvalidField(null)
+  }
+
   function closeNaming() {
     if (!busy) setNaming(null)
   }
@@ -219,7 +308,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
   async function saveAs(event?: FormEvent) {
     event?.preventDefault()
     const chosen = name.trim()
-    if (!chosen || busy) return
+    if (!chosen || busy || pinned) return
     setNameError(null)
     const described = details()
     if (!described) return
@@ -259,7 +348,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
       setSelection({ preset: copy, applied: applyPreset(schema, copy).values })
       setNaming(null)
     } catch (caught) {
-      refused(caught)
+      if (gone(caught)) lost(selected.id)
+      else refused(caught)
     } finally {
       setBusy(false)
     }
@@ -284,7 +374,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
       setSelection((current) => (current ? { ...current, preset: updated } : current))
       setNaming(null)
     } catch (caught) {
-      refused(caught)
+      if (gone(caught)) lost(selected.id)
+      else refused(caught)
     } finally {
       setBusy(false)
     }
@@ -297,7 +388,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
   }
 
   async function update(confirmed = false) {
-    if (!selected || !editable || busy) return
+    if (!selected || !editable || busy || pinned) return
     // The server refuses a parameter the template does not have, so the stored values
     // cannot be kept: Update replaces them, and says so before it does.
     if (skipped.length > 0 && !confirmed) {
@@ -315,7 +406,8 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
       setSelection({ preset: updated, applied: values })
       setSkipped([])
     } catch (caught) {
-      setError(message(caught))
+      if (gone(caught)) lost(selected.id)
+      else setError(message(caught))
     } finally {
       setBusy(false)
     }
@@ -332,7 +424,9 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
       setSkipped([])
       setConfirmingDelete(false)
     } catch (caught) {
-      setError(message(caught))
+      // Deleted already: what was asked for is done, and the list says so.
+      if (gone(caught)) lost(selected.id)
+      else setError(message(caught))
       setConfirmingDelete(false)
     } finally {
       setBusy(false)
@@ -376,14 +470,26 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
         </select>
       </div>
 
+      {/* #352 — its own line above the buttons: beside them it wrapped word by word
+          into a narrow column, and a long name pushed it out of the panel.
+          #351 — always in the page, so "Changed from …" is announced as it appears;
+          out of the flow while empty, so it adds no gap. */}
+      <p
+        role="status"
+        data-testid={modified ? 'preset-modified' : undefined}
+        title={modified ? `Changed from ${selected?.name ?? ''}` : undefined}
+        className={modified ? 'min-w-0 truncate text-[12px] text-faint' : 'sr-only'}
+      >
+        {modified && <>Changed from {selected?.name}</>}
+      </p>
       <div className="flex flex-wrap items-center justify-end gap-1">
-        {modified && (
-          <span data-testid="preset-modified" className="mr-auto text-[12px] text-faint">
-            Changed from {selected?.name}
-          </span>
-        )}
-        {editable && modified && (
-          <Button size="sm" onClick={() => void update()} disabled={busy}>
+        {editable && modified && !pinned && (
+          <Button
+            size="sm"
+            onClick={() => void update()}
+            disabled={busy}
+            aria-label={`Update preset ${selected?.name ?? ''}`}
+          >
             Update
           </Button>
         )}
@@ -397,7 +503,7 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
             Duplicate
           </Button>
         )}
-        <Button size="sm" onClick={openSaveAs} disabled={busy}>
+        <Button size="sm" onClick={openSaveAs} disabled={busy || pinned}>
           Save as preset…
         </Button>
         {editable && (
@@ -422,6 +528,12 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
           </Button>
         )}
       </div>
+
+      {pinned && (
+        <p data-testid="preset-pinned" className="text-[12px] text-faint">
+          Presets are saved against the current version.
+        </p>
+      )}
 
       {selected && (selected.description || selected.tags.length > 0) && (
         <div data-testid="preset-details" className="flex flex-col gap-1 text-[12px] text-muted">
@@ -490,9 +602,13 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
           <label className="flex flex-col gap-1 text-[13px] text-muted">
             Preset name
             <input
+              ref={nameInput}
               value={name}
-              onChange={(event) => setName(event.target.value)}
-              maxLength={80}
+              onChange={(event) => {
+                setName(event.target.value)
+                edited()
+              }}
+              maxLength={MAX_NAME}
               autoFocus
               aria-invalid={invalidField === 'name' || undefined}
               aria-describedby={invalidField === 'name' && nameError ? dialogErrorId : undefined}
@@ -506,7 +622,10 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
                 <textarea
                   ref={descriptionInput}
                   value={description}
-                  onChange={(event) => setDescription(event.target.value)}
+                  onChange={(event) => {
+                    setDescription(event.target.value)
+                    edited()
+                  }}
                   rows={3}
                   aria-invalid={invalidField === 'description' || undefined}
                   aria-describedby={
@@ -520,7 +639,10 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
                 <input
                   ref={tagsInput}
                   value={tagsText}
-                  onChange={(event) => setTagsText(event.target.value)}
+                  onChange={(event) => {
+                    setTagsText(event.target.value)
+                    edited()
+                  }}
                   aria-invalid={invalidField === 'tags' || undefined}
                   aria-describedby={invalidField === 'tags' && nameError ? dialogErrorId : undefined}
                   placeholder="gift, small"
@@ -567,8 +689,13 @@ export function PresetPicker({ slug, schema, values, extra, onApply, migrate }: 
         }
       >
         <p className="text-[13px] text-muted">
-          Applying {pending?.name} replaces them. To keep them, cancel and{' '}
-          {editable ? `update ${selected?.name} or ` : ''}save them as a preset first.
+          Applying {pending?.name} replaces them.
+          {!pinned && (
+            <>
+              {' '}To keep them, cancel and {editable ? `update ${selected?.name} or ` : ''}save
+              them as a preset first.
+            </>
+          )}
         </p>
       </Dialog>
 

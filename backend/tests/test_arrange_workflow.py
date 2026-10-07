@@ -1,10 +1,12 @@
-"""Arrange runs as a workflow on its own render_jobs row (spec 2026-09-27 §3.4, §7)."""
+"""Arrange runs as a `TemplatePipeline` of kind `arrange` on its own render_jobs row
+(spec 2026-09-27 §3.4, §7)."""
 
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from temporalio.worker import Worker
@@ -12,15 +14,16 @@ from temporalio.worker import Worker
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render import submit as submit_module
+from scadbuddy.render.inputs import arrange_key
 from scadbuddy.render.job_models import Job, now
-from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.projection import workflow_id_for_key
 from scadbuddy.render.submit import RenderService
-from scadbuddy.workflows.models import ArrangeInputs, PackItem, PlateSize
-from scadbuddy.workflows.pipelines import Arrange
+from scadbuddy.workflows.models import ArrangeInputs, PackItem, PlateSize, RenderAnswer, RenderStart
+from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.support.pipelines import FakeWorld
 from tests.support.temporal import temporal_client
 from tests.test_arrange_packing import part
-from tests.test_submit import projection  # noqa: F401  (the fixture)
 
 PLATE = PlateSize(key="default", width=256.0, depth=256.0)
 
@@ -53,9 +56,11 @@ async def _run(world: FakeWorld, job: Job) -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         async with Worker(
-            client, task_queue=queue, workflows=[Arrange], activities=world.activities()
+            client, task_queue=queue, workflows=[TemplatePipeline], activities=world.activities()
         ):
-            await client.execute_workflow(Arrange.run, job, id=f"render-{job.id}", task_queue=queue)
+            await client.execute_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
 
 
 @pytest.mark.requires_temporal
@@ -85,52 +90,65 @@ async def test_an_arrange_that_cannot_pack_fails_with_the_reason() -> None:
     assert world.outputs == []
 
 
-@pytest.mark.requires_postgres
-async def test_the_reconciler_starts_an_arrange_row_as_arrange(
-    projection: JobProjection,  # noqa: F811
-    tmp_path: Path,
-) -> None:
-    client = MagicMock()
-    client.start_workflow = AsyncMock(side_effect=RuntimeError("temporal is down"))
-    svc = RenderService(
-        projection=projection,
-        client=client,
+class _Starts:
+    """`start_command`, recorded: each start answers a job, coalesced when its id was
+    started before."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, RenderStart, str]] = []
+        self.jobs: dict[str, Job] = {}
+
+    async def __call__(
+        self, _client: object, workflow: str, start: RenderStart, **kwargs: Any
+    ) -> RenderAnswer:
+        self.calls.append((workflow, start, kwargs["id"]))
+        coalesced = kwargs["id"] in self.jobs
+        if not coalesced:
+            self.jobs[kwargs["id"]] = Job(
+                id=uuid.uuid4().hex,
+                slug=start.slug,
+                kind=start.kind,
+                inputs=start.inputs,
+                created_at=now(),
+            )
+        return RenderAnswer(job=self.jobs[kwargs["id"]], coalesced=coalesced)
+
+
+def _service(tmp_path: Path) -> RenderService:
+    return RenderService(
+        projection=MagicMock(),
+        client=MagicMock(),
         task_queue="q",
         config=Config(data_dir=tmp_path),
         paths=DataPaths(tmp_path),
         metrics=Metrics(),
-        reconcile_after=0.0,
     )
+
+
+async def test_an_arrange_starts_a_template_pipeline_of_kind_arrange(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    starts = _Starts()
+    monkeypatch.setattr(submit_module, "start_command", starts)
+    svc = _service(tmp_path)
     job = await svc.arrange("demo", _inputs())
-    assert client.start_workflow.await_args.args[0] == Arrange.run
-    client.start_workflow.side_effect = None
-    client.start_workflow.reset_mock()
-    assert await svc.reconcile_once() == 1
-    assert client.start_workflow.await_args.args[0] == Arrange.run
-    assert client.start_workflow.await_args.kwargs["id"] == f"render-{job.id}"
+    [(workflow, start, workflow_id)] = starts.calls
+    assert workflow == "TemplatePipeline" and start.kind == "arrange" and job.kind == "arrange"
+    payload = _inputs().model_dump(mode="json")
+    assert workflow_id == workflow_id_for_key(arrange_key("demo", payload))
+    assert start.inputs == payload
 
 
-@pytest.mark.requires_postgres
 async def test_an_identical_arrange_coalesces(
-    projection: JobProjection,  # noqa: F811
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client = MagicMock()
-    client.start_workflow = AsyncMock()
-    svc = RenderService(
-        projection=projection,
-        client=client,
-        task_queue="q",
-        config=Config(data_dir=tmp_path),
-        paths=DataPaths(tmp_path),
-        metrics=Metrics(),
-    )
+    monkeypatch.setattr(submit_module, "start_command", _Starts())
+    svc = _service(tmp_path)
     first = await svc.arrange("demo", _inputs())
     second = await svc.arrange("demo", _inputs())
     third = await svc.arrange("demo", _inputs("by_colour"))
     assert first.id == second.id != third.id
     assert first.kind == "arrange"
-    assert client.start_workflow.await_count == 2
     # Counted as arranges, not renders (final review M4).
     sample = svc.metrics.registry.get_sample_value
     assert sample("scadbuddy_render_jobs_submitted_total", {"kind": "arrange"}) == 2

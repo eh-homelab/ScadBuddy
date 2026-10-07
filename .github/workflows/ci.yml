@@ -249,6 +249,9 @@ jobs:
       - name: Test the issue-intake failure check
         run: .github/scripts/intake-verify.test.sh
 
+      - name: Test the follow-up-issues delivery check
+        run: .github/scripts/follow-up-verify.test.sh
+
       - name: Test the OpenSCAD bump script
         run: .github/scripts/openscad-bump.test.sh
 

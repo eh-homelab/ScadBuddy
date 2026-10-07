@@ -331,7 +331,9 @@ async def plate_layout(
         defines = plate_defines(index)
         raw = plate_dir / RAW_RENDER_NAME
         try:
-            await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
+            output = await render_3mf(
+                scad_path, schema, params, raw, config=config, extra_defines=defines
+            )
         except OpenSCADError as error:
             # OpenSCAD will not export an empty top-level object: it exits 1
             # before there is a 3MF to find empty (#1328).
@@ -342,10 +344,18 @@ async def plate_layout(
                 error.returncode,
                 diagnostics=error.diagnostics,
                 diagnostics_dropped=error.diagnostics_dropped,
+                missing_files=error.missing_files,
             ) from error
         split = split_by_material(raw)
         if not split:
-            raise OpenSCADError(_empty_plate(index, count), [])
+            # A file the plate could not open is often why it drew nothing (#451).
+            raise OpenSCADError(
+                _empty_plate(index, count),
+                output.log_tail,
+                diagnostics=output.diagnostics,
+                diagnostics_dropped=output.diagnostics_dropped,
+                missing_files=output.missing_files,
+            )
         for part in split:
             if part.colour not in colours:
                 colours.append(part.colour)
@@ -824,9 +834,20 @@ async def _render_solids(
     with stage("solids"):
         # One plate unless the template asked for more (spec §6.4); every plate
         # beyond the ordinary render is rendered and solidified here.
-        layout = await plate_layout(
-            prepared.scad, schema, staged, preview_parts, output.plates or 1, work, config=config
-        )
+        try:
+            layout = await plate_layout(
+                prepared.scad,
+                schema,
+                staged,
+                preview_parts,
+                output.plates or 1,
+                work,
+                config=config,
+            )
+        except OpenSCADError as error:
+            # A failed plate warns as a failed whole render does (#451).
+            error.warnings = failed_render_warnings(error.missing_files, schema, params)
+            raise
     layout.save(work / LAYOUT_NAME)
     return layout
 

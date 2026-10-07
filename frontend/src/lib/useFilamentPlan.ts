@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import type { ChoicesView, FilamentOptions, SlotChoice } from '../api/types'
-import { seedPlan } from './filaments'
+import { carriedPlan, seedPlan } from './filaments'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { useLatest } from './useLatest'
 
@@ -75,7 +75,7 @@ export function useFilamentPlan(
       const carried = carry?.get()
       if (carried) {
         // A re-arrange: the plan it was made for, less any slot the new file lacks.
-        setPlan(seedPlan(next, carried.plan))
+        setPlan(carriedPlan(next, carried.plan))
         if (carried.ready) carry?.set(null)
         return
       }

@@ -187,7 +187,7 @@ class Job(BaseModel):
     #: Which workflow `render-<id>` runs (spec §3.4): a render, or (phase 5) an arrange.
     kind: JobTableKind = "render"
     #: The first caller's ``traceparent`` (spec 2026-10-01 §4): what a coalesced
-    #: request links to and the reconciler starts a late workflow under. None before
+    #: request links to. None before
     #: tracing, when the sampler dropped the request, or with the SDK disabled.
     traceparent: str | None = None
     #: Template-owned inputs (spec §4.3). For a params-only template, `{"params": …}`;
@@ -198,6 +198,9 @@ class Job(BaseModel):
     steps: list[StepInfo] = Field(default_factory=list)
     outputs: list[PipelineOutput] = Field(default_factory=list)
     workflow_id: str | None = None
+    #: The execution that inserted the row (#1053); None on a row the API inserted
+    #: before renders moved to update-with-start, whose workflow is `render-<id>`.
+    workflow_run_id: str | None = None
     #: Submitters still waiting on this job (coalesced identical requests).
     claims: int = 1
     #: Which try this is, as the store that handed the job to a worker numbered it.
@@ -219,6 +222,7 @@ def now() -> datetime:
 
 
 SUPERSEDED_ERROR = "superseded by a newer render"
+CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 
 
 class QueueFullError(Exception):

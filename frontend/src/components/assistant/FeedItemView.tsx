@@ -168,6 +168,10 @@ function ApprovalCard({
               ? `Your decision was not taken: ${item.reason ?? 'the request is no longer waiting'}.`
               : item.state === 'approved'
               ? `Approved${item.by ? ` by ${item.by.label}` : ''}.`
+              : item.state === 'expired'
+              ? 'Expired: nobody decided in time, so it was not run.'
+              : item.state === 'cancelled'
+              ? `Cancelled: ${item.reason ?? 'it is no longer waiting'}.`
               : `Denied${item.by ? ` by ${item.by.label}` : ''}.`}
         </p>
       )}

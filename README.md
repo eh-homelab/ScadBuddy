@@ -201,15 +201,21 @@ on shutdown.
   references is removed after `SCADBUDDY_JOB_TTL`.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
-    supersedes a waiting preview, or matches one, is never refused.
+    matches a job still open (pending or running) joins it and is never refused, and
+    the waiting preview a request supersedes does not count against the limit.
   - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
-    (`render_jobs`), so accepted renders survive a restart; a pending row whose
-    workflow never started is started by the API's reconciler.
-    The same holds for a pending row whose workflow timed out before any worker
-    took it (the pipeline bound, 4 × `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT`): the
-    reconciler starts a new one, so the row stays `pending` and is restarted once
-    per bound until a worker runs it. Only a `running` row whose workflow ended
-    without settling it is failed.
+    (`render_jobs`), so accepted renders survive a restart. A row is written by its
+    workflow's first activity, so it exists only once Temporal has the render; with
+    Temporal unreachable a render is refused (503 `temporal-unavailable`). A job's
+    workflow is bounded (4 × `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT`), so a template
+    pipeline that never yields times out. At start and every five minutes the API fails
+    the rows nothing will settle: one whose workflow closed without settling it
+    (terminated by hand, or timed out), and a pending or running one an older release
+    left with no workflow running. Each pass lists the open
+    `TemplatePipeline` runs from Visibility once and describes only rows over 30 s old
+    that the listing leaves out; `scadbuddy_render_settle_failed_total` and
+    `scadbuddy_render_settle_errors_total` count what it failed and the passes that
+    could not finish.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
     hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
@@ -403,10 +409,23 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   (or use a `Recreate` rollout) before the new API starts, and start the API before
   the render workers. At start the API fails every render the old queue left
   `running` (no workflow; nothing would finish it), with an error naming the
-  upgrade; its `pending` renders are started on Temporal as usual. From a release
+  upgrade; its `pending` renders are failed too (#1053: nothing reconciles them). From a release
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+- **Upgrading to the release with #1053** moves renders onto the command shape: the
+  workflow `render-<render key>` inserts its own row. Do not let an older API overlap a
+  new one: stop the old API pods (or use a `Recreate` rollout, as the manifest does)
+  before the new API starts. An older API beside it would restart this release's
+  waiting renders as its own (its reconciler) and count requests into them that the
+  workflow never sees (its insert). The older render workers may keep running: they
+  finish the renders pinned to their build. A pending row of the older API's that no
+  workflow will run is failed, once it is 30 s old, by the next render of its key or
+  the API's next pass over such rows.
+- **Upgrading from a release with the in-process print watcher** (before #1053): roll
+  it out with `Recreate` (old replicas at 0 first). An old pod still logs prints to
+  `print_watches` after the new one hands that log to `FollowPrint` at start, and
+  those prints would go unfollowed until someone opens their progress.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053)
 
@@ -415,16 +434,23 @@ print runs and every other Bambuddy write (send, project files, projects, reprin
 timelapse pull, sidebar registration) run there as Temporal workflows. That worker is
 **not** versioned: any replica polling the queue may take any task on it.
 
-- **Upgrading to the release with #1053** adds a workflow type (`Operation`) and its
-  activities to that queue, and this release **must** roll out with `Recreate` (or the
-  old replicas scaled to 0 before the new ones start). The homelab deployment sets
-  `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
+- **Upgrading to the release with #1053** adds two workflow types (`Operation`,
+  `FollowPrint`) and their activities to that queue, and a second queue beside it,
+  `<bambuddy queue>-follow` (`bambuddy-follow` by default), where the same process runs
+  `FollowPrint`'s one long `follow_print` activity, so a followed print never holds a
+  slot a print run or an operation needs. That worker has `FOLLOW_SLOTS` (200,
+  `bambuddy/follow.py`) slots per process: each print holds one while it moves (a
+  poke's old attempt holds its own for up to about 24 s more). Past them, new prints
+  wait on the queue unfollowed: watch `scadbuddy_print_follows_running`, and the
+  warning "every follow slot is taken". This release **must** roll out with `Recreate`
+  (or the old replicas scaled to 0 before the new ones start). The homelab deployment
+  sets `strategy: Recreate` in eh-homelab/clusters#1669. A replica still on the old build
   takes those tasks and fails them as unregistered. A workflow task is retried, so an
-  `Operation` there only stalls. An activity task's failure counts against its retry
-  policy: the effect of a reprint, a timelapse pull or a project write runs at most once,
-  so one such task on an old replica records the operation `failed` as "may have been
-  done" although nothing reached Bambuddy, and a check whose three attempts all land
-  there is refused with a 500.
+  `Operation` or `FollowPrint` there only stalls. An activity task's failure counts
+  against its retry policy: the effect of a reprint, a timelapse pull or a project write
+  runs at most once, so one such task on an old replica records the operation `failed`
+  as "may have been done" although nothing reached Bambuddy, and a check whose three
+  attempts all land there is refused with a 500.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
@@ -764,8 +790,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
-  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
-  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a budget of its own (the panel's "Continue in a new chat", #790); counted like a start (`429`). With the headless browser's agent-actor marker, or through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
   | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any

@@ -41,6 +41,7 @@ from scadbuddy.api.jobs import (
     preview_view,
     render_model,
     require_job,
+    submit_problems,
 )
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.api.operations import (
@@ -475,7 +476,8 @@ async def arrange_outputs(
         async with client_for(stored) as client:
             plate_model = (await client.printer(printer_id)).model
     slug, inputs = await asyncio.to_thread(arrange_inputs, outputs, body, plate_model=plate_model)
-    job = await render.arrange(slug, inputs)
+    with submit_problems():
+        job = await render.arrange(slug, inputs)
     return _job_status(job, None)
 
 

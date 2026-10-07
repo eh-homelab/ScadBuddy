@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { FilamentOptions, FilamentWarning, SlotNeed, SpoolOption } from '../api/types'
 import {
   NO_FILTERS,
+  carriedPlan,
   checkPlan,
   facets,
   filterSpools,
@@ -45,7 +46,7 @@ function loaded(rest: Partial<NonNullable<SpoolOption['loaded']>> = {}) {
 }
 
 function slot(rest: Partial<SlotNeed> = {}): SlotNeed {
-  return { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, ...rest }
+  return { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, colour_matches: [], ...rest }
 }
 
 describe('spoolLabel', () => {
@@ -266,7 +267,10 @@ describe('seedPlan', () => {
   const options: FilamentOptions = {
     library_file_id: 1,
     track_switch: false,
-    slots: [slot({ slot_id: 1 }), slot({ slot_id: 2, colour: '#FF1493' })],
+    slots: [
+      slot({ slot_id: 1, colour_matches: [1, 2, 3] }),
+      slot({ slot_id: 2, colour: '#FF1493', colour_matches: [1, 2, 3] }),
+    ],
     spools: [spool({ spool_id: 1 }), spool({ spool_id: 2 }), spool({ spool_id: 3 })],
     suggested: [
       { slot_id: 1, spool_id: 1 },
@@ -286,7 +290,52 @@ describe('seedPlan', () => {
     expect(seedPlan(options, [{ slot_id: 1, spool_id: 99 }])).toEqual(options.suggested)
   })
 
+  it('falls back to the auto-match for a remembered spool whose colour no longer fits (#933)', () => {
+    const recoloured: FilamentOptions = {
+      ...options,
+      slots: [options.slots![0]!, slot({ slot_id: 2, colour: '#FF1493', colour_matches: [2] })],
+    }
+    expect(seedPlan(recoloured, [{ slot_id: 2, spool_id: 3 }])).toEqual(options.suggested)
+  })
+
   it('ignores a remembered slot this plate does not have', () => {
     expect(seedPlan(options, [{ slot_id: 3, spool_id: 3 }])).toEqual(options.suggested)
+  })
+})
+
+describe('carriedPlan', () => {
+  const options: FilamentOptions = {
+    library_file_id: 1,
+    track_switch: false,
+    slots: [
+      slot({ slot_id: 1, colour_matches: [1, 2, 3] }),
+      slot({ slot_id: 2, colour: '#FF1493', colour_matches: [1, 2, 3] }),
+    ],
+    spools: [spool({ spool_id: 1 }), spool({ spool_id: 2 }), spool({ spool_id: 3 })],
+    suggested: [
+      { slot_id: 1, spool_id: 1 },
+      { slot_id: 2, spool_id: 2 },
+    ],
+    warnings: [],
+  }
+
+  it("keeps the spool a re-arrange was made for, whatever its colour (#933 is for remembered ones)", () => {
+    const recoloured: FilamentOptions = {
+      ...options,
+      slots: [options.slots![0]!, slot({ slot_id: 2, colour: '#FF1493', colour_matches: [2] })],
+    }
+    expect(carriedPlan(recoloured, [{ slot_id: 2, spool_id: 3 }])).toEqual([
+      { slot_id: 1, spool_id: 1 },
+      { slot_id: 2, spool_id: 3 },
+    ])
+  })
+
+  it('drops a carried spool no longer in the inventory, and a slot the new file lacks', () => {
+    expect(
+      carriedPlan(options, [
+        { slot_id: 1, spool_id: 99 },
+        { slot_id: 3, spool_id: 3 },
+      ]),
+    ).toEqual(options.suggested)
   })
 })

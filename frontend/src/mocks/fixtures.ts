@@ -1137,8 +1137,10 @@ export const filamentOptions: FilamentOptions = {
   slots: [
     // A sliced plate, so the grams are real. `PrintPicker.test.tsx` overrides these to
     // null for the unsliced case, which is what an unmodified upload actually answers.
-    { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8 },
-    { slot_id: 2, material: 'PLA', colour: '#FF1493', used_grams: 1.9 },
+    // `colour_matches`: the spools whose colour still fits the slot, so a remembered
+    // choice of one is kept (#933). Hot Pink (22) is too far from #FF1493 to be.
+    { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, colour_matches: [21, 26] },
+    { slot_id: 2, material: 'PLA', colour: '#FF1493', used_grams: 1.9, colour_matches: [27] },
   ],
   spools: [
     {
@@ -1306,6 +1308,7 @@ function printOf(
     archive_id,
     output_id: output.id,
     slug: output.slug,
+    library_file_id: null,
     output_name: output.name ?? null,
     printer_id: 1,
     printer_name: '3DP-31B-598',
@@ -1438,7 +1441,7 @@ export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media
 
 // #311 — print 35 printed twice: the first run was cancelled, the second completed.
 const reprinted = prints.find((print) => print.archive_id === 35)
-if (reprinted) {
+if (reprinted?.provenance) {
   reprinted.provenance.model_version = versionIds.edited
   reprinted.outcome.runs = [
     {

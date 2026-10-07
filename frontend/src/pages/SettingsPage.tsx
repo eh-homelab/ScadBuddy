@@ -43,7 +43,7 @@ import {
 } from './settings/fields'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
-import { useLeaveGuard } from './settings/useLeaveGuard'
+import { useLeaveGuard } from '../lib/useLeaveGuard'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 function ofLimit(used: string, limit: number, format: (n: number) => string): string {
@@ -586,7 +586,9 @@ export function SettingsPage() {
   return (
     <div className="h-full overflow-y-auto">
       <nav aria-label="Settings sections" className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur">
-        <ul className="mx-auto flex max-w-2xl gap-1 overflow-x-auto px-4 py-2 text-[12px]">
+        {/* #969: wraps from sm up so every section shows at a glance; on a phone it
+            scrolls sideways, with a fade on the right edge to say there is more. */}
+        <ul className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-4 py-2 text-[12px] [mask-image:linear-gradient(to_right,black_85%,transparent)] sm:flex-wrap sm:justify-center sm:overflow-visible sm:[mask-image:none]">
           {SECTIONS.map((section) => (
             <li key={section.id} className="shrink-0">
               <a

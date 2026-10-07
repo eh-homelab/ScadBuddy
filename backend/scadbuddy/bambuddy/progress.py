@@ -424,7 +424,7 @@ OBSERVED_OUTPUTS = 256
 class ProgressObserver:
     """Turns the progress reads the backend makes into ``print.*`` events.
 
-    Its reads come from the per-print watcher (#268, ``bambuddy/watcher.py``) and
+    Its reads come from each print's `FollowPrint` (#1053, ``bambuddy/follow.py``) and
     from the progress route, which the UI still calls when it subscribes and
     while its realtime socket is down. Each read is compared with the last one seen
     for that output, so a read that finds nothing new publishes nothing, and

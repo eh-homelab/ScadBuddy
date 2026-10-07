@@ -590,7 +590,7 @@ def test_a_model_with_a_render_in_progress_cannot_be_deleted(
 ) -> None:
     projection = getattr(app.state, STATE_ATTR).projection
     job = Job(id="a" * 32, slug=model, created_at=datetime.now(UTC))
-    projection.submit(job, "planted")
+    projection.accept(job, "planted", workflow_id="render-planted", run_id="r")
     assert projection.mark_started(job.id) is not None
 
     response = client.delete(f"/api/v1/models/{model}")

@@ -147,7 +147,7 @@ async def test_an_item_with_no_picks_records_no_print(store: RackUsageStore) -> 
 
 
 async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> None:
-    """#1086 review: a stuck read must release its thread even after the watcher's
+    """#1086 review: a stuck read must release its thread even after the follow's
     timeout has stopped waiting on it."""
     await store.seen(1, [A])  # opens the pool, and migrates on one connection
     pool = store._ready()
