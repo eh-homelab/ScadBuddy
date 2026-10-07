@@ -230,31 +230,27 @@ class EnsuredCopy(NamedTuple):
 
 
 async def project_filename(
-    client: BambuddyClient,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     folder_id: int,
+    listed: Sequence[LibraryFile | LibraryListRow] | None,
     stem: str,
     target: Target,
 ) -> str:
-    """``<stem>.3mf``, made unique among the files already in ``folder_id`` (#317).
+    """``<stem>.3mf``, made unique among ``listed``, the files already in ``folder_id``
+    (#317).
 
     When this output already has a copy in the folder — laid out for another printer
     model, or it would have been reused — the new one is named after its model
     (``Name sign — Reagan (H2D).3mf``) so the two are told apart. Anything else that
     collides is numbered from 2.
 
-    A listing that fails (a timeout, a 5xx, a body that is not a list) leaves the name
-    unchecked rather than failing the print: naming is never worth the print.
+    A listing that failed (``None``: a timeout, a 5xx, a body that is not a list) leaves
+    the name unchecked rather than failing the print: naming is never worth the print.
     """
-    try:
-        taken = {row.filename.casefold() for row in await client.library_files(folder_id)}
-    except (ApiError, ValueError) as error:
-        logger.warning(
-            "could not list the project folder; naming the copy without checking it",
-            extra={"folder_id": folder_id, "error": str(error)},
-        )
+    if listed is None:
         return f"{stem}.3mf"
+    taken = {row.filename.casefold() for row in listed}
     candidates = [f"{stem}.3mf"]
     ours = any(copy.folder_id == folder_id for copy in await uploads.for_output(meta.id))
     if ours and target.plate.model:
@@ -314,12 +310,13 @@ async def upload_output(
         stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None
     )
 
+    listed = await _listing(client, folder)
     uploaded = await _left_unrecorded(
-        client, uploads, folder, payload, project_stem, download_filename(meta)
+        client, uploads, listed, payload, project_stem, download_filename(meta)
     )
     if uploaded is None:
         filename = (
-            await project_filename(client, uploads, meta, folder, project_stem, target)
+            await project_filename(uploads, meta, folder, listed, project_stem, target)
             if project_stem is not None and folder is not None
             else download_filename(meta)
         )
@@ -335,39 +332,46 @@ async def upload_output(
     return uploaded.id, uploaded.filename
 
 
+async def _listing(
+    client: BambuddyClient, folder: int | None
+) -> list[LibraryFile] | list[LibraryListRow] | None:
+    """The files directly in ``folder`` (the library root for ``None``), read once per
+    upload for :func:`_left_unrecorded` and :func:`project_filename`. ``None`` when the
+    read fails: the upload goes on without either check."""
+    try:
+        if folder is not None:
+            return await client.library_files(folder)
+        rows = await client.library_listing(folder_id=None)
+    except (ApiError, ValueError) as error:
+        logger.warning(
+            "could not list the folder; uploading without checking it",
+            extra={"folder_id": folder, "error": str(error)},
+        )
+        return None
+    return [row for row in rows if row.folder_id is None]
+
+
 async def _left_unrecorded(
     client: BambuddyClient,
     uploads: BambuddyUploadStore,
-    folder: int | None,
+    listed: Sequence[LibraryFile | LibraryListRow] | None,
     payload: bytes,
     project_stem: str | None,
     inbox_name: str,
 ) -> LibraryFile | None:
-    """The file an earlier attempt uploaded into ``folder`` and died before recording,
-    or ``None`` (#1145, #1127).
+    """The file an earlier attempt uploaded into the folder ``listed`` lists and died
+    before recording, or ``None`` (#1145, #1127).
 
     An attempt can die after Bambuddy stored the upload and before :func:`upload_output`
     recorded it: a timeout, a lost worker. Its retry finds no recorded copy and would
-    upload a duplicate. So the folder is listed first, for a file no output records,
-    named as this upload would be (``inbox_name``, or in a project's folder a name made
-    from ``project_stem``) and of the payload's size; only those are read, for a
+    upload a duplicate. So the folder's files are searched first, for one no output
+    records, named as this upload would be (``inbox_name``, or in a project's folder a
+    name made from ``project_stem``) and of the payload's size; only those are read, for a
     ``file_hash`` that is the sha256 of ``payload``: the same bytes, laid out for the same
-    target. A listing or a read that fails leaves it to the upload: a duplicate is not
-    worth failing the send or the print over.
+    target. A listing (``None``) or a read that failed leaves it to the upload: a
+    duplicate is not worth failing the send or the print over.
     """
-    try:
-        listed: Sequence[LibraryFile | LibraryListRow] = (
-            await client.library_files(folder)
-            if folder is not None
-            else [
-                row for row in await client.library_listing(folder_id=None) if row.folder_id is None
-            ]
-        )
-    except (ApiError, ValueError) as error:
-        logger.warning(
-            "could not list the folder for an unrecorded copy; uploading",
-            extra={"folder_id": folder, "error": str(error)},
-        )
+    if listed is None:
         return None
 
     def named(filename: str) -> bool:
@@ -392,7 +396,7 @@ async def _left_unrecorded(
         if found.file_hash == digest:
             logger.info(
                 "an earlier attempt's upload was never recorded; taking it",
-                extra={"library_file_id": found.id, "folder_id": folder},
+                extra={"library_file_id": found.id, "folder_id": found.folder_id},
             )
             return found
     return None
