@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, newRequestId, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED } from '../api/client'
+import { ApiError, api, newRequestId, OFFLINE, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED } from '../api/client'
 import type { Job } from '../api/types'
 import { joinInputs, NO_EXTRA, type InputsExtra } from './inputs'
 import type { ParamValues } from './params'
@@ -62,6 +62,19 @@ export interface RenderBusy {
  * sends it once more (review #1066 (11) 1). A full queue waits as long as it names.
  */
 export const TRANSIENT_RETRIES = 5
+
+/**
+ * Whether sending the render again may succeed, so the page offers "try again": an
+ * outage it gave up waiting out, or a request that never got ScadBuddy's answer (a
+ * dropped connection, a proxy's error, an offline browser). Never a refusal no retry
+ * fixes (a 422, a 500) or a render that failed (review #1066 (13) 2).
+ */
+export function canRetry(error: unknown): boolean {
+  if (error instanceof TypeError) return true // fetch's own network failure
+  if (!(error instanceof ApiError)) return false
+  const { type } = error.problem
+  return type === TEMPORAL_UNAVAILABLE || type === STILL_ACCEPTING || type === UNANSWERED || type === OFFLINE
+}
 
 function busyReason(cause: ApiError): BusyReason {
   switch (cause.problem.type) {
