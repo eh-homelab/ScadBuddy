@@ -105,7 +105,10 @@ def events(app: FastAPI) -> Recorded:
 @pytest.fixture
 def mine(client: TestClient, events: list[Event]) -> str:
     """A template created through the API, so it is committed like any other."""
-    _ok(client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}), 201)
+    _ok(
+        client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}, headers=press()),
+        201,
+    )
     events.clear()
     return "widget"
 
@@ -135,18 +138,23 @@ def _ok(response: httpx.Response, status: int = 200) -> Any:
 
 
 def test_creating_a_model_publishes_model_created(client: TestClient, events: list[Event]) -> None:
-    _ok(client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}), 201)
+    _ok(
+        client.post("/api/v1/models", json={"name": "Widget", "source": SOURCE}, headers=press()),
+        201,
+    )
     _ok(
         client.post(
             "/api/v1/models",
             content=SOURCE,
-            headers={"content-type": "text/plain", "X-Model-Name": "Pasted"},
+            headers={**press(), "content-type": "text/plain", "X-Model-Name": "Pasted"},
         ),
         201,
     )
     _ok(
         client.post(
-            "/api/v1/models", files={"file": ("uploaded.scad", SOURCE.encode(), "text/plain")}
+            "/api/v1/models",
+            files={"file": ("uploaded.scad", SOURCE.encode(), "text/plain")},
+            headers=press(),
         ),
         201,
     )
@@ -160,7 +168,9 @@ def test_creating_a_model_publishes_model_created(client: TestClient, events: li
 def test_a_refused_create_publishes_nothing(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
-    response = client.post("/api/v1/models", json={"name": "Demo", "source": SOURCE})
+    response = client.post(
+        "/api/v1/models", json={"name": "Demo", "source": SOURCE}, headers=press()
+    )
     assert response.status_code == 409
     assert published(events) == []
 
@@ -170,14 +180,14 @@ def test_a_refused_create_publishes_nothing(
 def test_importing_a_model_publishes_model_created(client: TestClient, events: list[Event]) -> None:
     url = "https://raw.githubusercontent.com/someone/models/main/Bin.scad"
     respx.get(url).mock(return_value=httpx.Response(200, text=SOURCE))
-    _ok(client.post("/api/v1/models/import", json={"url": url}), 201)
+    _ok(client.post("/api/v1/models/import", json={"url": url}, headers=press()), 201)
     assert published(events, "model.created") == [{"kind": "model.created", "slug": "bin"}]
 
 
 def test_editing_metadata_publishes_model_updated(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
-    _ok(client.patch(f"/api/v1/models/{model}", json={"description": "new"}))
+    _ok(client.patch(f"/api/v1/models/{model}", json={"description": "new"}, headers=press()))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": model}]
 
 
@@ -203,8 +213,10 @@ def test_thumbnail_and_readme_writes_publish_model_updated(
 def test_duplicating_and_deleting_publish_created_and_deleted(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    _ok(client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}), 201)
-    _ok(client.delete("/api/v1/models/copy"), 204)
+    _ok(
+        client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
+    _ok(client.delete("/api/v1/models/copy", headers=press()), 204)
     assert published(events, "model.created") == [{"kind": "model.created", "slug": "copy"}]
     assert published(events, "model.deleted") == [{"kind": "model.deleted", "slug": "copy"}]
 
@@ -253,7 +265,9 @@ def test_restoring_a_version_publishes_source_changed_and_its_commit(
 def test_an_upstream_edit_is_announced_to_its_duplicates(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    _ok(client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}), 201)
+    _ok(
+        client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
     events.clear()
 
     saved = _ok(
@@ -277,7 +291,9 @@ def test_an_upstream_edit_is_announced_to_its_duplicates(
 def test_merging_dismissing_and_detaching_publish_their_events(
     client: TestClient, mine: str, events: list[Event]
 ) -> None:
-    _ok(client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}), 201)
+    _ok(
+        client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"}, headers=press()), 201
+    )
     _ok(client.put(f"/api/v1/models/{mine}/source", json={"source": SOURCE + "// v2\n"}))
     events.clear()
     _ok(client.post("/api/v1/models/copy/upstream/dismiss"))
@@ -288,7 +304,7 @@ def test_merging_dismissing_and_detaching_publish_their_events(
     assert published(events, "source.changed") == [{"kind": "source.changed", "slug": "copy"}]
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
 
-    _ok(client.delete(f"/api/v1/models/{mine}", params={"force": "true"}), 204)
+    _ok(client.delete(f"/api/v1/models/{mine}", params={"force": "true"}, headers=press()), 204)
     events.clear()
     _ok(client.post("/api/v1/models/copy/upstream/detach"))
     assert published(events, "model.updated") == [{"kind": "model.updated", "slug": "copy"}]
@@ -574,7 +590,11 @@ def test_a_broken_bus_never_fails_the_request(
 
     monkeypatch.setattr(bus, "publish", broken)
     with caplog.at_level(logging.ERROR):
-        _ok(client.patch(f"/api/v1/models/{model}", json={"description": "still saved"}))
+        _ok(
+            client.patch(
+                f"/api/v1/models/{model}", json={"description": "still saved"}, headers=press()
+            )
+        )
         _ok(client.put("/api/v1/settings", json={"public_url": "https://scad.example"}))
     assert _ok(client.get(f"/api/v1/models/{model}"))["description"] == "still saved"
     assert "could not publish an event" in caplog.text

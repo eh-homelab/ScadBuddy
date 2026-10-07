@@ -22,6 +22,7 @@ from scadbuddy.core.authorship import (
 )
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.history import GitError, git_env
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -34,6 +35,7 @@ def upload(client: TestClient, source: str = FIRST) -> dict[str, Any]:
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()
