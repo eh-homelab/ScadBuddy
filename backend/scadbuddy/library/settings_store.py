@@ -99,6 +99,7 @@ REMEMBERED_ROWS = (
     "printer_print_options",
     "model_print_options",
     "printer_rack_algorithms",
+    "printer_rack_algorithm_versions",
 )
 
 
@@ -117,13 +118,22 @@ NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 #: (``rackAlgorithmSave`` in ``frontend/src/api/client.ts``): the dialog then sends its
 #: next choice, and a save it gave up on must not commit after that one. This bounds
 #: only the server's database work, not time a request spends before it reaches the
-#: store (a worker thread, a proxy); ordering saves explicitly is #1216.
+#: store (a worker thread, a proxy): the save's version orders those (#1216).
 RACK_ALGORITHM_WRITE_TIMEOUT = 5.0
+#: The ``settings`` row holding each printer's last stored rack-algorithm save version
+#: (#1216), beside ``printer_rack_algorithms`` rather than inside it, so that setting's
+#: shape is unchanged. Not a ``StoredSettings`` field: a load skips names it does not know.
+RACK_ALGORITHM_VERSIONS = "printer_rack_algorithm_versions"
 
 #: The settings `StoreNotReadyError` is decided from.
 STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
 #: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
 STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
+
+
+class RackAlgorithmSupersededError(Exception):
+    """A rack-algorithm save older than the one the printer stores (#1216): refused, so
+    the newer choice stays whatever order the two arrived in."""
 
 
 class StoreNotReadyError(ValueError):
@@ -647,22 +657,45 @@ class SettingsStore:
         return self._written("printer_bed_type")
 
     def set_printer_rack_algorithm(
-        self, printer_id: int, algorithm: RackAlgorithm | None
+        self, printer_id: int, algorithm: RackAlgorithm | None, version: int | None = None
     ) -> RackAlgorithm:
         """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
         Returns the printer's algorithm now.
+
+        With a ``version`` (#1216), compare and set: a save older than the printer's
+        stored version raises :class:`RackAlgorithmSupersededError` and changes nothing,
+        whenever it arrives. The same version is accepted again, so a save that failed
+        with nothing known can be resent as it was. Without one, the save is unordered
+        (an older client) and leaves the stored version alone.
 
         Bounded by ``RACK_ALGORITHM_WRITE_TIMEOUT`` for the pool wait and again for the
         write, so it commits well inside the print dialog's give-up or not at all
         (#1129). Nothing is read back afterwards: an unbounded read of every setting
         could outlast the give-up on a save that has already landed."""
         bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
+        key = str(printer_id)
         with (
             self._pool.connection(timeout=RACK_ALGORITHM_WRITE_TIMEOUT) as conn,
             conn.transaction(),
         ):
             conn.execute(f"SET LOCAL statement_timeout = {bound_ms}")
-            _put_entry(conn, "printer_rack_algorithms", str(printer_id), algorithm)
+            if version is not None:
+                # The versions row's lock, held to the commit, orders two saves of one
+                # printer; a refused upsert updates and returns nothing.
+                taken = conn.execute(
+                    "INSERT INTO settings (name, value)"
+                    " VALUES (%s, jsonb_build_object(%s::text, %s::bigint))"
+                    " ON CONFLICT (name) DO UPDATE"
+                    " SET value = settings.value || EXCLUDED.value, updated_at = now()"
+                    " WHERE coalesce((settings.value ->> %s)::bigint, -1) <= %s"
+                    " RETURNING 1",
+                    (RACK_ALGORITHM_VERSIONS, key, version, key, version),
+                ).fetchone()
+                if taken is None:
+                    raise RackAlgorithmSupersededError(
+                        f"a newer rack-algorithm save is stored for printer {printer_id}"
+                    )
+            _put_entry(conn, "printer_rack_algorithms", key, algorithm)
         emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
         return algorithm or DEFAULT_ALGORITHM
 

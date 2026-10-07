@@ -378,10 +378,21 @@ export const printRunPoll = {
  * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, 5 s, #1129):
  * once a save reaches the store it commits or fails within twice that bound, one for
  * the pool wait and one for the write (#1264). Time before it reaches
- * the store is not bounded, so a save held up there can still land after the next one;
- * ordering saves explicitly is #1216.
+ * the store is not bounded, so a save held up there can still land after the next one:
+ * each save's version orders them (#1216), and the server refuses the older one.
  */
 export const rackAlgorithmSave = { timeoutMs: 25_000 }
+
+let lastRackAlgorithmVersion = 0
+/**
+ * #1216 — the version a rack-algorithm save is sent with: the clock, but never less than
+ * one above the last, so it grows across saves, dialogs and page loads in this browser.
+ * A count that started again at 1 on each load would be refused for good after a reload.
+ */
+export function nextRackAlgorithmVersion(): number {
+  lastRackAlgorithmVersion = Math.max(Date.now(), lastRackAlgorithmVersion + 1)
+  return lastRackAlgorithmVersion
+}
 
 /**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
@@ -1013,11 +1024,19 @@ export const api = {
       body: JSON.stringify({ bed_type: bedType }),
     }),
 
-  /** #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). */
-  putPrinterRackAlgorithm: (printerId: number, algorithm: RackAlgorithm | null, signal?: AbortSignal) =>
+  /**
+   * #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). A save
+   * with a lower `version` than the stored one is refused with 409 (#1216).
+   */
+  putPrinterRackAlgorithm: (
+    printerId: number,
+    algorithm: RackAlgorithm | null,
+    version: number = nextRackAlgorithmVersion(),
+    signal?: AbortSignal,
+  ) =>
     request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
       method: 'PUT',
-      body: JSON.stringify({ algorithm }),
+      body: JSON.stringify({ algorithm, version }),
       signal,
     }),
 

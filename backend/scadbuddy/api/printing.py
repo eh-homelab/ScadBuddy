@@ -65,7 +65,7 @@ from scadbuddy.bambuddy.projects import (
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.library.settings_store import ModelPrintChoices, RackAlgorithmSupersededError
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.commands import (
@@ -154,6 +154,14 @@ class PrinterRackAlgorithmPut(BaseModel):
     """How to pick this printer's rack nozzle (#836); ``null`` forgets it."""
 
     algorithm: RackAlgorithm | None = None
+    #: Orders saves of one printer (#1216): a save with a lower version than the stored
+    #: one is refused with 409, whenever it arrives. The print dialog sends a number that
+    #: only grows. Omitted, the save is unordered.
+    version: int | None = Field(default=None, ge=0, le=2**53 - 1)
+
+
+#: A rack-algorithm save older than the printer's stored one (#1216).
+RACK_ALGORITHM_SUPERSEDED_PROBLEM = "https://scadbuddy.dev/problems/rack-algorithm-superseded"
 
 
 class PrinterRackAlgorithm(BaseModel):
@@ -205,12 +213,19 @@ def put_printer_bed_type(
     response_model=PrinterRackAlgorithm,
     summary="Remember how this printer's rack nozzle is picked",
     responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "A save with a higher `version` is already stored for this printer, so this "
+                "older one changed nothing and the newer choice stays (#1216)."
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "The database did not answer within the save's bound, so it was probably not saved "
-                "(#1129). Whether resending is safe is #1216."
+                "(#1129). Safe to resend with the same version (#1216): a save that did land is "
+                "stored again unchanged, and one a newer save has overtaken answers 409."
             )
-        }
+        },
     },
 )
 def put_printer_rack_algorithm(
@@ -219,7 +234,13 @@ def put_printer_rack_algorithm(
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
     Bambuddy, like the printer's remembered plate."""
     try:
-        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm, body.version)
+    except RackAlgorithmSupersededError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "a newer save of this printer's rack algorithm is stored, so this one was not",
+            type_=RACK_ALGORITHM_SUPERSEDED_PROBLEM,
+        ) from None
     except DATABASE_ERRORS as error:
         # The store gives up on purpose rather than commit after the dialog has (#1129).
         # Only a pool wait or a cancelled statement is known to have saved nothing; any
@@ -232,7 +253,7 @@ def put_printer_rack_algorithm(
         outcome = (
             "nothing was saved"
             if rolled_back
-            else "could not confirm the save; check the setting before resending"
+            else "could not confirm the save; resending it with the same version is safe"
         )
         # Say which failure it was (#1283): a full pool, a statement cut off, or a
         # connection that failed, rather than calling each one a timeout.

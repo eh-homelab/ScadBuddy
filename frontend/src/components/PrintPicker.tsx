@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api, rackAlgorithmSave } from '../api/client'
+import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
   FilamentWarning,
@@ -190,8 +190,10 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     const save = ++algorithmSave.current
     const savedOn = printerId
     if (savedOn === null) return
+    // Taken when chosen, not when sent, so the order is the user's (#1216).
+    const version = nextRackAlgorithmVersion()
     const saving = algorithmSaves.current.then(() =>
-      api.putPrinterRackAlgorithm(savedOn, next, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
+      api.putPrinterRackAlgorithm(savedOn, next, version, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
     )
     algorithmSaves.current = saving.catch(() => undefined)
     void saving.then(
@@ -207,7 +209,10 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
               : { printerId: savedOn, algorithm: next, afterRead: picker.readsStarted.current, save },
           )
       },
-      () => {
+      (error: unknown) => {
+        // A 409 is a newer save already stored (#1216): by definition that one won, so
+        // there is nothing to report.
+        if (error instanceof ApiError && error.status === 409) return
         if (algorithmSave.current === save && algorithmSession.current === session)
           setAlgorithmUnsaved(true)
       },

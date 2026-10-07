@@ -17,6 +17,7 @@ from psycopg_pool import PoolTimeout
 
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.printing import RACK_ALGORITHM_SUPERSEDED_PROBLEM
 from scadbuddy.core.problems import DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import settings_store
@@ -51,6 +52,25 @@ def test_the_rack_algorithm_is_remembered_per_printer_and_forgotten(client: Test
     forgot = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": None})
     assert forgot.json() == {"printer_id": 1, "algorithm": "least_used"}
     assert client.get("/api/v1/settings/remembered").json().get("printer_rack_algorithms", {}) == {}
+
+
+def test_an_older_rack_algorithm_save_is_a_409_and_the_newer_choice_stays(
+    client: TestClient,
+) -> None:
+    """#1216: the dialog's version orders its saves, whatever order they arrive in."""
+    path = "/api/v1/print/printers/1/rack-algorithm"
+    newer = client.put(path, json={"algorithm": "bambuddy", "version": 2})
+    assert newer.status_code == 200, newer.text
+    older = client.put(path, json={"algorithm": "oldest_first", "version": 1})
+    assert older.status_code == 409, older.text
+    assert older.json()["type"] == RACK_ALGORITHM_SUPERSEDED_PROBLEM
+    remembered = client.get("/api/v1/settings/remembered").json()
+    assert remembered["printer_rack_algorithms"] == {"1": "bambuddy"}
+    put = client.get("/openapi.json").json()["paths"][
+        "/api/v1/print/printers/{printer_id}/rack-algorithm"
+    ]["put"]
+    assert "409" in put["responses"]
+    assert "same version" in put["responses"]["503"]["description"]
 
 
 @pytest.mark.parametrize(

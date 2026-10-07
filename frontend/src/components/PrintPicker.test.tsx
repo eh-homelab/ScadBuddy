@@ -1901,7 +1901,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_position: 2, rack_algorithm: 'newest_first' })
-    expect(puts.bodies).toEqual([{ algorithm: 'newest_first' }])
+    expect(puts.bodies).toEqual([{ algorithm: 'newest_first', version: expect.any(Number) }])
   })
 
   it('goes back to Automatic when the nozzle size changes', async () => {
@@ -2153,6 +2153,8 @@ describe('PrintPicker · rack nozzle (#836)', () => {
   /** Holds each algorithm PUT until the test answers it, in any order. */
   function heldSaves() {
     const answers: ((status: number) => void)[] = []
+    /** The `version` each save was sent with, in the order sent. */
+    const versions: number[] = []
     // The printer's stored algorithm, as the choices read reports it.
     let stored = 'least_used'
     // While set, each choices read answers with what was stored when it started, but only
@@ -2168,7 +2170,8 @@ describe('PrintPicker · rack nozzle (#836)', () => {
         return HttpResponse.json({ ...choicesView, printer_id, rack_algorithm })
       }),
       http.put('/api/v1/print/printers/:id/rack-algorithm', async ({ request }) => {
-        const { algorithm } = (await request.json()) as { algorithm: string }
+        const { algorithm, version } = (await request.json()) as { algorithm: string; version: number }
+        versions.push(version)
         const status = await new Promise<number>((resolve) => answers.push(resolve))
         if (status !== 200) return HttpResponse.json({ title: 'Service Unavailable', status }, { status })
         stored = algorithm
@@ -2191,7 +2194,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     const releaseReads = () => heldReads.splice(0).forEach((resolve) => resolve())
     /** What the printer stores now. */
     const storedNow = () => stored
-    return { answers, answer, saves, heldReads, holdChoiceReads, releaseReads, stored: storedNow }
+    return { answers, answer, saves, versions, heldReads, holdChoiceReads, releaseReads, stored: storedNow }
   }
 
   it('lets only the latest of two saves say it was not remembered', async () => {
@@ -2261,6 +2264,27 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     answer(1, 200)
     await act(() => Promise.allSettled(saves))
     expect(stored()).toBe('bambuddy')
+  })
+
+  it('sends growing versions and treats a 409 for its superseded save as nothing to report', async () => {
+    // #1216: the server refuses a save older than the stored one with 409, so a newer save
+    // won and the dialog has nothing to say about it.
+    server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
+    const { answers, answer, saves, versions } = heldSaves()
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    const select = await screen.findByLabelText('Rack algorithm')
+    fireEvent.change(select, { target: { value: 'oldest_first' } })
+    fireEvent.change(select, { target: { value: 'bambuddy' } })
+    await waitFor(() => expect(answers.length).toBe(1))
+    answer(0, 200)
+    await waitFor(() => expect(answers.length).toBe(2))
+    answer(1, 409)
+    await act(() => Promise.allSettled(saves))
+    expect(versions).toHaveLength(2)
+    expect(versions[1]).toBeGreaterThan(versions[0] ?? Infinity)
+    expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
   })
 
   it('counts a save that never answers as not remembered, and sends the next one', async () => {
