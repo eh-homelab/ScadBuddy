@@ -151,6 +151,24 @@ export type DoneAttention = Extract<Attention, { summary: string }>
 /** Whether `a` is a `done` summary, which is dismissed rather than answered. */
 export const isDone = (a: Attention | undefined): a is DoneAttention => a !== undefined && 'summary' in a
 
+/**
+ * #1200 — `GET /api/v1/ai/pending-input`'s body as the badge reads it (agent
+ * `src/routes/pendingInput.ts` `PendingInputPage`): only what it counts by.
+ */
+export const PendingInputSchema = z.object({
+  entries: z.array(
+    z.object({
+      kind: z.enum(['approval', 'answer']),
+      attention: z
+        .object({ reason: z.string(), on_timeout: z.string().nullable(), summary: z.string().optional() })
+        .optional(),
+    }),
+  ),
+  /** Absent from an older agent. */
+  summaries_truncated: z.boolean().optional(),
+})
+export type PendingInput = z.infer<typeof PendingInputSchema>
+
 export const SessionSummarySchema = z.object({
   sessionId: z.string().min(1),
   title: z.string(),

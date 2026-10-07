@@ -78,6 +78,13 @@ describe('fetchPendingInput', () => {
     expect(await fetchPendingInput()).toBeNull()
   })
 
+  it('is unknown (null) when an entry is not one the agent lists (#1200)', async () => {
+    for (const entry of [{ kind: 'answer', attention: null }, { kind: 'grant' }, { kind: 'answer', attention: { reason: 1 } }, 'approval']) {
+      server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [{ kind: 'approval' }, entry] })))
+      expect(await fetchPendingInput(), JSON.stringify(entry)).toBeNull()
+    }
+  })
+
   it('gives up on an agent that accepts and never answers', async () => {
     server.use(http.get('/api/v1/ai/pending-input', () => new Promise<never>(() => {})))
     expect(await fetchPendingInput(20)).toBeNull()

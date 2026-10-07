@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { type PendingInput, PendingInputSchema } from './chat/protocol'
 
 /**
  * #815 — whether the assistant is waiting on the user, for the header outside the
@@ -56,33 +57,26 @@ export async function fetchPendingInput(timeoutMs = ATTENTION_TIMEOUT_MS): Promi
 
 // A `done` summary has no timer. An older replica's done row with one is an ordinary
 // attention request its turn is parked on (agent questions/service.ts), so it waits.
-const isDone = (attention: unknown): boolean => {
-  if (typeof attention !== 'object' || attention === null) return false
-  const a = attention as { reason?: unknown; on_timeout?: unknown }
-  return a.reason === 'done' && a.on_timeout === null
-}
+const isDone = (attention: PendingAttention): boolean => attention.reason === 'done' && attention.on_timeout === null
+
+type PendingAttention = NonNullable<PendingInput['entries'][number]['attention']>
 
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
     const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
     if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) return null
-    const body: unknown = await response.json()
-    if (typeof body !== 'object' || body === null) return null
-    const entries = (body as { entries?: unknown }).entries
-    if (!Array.isArray(entries)) return null
+    const parsed = PendingInputSchema.safeParse(await response.json())
+    if (!parsed.success) return null
     const counts: PendingCounts = { approvals: 0, questions: 0, attention: 0, summaries: 0 }
-    for (const e of entries as unknown[]) {
-      if (typeof e !== 'object' || e === null) continue
-      const entry = e as { kind?: unknown; attention?: unknown }
+    for (const entry of parsed.data.entries) {
       // An approval is the call's decision; an answer is a question, or an attention request when it says so
       // (a summary when its reason is `done`).
       if (entry.kind === 'approval') counts.approvals += 1
+      else if (entry.attention === undefined) counts.questions += 1
       else if (isDone(entry.attention)) counts.summaries += 1
-      else if (entry.attention !== undefined) counts.attention += 1
-      else counts.questions += 1
+      else counts.attention += 1
     }
-    const truncated = (body as { summaries_truncated?: unknown }).summaries_truncated
-    if (typeof truncated === 'boolean') counts.summariesTruncated = truncated
+    if (parsed.data.summaries_truncated !== undefined) counts.summariesTruncated = parsed.data.summaries_truncated
     return counts
   } catch {
     return null
