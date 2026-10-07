@@ -189,7 +189,7 @@ class WorkflowReaper:
 
     def __enter__(self) -> WorkflowReaper:
         self._thread.start()
-        self.client = self._run(Client.connect(self._address, namespace=self._namespace))
+        self.client = self.run(Client.connect(self._address, namespace=self._namespace))
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -199,14 +199,15 @@ class WorkflowReaper:
 
     def terminate(self, task_queue: str) -> None:
         assert self.client is not None, "use the reaper as a context manager"
-        self._run(terminate_open_workflows(self.client, task_queue))
+        self.run(terminate_open_workflows(self.client, task_queue))
 
     def delete_schedules(self, *schedule_ids: str) -> None:
         assert self.client is not None, "use the reaper as a context manager"
-        self._run(delete_schedules(self.client, *schedule_ids))
+        self.run(delete_schedules(self.client, *schedule_ids))
 
-    def _run[T](self, coro: Coroutine[object, object, T]) -> T:
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=60)
+    def run[T](self, coro: Coroutine[object, object, T], *, timeout: float = 60) -> T:
+        """Run ``coro`` on the reaper's loop (where its client lives), from a sync caller."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
 
 
 def current_address(client: Client) -> str:
