@@ -379,6 +379,26 @@ describe('chatReducer', () => {
     expect(state.notice).toBeNull()
   })
 
+  it('shows a durable message that was not delivered as an error in the feed (agent not_delivered)', () => {
+    const state = run(
+      [
+        server({ type: 'session.status', sessionId: 's1', status: 'running' }),
+        server({
+          type: 'error',
+          sessionId: 's1',
+          code: 'not_delivered',
+          message: 'Your message was not delivered (the session is busy); send it again.',
+        }),
+        server({ type: 'session.status', sessionId: 's1', status: 'idle' }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.items).toEqual([
+      { kind: 'error', id: 'error-0', message: 'Your message was not delivered (the session is busy); send it again.' },
+    ])
+    expect(isBusy(state.sessions.s1)).toBe(false)
+  })
+
   it('carries a session mode from its start and from the list', () => {
     const state = run([
       server({ type: 'session.started', sessionId: 'd1', origin: 'chat', owner: you, mode: 'durable' }),
