@@ -413,7 +413,8 @@ async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
         return _sample(bus.metrics, "scadbuddy_event_log_pruned_total")
 
     await bus.prune_log()  # by rows
-    await _until(lambda: pruned() == 2)
+    await _until(lambda: pruned() >= 2)
+    assert pruned() == 2
     replay = await bus.replay(0)
     assert _slugs([logged.event for logged in replay.events]) == ["m2", "m3", "m4"]
     assert replay.gap  # m0 and m1 are gone: a client resuming from 0 must resync
@@ -425,8 +426,32 @@ async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
             (replay.events[0].seq,),
         )
     await bus.prune_log()  # by age
-    await _until(lambda: pruned() == 3)
+    await _until(lambda: pruned() >= 3)
+    assert pruned() == 3
     assert _slugs([logged.event for logged in (await bus.replay(0)).events]) == ["m3", "m4"]
+
+
+@pytest.mark.requires_postgres
+async def test_prune_log_returns_the_rows_it_removed(
+    make_bus: BusFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no pruner of the bus's own (#1787), each `prune_log` is the only one: what
+    it returns is what it removed, and what the metric counts."""
+
+    async def no_pruner(self: PgNotifyEventBus) -> None:
+        return None
+
+    monkeypatch.setattr(PgNotifyEventBus, "_pruner", no_pruner)
+    bus = await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
+    subscription = bus.subscribe()
+    for n in range(5):
+        bus.publish(_model(f"m{n}"))
+    for _ in range(5):
+        await _next(subscription)
+
+    assert await bus.prune_log() == 2
+    assert await bus.prune_log() == 0
+    assert _sample(bus.metrics, "scadbuddy_event_log_pruned_total") == 2
 
 
 @pytest.mark.requires_postgres
