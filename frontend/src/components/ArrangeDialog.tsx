@@ -91,11 +91,15 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
         })
         setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
         setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
-        if (failed.length > 0) skipped = backfillFailures(failed)
+        const why = backfillFailures(failed)
         // Every output that can be arranged is, the ones that never needed a re-render too.
         if (ready.length === 0 && usable.length === 0) {
-          setFailures(`${skipped} Nothing was arranged.`)
+          setFailures(`${why} Nothing was arranged.`)
           return
+        }
+        // Said wherever this lands, History too: the arrange went ahead without them (#1007).
+        if (failed.length > 0) {
+          skipped = `${why} ${failed.length === 1 ? 'It was' : 'They were'} left out of the arrange.`
         }
         if (skipped) setFailures(skipped)
         // In the dialog's order, each re-rendered output in its old one's place.

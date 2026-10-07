@@ -2699,7 +2699,7 @@ export const handlers = [
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
     if ((output.manifest ?? []).length > 0) {
-      return problem(409, 'Conflict', `output ${output.id} already records its objects`)
+      return problem(409, 'Conflict', `output ${output.id} already records its objects`, { code: 'already_backfilled' })
     }
     if ((output.arranged_from ?? []).length > 0) {
       return problem(

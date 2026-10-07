@@ -263,6 +263,27 @@ async def test_a_transient_failure_is_left_for_the_next_pass(
 
 
 @pytest.mark.requires_postgres
+async def test_a_job_that_does_not_validate_is_retried_not_failed(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1007: a ValidationError reading the job is not the output's fault; the next pass
+    tries again instead of marking the backfill failed for good."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+
+    def unreadable(job_id: str) -> Job:
+        Job.model_validate({"id": job_id})  # raises a ValidationError, a ValueError
+        raise AssertionError("unreachable")
+
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, unreadable) == 0
+        assert store.backfill(old.id) == BackfillState(job_id=job.id)  # still pending
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+    assert store.manifest(old.id) == written.manifest
+
+
+@pytest.mark.requires_postgres
 async def test_a_marker_left_after_its_manifest_was_written_is_cleared_not_failed(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
