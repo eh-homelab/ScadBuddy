@@ -1,4 +1,14 @@
-import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  Suspense,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -21,6 +31,37 @@ const STAGE_LABELS: Record<RenderStage, string> = {
   solids: 'building each colour',
   thumbnail: 'drawing the covers',
   write: 'writing the 3MF',
+}
+
+/**
+ * #1743 — below this the readouts shrink to one-line chips and the notes and warnings
+ * fold into one: the preview can be short on any screen (beside the assistant, inside
+ * a template's own UI), so it is the preview's own size, not the window's.
+ */
+const COMPACT_HEIGHT = 200
+const COMPACT_WIDTH = 360
+
+/** The element's size in CSS pixels, kept current; `null` until it has been laid out. */
+function useBoxSize(ref: RefObject<HTMLElement | null>): { width: number; height: number } | null {
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element) return
+    const measure = () => {
+      const { width, height } = element.getBoundingClientRect()
+      const next = width === 0 && height === 0 ? null : { width, height }
+      setSize((prev) => (prev?.width === next?.width && prev?.height === next?.height ? prev : next))
+    }
+    measure()
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
+    observer?.observe(element)
+    window.addEventListener('resize', measure)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [ref])
+  return size
 }
 
 interface ViewerTheme {
@@ -151,12 +192,36 @@ export function Preview({
   const failed = job?.status === 'failed' || cancelled
   const clear = covered ? { left: covered } : undefined
 
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const size = useBoxSize(overlayRef)
+  const compact = size !== null && (size.height < COMPACT_HEIGHT || size.width < COMPACT_WIDTH)
+  const messages =
+    shown && !failed && shown.warnings.length + shown.diagnostics.length + shown.notes.length > 0
+      ? shown
+      : undefined
+  // #1744 — the panels together take at most a third of the preview's height. They are
+  // laid out open once for each render and size, and fold into one chip when they would
+  // take more: shown open they never scroll, so they need no pointer input, and a drag
+  // that starts on one still orbits the model.
+  const room = size ? Math.floor(size.height / 3) : Infinity
+  const stackRef = useRef<HTMLDivElement>(null)
+  const [fit, setFit] = useState<{ shown: object; width?: number; room: number; fits: boolean }>()
+  const measured =
+    fit !== undefined && fit.shown === messages && fit.width === size?.width && fit.room === room
+  const folded = compact || (measured && !fit.fits)
+  useLayoutEffect(() => {
+    if (!messages || compact || measured || !stackRef.current) return
+    setFit({ shown: messages, width: size?.width, room, fits: stackRef.current.scrollHeight <= room })
+  }, [messages, compact, measured, size?.width, room])
+
   return (
     <div
+      data-testid="preview"
       // min-w-0: the canvas is sized in pixels, and without it that width holds the
       // column open, so the view never narrows again after full screen or a smaller
-      // window.
-      className="relative h-full min-h-0 w-full min-w-0 bg-bg"
+      // window. overflow-hidden (#1743): the readouts never paint over the page around
+      // a short preview.
+      className="relative h-full min-h-0 w-full min-w-0 overflow-hidden bg-bg"
     >
       {/* #361 — a GLB that fails to load throws out of the scene: without this, the
           whole app unmounts. A new render, or Try again, mounts the scene afresh. */}
@@ -237,7 +302,11 @@ export function Preview({
       </ErrorBoundary>
 
       <div
-        className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3"
+        ref={overlayRef}
+        data-testid="preview-overlay"
+        // A flex column, so the top row and the bottom stack never overlap: on a preview
+        // too short for both, the bottom one runs past the edge and is clipped.
+        className={`pointer-events-none absolute inset-0 flex flex-col justify-between ${compact ? 'gap-1 p-2' : 'p-3'}`}
         style={clear}
       >
         <div className="flex items-start justify-between gap-3">
@@ -245,13 +314,18 @@ export function Preview({
               right side's controls stay on screen. */}
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {leading}
-            {plate && <PlateBadge plate={plate} />}
+            {plate && <PlateBadge plate={plate} compact={compact} />}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {(rendering || loading) && (
-              <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
+              <span
+                data-overlay="chip"
+                className={`flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 text-muted backdrop-blur-sm ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-[12px]'}`}
+              >
                 <Spinner /> Rendering
-                {rendering && stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
+                {rendering && stage && !compact && (
+                  <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>
+                )}
               </span>
             )}
             {controls}
@@ -259,13 +333,22 @@ export function Preview({
         </div>
 
         {!failed && (
-          <div className="flex flex-col items-start gap-2">
-            {shown && shown.warnings.length > 0 && <RenderWarnings warnings={shown.warnings} />}
-            {shown && shown.diagnostics.length > 0 && (
-              <OpenScadWarnings diagnostics={shown.diagnostics} sourceLink={sourceLink} />
-            )}
-            {shown && shown.notes.length > 0 && <RenderNotes notes={shown.notes} />}
-            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
+          <div className={compact ? 'flex flex-wrap items-end gap-2' : 'flex flex-col items-start gap-2'}>
+            {messages &&
+              (folded ? (
+                <MessagesChip
+                  warnings={messages.warnings.length + messages.diagnostics.length}
+                  notes={messages.notes.length}
+                  compact={compact}
+                >
+                  <RenderMessages {...messages} sourceLink={sourceLink} overlay={false} />
+                </MessagesChip>
+              ) : (
+                <div ref={stackRef} className="flex max-w-full flex-col items-start gap-2">
+                  <RenderMessages {...messages} sourceLink={sourceLink} overlay />
+                </div>
+              ))}
+            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} compact={compact} />}
           </div>
         )}
       </div>
@@ -319,21 +402,51 @@ function PreviewFailed({
   )
 }
 
-function PlateBadge({ plate }: { plate: Plate }) {
+function PlateBadge({ plate, compact }: { plate: Plate; compact: boolean }) {
   const unit = useDisplayUnit()
   return (
-    <span className="sb-num rounded-[6px] border border-line bg-surface/90 px-2 py-1 text-[11px] text-faint backdrop-blur-sm">
-      {plate.model ? `${plate.name} · ` : ''}
-      {plateSize(plate.size, unit)} plate
+    <span
+      data-testid="plate-badge"
+      data-overlay="chip"
+      className={`sb-num rounded-[6px] border border-line bg-surface/90 px-2 text-[11px] text-faint backdrop-blur-sm ${compact ? 'py-0.5' : 'py-1'}`}
+    >
+      {/* #1743 — short of room, the size alone: it is what the scene draws. */}
+      {compact ? (
+        plateSize(plate.size, unit)
+      ) : (
+        <>
+          {plate.model ? `${plate.name} · ` : ''}
+          {plateSize(plate.size, unit)} plate
+        </>
+      )}
     </span>
   )
 }
 
-function Dimensions({ bbox, plates }: { bbox: BoundingBox; plates: number }) {
+function Dimensions({ bbox, plates, compact }: { bbox: BoundingBox; plates: number; compact: boolean }) {
   const unit = useDisplayUnit()
+  if (compact) {
+    return (
+      <span
+        role="group"
+        aria-label="Bounding box"
+        data-testid="bbox-readout"
+        data-overlay="chip"
+        className="sb-num rounded-[6px] border border-line bg-surface/90 px-2 py-0.5 text-[11px] text-ink backdrop-blur-sm"
+      >
+        {formatBbox(bbox, unit)}
+        {plates > 1 && (
+          <span data-testid="plate-count" className="text-faint">
+            {` · ${plates} plates`}
+          </span>
+        )}
+      </span>
+    )
+  }
   return (
     <dl
       data-testid="bbox-readout"
+      data-overlay="chip"
       className="w-fit self-start rounded-[6px] border border-line bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
     >
       <dt className="text-[10px] tracking-wide text-faint">Bounding box</dt>
@@ -352,16 +465,151 @@ function Dimensions({ bbox, plates }: { bbox: BoundingBox; plates: number }) {
 }
 
 /**
+ * The top layer, where a popover escapes the preview's clipping. Without it (jsdom has
+ * none) the panel is fixed-position in place, which the clipping does not reach either.
+ */
+const POPOVER = typeof HTMLElement !== 'undefined' && 'showPopover' in HTMLElement.prototype
+
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
+
+/**
+ * #1744 — the notes and warnings folded into one chip, for a preview without room to
+ * show them open. It opens them in a popover in the top layer, clear of the preview's
+ * clipping; Escape or a press elsewhere closes it.
+ */
+function MessagesChip({
+  warnings,
+  notes,
+  compact,
+  children,
+}: {
+  warnings: number
+  notes: number
+  compact: boolean
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  const chip = useRef<HTMLButtonElement>(null)
+  const popover = useRef<HTMLDivElement>(null)
+  const id = useId()
+
+  useLayoutEffect(() => {
+    const panel = popover.current
+    const anchor = chip.current
+    if (!open || !panel || !anchor) return
+    if (POPOVER) panel.showPopover()
+    const place = () => {
+      const box = anchor.getBoundingClientRect()
+      const below = box.top < window.innerHeight / 2
+      panel.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - panel.offsetWidth - 8))}px`
+      panel.style.top = below ? `${box.bottom + 4}px` : 'auto'
+      panel.style.bottom = below ? 'auto' : `${window.innerHeight - box.top + 4}px`
+      panel.style.maxHeight = `${(below ? window.innerHeight - box.bottom : box.top) - 12}px`
+    }
+    place()
+    panel.focus()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setOpen(false)
+      chip.current?.focus()
+    }
+    const onPointer = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (popover.current?.contains(target) || chip.current?.contains(target)) return
+      setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onPointer)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onPointer)
+    }
+  }, [open])
+
+  return (
+    <>
+      <button
+        ref={chip}
+        type="button"
+        data-overlay="chip"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((was) => !was)}
+        className={`pointer-events-auto rounded-[6px] border bg-surface/90 px-2 text-[11px] backdrop-blur-sm hover:bg-surface ${compact ? 'py-0.5' : 'py-1'} ${warnings > 0 ? 'border-warn/45 text-warn' : 'border-line text-muted'}`}
+      >
+        {[warnings > 0 && count(warnings, 'warning'), notes > 0 && count(notes, 'note')]
+          .filter(Boolean)
+          .join(' · ')}
+      </button>
+      {open && (
+        <div
+          ref={popover}
+          id={id}
+          popover={POPOVER ? 'manual' : undefined}
+          tabIndex={-1}
+          role="group"
+          aria-label="About this render"
+          className="m-0 flex w-max max-w-[min(32rem,calc(100vw-1rem))] flex-col gap-2 overflow-auto border-0 bg-transparent p-0 outline-none"
+          style={{ position: 'fixed', inset: 'auto' }}
+        >
+          {children}
+        </div>
+      )}
+    </>
+  )
+}
+
+/** A render's notes and warnings: ScadBuddy's own, OpenSCAD's, then the template's. */
+function RenderMessages({
+  warnings,
+  diagnostics,
+  notes,
+  sourceLink,
+  overlay,
+}: {
+  warnings: string[]
+  diagnostics: Diagnostic[]
+  notes: string[]
+  sourceLink?: ReactNode
+  overlay: boolean
+}) {
+  return (
+    <>
+      {warnings.length > 0 && <RenderWarnings warnings={warnings} overlay={overlay} />}
+      {diagnostics.length > 0 && (
+        <OpenScadWarnings diagnostics={diagnostics} sourceLink={sourceLink} overlay={overlay} />
+      )}
+      {notes.length > 0 && <RenderNotes notes={notes} overlay={overlay} />}
+    </>
+  )
+}
+
+/**
+ * Over the scene a panel takes no pointer input, so a drag that starts on it still
+ * orbits the model (#1744): it is shown open there only when it fits without scrolling.
+ * In the popover it is an ordinary panel.
+ */
+const panelClass = (overlay: boolean, border: string) =>
+  `w-fit max-w-[min(32rem,100%)] rounded-[6px] border ${border} px-2.5 py-1.5 ${overlay ? 'pointer-events-none bg-surface/90 backdrop-blur-sm' : 'bg-surface'}`
+
+/**
  * #285 — what the template echoed as `NOTE:`/`WARNING:` on a successful render: a
  * size it capped or text it shrank to fit the plate. Without it the result simply
  * differs from the parameters, with nothing to say why.
  */
-export function RenderNotes({ notes }: { notes: string[] }) {
+function RenderNotes({ notes, overlay }: { notes: string[]; overlay: boolean }) {
   return (
     <section
       data-testid="render-notes"
+      data-overlay="panel"
       aria-label="Notes from the template"
-      className="pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-line bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
+      className={panelClass(overlay, 'border-line')}
     >
       <h3 className="text-[10px] tracking-wide text-faint">From the template</h3>
       <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-muted">
@@ -382,18 +630,23 @@ export function RenderNotes({ notes }: { notes: string[] }) {
 function OpenScadWarnings({
   diagnostics,
   sourceLink,
+  overlay,
 }: {
   diagnostics: Diagnostic[]
   sourceLink?: ReactNode
+  overlay: boolean
 }) {
   return (
     <section
       aria-label="OpenSCAD warnings"
-      className="pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
+      data-overlay="panel"
+      className={panelClass(overlay, 'border-warn/45')}
     >
       <h3 className="flex items-center gap-2 text-[10px] tracking-wide text-warn">
         From OpenSCAD
-        {sourceLink && <span className="text-[11px] tracking-normal underline">{sourceLink}</span>}
+        {sourceLink && (
+          <span className="pointer-events-auto text-[11px] tracking-normal underline">{sourceLink}</span>
+        )}
       </h3>
       <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-warn">
         {diagnostics.map((diagnostic, index) => (
@@ -418,15 +671,22 @@ function OpenScadWarnings({
  * OpenSCAD could not open. Warn-coloured and titled for ScadBuddy, so it reads as
  * distinct from what the template itself said (`RenderNotes`).
  */
-export function RenderWarnings({ warnings, inline = false }: { warnings: string[]; inline?: boolean }) {
+function RenderWarnings({
+  warnings,
+  inline = false,
+  overlay = false,
+}: {
+  warnings: string[]
+  inline?: boolean
+  overlay?: boolean
+}) {
   return (
     <section
       data-testid="render-warnings"
       aria-label="Render warnings"
+      data-overlay={inline ? undefined : 'panel'}
       className={
-        inline
-          ? 'max-h-28 overflow-auto border-b border-warn/25 px-3 py-2'
-          : 'pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm'
+        inline ? 'max-h-28 overflow-auto border-b border-warn/25 px-3 py-2' : panelClass(overlay, 'border-warn/45')
       }
     >
       <h3 className="text-[10px] tracking-wide text-warn">From ScadBuddy</h3>
@@ -457,7 +717,8 @@ function RenderError({
   const ownFailure = !cancelled && !log && !!error
   return (
     <div
-      className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
+      // #1743 — no taller than the preview, which clips it: on a short one it scrolls.
+      className="absolute inset-x-3 bottom-3 max-h-[calc(100%-1.5rem)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
       style={covered ? { left: `calc(${covered} + 0.75rem)` } : undefined}
     >
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">

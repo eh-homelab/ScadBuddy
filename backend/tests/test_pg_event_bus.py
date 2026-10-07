@@ -162,6 +162,25 @@ async def test_events_published_before_start_are_sent_on_start(pg_conninfo: str)
 
 
 @pytest.mark.requires_postgres
+async def test_a_bus_hears_what_it_publishes_as_soon_as_it_has_started(
+    pg_conninfo: str,
+) -> None:
+    # #1745: `start` returned before the listener's LISTEN, so an event published
+    # straight after it (an app's first request) could commit its NOTIFY to nobody.
+    _migrated(pg_conninfo)
+    listener = PgListener(pg_conninfo, check_interval=1.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
+    subscription = bus.subscribe()
+    await bus.start()
+    try:
+        assert listener.backend_pid is not None
+        bus.publish(_model("first"))
+        assert _slugs([await _next(subscription)]) == ["first"]
+    finally:
+        await bus.aclose()
+
+
+@pytest.mark.requires_postgres
 async def test_starting_before_the_store_migrated_says_so(pg_conninfo: str) -> None:
     """The ordering the lifespan relies on, asserted: an unmigrated database is a
     clear error at start, not `relation "events" does not exist` in every write."""

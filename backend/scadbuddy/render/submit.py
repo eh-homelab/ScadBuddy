@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import timedelta
@@ -23,12 +24,14 @@ from typing import Any
 from fastapi import status
 from temporalio.client import (
     Client,
+    WorkflowFailureError,
     WorkflowUpdateFailedError,
     WorkflowUpdateRPCTimeoutOrCancelledError,
 )
-from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.common import Priority, WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
@@ -41,7 +44,7 @@ from scadbuddy.core.tracing import (
     span,
 )
 from scadbuddy.library.previews import source_key
-from scadbuddy.render.inputs import legacy_inputs
+from scadbuddy.render.inputs import InputsError, arrange_key, inputs_key, legacy_inputs
 from scadbuddy.render.job_models import (
     SUPERSEDED_ERROR,
     Job,
@@ -82,14 +85,28 @@ from scadbuddy.workflows.commands import (
 from scadbuddy.workflows.models import (
     CLOSING,
     RELEASE_UPDATE,
+    ArrangeInputs,
+    MigrateRequest,
+    MigrateResult,
     ReleaseAnswer,
     RenderAnswer,
     RenderStart,
 )
-from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview
+from scadbuddy.workflows.pipelines import (
+    MIGRATE_EXECUTION_TIMEOUT,
+    PREVIEW_TRANSFER,
+    MigrateInputs,
+    RenderPreview,
+)
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
 
 logger = logging.getLogger(__name__)
+
+#: A preview's priority on the render queue it shares with user renders (#603): below
+#: Temporal's default of 3 (1 is first, 5 last), so a boot-time or hourly pass of
+#: previews never holds a render someone is waiting for. `RenderPreview` passes it to its
+#: activity (Temporal 1.32 no longer passes a workflow's priority on by itself).
+PREVIEW_PRIORITY = 4
 
 #: How long a request waits on one Temporal call it makes besides the start (a release,
 #: a describe): the SDK's own retry budget is ~10 s per call.
@@ -176,7 +193,10 @@ class RenderService:
             self._boot = None
 
     def _memo(self) -> dict[str, Any]:
-        return {"activity_timeout": self.config.activity_timeout}
+        return {
+            "activity_timeout": self.config.activity_timeout,
+            "template_activity_max_timeout": self.config.template_activity_max_timeout,
+        }
 
     async def submit(
         self,
@@ -186,10 +206,12 @@ class RenderService:
         model_version: str | None = None,
         supersedes: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        whole_inputs: bool = False,
         request_id: str | None = None,
     ) -> Job:
         """Start the job's execution, or join the open one rendering the same content,
-        and answer the row its first activity wrote. ``request_id`` (the request's
+        and answer the row its first activity wrote. ``whole_inputs``: a pipeline
+        template's job, keyed on all of its inputs (§3.4). ``request_id`` (the request's
         `Idempotency-Key`) makes a re-sent request the same claim, not another: it is
         the `accepted` Update's id, which Temporal answers with its first outcome on
         the open run and, once that run has closed, on the closed one (until another
@@ -201,6 +223,7 @@ class RenderService:
                 model_version=model_version,
                 supersedes=supersedes,
                 inputs=inputs,
+                whole_inputs=whole_inputs,
                 request_id=request_id,
             )
             current.set_attribute("scadbuddy.job_id", job.id)
@@ -222,6 +245,7 @@ class RenderService:
         model_version: str | None = None,
         supersedes: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        whole_inputs: bool = False,
         request_id: str | None = None,
     ) -> tuple[Job, bool]:
         if self.snapshots is not None:
@@ -235,12 +259,17 @@ class RenderService:
                     " history, or the template was never committed"
                 )
         previous = await self._superseded(supersedes, slug) if supersedes else None
+        data = dict(inputs) if inputs is not None else legacy_inputs(params)
         start = RenderStart(
             slug=slug,
             params=dict(params),
-            inputs=dict(inputs) if inputs is not None else legacy_inputs(params),
+            inputs=data,
             model_version=model_version,
-            render_key=render_key(slug, params, model_version),
+            render_key=(
+                inputs_key(slug, data, model_version)
+                if whole_inputs
+                else render_key(slug, params, model_version)
+            ),
             max_pending=self.config.render_queue_max,
             search_attributes=self.search_attributes,
             traceparent=current_traceparent(),
@@ -255,8 +284,15 @@ class RenderService:
             )
         if previous is not None and previous.workflow_id == workflow_id_for_key(start.render_key):
             # The same render it replaces: answered with it, as the row did (no claim).
-            self.metrics.render_coalesced.inc()
+            self.metrics.render_coalesced.labels("render").inc()
             return previous, True
+        return await self._answer(start, previous, request_id)
+
+    async def _answer(
+        self, start: RenderStart, previous: Job | None, request_id: str | None
+    ) -> tuple[Job, bool]:
+        """The job ``start`` was answered with, and whether it joined an open one;
+        counted under its kind."""
         try:
             answer = await self._started(start, previous, request_id)
         except (CommandStillAcceptingError, CommandClosedError):
@@ -269,14 +305,41 @@ class RenderService:
             self.metrics.store_errors.labels("start_workflow").inc()
             raise
         if answer.queue_full is not None:
-            self.metrics.render_rejected.inc()
-            raise QueueFullError(answer.queue_full, self.retry_after())
+            self.metrics.render_rejected.labels(start.kind).inc()
+            raise QueueFullError(answer.queue_full, await self.retry_after())
         assert answer.job is not None
         if answer.coalesced:
-            self.metrics.render_coalesced.inc()
+            self.metrics.render_coalesced.labels(start.kind).inc()
         else:
-            self.metrics.render_submitted.inc()
+            self.metrics.render_submitted.labels(start.kind).inc()
         return answer.job, answer.coalesced
+
+    async def arrange(
+        self, slug: str, inputs: ArrangeInputs, *, request_id: str | None = None
+    ) -> Job:
+        """Start an `arrange` job's execution (or join the open, identical one): the
+        same `TemplatePipeline` and the same accept as a render (spec §3.3, §3.4), keyed
+        on the arrange's inputs."""
+        payload = inputs.model_dump(mode="json")
+        start = RenderStart(
+            slug=slug,
+            inputs=payload,
+            render_key=arrange_key(slug, payload),
+            kind="arrange",
+            max_pending=self.config.render_queue_max,
+            search_attributes=self.search_attributes,
+            traceparent=current_traceparent(),
+        )
+        # Temporal refuses an input this large outright, so it could never start.
+        size = len(pydantic_data_converter.payload_converter.to_payload(start).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these objects make an arrange request of {size} bytes; the most a job can"
+                f" carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
+        job, _ = await self._answer(start, None, request_id)
+        return job
 
     async def _superseded(self, job_id: str, slug: str) -> Job | None:
         try:
@@ -326,6 +389,8 @@ class RenderService:
                     reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                     memo=self._memo(),
                     update_id=request_id,
+                    # Bounds a pipeline that never yields; `settle_closed` fails its row.
+                    execution_timeout=timedelta(seconds=self.config.pipeline_timeout),
                 )
             except (TemporalBusyError, TemporalRefusedError) as error:
                 # `start_command` classifies its `RPCError` (#1316); the cause says which.
@@ -554,13 +619,71 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
+            priority=Priority(priority_key=PREVIEW_PRIORITY),
             rpc_timeout=RPC_TIMEOUT,
         )
         png: bytes = await asyncio.wait_for(handle.result(), wait)
         return png
 
-    def retry_after(self) -> int:
-        return max(1, math.ceil(INITIAL_RENDER_ESTIMATE))
+    async def migrate_inputs(
+        self, slug: str, inputs: Mapping[str, Any], *, version: str | None
+    ) -> MigrateResult:
+        """``inputs`` brought up to the template's `INPUTS_VERSION` by its `migrate`, run
+        on a worker (§8.2, §9). The template's refusal is an `InputsError` with its
+        message; a request too large to carry is a 413, the service unreachable a 503,
+        and a migration that ran out of time a 504. On the bambuddy store the worker has
+        no volume, so every revision is pinned as a snapshot first, as for a render
+        (`pin` takes None as the last commit)."""
+        # Measured before the pin, so an oversized request uploads no snapshot: with a
+        # full-length revision, the longest `pin` can return.
+        probe = MigrateRequest(slug=slug, revision="0" * 40, inputs=dict(inputs))
+        size = len(pydantic_data_converter.payload_converter.to_payload(probe).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these inputs make a migration request of {size} bytes; the most one"
+                f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
+        revision = version
+        if self.snapshots is not None:
+            revision = await self.snapshots.pin(slug, version)
+        req = MigrateRequest(slug=slug, revision=revision, inputs=dict(inputs))
+        try:
+            result: MigrateResult = await self.client.execute_workflow(
+                MigrateInputs.run,
+                req,
+                id=f"migrate-{uuid.uuid4().hex}",
+                task_queue=self.task_queue,
+                execution_timeout=MIGRATE_EXECUTION_TIMEOUT,
+                rpc_timeout=RPC_TIMEOUT,
+            )
+        except RPCError as error:
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"the render service is unavailable: {error.message}",
+            ) from None
+        except WorkflowFailureError as error:
+            cause: BaseException | None = error.cause
+            timed_out = False
+            while cause is not None and not isinstance(cause, ApplicationError):
+                timed_out = timed_out or isinstance(cause, TemporalTimeoutError)
+                cause = cause.__cause__
+            if isinstance(cause, ApplicationError):
+                raise InputsError(cause.message) from None
+            if timed_out:
+                raise ApiError(
+                    status.HTTP_504_GATEWAY_TIMEOUT,
+                    "migrating the inputs timed out after"
+                    f" {MIGRATE_EXECUTION_TIMEOUT.total_seconds():g}s",
+                ) from None
+            raise InputsError(str(error)) from None
+        return result
+
+    async def retry_after(self) -> int:
+        """A full queue's `Retry-After`: how long renders take now (the latest finished
+        ones' median), or the initial estimate before one has finished (#603)."""
+        recent = await asyncio.to_thread(self.store.recent_render_seconds)
+        return max(1, math.ceil(INITIAL_RENDER_ESTIMATE if recent is None else recent))
 
     def refresh_metrics(self) -> None:
         """The queue gauges, read from the projection."""

@@ -58,19 +58,6 @@ def bundled(seed_dir: Path) -> Path:
 
 
 @pytest.fixture
-def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
-    """The API tests' settings, with the Postgres the media list lives in."""
-    return Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-        database_url=pg_conninfo,
-        temporal_address=UNUSED_TEMPORAL_ADDRESS,
-    )
-
-
-@pytest.fixture
 def client(app: FastAPI, bundled: Path) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
@@ -397,7 +384,7 @@ def test_the_legacy_etag_is_of_the_file_served_when_it_is_replaced_mid_request(
     """#1689: a thumbnail PUT landing between the 304 check and the decode."""
     legacy = paths.model_dir(model) / "thumbnail.png"
     legacy.write_bytes(_real_image((400, 300), "PNG"))
-    old = client.get(_thumbnail_url(model, "thumbnail")).headers["etag"]
+    old = media_api._legacy_etag(legacy.stat())
     real = media_api._thumbnail_of
 
     def replaced_first(path: Path, content_type: str) -> Any:
@@ -480,6 +467,75 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
 
     assert codes == [200] * 8
     assert 1 < most <= MAX_CONCURRENT_THUMBNAILS
+
+
+def _counting_decodes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """How many times `_shrink` runs, in a one-item list."""
+    real = media_api._shrink
+    decoded = [0]
+
+    def counting(file: IO[bytes]) -> bytes | None:
+        decoded[0] += 1
+        return real(file)
+
+    monkeypatch.setattr("scadbuddy.api.media._shrink", counting)
+    return decoded
+
+
+def test_a_thumbnail_is_decoded_once(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1420: a decode costs up to some 200 MB, so a thumbnail made once is served from
+    memory after that."""
+    item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
+    decoded = _counting_decodes(monkeypatch)
+
+    first = client.get(_thumbnail_url(model, item["id"]))
+    again = client.get(_thumbnail_url(model, item["id"]))
+
+    assert first.status_code == again.status_code == 200
+    assert again.content == first.content
+    assert again.headers["content-type"] == "image/webp"
+    assert decoded == [1]
+
+
+def test_a_kept_thumbnail_is_made_again_when_its_file_is_replaced(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy item is replaced in place by a thumbnail PUT: a kept copy of the old
+    file is not served for the new one."""
+    legacy = paths.model_dir(model) / "thumbnail.png"
+    legacy.write_bytes(_real_image((400, 300), "PNG"))
+    decoded = _counting_decodes(monkeypatch)
+
+    old = client.get(_thumbnail_url(model, "thumbnail"))
+    legacy.write_bytes(_real_image((300, 400), "PNG") + b"\x00")  # another size, too
+    new = client.get(_thumbnail_url(model, "thumbnail"))
+
+    assert old.status_code == new.status_code == 200
+    assert decoded == [2]
+    assert new.headers["etag"] != old.headers["etag"]
+    with Image.open(io.BytesIO(new.content)) as small:
+        assert small.size == (144, 192)
+
+
+def test_a_thumbnail_served_as_it_is_is_not_kept(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the small WebP is kept in memory: a file served as it is can be 10 MB."""
+    item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
+    decoded = 0
+
+    def undecodable(file: IO[bytes]) -> bytes | None:
+        nonlocal decoded
+        decoded += 1
+        return None
+
+    monkeypatch.setattr("scadbuddy.api.media._shrink", undecodable)
+    client.get(_thumbnail_url(model, item["id"]))
+    client.get(_thumbnail_url(model, item["id"]))
+
+    assert decoded == 2
 
 
 def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: str) -> None:

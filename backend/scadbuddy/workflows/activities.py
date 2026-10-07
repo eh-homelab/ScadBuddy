@@ -4,14 +4,16 @@ reads and writes the piece's directory in the blob store (spec §3.4)."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import psycopg
@@ -37,7 +39,7 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection, LegacyPendingError, legacy_unrun
-from scadbuddy.render.runner import OpenSCADError, ProcessOutput
+from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
@@ -82,6 +84,11 @@ class WorkerDeps:
     snapshots: SnapshotStore | None = None
     fonts_mirror: FontMirror | None = None
     remote_assets: RemoteAssets | None = None
+    #: `SCADBUDDY_REVISION` and `openscad --version` of this worker, for the record (§8.4).
+    revision: str = ""
+    openscad_version: str = ""
+    #: The interpreter template activities run under: this worker's own (§5.2).
+    template_python: str = sys.executable
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -182,6 +189,42 @@ async def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
     return BlobScope(slug=req.slug, title=title)
 
 
+def _parameter_error(message: str) -> ApplicationError:
+    """Non-retryable: the same file and parameters are refused on every attempt."""
+    return ApplicationError(
+        message, Failure(error=message), type="ParameterError", non_retryable=True
+    )
+
+
+def _render_file(prepared: Prepared, file: str) -> Prepared:
+    """``prepared`` for the template's file ``file`` rather than `model.scad`: a
+    `.scad` file inside the template's directory, with a schema cache of its own."""
+    # Canonical only: the template root is later derived from this string
+    # (`model_dir`), so `parts/../model.scad`, `./model.scad` or an absolute path would
+    # root the fonts scan and the store folder elsewhere even though they resolve inside.
+    path = PurePosixPath(file)
+    if (
+        path.is_absolute()
+        or any(part in (".", "..") for part in file.split("/"))
+        or path.as_posix() != file
+    ):
+        raise _parameter_error(
+            f"{file} is not a file of the template: name it by its plain path inside"
+            " the template, e.g. parts/roof.scad"
+        )
+    if file == "model.scad":
+        return prepared
+    root = prepared.scad.parent.resolve()
+    scad = (root / file).resolve()
+    if not scad.is_relative_to(root) or scad.suffix != ".scad" or not scad.is_file():
+        raise _parameter_error(f"{file} is not a file of the template")
+    cache = prepared.schema_cache
+    digest = hashlib.sha256(file.encode()).hexdigest()[:12]
+    return replace(
+        prepared, scad=scad, schema_cache=cache.with_name(f"{cache.stem}.{digest}{cache.suffix}")
+    )
+
+
 async def _checkout(blobs: BlobStore, key: str) -> str | None:
     """The piece an earlier stage published, for this stage to continue; its sha is the
     publish baseline. Non-retryable when the store lost it: a retry would find nothing
@@ -278,7 +321,7 @@ class RenderActivities:
             return None
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
-    async def _materialize(self, slug: str, revision: str | None) -> None:
+    async def materialize(self, slug: str, revision: str | None) -> None:
         """The revision's snapshot, from the store onto this worker's volume."""
         d = self.deps
         if d.snapshots is None or revision is None:
@@ -296,7 +339,7 @@ class RenderActivities:
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
-        await self._materialize(req.slug, req.revision)
+        await self.materialize(req.slug, req.revision)
         try:
             with timed_stage(d.metrics)("source"):
                 prepared, _ = await _heartbeating(
@@ -313,19 +356,37 @@ class RenderActivities:
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
-        if d.fonts_mirror is not None:
-            # Only the families this template could name: a fresh worker does not
-            # download the whole font library for its first piece.
-            source = model_dir(prepared.scad, req.file)
-            families = await asyncio.to_thread(wanted_families, source, req.params)
-            await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
-        return PrepareResult(
+        prepared = _render_file(prepared, req.file)
+        result = PrepareResult(
             version=prepared.version,
             scad=str(prepared.scad),
             library_path=[str(path) for path in prepared.library_path],
             schema_cache=str(prepared.schema_cache),
             libraries=list(prepared.libraries),
         )
+        if d.fonts_mirror is not None:
+            # Only the families this template could name: a fresh worker does not
+            # download the whole font library for its first piece.
+            source = model_dir(prepared.scad, req.file)
+            families = await asyncio.to_thread(wanted_families, source, req.params)
+            await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
+        # The parameters are checked here, against the file's own schema: the API checked
+        # them against model.scad's, and a pipeline's `ctx.render` passes any (#432).
+        try:
+            async with library_lease(d.checkouts, f"piece:{req.piece_key}", prepared.library_path):
+                schema = await _heartbeating(
+                    asyncio.create_task(
+                        cached_schema(
+                            prepared.scad, prepared.schema_cache, config=self._config(result)
+                        )
+                    )
+                )
+        except OpenSCADError as error:
+            raise _failure(error) from None
+        problem = params_problem(schema, req.params)
+        if problem is not None:
+            raise _parameter_error(problem)
+        return result
 
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
@@ -447,7 +508,7 @@ class RenderActivities:
         snapshot and its fonts come from the store (final review C1). The defaults
         name no upload (`file_assets` skips a file parameter's own default)."""
         d = self.deps
-        await self._materialize(slug, revision)
+        await self.materialize(slug, revision)
         if d.fonts_mirror is not None:
             source = (
                 d.paths.model_revision_dir(slug, revision)
@@ -543,8 +604,11 @@ class RenderActivities:
         await asyncio.to_thread(self.deps.projection.set_claims, job_id, claims)
 
     @activity.defn(name="project")
-    async def project(self, projection: Projection) -> None:
-        """Move the row forward; a no-op when it is already past this state or gone."""
+    async def project(self, projection: Projection) -> bool:
+        """Move the row forward; a no-op when it is already past this state or gone.
+        For ``running``, whether the row is still open: an older build's API commits
+        the row before it starts the run, so a release may have settled it first, and
+        the run then renders nothing (#603). Every other state answers True."""
         p = self.deps.projection
         if projection.state == "running":
             started = await asyncio.to_thread(p.mark_started, projection.job_id)
@@ -553,15 +617,21 @@ class RenderActivities:
                 self.deps.metrics.queue_wait.observe(
                     max(0.0, (started.started_at - started.created_at).total_seconds())
                 )
-            return
+            if started is not None:
+                return True
+            try:
+                job = await asyncio.to_thread(p.read, projection.job_id)
+            except JobNotFoundError:
+                return False
+            return job.state == "running"
         if projection.state is None:
             if projection.steps is not None:
                 await asyncio.to_thread(p.set_steps, projection.job_id, projection.steps)
-            return
+            return True
         try:
             job = await asyncio.to_thread(p.read, projection.job_id)
         except JobNotFoundError:
-            return
+            return True
         # The API cancelled it first: its error says why, the workflow's does not.
         keep_error = projection.state == "cancelled" and job.state == "cancelled"
         job.state = projection.state
@@ -582,15 +652,19 @@ class RenderActivities:
             job.diagnostics = failure.diagnostics
             job.diagnostics_dropped = failure.diagnostics_dropped
             job.warnings = failure.warnings
-        if projection.blob_key is not None and projection.state == "done":
-            # Before `finish`, so a sweep between the two cannot take the blob.
-            await asyncio.to_thread(self.deps.refs.add, projection.blob_key, "job", job.id)
+        if projection.state == "done":
+            job.outputs = projection.outputs
+            # Before `finish`, so a sweep between the two cannot take a blob.
+            keys = [*projection.blob_keys, *([projection.blob_key] if projection.blob_key else [])]
+            for key in dict.fromkeys(keys):
+                await asyncio.to_thread(self.deps.refs.add, key, "job", job.id)
         job.finished_at = job.finished_at or now()
         if not await asyncio.to_thread(p.finish, job):
             logger.debug(
                 "job already settled; projection ignored",
                 extra={"job_id": job.id, "state": projection.state},
             )
-            return
+            return True
         if self.deps.metrics is not None and job.state in ("done", "failed"):
             _observe_settled(self.deps.metrics, job)
+        return True
