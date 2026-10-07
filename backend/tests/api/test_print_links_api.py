@@ -14,6 +14,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.print_links import PrintLink
 from tests.api.test_send import API, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -82,6 +83,7 @@ def test_attaching_a_queue_item_that_is_not_the_outputs_does_not_link_it(
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/project",
         json={"project_id": 7, "queue_item_ids": [34, 500]},
+        headers=press(),
     )
 
     assert response.status_code == 200
@@ -117,6 +119,7 @@ def test_attaching_an_item_already_linked_to_the_output_links_it(
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/project",
         json={"project_id": 7, "queue_item_ids": [90]},
+        headers=press(),
     )
 
     assert response.status_code == 200

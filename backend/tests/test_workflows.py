@@ -37,6 +37,7 @@ from scadbuddy.render.job_models import (
     Job,
     JobResult,
     PartInfo,
+    PipelineOutput,
 )
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
@@ -46,6 +47,11 @@ from scadbuddy.workflows.models import (
     RELEASE_UPDATE,
     AcceptRender,
     Failure,
+    Layout,
+    LoadedPipeline,
+    LoadRequest,
+    OutputRequest,
+    PackRequest,
     PieceRequest,
     PieceResult,
     PrepareResult,
@@ -55,8 +61,10 @@ from scadbuddy.workflows.models import (
     RenderMainResult,
     piece_key,
 )
+from scadbuddy.workflows.pipeline_activities import pack_layout
 from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline, _target_gone
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
+from tests.support.pipelines import FakeWorld, fake_output
 from tests.support.renders import start_of, start_render
 from tests.support.temporal import temporal_client
 
@@ -196,6 +204,19 @@ class FakeActivities:
             await self.block_claims.wait()
         self.claims.append(claims)
 
+    # The built-in pipeline's own activities (spec §5.3), as `FakeWorld` has them.
+    @activity.defn(name="load_pipeline")
+    async def load_pipeline(self, req: LoadRequest) -> LoadedPipeline:
+        return await FakeWorld().load_pipeline(req)
+
+    @activity.defn(name="pack")
+    async def pack(self, req: PackRequest) -> Layout:
+        return pack_layout(req)
+
+    @activity.defn(name="write_output")
+    async def write_output(self, req: OutputRequest) -> PipelineOutput:
+        return fake_output(req)
+
 
 def _job(revision: str | None = REVISION, **params: int) -> Job:
     return Job(
@@ -229,6 +250,9 @@ def _worker(
             acts.render_solids,
             acts.finish_piece,
             acts.project,
+            acts.load_pipeline,
+            acts.pack,
+            acts.write_output,
             acts.render_accept,
             acts.render_claims,
         ],
@@ -327,9 +351,9 @@ async def test_a_default_render_runs_the_four_stages_and_projects_done() -> None
         states = [p.state for p in acts.projections if p.state]
         assert states == ["running", "done"]
         assert acts.projections[-1].result is not None
-        assert acts.projections[-1].blob_key == piece_key(
-            "demo", REVISION, "model.scad", {"width": 1}
-        )
+        assert acts.projections[-1].blob_keys == [
+            piece_key("demo", REVISION, "model.scad", {"width": 1})
+        ]
 
 
 async def test_an_openscad_failure_projects_failed_with_the_log_tail() -> None:
@@ -344,6 +368,8 @@ async def test_an_openscad_failure_projects_failed_with_the_log_tail() -> None:
         assert acts.projections[0].state == "running"
         last = acts.projections[-1]
         assert last.state == "failed" and last.failure is not None
+        # The built-in pipeline's one piece: its error as it is, no file in front (§5.3).
+        assert last.failure.error == "openscad exited with 1"
         assert last.failure.log_tail == ["ERROR: boom"]
         assert acts.calls == ["prepare", "render_main"]
 
@@ -403,9 +429,10 @@ async def test_two_revision_less_jobs_never_share_a_piece() -> None:
                 ),
             )
         assert acts.calls.count("render_main") == 2
-        keys = {p.job_id: p.blob_key for p in acts.projections if p.state == "done"}
+        keys = {p.job_id: p.blob_keys for p in acts.projections if p.state == "done"}
         assert keys == {
-            job.id: piece_key("demo", f"job:{job.id}", "model.scad", {"width": 6}) for job in (a, b)
+            job.id: [piece_key("demo", f"job:{job.id}", "model.scad", {"width": 6})]
+            for job in (a, b)
         }
 
 
@@ -599,8 +626,9 @@ async def test_an_unexpected_error_in_the_pipeline_projects_failed_and_closes_th
         acts = FakeActivities()
         async with _worker(client, queue, acts):
             job = _job(width=31)
-            # Hand-authored inputs (spec §4.3): `params` present but not a mapping.
-            job.inputs = {"params": None}
+            # Hand-authored inputs (spec §4.3): a `v` that is not a number fails the host,
+            # before any template code runs.
+            job.inputs = {"params": {"width": 31}, "v": "x"}
             handle = await client.start_workflow(
                 TemplatePipeline.run, start_of(job), id=f"render-{job.id}", task_queue=queue
             )
@@ -609,7 +637,30 @@ async def test_an_unexpected_error_in_the_pipeline_projects_failed_and_closes_th
                 await asyncio.wait_for(handle.result(), timeout=30)
         last = [p for p in acts.projections if p.job_id == job.id and p.state][-1]
         assert last.state == "failed"
-        assert last.failure is not None and last.failure.error.startswith("TypeError: ")
+        assert last.failure is not None and last.failure.error.startswith("ValueError: ")
+        assert last.steps is not None and last.steps[0].state == "failed"
+        assert acts.calls == []
+
+
+async def test_params_that_are_not_a_mapping_fail_the_default_pipeline_without_a_location() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities()
+        async with _worker(client, queue, acts):
+            job = _job(width=32)
+            # `params` present but not a mapping: the pipeline's own error, so the run
+            # completes with the job failed.
+            job.inputs = {"params": None}
+            await asyncio.wait_for(
+                client.execute_workflow(
+                    TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+                ),
+                timeout=30,
+            )
+        last = [p for p in acts.projections if p.job_id == job.id and p.state][-1]
+        assert last.state == "failed"
+        assert last.failure is not None
+        assert last.failure.error.startswith("TypeError: ")  # no line in code nobody wrote
         assert last.steps is not None and last.steps[0].state == "failed"
         assert acts.calls == []
 

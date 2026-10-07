@@ -813,8 +813,9 @@ including `disabled`. Where it is enforced:
   (`agent/test/harnessWiring.test.ts`). Its call has no timeout short of the turn's end
   (`ASK_USER_TIMEOUT_MS`, measured). `ai_questions.tool` records which tool asked. Each
   answer is an audit row of kind `question`, naming that tool and holding a keyed hash of
-  the answers, never their text (#1075). A subagent's calls are not yet in the panel feed
-  or the `tool_call` rows (#1108), and the card does not yet say who asked (#1109). Expiry and notifications
+  the answers, never their text (#1075). A subagent's calls are in the panel feed, tagged
+  with the `Agent` call that spawned it (`parent`), and have `tool_call` rows (#1108); the
+  card does not yet say who asked (#1109). Expiry and notifications
   belong to the attention requests of #815. The code is `agent/src/harness/questions.ts`
   and `agent/src/questions/service.ts`; the panel's card is `QuestionCard` in
   `frontend/src/components/assistant/FeedItemView.tsx`.
