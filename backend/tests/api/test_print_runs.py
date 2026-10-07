@@ -866,6 +866,42 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
 
 
 @respx.mock
+def test_a_repeat_of_an_ended_run_still_open_after_the_wait_is_still_accepting(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Our record no longer repeats the ended run, and its execution outlived
+    `CLOSING_WAIT` (a loaded worker had not closed it yet): the second start attached to
+    it again and answered its old run, so a deliberate reprint got the last print's
+    copy back (`test_a_copy_deleted_in_bambuddy_is_dropped_and_uploaded_again`). The
+    client is told to send it again instead, and that request starts the new run."""
+    output_id = prepared(client, model)
+    ended_run = PrintRun(
+        id="run-old", output_id=output_id, status="succeeded", created_at=datetime.now(UTC)
+    )
+    starts: list[timedelta] = []
+
+    async def still_open(
+        *args: Any, deadline: timedelta = timedelta(seconds=10), **kwargs: Any
+    ) -> AcceptAnswer:
+        starts.append(deadline)
+        return AcceptAnswer(run=ended_run, repeated=True)
+
+    async def stored(run_id: str) -> PrintRun:
+        return ended_run
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(printing_api, "CLOSING_WAIT", 0.1)
+    monkeypatch.setattr(printing_api, "start_command", still_open)
+    monkeypatch.setattr(state.print_runs.store, "get", stored)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+    assert len(starts) == 2
+
+
+@respx.mock
 def test_an_execution_ended_before_it_answered_is_still_accepting(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

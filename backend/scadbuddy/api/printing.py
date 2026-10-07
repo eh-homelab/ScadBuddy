@@ -391,16 +391,18 @@ async def accept_run(
             deadline=deadline,
         )
 
+    async def ended(answer: AcceptAnswer) -> bool:
+        """Whether ``answer`` repeats a run our record no longer repeats: it ended (the
+        record is the truth: the workflow's copy of the row may not have caught up
+        with the run's end yet) and `runs.store.find` did not answer it."""
+        if has_request_id or not answer.repeated or answer.run is None:
+            return False
+        stored = await runs.store.get(answer.run.id)
+        return stored is not None and stored.status != "running"
+
     try:
         answer = await start()
-        if not has_request_id and answer.repeated and answer.run is not None:
-            # The record is the truth: the workflow's copy of the row may not have
-            # caught up with the run's end yet.
-            stored = await runs.store.get(answer.run.id)
-            ended = stored is not None and stored.status != "running"
-        else:
-            ended = False
-        if ended:
+        if await ended(answer):
             # Our record no longer repeats this ended run: its window is over and the
             # execution is closing. Let it close, then this request starts its own.
             margin = CONNECT_MARGIN_SECONDS + DESCRIBE_SECONDS
@@ -415,6 +417,11 @@ async def accept_run(
                 # The client sends it again, and that request starts the new run.
                 raise CommandStillAcceptingError(workflow_id)
             answer = await start(timedelta(seconds=left))
+            if await ended(answer):
+                # Still open past the wait (a loaded worker had not closed it): the
+                # start attached to it again. Its old run is no answer to this request;
+                # the client sends it again, and that request starts the new run.
+                raise CommandStillAcceptingError(workflow_id)
     except AlreadyClosedError:
         # The press's execution closed after recording its run (§4.2): that run. With
         # no row, retention pruned it: the run may well have printed (review #1061 2a).
