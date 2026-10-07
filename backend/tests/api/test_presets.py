@@ -31,6 +31,7 @@ from scadbuddy.library.presets import (
 )
 from scadbuddy.main import sweep_assets
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
+from tests.support.operations import press
 
 # Saved presets are rows in Postgres (#332): every test here runs on a throwaway schema.
 pytestmark = pytest.mark.requires_postgres
@@ -377,7 +378,9 @@ def test_a_broken_preset_list_costs_only_the_template_presets(
 @pytest.mark.requires_git
 def test_a_duplicate_takes_the_saved_presets_along(client: TestClient) -> None:
     saved = _save(client, BUILTIN, "Mine", {"label": "Bo"})
-    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    created = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
     listed = client.get(_url(slug)).json()
@@ -395,7 +398,7 @@ def test_deleting_a_model_takes_its_presets(
     client: TestClient, model: str, pg_conninfo: str
 ) -> None:
     _save(client, model, "Big", {"width": 25})
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
     assert _rows(pg_conninfo, model) == []
 
 
@@ -525,7 +528,7 @@ def test_a_legacy_presets_file_is_still_read_below_model_json(
 
 
 def _patch_presets(client: TestClient, model_id: str, presets: Any) -> Any:
-    return client.patch(f"/api/v1/models/{model_id}", json={"presets": presets})
+    return client.patch(f"/api/v1/models/{model_id}", json={"presets": presets}, headers=press())
 
 
 def test_a_template_of_mine_edits_its_presets_through_its_metadata(
@@ -812,7 +815,9 @@ def test_a_template_duplicate_copies_its_saved_presets_details(client: TestClien
         _url(BUILTIN),
         json={"name": "Mine", "params": {}, "description": "Mine", "tags": ["x"]},
     )
-    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    created = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     copied = client.get(_url(created.json()["slug"])).json()[1]
     assert (copied["name"], copied["description"], copied["tags"]) == ("Mine", "Mine", ["x"])
@@ -1032,7 +1037,9 @@ def test_the_migration_backfills_inputs_from_params(
 def test_a_duplicated_template_takes_its_presets_inputs_along(client: TestClient) -> None:
     body = {"name": "Mine", "inputs": {"params": {"label": "Bo"}, "ui": {"tab": "text"}}}
     assert client.post(_url(BUILTIN), json=body).status_code == 201
-    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    created = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     [mine] = [p for p in client.get(_url(created.json()["slug"])).json() if p["origin"] == "mine"]
     assert mine["inputs"] == {"params": {"label": "Bo"}, "ui": {"tab": "text"}, "v": 0}
@@ -1150,7 +1157,7 @@ def test_an_unrelated_metadata_patch_leaves_model_json_presets_as_written(
         "inputs": {"params": {"width": 5}, "v": 0},
     }
     _define(paths, model, [legacy])
-    tagged = client.patch(f"/api/v1/models/{model}", json={"tags": ["box"]})
+    tagged = client.patch(f"/api/v1/models/{model}", json={"tags": ["box"]}, headers=press())
     assert tagged.status_code == 200, tagged.text
     [written] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
     assert written == legacy
