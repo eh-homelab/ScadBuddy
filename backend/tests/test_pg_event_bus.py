@@ -414,6 +414,27 @@ async def test_the_log_replays_after_a_seq_in_pages(make_bus: BusFactory) -> Non
 
 
 @pytest.mark.requires_postgres
+async def test_a_started_bus_has_already_pruned_once(
+    make_bus: BusFactory, pg_conninfo: str
+) -> None:
+    """#1787: the first pass belongs to `start`, not to a background task that runs
+    whenever the caller next yields, which could be after the caller's own events
+    were logged, so a prune of its own then found them already gone."""
+    writer = await make_bus()
+    subscription = writer.subscribe()
+    for n in range(5):
+        writer.publish(_model(f"m{n}"))
+    for _ in range(5):
+        await _next(subscription)
+
+    await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
+
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT count(*) FROM events").fetchone()
+    assert row is not None and row[0] == 3
+
+
+@pytest.mark.requires_postgres
 async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
     make_bus: BusFactory, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
