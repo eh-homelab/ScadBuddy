@@ -1048,6 +1048,22 @@ export const WARNED_NAME = 'nopic'
 
 export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendered without it']
 
+/**
+ * #1743, #1744 — a name the mock renders fine with all three kinds of message at once:
+ * the template's notes, ScadBuddy's warnings and OpenSCAD's own, as a busy template's
+ * render can carry.
+ */
+export const CROWDED_NAME = 'crowded'
+
+export const CROWDED_DIAGNOSTICS = [
+  {
+    severity: 'warning' as const,
+    message: 'module cube() does not support child modules',
+    file: 'model.scad',
+    line: 6,
+  },
+]
+
 /** #408 — a name the mock fails the way a template drawing only a missing picture does. */
 export const PICTURELESS_NAME = 'nosvg'
 

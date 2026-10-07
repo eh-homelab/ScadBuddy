@@ -225,14 +225,11 @@ function runJob(jobId: string): void {
       if (state.jobOutputs[job.slug]) job.outputs = state.jobOutputs[job.slug]
       job.preview_url = `${base}/jobs/${job.id}/preview.glb`
       job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
-      job.notes =
-        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME
-          ? fixtures.TEMPLATE_NOTES
-          : []
-      job.warnings =
-        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME
-          ? fixtures.JOB_WARNINGS
-          : []
+      const name = String(job.params?.['name'] ?? '').toLowerCase()
+      const crowded = name === fixtures.CROWDED_NAME
+      job.notes = name === fixtures.NOTED_NAME || crowded ? fixtures.TEMPLATE_NOTES : []
+      job.warnings = name === fixtures.WARNED_NAME || crowded ? fixtures.JOB_WARNINGS : []
+      job.diagnostics = crowded ? fixtures.CROWDED_DIAGNOSTICS : []
       announce('job.done')
     }, MOCK_JOB_STEP_MS)
   }, MOCK_JOB_STEP_MS)
