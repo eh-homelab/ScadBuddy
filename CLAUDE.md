@@ -89,7 +89,7 @@ cd agent
 corepack enable
 pnpm install --frozen-lockfile
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
-docker build --target agent -t scadbuddy-agent:dev .   # asserts CLAUDE_CODE_VERSION
+docker build --target agent -t scadbuddy-agent:dev .   # checks the bundled Claude Code binary
 ```
 
 Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
@@ -171,6 +171,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`PrintActivities`, `PrintDeps`), `print_models.py`; `commands.py` (`start_command`,
   update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
   `bambuddy` queue's worker runs inside the API process until #1060.
+  Housekeeping (#1054): `housekeeping.py` (`Housekeeping`, `ensure_schedule`), the
+  periodic sweeps as Temporal Schedules (every sweep, and the render prune on its own
+  300 s one) on the `library` queue
+  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
+  process (it holds the data volume). A new periodic pass is an activity in its
+  `SWEEPS`, never a loop in the API.
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
@@ -466,8 +472,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
   the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
-  Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
-  currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
+  lockfile pins the Claude Code binary it bundles. The image build checks that the
+  binary reports the version the SDK declares (`agent/src/check-cli-version.ts`), so
+  no second pin moves with a bump (#1540). A bump still changes the harness under
+  every query: the `*.e2e`/`*.sdk` tests run the real binary, and a "measured on"
+  note is re-dated only when what backs it was re-checked.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,

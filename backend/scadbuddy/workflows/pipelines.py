@@ -308,8 +308,10 @@ class RenderPiece:
 
     async def _tell_waiting(self, outcome: PieceOutcome) -> None:
         while self._waiting:
-            job = workflow.get_external_workflow_handle_for(
-                TemplatePipeline.run, self._waiting.pop(0)
+            job: workflow.ExternalWorkflowHandle[TemplatePipeline] = (
+                workflow.get_external_workflow_handle_for(
+                    TemplatePipeline.run, self._waiting.pop(0)
+                )
             )
             try:
                 await job.signal(TemplatePipeline.piece_finished, outcome)
@@ -363,7 +365,7 @@ class TemplatePipeline:
         self._unstartable: str | None = None
         #: An older build's row held the key past the first step's retries: the run
         #: completes with no row, and the request is still accepting.
-        self._legacy_pending = False
+        self._accept_transient = False
         self._answered = False
         self._claims = 0
         #: The `accepted` Update ids answered: a request sent again keeps its one claim.
@@ -462,7 +464,7 @@ class TemplatePipeline:
             self._work is not None
             or self._queue_full is not None
             or self._unstartable is not None
-            or self._legacy_pending
+            or self._accept_transient
         )
 
     def _closing(self) -> bool:
@@ -470,7 +472,7 @@ class TemplatePipeline:
             self._released is not None
             or self._raised()
             or self._unstartable is not None
-            or self._legacy_pending
+            or self._accept_transient
         )
 
     @workflow.update(name=ACCEPTED_UPDATE)
@@ -622,7 +624,7 @@ class TemplatePipeline:
                 # Transient: the older build's workflow settles its row, Postgres comes
                 # back, or an attempt hung past `SHORT` (review #1066 (11)). `accepted`
                 # answers `closing` and the client sends the request again.
-                self._legacy_pending = True
+                self._accept_transient = True
                 self._upsert(STATUS.value_set("refused"))
                 await workflow.wait_condition(workflow.all_handlers_finished)
                 return
@@ -915,7 +917,9 @@ class TemplatePipeline:
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                 )
             except WorkflowAlreadyStartedError:
-                piece = workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
+                piece: workflow.ExternalWorkflowHandle[RenderPiece] = (
+                    workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
+                )
                 self._waiting_on.append(key)
                 try:
                     try:

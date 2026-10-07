@@ -59,11 +59,11 @@ export async function waitForSpan(
   predicate: (s: ReadableSpan) => boolean,
   timeoutMs = 10_000,
 ): Promise<ReadableSpan> {
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   for (;;) {
     const found = spans.getFinishedSpans().find(predicate)
     if (found) return found
-    if (Date.now() > deadline) {
+    if (performance.now() > deadline) {
       throw new Error(`no such span; exported: ${spans.getFinishedSpans().map((s) => s.name).join(', ') || 'none'}`)
     }
     await new Promise((resolve) => setTimeout(resolve, 20))

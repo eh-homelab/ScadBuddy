@@ -383,8 +383,9 @@ export const printRunPoll = {
  * How long the print dialog waits for one rack-algorithm save before counting it as
  * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
  * later one back (#1086 review). Aborting only stops the browser waiting, so the server
- * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, #1129): once
- * a save reaches the store it commits or fails inside that bound. Time before it reaches
+ * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, 5 s, #1129):
+ * once a save reaches the store it commits or fails within twice that bound, one for
+ * the pool wait and one for the write (#1264). Time before it reaches
  * the store is not bounded, so a save held up there can still land after the next one;
  * ordering saves explicitly is #1216.
  */

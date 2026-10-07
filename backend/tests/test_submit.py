@@ -1440,12 +1440,12 @@ async def test_a_legacy_row_whose_workflow_runs_answers_still_accepting_past_the
 async def test_rows_nothing_will_settle_are_failed_without_a_restart(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
-    """The pruner's pass also fails a row whose execution closed without settling it
-    (terminated by hand), and a legacy row an older API inserted after this one booted
-    (review #1066 1.2). A row whose execution runs is left alone."""
+    """The housekeeping prune also fails a row whose execution closed without settling
+    it (terminated by hand), and a legacy row an older API inserted after this one
+    booted (review #1066 1.2). A row whose execution runs is left alone."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue, prune_interval=0.05)
+        service = make_service(client, queue)
         await service.start()
         held = asyncio.Event()
         try:
@@ -1453,7 +1453,7 @@ async def test_rows_nothing_will_settle_are_failed_without_a_restart(
                 job = await service.submit(SLUG, {"width": _w()})
                 late = _legacy(projection)
                 _aged(projection, late.id)
-                await asyncio.sleep(0.5)
+                await service.prune()
                 running = await asyncio.to_thread(projection.read, job.id)
                 assert job.workflow_id is not None
                 await client.get_workflow_handle(
@@ -1461,6 +1461,7 @@ async def test_rows_nothing_will_settle_are_failed_without_a_restart(
                 ).terminate()
                 # Past the grace a run's listing in Visibility may trail its start by.
                 _aged(projection, job.id)
+                await service.prune()
                 closed = await _settled(projection, job.id, timeout=10)
                 orphan = await _settled(projection, late.id, timeout=10)
                 held.set()
@@ -1658,9 +1659,10 @@ async def test_a_submit_too_large_for_a_workflow_input_is_a_413_and_no_row(
     assert await asyncio.to_thread(projection.list_jobs) == []
 
 
-async def test_settled_jobs_past_their_ttl_are_pruned_without_a_restart(
+async def test_settled_jobs_past_their_ttl_are_pruned(
     projection: JobProjection, deps: WorkerDeps
 ) -> None:
+    """The housekeeping Schedule's prune (#1054) calls this every interval."""
     old = _accepted(projection, finished_ago=timedelta(days=2))
     old.state, old.finished_at = "done", now() - timedelta(days=2)
     assert projection.finish(old)
@@ -1676,21 +1678,41 @@ async def test_settled_jobs_past_their_ttl_are_pruned_without_a_restart(
             config=replace(deps.config, job_ttl=86400.0),
             paths=deps.paths,
             metrics=Metrics(),
-            prune_interval=0.05,
         )
-        await service.start()
-        try:
-            async with asyncio.timeout(10):
-                while True:
-                    try:
-                        await asyncio.to_thread(projection.read, old.id)
-                    except JobNotFoundError:
-                        break
-                    await asyncio.sleep(0.05)
-        finally:
-            await service.aclose()
+        await service.prune()
 
+    with pytest.raises(JobNotFoundError):
+        await asyncio.to_thread(projection.read, old.id)
     assert (await asyncio.to_thread(projection.read, fresh.id)).state == "done"
+
+
+async def test_a_prune_that_fails_still_settles_the_rows_nothing_will_settle(
+    projection: JobProjection, deps: WorkerDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1095b 1: a prune whose delete fails (a Postgres error, a read-only
+    volume) still fails the rows whose run closed, then fails its activity."""
+    orphan = _accepted(projection, finished_ago=timedelta(0))  # its run never existed
+    # Past the grace a run's listing in Visibility may trail its start by.
+    _aged(projection, orphan.id)
+
+    def failing(ttl: float, **_: object) -> list[str]:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(projection, "prune", failing)
+    async with temporal_client() as client:
+        service = RenderService(
+            projection=projection,
+            client=client,
+            task_queue=f"t-{uuid.uuid4().hex[:8]}",
+            config=deps.config,
+            paths=deps.paths,
+            metrics=Metrics(),
+        )
+        with pytest.raises(OSError, match="read-only"):
+            await service.prune()
+
+    settled = await asyncio.to_thread(projection.read, orphan.id)
+    assert (settled.state, settled.error) == ("failed", CLOSED_ERROR)
 
 
 def _accepted(projection: JobProjection, *, finished_ago: timedelta) -> Job:

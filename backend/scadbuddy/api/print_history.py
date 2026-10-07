@@ -529,7 +529,11 @@ async def list_prints(
     scanned = 0
 
     async with client_for(store.load()) as client:
-        await link_library_prints(client, links)
+        if cursor is None and slug is None:
+            # Only the first page can show a print linked now, and a slug filter
+            # leaves every library print out (#1663). The other filters can show
+            # one, so they still link.
+            await link_library_prints(client, links)
         while True:
             wanted = min(limit, MAX_SCANNED - scanned)
             batch = await links.page(limit=wanted, before=before, output_ids=output_ids)

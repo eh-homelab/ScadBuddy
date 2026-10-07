@@ -54,6 +54,7 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.render.pg_store import migrate
@@ -435,7 +436,7 @@ class SettingsStore:
             max_size=defaults.database_pool_size,
             open=False,
             connection_class=Connection[DictRow],
-            kwargs={"autocommit": True, "row_factory": dict_row},
+            kwargs={"autocommit": True, "row_factory": dict_row, **TCP_KEEPALIVE},
             name="scadbuddy-settings",
         )
 
