@@ -89,6 +89,23 @@ describe('installStaleChunkReload', () => {
     expect(reload).toHaveBeenCalledTimes(1)
   })
 
+  it('does not reload for an error naming no URL (Safari) while an optional load is pending', async () => {
+    const reload = load('old')
+    let rejectImport: (error: Error) => void = () => undefined
+    const pending = loadOptionalChunk(
+      () => new Promise<never>((_, reject) => (rejectImport = reject)),
+      TRACING,
+    ).catch(() => 'failed')
+    const urlless = preloadError('Importing a module script failed.')
+    expect(reload).not.toHaveBeenCalled()
+    expect(urlless.defaultPrevented).toBe(false)
+    rejectImport(new Error('blocked'))
+    await pending
+    // With no optional load in flight, the same error is a stale chunk again.
+    preloadError('Importing a module script failed.')
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
   it("still reloads for another chunk's error while an optional load is pending", async () => {
     const reload = load('old')
     let rejectImport: (error: Error) => void = () => undefined

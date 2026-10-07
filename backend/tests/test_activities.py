@@ -508,6 +508,28 @@ async def test_project_running_records_the_queue_wait_once(
 
 
 @pytest.mark.requires_postgres
+async def test_project_running_says_whether_the_row_is_still_open(
+    projecting: tuple[RenderActivities, JobProjection, BlobRefs],
+) -> None:
+    """#603: an older build's API inserts the row and then starts the workflow, so a
+    release can cancel the row before the run's first step. That step says so, and the
+    run renders nothing. A retried step finds its own row running: still open."""
+    acts, projection, _ = projecting
+    job = _submitted(projection)
+    assert await acts.project(Projection(job_id=job.id, slug="demo", state="running")) is True
+    assert await acts.project(Projection(job_id=job.id, slug="demo", state="running")) is True
+
+    cancelled = _submitted(projection)
+    assert projection.release_claim(cancelled.id, slug="demo") is not None
+    running = Projection(job_id=cancelled.id, slug="demo", state="running")
+    assert await acts.project(running) is False
+    assert projection.read(cancelled.id).state == "cancelled"
+
+    gone = Projection(job_id=uuid.uuid4().hex, slug="demo", state="running")
+    assert await acts.project(gone) is False
+
+
+@pytest.mark.requires_postgres
 async def test_project_done_copies_the_result_and_refs_the_blob(
     projecting: tuple[RenderActivities, JobProjection, BlobRefs],
 ) -> None:

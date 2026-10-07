@@ -36,7 +36,7 @@ import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents
 import { SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
-import { shutdownTelemetry, traceListener } from './telemetry/setup.js'
+import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'

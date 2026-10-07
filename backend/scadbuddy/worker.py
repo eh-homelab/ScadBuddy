@@ -36,6 +36,7 @@ from scadbuddy.library.libraries import (
     CheckoutFetcher,
     CheckoutGate,
     CheckoutLeases,
+    InstallPermits,
     LibraryStore,
 )
 from scadbuddy.library.library_seed import seed_libraries
@@ -99,7 +100,9 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     # The leases in Postgres, where the API's removals see them (#872).
     checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    fetcher = CheckoutFetcher(libraries, asyncio.Semaphore(INSTALL_CONCURRENCY), checkouts)
+    fetcher = CheckoutFetcher(
+        libraries, InstallPermits(INSTALL_CONCURRENCY, projection.pool), checkouts
+    )
     assets = AssetStore(
         paths.assets,
         projection.pool,

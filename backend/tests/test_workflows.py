@@ -89,8 +89,11 @@ class FakeActivities:
         block_claims: asyncio.Event | None = None,
         fail_running: asyncio.Event | None = None,
         fail_solids: bool = False,
+        settled_rows: frozenset[str] = frozenset(),
     ) -> None:
         self.calls: list[str] = []
+        #: Rows the API settled before the run's first step (#603).
+        self.settled_rows = settled_rows
         self.projections: list[Projection] = []
         self.claims: list[int] = []
         self.accepts = 0
@@ -166,13 +169,14 @@ class FakeActivities:
         )
 
     @activity.defn(name="project")
-    async def project(self, projection: Projection) -> None:
+    async def project(self, projection: Projection) -> bool:
         self.projections.append(projection)
         if projection.state == "running" and self.fail_running is not None:
             await self.fail_running.wait()
             raise ApplicationError("the database went away", non_retryable=True)
         if projection.state == "cancelled" and self.block_cancelled is not None:
             await self.block_cancelled.wait()
+        return projection.job_id not in self.settled_rows
 
     @activity.defn(name=ACCEPT_ACTIVITY)
     async def render_accept(self, accept: AcceptRender) -> Job:
@@ -940,6 +944,26 @@ async def test_a_job_input_from_an_older_build_still_renders() -> None:
         assert acts.accepts == 0
         last = [p for p in acts.projections if p.state][-1]
         assert last.state == "done" and last.job_id == job.id
+
+
+async def test_an_older_builds_start_for_a_row_already_cancelled_renders_nothing() -> None:
+    """#603: an older build's API commits the row, then starts `render-<job id>`. A
+    release on a newer replica in between cancels the row and finds no workflow to
+    cancel, so the run starts for a cancelled row: it stops at its first step instead
+    of rendering in full."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        job = _job(width=uuid.uuid4().int % 10**9)
+        acts = FakeActivities(settled_rows=frozenset({job.id}))
+        async with _worker(client, queue, acts):
+            await client.execute_workflow(
+                TemplatePipeline.run,
+                job,
+                id=f"render-{job.id}",
+                task_queue=queue,
+            )
+        assert acts.calls == []
+        assert [p.state for p in acts.projections] == ["running"]
 
 
 async def test_a_release_right_after_the_start_cancels_the_job() -> None:

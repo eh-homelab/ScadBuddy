@@ -13,6 +13,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.render import projection as projection_module
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import (
     CANCELLED_ERROR,
@@ -566,3 +567,30 @@ async def test_an_execution_past_retention_is_gone() -> None:
     )
     assert await run_closed(client, _unsettled(), rpc_timeout=timedelta(seconds=1))
     assert await legacy_unrun(client, _unsettled(), rpc_timeout=timedelta(seconds=1))
+
+
+def _rendered(store: JobProjection, run_id: str, seconds: float, *, ago: float = 0.0) -> None:
+    """A job that rendered in ``seconds`` and finished ``ago`` seconds ago."""
+    job = _accept(store, run_id, width=uuid.uuid4().int % 10**9)
+    with store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE render_jobs SET state = 'done',"
+            " finished_at = now() - make_interval(secs => %s),"
+            " started_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (ago, ago + seconds, job.id),
+        )
+
+
+def test_recent_render_seconds_is_the_median_of_the_latest_renders(
+    projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#603: a full queue's `Retry-After` comes from how long renders take now, not a
+    constant. Only finished renders count, and only the latest `RECENT_RENDERS`."""
+    monkeypatch.setattr(projection_module, "RECENT_RENDERS", 3)
+    assert projection.recent_render_seconds() is None
+    # Older than the three below: past the latest three, so never counted.
+    _rendered(projection, "run-old", 900.0, ago=86400)
+    for index, seconds in enumerate((4.0, 6.0, 40.0)):
+        _rendered(projection, f"run-{index}", seconds)
+    _accept(projection, "run-pending", width=7)  # not finished: never counted
+    assert projection.recent_render_seconds() == pytest.approx(6.0, abs=0.1)

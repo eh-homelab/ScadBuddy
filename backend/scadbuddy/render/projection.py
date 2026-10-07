@@ -146,6 +146,8 @@ PROJECTION_COLUMNS = (
 )
 
 
+#: How many of the latest finished renders `recent_render_seconds` reads.
+RECENT_RENDERS = 20
 #: The event a settled job announces; `core.events.JobKind` has no ``job.cancelled``.
 _FINISHED_KINDS: dict[str, JobKind] = {
     "done": "job.done",
@@ -525,6 +527,21 @@ class JobProjection:
         return QueueCounts(
             pending=row["pending"], running=row["running"], oldest_pending=row["oldest_pending"]
         )
+
+    def recent_render_seconds(self) -> float | None:
+        """The median time the latest `RECENT_RENDERS` finished renders took, from their
+        start to their end, or None before one has: what a full queue's `Retry-After`
+        says (#603)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY seconds) AS median"
+                " FROM (SELECT extract(epoch FROM finished_at - started_at) AS seconds"
+                "  FROM render_jobs WHERE state = 'done' AND started_at IS NOT NULL"
+                "  ORDER BY finished_at DESC LIMIT %s) AS latest",
+                (RECENT_RENDERS,),
+            ).fetchone()
+        median = row["median"] if row is not None else None
+        return float(median) if median is not None else None
 
     def prune(self, ttl: float, *, now_: datetime | None = None) -> list[str]:
         cutoff = (now_ or now()) - timedelta(seconds=ttl)

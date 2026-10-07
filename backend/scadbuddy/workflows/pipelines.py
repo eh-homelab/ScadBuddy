@@ -340,6 +340,9 @@ class RenderPreview:
             start_to_close_timeout=timedelta(seconds=timeout) + PREVIEW_TRANSFER,
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RetryPolicy(maximum_attempts=1),
+            # The run's own priority (`PREVIEW_PRIORITY`), given outright: Temporal
+            # 1.31 hands an activity its workflow's priority, 1.32 does not (#603).
+            priority=workflow.info().priority,
         )
         return png
 
@@ -418,10 +421,12 @@ class TemplatePipeline:
             raise RuntimeError("the job has not started")
         return Projection.model_validate({"job_id": job.id, "slug": job.slug, **fields})
 
-    async def _project(self, **fields: Any) -> None:
-        await workflow.execute_activity(
+    async def _project(self, **fields: Any) -> bool:
+        """For ``state="running"``, whether the row is still open (#603); else True."""
+        open_row: bool = await workflow.execute_activity(
             "project",
             self._projection(fields),
+            result_type=bool,
             start_to_close_timeout=SHORT,
             retry_policy=PROJECT_RETRY,
             # A release that cancels the job mid-projection waits for the write to
@@ -433,6 +438,7 @@ class TemplatePipeline:
             # A write that completed despite the cancel returns normally: the release
             # still stands.
             raise asyncio.CancelledError
+        return open_row
 
     def project_later(self, **fields: Any) -> None:
         """`ctx.progress` is synchronous (§5.2): the write goes out without waiting.
@@ -678,7 +684,11 @@ class TemplatePipeline:
         steps = [StepInfo(name="render", state="running", done=0, total=None)]
         version = "default"
         try:
-            await self._project(state="running")
+            if not await self._project(state="running"):
+                # Settled before this run began: an older build's API commits the row
+                # before it starts the run, and a release in between cancels the row
+                # with no run to cancel. Nothing to render (#603).
+                return
             self._upsert(STATUS.value_set("running"))
             await self._project(steps=steps)
             loaded: LoadedPipeline = await workflow.execute_activity(
@@ -816,7 +826,8 @@ class TemplatePipeline:
         inputs = ArrangeInputs.model_validate(job.inputs)
         steps = [StepInfo(name="arrange", state="running", done=0, total=2)]
         try:
-            await self._project(state="running", pipeline_version=ARRANGE_VERSION)
+            if not await self._project(state="running", pipeline_version=ARRANGE_VERSION):
+                return  # settled before this run began, as in `_render` (#603)
             self._upsert(STATUS.value_set("running"))
             await self._project(steps=steps)
             layout = await workflow.execute_activity(

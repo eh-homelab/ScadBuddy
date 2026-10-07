@@ -319,10 +319,10 @@ async def run(ctx, inputs):
     )
     original = world.project
 
-    async def slow_first(projection: Projection) -> None:
+    async def slow_first(projection: Projection) -> bool:
         if projection.steps and projection.steps[0].name == "one":
             await asyncio.sleep(1)  # the first write is the slower one
-        await original(projection)
+        return await original(projection)
 
     world.project = activity_named("project", slow_first)  # type: ignore[method-assign]
     async with temporal_client() as client:

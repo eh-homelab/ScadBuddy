@@ -703,7 +703,7 @@ export class ApprovalService {
     // `running`) before the event that reports it is in the log.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
     // Started only once the UPDATE has won, so a lost race leaves no span.
-    const traced: { span?: Span } = {}
+    const traced: { span?: Span; committed?: boolean } = {}
     try {
       const approval = await this.deps.sql.begin(async (tx) => {
         const [row] = await tx.unsafe<Row[]>(
@@ -739,6 +739,7 @@ export class ApprovalService {
         }
         return settled
       })
+      traced.committed = true
       if (!approval) return undefined
       // Committed: wake followers, and announce it on the bus (#300).
       if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
@@ -746,7 +747,11 @@ export class ApprovalService {
       await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
       return approval
     } catch (err) {
-      if (traced.span) recordFailure(traced.span, err)
+      if (traced.span) {
+        recordFailure(traced.span, err)
+        // The span says the decision; a rollback means nothing was decided.
+        if (!traced.committed) traced.span.setAttribute('scadbuddy.outcome', 'rolled_back')
+      }
       throw err
     } finally {
       traced.span?.end()
@@ -1094,7 +1099,11 @@ export class ApprovalService {
       })
       return row ? record(row) : undefined
     } catch (err) {
-      for (const span of evicted) recordFailure(span, err)
+      // Only the transaction can throw here, and it rolled the cancellations back.
+      for (const span of evicted) {
+        recordFailure(span, err)
+        span.setAttribute('scadbuddy.outcome', 'rolled_back')
+      }
       throw err
     } finally {
       for (const span of evicted) span.end()

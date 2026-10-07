@@ -28,7 +28,7 @@ from temporalio.client import (
     WorkflowUpdateFailedError,
     WorkflowUpdateRPCTimeoutOrCancelledError,
 )
-from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.common import Priority, WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
@@ -101,6 +101,12 @@ from scadbuddy.workflows.pipelines import (
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
 
 logger = logging.getLogger(__name__)
+
+#: A preview's priority on the render queue it shares with user renders (#603): below
+#: Temporal's default of 3 (1 is first, 5 last), so a boot-time or hourly pass of
+#: previews never holds a render someone is waiting for. `RenderPreview` passes it to its
+#: activity (Temporal 1.32 no longer passes a workflow's priority on by itself).
+PREVIEW_PRIORITY = 4
 
 #: How long a request waits on one Temporal call it makes besides the start (a release,
 #: a describe): the SDK's own retry budget is ~10 s per call.
@@ -300,7 +306,7 @@ class RenderService:
             raise
         if answer.queue_full is not None:
             self.metrics.render_rejected.labels(start.kind).inc()
-            raise QueueFullError(answer.queue_full, self.retry_after())
+            raise QueueFullError(answer.queue_full, await self.retry_after())
         assert answer.job is not None
         if answer.coalesced:
             self.metrics.render_coalesced.labels(start.kind).inc()
@@ -613,6 +619,7 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
+            priority=Priority(priority_key=PREVIEW_PRIORITY),
             rpc_timeout=RPC_TIMEOUT,
         )
         png: bytes = await asyncio.wait_for(handle.result(), wait)
@@ -672,8 +679,11 @@ class RenderService:
             raise InputsError(str(error)) from None
         return result
 
-    def retry_after(self) -> int:
-        return max(1, math.ceil(INITIAL_RENDER_ESTIMATE))
+    async def retry_after(self) -> int:
+        """A full queue's `Retry-After`: how long renders take now (the latest finished
+        ones' median), or the initial estimate before one has finished (#603)."""
+        recent = await asyncio.to_thread(self.store.recent_render_seconds)
+        return max(1, math.ceil(INITIAL_RENDER_ESTIMATE if recent is None else recent))
 
     def refresh_metrics(self) -> None:
         """The queue gauges, read from the projection."""

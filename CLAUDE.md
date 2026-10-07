@@ -272,8 +272,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
   the action's trace only inside its `within`. `traceparent` goes on same-origin
   requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
-  a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk
-  reload; any other chunk's error still does.
+  a blocked one (an error naming `tracing-<hash>.js`, or Safari's naming no URL while it
+  loads) does not trigger the stale-chunk reload; any other chunk's error still does.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
   inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
   reports a failure through `onFailure`; the Customize page then falls back to the generated form
@@ -324,7 +324,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
   `pnpm start`) that registers the OTel ESM hook, then `src/telemetry/setup.ts` starts
-  the SDK (standard `OTEL_*` variables only; incoming HTTP only).
+  the SDK (standard `OTEL_*` variables only; incoming HTTP only). `main.ts` imports
+  only the SDK-free `src/telemetry/runtime.ts`, so with `OTEL_SDK_DISABLED=true` no SDK
+  package is loaded (#1351).
   `src/telemetry/scrub.ts` strips exception messages, query strings and user agents
   before export; `src/telemetry/turn.ts` (`TurnTrace`) ends a turn's spans at every
   park and opens `agent.turn.resume` under the decision (`ai_approvals.traceparent`,

@@ -122,8 +122,9 @@ class FakeWorld:
         return fake_output(req)
 
     @activity.defn(name="project")
-    async def project(self, projection: Projection) -> None:
+    async def project(self, projection: Projection) -> bool:
         self.projections.append(projection)
+        return True  # the row is open, as the real activity answers for a live job
 
     @activity.defn(name="run_template_activity")
     async def run_template_activity(self, call: TemplateCall) -> Any:
