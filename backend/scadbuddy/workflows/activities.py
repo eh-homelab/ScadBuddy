@@ -104,7 +104,10 @@ def _retried(error: Exception) -> bool:
 
 def _stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
     """The current activity's stages: traced with its attempt, and a failed attempt
-    that is retried is no failed span (#1183)."""
+    that is retried is no failed span (#1183). Called outside an activity (a test, or
+    a caller that runs the stage directly) there is no attempt, and nothing retries."""
+    if not activity.in_activity():
+        return timed_stage(metrics)
     return timed_stage(metrics, attempt=activity.info().attempt, retried=_retried)
 
 
