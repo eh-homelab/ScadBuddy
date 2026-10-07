@@ -6,7 +6,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk'
-import { context as otelContext } from '@opentelemetry/api'
+import { type Context, context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
@@ -489,7 +489,7 @@ export type SessionManagerDeps = {
     session: SessionRecord,
     turn: TurnPrincipal,
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
-    extras?: { waitForTab?: WaitForTab },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context },
   ) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
   /** ScadBuddy's own plugin (harness/ownPlugin.ts, #896); its Skill and Agent tools come with it. */
@@ -1357,9 +1357,12 @@ export class SessionManager {
                     ? this.deps.mcpServers(
                         session,
                         principal,
-                        questionGate
-                          ? { waitForTab: waitForTab(questionGate, controller.signal, () => this.questions.reconnected(id)) }
-                          : {},
+                        {
+                          ...(questionGate
+                            ? { waitForTab: waitForTab(questionGate, controller.signal, () => this.questions.reconnected(id)) }
+                            : {}),
+                          turnContext: () => traced.context(),
+                        },
                       )
                     : {}),
                   ...(http ? { [HTTP_SERVER]: http } : {}),

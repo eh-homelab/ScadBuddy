@@ -310,7 +310,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
   `pnpm start`) that registers the OTel ESM hook, then `src/telemetry/setup.ts` starts
-  the SDK (standard `OTEL_*` variables only; incoming HTTP only).
+  the SDK (standard `OTEL_*` variables only; incoming HTTP only). `main.ts` imports
+  only the SDK-free `src/telemetry/runtime.ts`, so with `OTEL_SDK_DISABLED=true` no SDK
+  package is loaded (#1351).
   `src/telemetry/scrub.ts` strips exception messages, query strings and user agents
   before export; `src/telemetry/turn.ts` (`TurnTrace`) ends a turn's spans at every
   park and opens `agent.turn.resume` under the decision (`ai_approvals.traceparent`,
