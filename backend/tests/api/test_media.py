@@ -30,6 +30,7 @@ from scadbuddy.library.history import GIT, git_env
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -860,7 +861,9 @@ def test_a_duplicate_of_a_built_in_takes_what_was_added_to_it(client: TestClient
     added = _upload(client, BUILTIN, JPEG, caption="Mine").json()["media"][1]
     client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]})
 
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     copy = response.json()
@@ -878,7 +881,9 @@ def test_a_duplicate_copies_its_media_videos_included(
     image = _upload(client, model, PNG).json()["media"][0]
     video = _upload(client, model, MP4).json()["media"][1]
 
-    response = client.post(f"/api/v1/models/{model}/duplicate", json={"name": "Copy"})
+    response = client.post(
+        f"/api/v1/models/{model}/duplicate", json={"name": "Copy"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     copy = response.json()
@@ -889,7 +894,9 @@ def test_a_duplicate_copies_its_media_videos_included(
 
 
 def test_a_duplicate_of_a_built_in_copies_its_media(client: TestClient) -> None:
-    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Mine"})
+    response = client.post(
+        f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Mine"}, headers=press()
+    )
 
     assert response.status_code == 201, response.text
     [item] = response.json()["media"]
