@@ -59,7 +59,11 @@ export function useFilamentPlan(
   /**
    * #1044 — every spool the plan has held for these choices, by slot. A plate change
    * keeps the pick for each slot the new plate still has, and a slot one plate lacks
-   * gets its pick back on a plate that has it; only a slot never seen is seeded.
+   * gets its pick back on a plate that has it; only a slot never seen is seeded. It only
+   * gains: a reset to the suggestion on one plate resets that plate's slots, and a slot
+   * it does not show keeps its pick. Keyed by the `choices` object, so this relies on a
+   * plate change never re-reading the choices (`usePrintChoices` re-reads on open,
+   * source and printer only); a re-read starts the plan afresh.
    */
   const held = useRef<{ choices: ChoicesView; slots: Map<number, SlotChoice> } | null>(null)
   useEffect(() => {
