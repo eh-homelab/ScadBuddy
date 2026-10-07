@@ -17,14 +17,20 @@ DECISIONS_QUERY = "decisions"
 EXPIRED_BY = "system:expired"
 # The send validator's refusal while a Stop closes the run (the agent maps it to `busy`).
 STOPPING = "the session is stopping; send again"
-# A nudge's refusals: another message's turn is running, the message will never run (a
-# Stop or a refusal abandoned it), or no committed message has its id.
+# A nudge's answers when its message did not start: another turn runs first (BUSY: the
+# message stays queued in this run, which starts it after that turn), the message will
+# never run (a Stop abandoned it), or no committed message has its id after the run
+# looked again for a while (UNKNOWN_INPUT: neither is it abandoned).
 BUSY = "the session is busy"
 ABANDONED = "this message was abandoned and will not run"
 UNKNOWN_INPUT = "no message with this id was committed for this session"
 # The activities that read and take the session's committed messages (inputs.py).
 LOAD_INPUTS = "durable_load_inputs"
 START_INPUT = "durable_start_input"
+RELEASE_INPUT = "durable_release_input"
+# The `error` (code `interrupted`) a Stop logs for a message taken and never started:
+# the agent service's STOPPED_BEFORE_IT_RAN (sessions/manager.ts).
+STOPPED_BEFORE_IT_RAN = "stopped before it ran; this message was not delivered"
 # How many ids of messages that ran a run carries into the next (Continue-As-New).
 RECENT_INPUTS = 64
 
@@ -92,6 +98,18 @@ class Loaded:
 class StartInput:
     session_id: str
     id: str
+    #: This take's own id (workflow.uuid4, one per take): a retry of the same take finds
+    #: the message taken with it and answers True again; any other take is refused.
+    token: str
+
+
+@dataclass
+class ReleaseInput:
+    """A take a Stop cut short: the message is abandoned, and the log says so."""
+
+    session_id: str
+    id: str
+    token: str
 
 
 @dataclass

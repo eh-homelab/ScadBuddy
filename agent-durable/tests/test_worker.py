@@ -74,6 +74,7 @@ async def test_build_worker_registers_the_workflow_and_its_activities(
     )
     assert names == [
         "durable_load_inputs",
+        "durable_release_input",
         "durable_save_snapshot",
         "durable_start_input",
         "run_claude_segment",

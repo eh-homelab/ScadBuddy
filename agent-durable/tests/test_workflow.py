@@ -7,7 +7,7 @@ import contextlib
 import dataclasses
 import os
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,8 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
 from scadbuddy_durable.models import (
+    ABANDONED,
+    BUSY,
     DECISIONS_QUERY,
     EXPIRED_BY,
     PENDING_QUERY,
@@ -181,19 +183,139 @@ async def test_a_message_is_answered_and_the_next_continues_the_session(rig: Rig
 
 
 @temporal
-async def test_a_second_message_while_busy_is_refused_before_history(rig: Rig) -> None:
+async def test_a_message_sent_while_busy_stays_queued_and_runs_after_the_turn(rig: Rig) -> None:
+    # Lead ruling: only a Stop or a forget abandons a queued message. A nudge that finds
+    # another turn running answers BUSY, and the message stays queued in this run.
     gate = rig.stubs.gate("get_model")
     wid, inp = rig.new()
     handle = await rig.send(wid, inp, "read slow")
     await rig.started("get_model")
     another = await rig.inputs.commit(inp.session_id, "another")
     with pytest.raises(WorkflowUpdateFailedError) as err:
-        await handle.execute_update(SEND_UPDATE, Nudge(another))
-    assert "the session is busy" in str(err.value.cause)
+        await handle.execute_update(SEND_UPDATE, Nudge(another), id=another)
+    assert BUSY in str(err.value.cause)
+    assert rig.fake.status(another) == "pending"
     gate.set()
+    assert (await rig.event(wid, "done", 2))["result"] == "answer to another"
+    assert rig.fake.takes[1:] == [another]
+    assert rig.fake.status(another) == "run"
+
+
+async def admitted_update(handle: WorkflowHandle[Any, Any], update_id: str) -> None:
+    """Returns once the run's history accepted the Update `update_id`."""
+    while True:
+        events = (await handle.fetch_history()).events
+        if any(
+            e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED
+            and e.workflow_execution_update_accepted_event_attributes.accepted_request.meta.update_id
+            == update_id
+            for e in events
+        ):
+            return
+        await asyncio.sleep(0.1)
+
+
+async def until(check: Callable[[], bool], within: float) -> bool:
+    """Whether `check` held within `within` seconds."""
+
+    async def poll() -> None:
+        while True:
+            if check():
+                return
+            await asyncio.sleep(0.05)
+
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(poll(), within)
+    return check()
+
+
+@temporal
+async def test_a_nudge_while_its_message_is_taken_never_runs_it_twice(rig: Rig) -> None:
+    # Round 2, item 1: the run popped the message and waits for its take; a second nudge
+    # for it meanwhile must not load it back into the inbox (the take accepts a message
+    # already `run`, so it would run again).
+    wid, inp = rig.new()
+    message_id = await rig.inputs.commit(inp.session_id, "hello")
+    rig.fake.take_gate = asyncio.Event()
+    first = asyncio.create_task(rig.nudge(wid, inp, message_id))
+    await asyncio.wait_for(rig.fake.taking.wait(), WAIT)
+    handle = rig.handle(wid)
+    loads = rig.fake.loads
+    again = asyncio.create_task(
+        handle.execute_update(SEND_UPDATE, Nudge(message_id), id=f"{message_id}-again")
+    )
+    await asyncio.wait_for(admitted_update(handle, f"{message_id}-again"), WAIT)
+    await until(lambda: rig.fake.loads > loads, 5)  # the reordering, if the run would load
+    rig.fake.take_gate.set()
+    await asyncio.wait_for(asyncio.gather(first, again), WAIT)
     await rig.event(wid, "done")
-    assert await accepted(handle, SEND_UPDATE) == 1
-    assert all(p != "another" for p, _ in rig.seen.calls)
+    nxt = await rig.inputs.commit(inp.session_id, "next")
+    await rig.nudge(wid, inp, nxt)
+    await rig.event(wid, "done", 2)
+    assert rig.fake.takes == [message_id, nxt]
+    assert [p for p, _ in rig.seen.calls] == ["hello", "next"]
+    # One take of it (its retries repeat the token): the run never took it again.
+    assert len({token for i, token in rig.fake.attempts if i == message_id}) == 1
+
+
+@temporal
+async def test_a_nudge_racing_its_commit_loads_it_again_and_runs_it_once(rig: Rig) -> None:
+    # Lead ruling: an unknown id is a race (committed, not loaded yet), never a reason to
+    # abandon. The run looks again, and the message runs once.
+    wid, inp = rig.new()
+    message_id = await rig.inputs.commit(inp.session_id, "hello")
+    rig.fake.unseen[message_id] = 2  # the run's first load and the nudge's miss it
+    await rig.nudge(wid, inp, message_id)
+    assert (await rig.event(wid, "done"))["result"] == "answer to hello"
+    assert rig.fake.takes == [message_id]
+    assert rig.fake.status(message_id) == "run"
+
+
+@temporal
+async def test_a_stop_while_a_message_is_taken_abandons_it_and_says_so(rig: Rig) -> None:
+    # Round 2, item 3: taken (its row `run`) but never started; the Stop must not leave it
+    # `run` with nothing in the log. The run releases it: abandoned, with an `interrupted`
+    # error (inputs.py `release`).
+    wid, inp = rig.new()
+    message_id = await rig.inputs.commit(inp.session_id, "never")
+    rig.fake.take_gate, rig.fake.gate_after_commit = asyncio.Event(), True
+    sending = asyncio.create_task(rig.nudge(wid, inp, message_id))
+    await asyncio.wait_for(rig.fake.taking.wait(), WAIT)
+    assert await until(lambda: message_id in rig.fake.takes, WAIT)
+    await rig.handle(wid).cancel()
+    with pytest.raises(WorkflowUpdateFailedError) as err:
+        await asyncio.wait_for(sending, WAIT)
+    assert ABANDONED in str(err.value.cause)
+    await asyncio.wait_for(rig.handle(wid).result(), WAIT)
+    rig.fake.take_gate.set()
+    assert rig.fake.releases == [message_id]
+    assert rig.fake.status(message_id) == "abandoned"
+    assert rig.seen.calls == []
+
+
+@temporal
+async def test_continue_as_new_inside_a_turn_leaves_no_nudge_unfinished(
+    rig: Rig, recwarn: pytest.WarningsRecorder
+) -> None:
+    # Round 2, item 4: the plugin continues as new between a turn's steps (auto), and
+    # waits for every handler first (_hand_over: all_handlers_finished); a nudge during a
+    # turn answers BUSY at once and its message stays committed, so the next run loads it.
+    wid, inp = rig.new()
+    gate = rig.stubs.gate("get_model")
+    handle = await rig.send(wid, inp, "read 1", workflow=ShortRuns)
+    await rig.started("get_model")
+    queued: list[str] = []
+    for n in range(2, 5):
+        message_id = await rig.inputs.commit(inp.session_id, f"read {n}")
+        queued.append(message_id)
+        with pytest.raises(WorkflowUpdateFailedError) as err:
+            await handle.execute_update(SEND_UPDATE, Nudge(message_id), id=message_id)
+        assert BUSY in str(err.value.cause)
+    gate.set()
+    await rig.event(wid, "done", 4)
+    assert rig.snaps.latest(inp.session_id).state.runs > 1
+    assert rig.fake.takes[1:] == queued
+    assert not [w for w in recwarn if "send_message" in str(w.message)]
 
 
 @temporal

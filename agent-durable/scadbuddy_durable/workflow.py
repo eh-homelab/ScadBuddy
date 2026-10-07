@@ -23,6 +23,7 @@ from .models import (
     LOAD_INPUTS,
     PENDING_QUERY,
     RECENT_INPUTS,
+    RELEASE_INPUT,
     REVIEW_UPDATE,
     SEND_UPDATE,
     START_INPUT,
@@ -34,6 +35,7 @@ from .models import (
     LoadInputs,
     Message,
     Nudge,
+    ReleaseInput,
     SessionInput,
     SnapshotInput,
     StartInput,
@@ -46,6 +48,11 @@ RAN = "ran"
 
 # The input activities (inputs.py) are short database calls on this worker.
 _INPUT_TIMEOUT = timedelta(seconds=10)
+# A nudge for an id no load found looks again after each of these (seconds): the agent
+# service commits before it nudges, so a miss is a race, never a reason to give the
+# message up (lead ruling); after the last one it answers UNKNOWN_INPUT, and the message,
+# if it does exist, stays pending for the next load.
+_UNSEEN_RETRIES = (0.5, 1.0, 2.0, 4.0)
 
 
 @workflow.defn(name=WORKFLOW_NAME)
@@ -72,6 +79,9 @@ class DurableSession:
         self._loading = 0
         # Nudge handlers not finished yet: a stopped run answers them before it returns.
         self._nudges = 0
+        # The message being taken (START_INPUT in flight), and the take's token: known to
+        # every nudge, so none loads it back into the inbox meanwhile (it would run twice).
+        self._taking: tuple[str, str] | None = None
         # When each waiting call's expiry timer started (ruling 8).
         self._timed: dict[str, datetime] = {}
         self._saved: tuple[Any, ...] | None = None
@@ -110,7 +120,17 @@ class DurableSession:
                     if not self._inbox:
                         await self.agent.continue_as_new()
                     message = self._inbox.pop(0)
-                    if not await self._take(message.id):
+                    if message.id in self._outcome:
+                        continue
+                    self._taking = (message.id, str(workflow.uuid4()))
+                    try:
+                        taken = await self._take(*self._taking)
+                    except ActivityError as err:
+                        if isinstance(err.cause, CancelledError):
+                            raise asyncio.CancelledError() from err  # a Stop cut the take short
+                        raise
+                    self._taking = None
+                    if not taken:
                         self._outcome[message.id] = ABANDONED
                         continue
                     self._outcome[message.id] = RAN
@@ -130,6 +150,8 @@ class DurableSession:
             # message refuses it as stopping (`send_message`) before the run returns. Not
             # `all_handlers_finished`: live output subscribers' polls are Update handlers too,
             # and they wait as long as the run is open.
+            if self._taking is not None:
+                await self._release(*self._taking)
             await workflow.wait_condition(lambda: self._nudges == 0)
             return self.agent.state()
 
@@ -139,33 +161,49 @@ class DurableSession:
         )
         return loaded
 
-    async def _take(self, message_id: str) -> bool:
+    async def _take(self, message_id: str, token: str) -> bool:
         taken: bool = await workflow.execute_local_activity(
             START_INPUT,
-            StartInput(self._inp.session_id, message_id),
+            StartInput(self._inp.session_id, message_id, token),
             result_type=bool,
             start_to_close_timeout=_INPUT_TIMEOUT,
         )
         return taken
 
+    async def _release(self, message_id: str, token: str) -> None:
+        """A Stop cut this take short: whether or not it took the message, the message
+        never starts here, so it is abandoned (only if still pending, or taken by this very
+        take) and the log says so (inputs.py `release`). Its nudge answers ABANDONED."""
+        await workflow.execute_local_activity(
+            RELEASE_INPUT,
+            ReleaseInput(self._inp.session_id, message_id, token),
+            result_type=bool,
+            start_to_close_timeout=_INPUT_TIMEOUT,
+        )
+        self._outcome[message_id] = ABANDONED
+        self._taking = None
+
     def _enqueue(self, loaded: Loaded) -> None:
-        queued = {m.id for m in self._inbox}
         for message in loaded.pending:
-            if message.id not in queued and message.id not in self._outcome:
+            if not self._known(message.id):
                 self._inbox.append(message)
-                queued.add(message.id)
 
     def _known(self, message_id: str) -> bool:
-        return message_id in self._outcome or any(m.id == message_id for m in self._inbox)
+        return (
+            message_id in self._outcome
+            or (self._taking is not None and self._taking[0] == message_id)
+            or any(m.id == message_id for m in self._inbox)
+        )
 
     @workflow.update(name=SEND_UPDATE)
     async def send_message(self, nudge: Nudge) -> None:
-        """Answers once the nudged message's turn started, or refuses it.
+        """Answers once the nudged message's turn started; otherwise refuses with why.
 
-        Never accepted and then dropped: a Stop before the turn started refuses it as
-        STOPPING (the run waits for this handler before it returns), and so does another
-        message's turn starting first (BUSY), so the agent service always learns that the
-        message did not run, and abandons it (START_INPUT then skips it here too).
+        Never accepted and then dropped. A Stop before the turn started refuses it as
+        STOPPING, or ABANDONED once the Stop cut its take short (the run waits for this
+        handler before it returns; the agent service and `release` log it). Another turn
+        running refuses it as BUSY, and the message stays queued here: this run starts it
+        after that turn (lead ruling: only a Stop or a forget gives a message up).
         """
         self._nudges += 1
         try:
@@ -174,31 +212,48 @@ class DurableSession:
             self._nudges -= 1
 
     async def _answer(self, nudge: Nudge) -> None:
-        if not self._known(nudge.id):
+        for delay in (*_UNSEEN_RETRIES, None):
+            if self._known(nudge.id) or workflow.cancellation_reason() is not None:
+                break
             self._loading += 1
             try:
                 loaded = await self._load(LoadInputs(self._inp.session_id, asked=nudge.id))
             finally:
                 self._loading -= 1
             self._enqueue(loaded)
-            if not self._known(nudge.id):
-                if loaded.status == "run":
-                    self._outcome[nudge.id] = RAN  # an earlier run took it
-                else:
-                    self._outcome[nudge.id] = ABANDONED if loaded.status == "abandoned" else UNKNOWN_INPUT
+            if self._known(nudge.id):
+                break
+            if loaded.status in ("run", "abandoned"):
+                # An earlier run took it, or a Stop abandoned it.
+                self._outcome[nudge.id] = RAN if loaded.status == "run" else ABANDONED
+                break
+            if delay is None:
+                # Not cached in `_outcome`: a later nudge looks again.
+                raise ApplicationError(UNKNOWN_INPUT, non_retryable=True)
+            await workflow.sleep(delay)
+
+        def taking() -> bool:
+            return self._taking is not None and self._taking[0] == nudge.id
+
         await workflow.wait_condition(
-            lambda: nudge.id in self._outcome or workflow.cancellation_reason() is not None or self.agent.busy
+            lambda: (
+                nudge.id in self._outcome
+                or (workflow.cancellation_reason() is not None and not taking())
+                or (self.agent.busy and not taking())
+            )
         )
         outcome = self._outcome.get(nudge.id)
         if outcome == RAN:
             return
-        if outcome is None:
-            # Refused while still queued: it must not run in this run any more (the agent
-            # service abandons it, so no later run takes it either).
+        if outcome is not None:
+            raise ApplicationError(outcome, non_retryable=True)
+        if workflow.cancellation_reason() is not None:
+            # A Stop before its turn: it must not run in this run any more (the agent
+            # service abandoned it with the Stop, so no later run takes it either).
             self._inbox = [m for m in self._inbox if m.id != nudge.id]
-            outcome = STOPPING if workflow.cancellation_reason() is not None else BUSY
-            self._outcome[nudge.id] = outcome
-        raise ApplicationError(outcome, non_retryable=True)
+            self._outcome[nudge.id] = STOPPING
+            raise ApplicationError(STOPPING, non_retryable=True)
+        raise ApplicationError(BUSY, non_retryable=True)  # still queued here
 
     @send_message.validator
     def check_message(self, nudge: Nudge) -> None:
@@ -206,10 +261,8 @@ class DurableSession:
             raise ValueError("the message has no id")
         # A Stop ends the plugin's task (the session reads idle) before this run returns
         # its state: a message must not start a turn meanwhile.
-        if workflow.cancellation_reason() is not None and nudge.id not in self._outcome:
+        if workflow.cancellation_reason() is not None and not self._known(nudge.id):
             raise ValueError(STOPPING)
-        if self.agent.busy and not self._known(nudge.id):
-            raise ValueError(BUSY)
 
     @workflow.update(name=REVIEW_UPDATE)
     def review(self, tool_use_id: str, approved: bool, approver: str) -> None:

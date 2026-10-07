@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator
 
@@ -11,7 +12,17 @@ from psycopg_pool import AsyncConnectionPool
 from temporalio import activity
 
 from scadbuddy_durable.inputs import Inputs, make_input_activities
-from scadbuddy_durable.models import LOAD_INPUTS, START_INPUT, Loaded, LoadInputs, Message, StartInput
+from scadbuddy_durable.models import (
+    LOAD_INPUTS,
+    RELEASE_INPUT,
+    START_INPUT,
+    STOPPED_BEFORE_IT_RAN,
+    Loaded,
+    LoadInputs,
+    Message,
+    ReleaseInput,
+    StartInput,
+)
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -71,20 +82,52 @@ async def test_start_takes_a_pending_message_once_and_never_an_abandoned_one(
     async with pool.connection() as conn:
         await conn.execute("UPDATE ai_durable_inputs SET status = 'abandoned' WHERE id = %s", (abandoned,))
     inputs = Inputs(pool)
-    assert await inputs.start(StartInput(sid, taken)) is True
-    # A retry whose first answer was lost: still this run's.
-    assert await inputs.start(StartInput(sid, taken)) is True
-    assert await inputs.start(StartInput(sid, abandoned)) is False
-    assert await inputs.start(StartInput(str(uuid.uuid4()), taken)) is False
+    assert await inputs.start(StartInput(sid, taken, "take-1")) is True
+    # A retry of the same take whose first answer was lost: still this take's.
+    assert await inputs.start(StartInput(sid, taken, "take-1")) is True
+    # Any other take of it (a nudge loaded it back meanwhile, say): refused (round 2, item 1).
+    assert await inputs.start(StartInput(sid, taken, "take-2")) is False
+    assert await inputs.start(StartInput(sid, abandoned, "take-3")) is False
+    assert await inputs.start(StartInput(str(uuid.uuid4()), taken, "take-1")) is False
     loaded = await inputs.load(LoadInputs(sid, asked=taken))
     assert loaded == Loaded([], "run")
+
+
+async def errors(pool: AsyncConnectionPool, sid: str) -> list[dict[str, object]]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT event FROM ai_session_events WHERE session_id = %s ORDER BY seq", (sid,)
+        )
+        rows = [json.loads(e) if isinstance(e, str) else e for (e,) in await cur.fetchall()]
+        return [e for e in rows if e["type"] == "error"]
+
+
+async def test_release_abandons_a_take_a_stop_cut_short_and_logs_it_once(pool: AsyncConnectionPool) -> None:
+    # Round 2, item 3: taken and never started, the message is abandoned with an
+    # `interrupted` error; released again, or by another take, nothing more is logged.
+    sid = await make_session(pool)
+    taken, other = await commit(pool, sid, "taken"), await commit(pool, sid, "taken elsewhere")
+    inputs = Inputs(pool)
+    assert await inputs.start(StartInput(sid, taken, "take-1")) is True
+    assert await inputs.start(StartInput(sid, other, "take-2")) is True
+    assert await inputs.release(ReleaseInput(sid, taken, "take-1")) is True
+    assert await inputs.release(ReleaseInput(sid, taken, "take-1")) is False
+    assert await inputs.release(ReleaseInput(sid, other, "take-9")) is False
+    assert (await inputs.load(LoadInputs(sid, asked=taken))).status == "abandoned"
+    assert (await inputs.load(LoadInputs(sid, asked=other))).status == "run"
+    assert await inputs.start(StartInput(sid, taken, "take-1")) is False
+    assert await errors(pool, sid) == [
+        {"v": 1, "type": "error", "sessionId": sid, "code": "interrupted", "message": STOPPED_BEFORE_IT_RAN}
+    ]
 
 
 async def test_the_activities_serve_the_workflow(pool: AsyncConnectionPool) -> None:
     sid = await make_session(pool)
     message_id = await commit(pool, sid, "hi")
-    load, start = make_input_activities(Inputs(pool))
+    load, start, release = make_input_activities(Inputs(pool))
     assert activity._Definition.must_from_callable(load).name == LOAD_INPUTS
     assert activity._Definition.must_from_callable(start).name == START_INPUT
+    assert activity._Definition.must_from_callable(release).name == RELEASE_INPUT
     assert (await load(LoadInputs(sid))).pending == [Message(message_id, "hi")]
-    assert await start(StartInput(sid, message_id)) is True
+    assert await start(StartInput(sid, message_id, "t")) is True
+    assert await release(ReleaseInput(sid, message_id, "t")) is True

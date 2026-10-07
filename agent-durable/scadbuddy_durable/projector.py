@@ -229,6 +229,24 @@ async def settle_idle(
     return seqs[-1]
 
 
+async def log_events(conn: AsyncConnection[Any], session_id: str, events: list[dict[str, Any]]) -> int:
+    """Appends `events` to the session's log in the caller's transaction; returns the last
+    seq. The caller announces them (`notify_events`) once it committed."""
+    texts = [json.dumps(e, ensure_ascii=False, separators=(",", ":")) for e in events]
+    cur = await conn.execute(_APPEND, {"n": len(texts), "status": None, "id": session_id, "texts": texts})
+    seqs = sorted(int(r[0]) for r in await cur.fetchall())
+    if len(seqs) != len(texts):
+        raise LookupError(f"session {session_id} does not exist")
+    return seqs[-1]
+
+
+async def notify_events(
+    conn: AsyncConnection[Any], session_id: str, events: list[dict[str, Any]], seq: int, replica: str
+) -> None:
+    """The bus NOTIFY for committed `events` (agent/src/sessions/busEvents.ts)."""
+    await _notify(conn, session_id, events, seq, replica)
+
+
 async def _notify(
     conn: AsyncConnection[Any], session_id: str, events: list[dict[str, Any]], seq: int, holder: str
 ) -> None:

@@ -23,6 +23,7 @@ from scadbuddy_durable.inputs import Inputs, make_input_activities
 from scadbuddy_durable.models import (
     LOAD_INPUTS,
     PENDING_QUERY,
+    RELEASE_INPUT,
     SEND_UPDATE,
     START_INPUT,
     TASK_QUEUE,
@@ -30,6 +31,7 @@ from scadbuddy_durable.models import (
     LoadInputs,
     Message,
     Nudge,
+    ReleaseInput,
     SessionInput,
     SnapshotInput,
     StartInput,
@@ -135,24 +137,64 @@ class FakeInputs:
     def __init__(self) -> None:
         # message id -> (session id, message, status), in commit order
         self.rows: dict[str, tuple[str, Message, str]] = {}
+        self.tokens: dict[str, str] = {}
         self.takes: list[str] = []
+        # Every take attempt, (message id, token): a retry repeats its take's token.
+        self.attempts: list[tuple[str, str]] = []
+        self.releases: list[str] = []
+        self.loads = 0
+        # A take waits for this, once it started (`taking`): set it to let takes finish.
+        # With `gate_after_commit`, it waits after it took the message instead.
+        self.take_gate: asyncio.Event | None = None
+        self.gate_after_commit = False
+        self.taking = asyncio.Event()
+        # Message ids the next loads do not see yet, with how many loads miss each.
+        self.unseen: dict[str, int] = {}
 
         @activity.defn(name=LOAD_INPUTS)
         async def load_inputs(inp: LoadInputs) -> Loaded:
-            pending = [m for sid, m, st in self.rows.values() if sid == inp.session_id and st == "pending"]
-            row = self.rows.get(inp.asked or "")
+            self.loads += 1
+            hidden = {i for i, n in self.unseen.items() if n > 0}
+            for i in hidden:
+                self.unseen[i] -= 1
+            pending = [
+                m
+                for sid, m, st in self.rows.values()
+                if sid == inp.session_id and st == "pending" and m.id not in hidden
+            ]
+            row = None if inp.asked in hidden else self.rows.get(inp.asked or "")
             return Loaded(pending, None if row is None or row[0] != inp.session_id else row[2])
 
         @activity.defn(name=START_INPUT)
         async def start_input(inp: StartInput) -> bool:
+            self.attempts.append((inp.id, inp.token))
+            self.taking.set()
+            if self.take_gate is not None and not self.gate_after_commit:
+                await self.take_gate.wait()
             row = self.rows.get(inp.id)
-            if row is None or row[0] != inp.session_id or row[2] == "abandoned":
+            if row is None or row[0] != inp.session_id:
+                return False
+            if not (row[2] == "pending" or (row[2] == "run" and self.tokens.get(inp.id) == inp.token)):
                 return False
             self.rows[inp.id] = (row[0], row[1], "run")
+            self.tokens[inp.id] = inp.token
             self.takes.append(inp.id)
+            if self.take_gate is not None and self.gate_after_commit:
+                await self.take_gate.wait()
             return True
 
-        self.activities: list[Callable[..., Any]] = [load_inputs, start_input]
+        @activity.defn(name=RELEASE_INPUT)
+        async def release_input(inp: ReleaseInput) -> bool:
+            row = self.rows.get(inp.id)
+            if row is None or row[0] != inp.session_id:
+                return False
+            if not (row[2] == "pending" or (row[2] == "run" and self.tokens.get(inp.id) == inp.token)):
+                return False
+            self.rows[inp.id] = (row[0], row[1], "abandoned")
+            self.releases.append(inp.id)
+            return True
+
+        self.activities: list[Callable[..., Any]] = [load_inputs, start_input, release_input]
 
     async def commit(self, session_id: str, text: str, context: str | None = None) -> str:
         message = Message(str(uuid.uuid4()), text, context)
