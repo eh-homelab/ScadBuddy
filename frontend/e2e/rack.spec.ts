@@ -65,6 +65,6 @@ test.describe('rack nozzle', () => {
       (request) => request.method() === 'PUT' && request.url().endsWith('/rack-algorithm'),
     )
     await dialog.getByLabel('Rack algorithm').selectOption('oldest_first')
-    expect((await saved).postDataJSON()).toEqual({ algorithm: 'oldest_first' })
+    expect((await saved).postDataJSON()).toEqual({ algorithm: 'oldest_first', version: expect.any(Number) })
   })
 })
