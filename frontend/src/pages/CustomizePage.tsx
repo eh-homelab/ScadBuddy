@@ -15,7 +15,7 @@ import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
-import { PresetPicker } from '../components/PresetPicker'
+import { PresetPicker, type SelectedElsewhere } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
@@ -221,6 +221,9 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
+  /** #1457, #1484 — the preset the template UI last loaded or saved, for the picker. */
+  const [presetElsewhere, setPresetElsewhere] = useState<(SelectedElsewhere & { slug: string }) | null>(null)
+  if (presetElsewhere && presetElsewhere.slug !== slug) setPresetElsewhere(null)
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -449,10 +452,13 @@ export function CustomizePage() {
       presets: {
         list: () => api.listPresets(slug),
         save: async (name: string) => {
+          const { values: savedValues, extra: savedExtra } = live.current
           const created = await api.createPreset(slug, {
             name,
-            inputs: presetInputs(schemaNow(), live.current.values, live.current.extra),
+            inputs: presetInputs(schemaNow(), savedValues, savedExtra),
           })
+          // The picker shows it selected, as its own Save as preset does.
+          setPresetElsewhere({ slug, preset: created, values: savedValues, extra: savedExtra })
           setPresetsRevision((n) => n + 1) // the picker keeps its own list; remount it
           return created
         },
@@ -461,6 +467,7 @@ export function CustomizePage() {
           if (!preset) throw new Error(`no preset ${id}`)
           const applied = applyPreset(schemaNow(), preset)
           onApplyPreset(applied.values, applied.extra)
+          setPresetElsewhere({ slug, preset, values: applied.values, extra: applied.extra })
         },
       },
       onDescribe: (fn: (() => string) | null) => {
@@ -810,6 +817,7 @@ export function CustomizePage() {
       onApply={onApplyPreset}
       pinned={version !== undefined}
       resetKey={resets}
+      selected={presetElsewhere}
     />
   )
   const templateUi = customUi && (
@@ -1075,6 +1083,7 @@ export function CustomizePage() {
                     onApply={onApplyPreset}
                     pinned={version !== undefined}
                     resetKey={resets}
+                    selected={presetElsewhere}
                   />
                 </>
               }

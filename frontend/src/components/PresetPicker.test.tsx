@@ -59,17 +59,23 @@ function Harness({ onApply }: { onApply: (values: ParamValues, extra: InputsExtr
   const [values, setValues] = useState(() => defaultValues(keychainSchema))
   const [extra, setExtra] = useState<InputsExtra>({ tab: 'lid' })
   return (
-    <PresetPicker
-      slug="name-keychain"
-      schema={keychainSchema}
-      values={values}
-      extra={extra}
-      onApply={(next, nextExtra) => {
-        setValues(next)
-        setExtra(nextExtra)
-        onApply(next, nextExtra)
-      }}
-    />
+    <>
+      <PresetPicker
+        slug="name-keychain"
+        schema={keychainSchema}
+        values={values}
+        extra={extra}
+        onApply={(next, nextExtra) => {
+          setValues(next)
+          setExtra(nextExtra)
+          onApply(next, nextExtra)
+        }}
+      />
+      {/* A template UI's own state changing, with no parameter touched. */}
+      <button type="button" onClick={() => setExtra((current) => ({ ...current, tab: 'base' }))}>
+        Change the UI state
+      </button>
+    </>
   )
 }
 
@@ -649,6 +655,20 @@ describe('PresetPicker', () => {
     await user.selectOptions(select, 'Lid')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
+  })
+
+  it('counts a change to the UI state alone as unsaved (#1484)', async () => {
+    const { user } = renderPage(<Harness onApply={vi.fn()} />)
+    const select = await picker()
+    // Nothing picked yet: the UI's own starting state is no edit, so this does not ask.
+    await user.click(screen.getByRole('button', { name: 'Change the UI state' }))
+    await user.selectOptions(select, 'Tiny')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Change the UI state' }))
+    expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Tiny')
+    await user.selectOptions(select, 'Mum')
+    expect(screen.getByRole('dialog', { name: 'Apply preset Mum?' })).toBeInTheDocument()
   })
 
   it('on a pinned revision, applies presets but saves none (#355)', async () => {

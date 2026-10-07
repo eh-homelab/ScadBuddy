@@ -223,6 +223,57 @@ describe('CustomizePage with a template UI', () => {
     expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe(initial)
   })
 
+  it('keeps a preset the template UI saved selected in the picker (#1484)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined())
+    host?.inputs.set({ params: { name: 'Saved' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Saved'))
+    await host!.presets.save('From the UI')
+    await host!.presets.save('Another')
+
+    // Saving remounts the picker, so the select is found again each time.
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Another' })).toBeInTheDocument())
+    await waitFor(() => expect(preset()).toHaveDisplayValue('Another'))
+    const select = preset()
+    // Nothing on screen differs from it, so picking the other one loses nothing.
+    await user.selectOptions(select, 'From the UI')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(select).toHaveDisplayValue('From the UI')
+  })
+
+  it('selects a preset the template UI loaded, so the next pick does not ask (#1457)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined())
+    host?.inputs.set({ params: { name: 'One' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('One'))
+    const one = await host!.presets.save('One')
+    host?.inputs.set({ params: { name: 'Two' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two'))
+    await host!.presets.save('Two')
+
+    await host!.presets.load(one.id)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument())
+    await waitFor(() => expect(preset()).toHaveDisplayValue('One'))
+    const select = preset()
+    await user.selectOptions(select, 'Two')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two')
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

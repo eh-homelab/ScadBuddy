@@ -29,6 +29,35 @@ test.describe('template presets', () => {
     await expect(page.getByTestId('preset-modified')).toHaveCount(0)
   })
 
+  test('ArrowDown over unsaved edits asks about the first preset once, and gives focus back (#1457)', async ({
+    page,
+  }) => {
+    // Chromium fires a change per ArrowDown on a closed select, which jsdom cannot
+    // reproduce: before #359, arrowing applied each preset in turn over the edits.
+    await page.goto('/m/name-keychain')
+    // Exact: the confirmation's own label starts with "Apply preset".
+    const preset = page.getByLabel('Preset', { exact: true })
+    const name = page.getByRole('textbox', { name: 'Name on the tag' })
+    // The list loads before the select takes keys (it is disabled until then).
+    await expect(preset).toBeEnabled({ timeout: 20_000 })
+    await name.fill('Emmalina')
+
+    await preset.focus()
+    for (let press = 0; press < 3; press += 1) await page.keyboard.press('ArrowDown')
+
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toHaveCount(1)
+    await expect(dialog).toHaveAccessibleName('Apply preset Tiny?')
+    await expect(name).toHaveValue('Emmalina')
+    await expect(preset).toHaveValue('')
+
+    await dialog.getByRole('button', { name: 'Cancel' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(preset).toBeFocused()
+    await expect(preset).toHaveValue('')
+    await expect(name).toHaveValue('Emmalina')
+  })
+
   test('Save as preset takes typing at once, keeps Tab inside, and gives focus back (#351)', async ({ page }) => {
     await page.goto('/m/name-keychain')
     const saveAs = page.getByRole('button', { name: 'Save as preset…' })
