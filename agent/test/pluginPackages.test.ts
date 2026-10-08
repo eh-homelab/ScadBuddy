@@ -507,6 +507,20 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect(problems.at(-1)).toMatch(/^and \d+ more$/)
   })
 
+  it('lists a fatal problem first when a load is refused, too', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({ ...GREETER, ...many })
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    // The MCP server's host now resolves to a refused address: fatal at load.
+    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver({ 'mcp.example': ['169.254.169.254'] }) })
+    const err = await later.materialise(pin).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem".*169\.254\.169\.254/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
+  })
+
   it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {
     repos.greeter = gitRepo(GREETER)
     const prepared = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' }))
