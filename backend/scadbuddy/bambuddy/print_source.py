@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.send import (
     ensure_file,
     ensure_uploaded,
     read_3mf,
+    recorded_copy_to_read,
     target_for,
 )
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -110,6 +111,11 @@ class PrintSource(Protocol):
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile: ...
+
+    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
+        """:meth:`file_to_read` when Bambuddy has it without an upload, else ``None``:
+        what the print check reads slots from, since it uploads nothing (#1050)."""
+        ...
 
     async def file_to_print(
         self,
@@ -220,6 +226,12 @@ class OutputSource:
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         copy = await copy_to_read(client, self.store, self.uploads, self.meta, self.settings)
+        return ReadFile(copy.id, own_colours=list(self.meta.colors) if copy.recolored else None)
+
+    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
+        copy = await recorded_copy_to_read(client, self.uploads, self.meta, self.settings)
+        if copy is None:
+            return None
         return ReadFile(copy.id, own_colours=list(self.meta.colors) if copy.recolored else None)
 
     async def file_to_print(
@@ -458,6 +470,9 @@ class LibrarySource:
         return list(self.plates)
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+        return ReadFile(self.file_id)
+
+    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
         return ReadFile(self.file_id)
 
     async def file_to_print(

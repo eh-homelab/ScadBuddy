@@ -693,14 +693,28 @@ async def copy_to_read(
     supersede and the next open would upload again. Inbox copies come first; a copy in
     a project's folder is only read, never moved.
     """
+    found = await recorded_copy_to_read(client, uploads, meta, settings)
+    if found is not None:
+        return found
+    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings)
+    return ReadableCopy(library_file_id, recolored=False)
+
+
+async def recorded_copy_to_read(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+) -> ReadableCopy | None:
+    """:func:`copy_to_read` without the upload: a copy Bambuddy already has, or ``None``
+    (#1050, for the print check, which uploads nothing)."""
     recorded = sorted(
         await uploads.for_output(meta.id), key=lambda copy: not is_inbox(copy.folder_id, settings)
     )
     for copy in recorded:
         if await _still_there(client, uploads, meta, copy, tolerate_errors=True) is not None:
             return ReadableCopy(copy.id, recolored=_RECOLORED in copy.target_key)
-    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings)
-    return ReadableCopy(library_file_id, recolored=False)
+    return None
 
 
 async def ensure_uploaded(
