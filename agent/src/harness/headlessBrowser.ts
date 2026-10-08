@@ -24,10 +24,12 @@ import type { GuardVerdict, RiskTier } from './permissions.js'
 //     is vendored verbatim in agent/plugins/playwright/; the `.mcp.json` is
 //     NOT used as shipped (spec D11: `npx …@latest` fetches an unpinned package
 //     at runtime) and is written per session below instead.
-//   - The server: `@playwright/mcp` 0.0.82, an exact dependency of agent/
-//     (Apache-2.0, https://www.npmjs.com/package/@playwright/mcp/v/0.0.82,
-//     https://github.com/microsoft/playwright-mcp). Every option below is read
-//     from that version's `config.d.ts` and README ("Configuration").
+//   - The server: `@playwright/mcp` 0.0.83, an exact dependency of agent/
+//     (Apache-2.0, https://www.npmjs.com/package/@playwright/mcp/v/0.0.83,
+//     https://github.com/microsoft/playwright-mcp). Every option below was read
+//     from 0.0.82's `config.d.ts` and README ("Configuration") and not yet
+//     re-read against 0.0.83 (bumped by Dependabot); re-check before relying on
+//     a changed option.
 //
 // WHAT A SESSION GETS (spec §5.3), measured in test/headlessBrowser.server.test.ts
 // and test/headlessBrowser.e2e.test.ts (docs/ai/headless-browser.md, "Measured"):
@@ -70,7 +72,7 @@ import type { GuardVerdict, RiskTier } from './permissions.js'
 // (turned into the backend) and the origins approved in this session.
 
 /** The pinned `@playwright/mcp` version; agent/package.json pins the same. */
-export const PLAYWRIGHT_MCP_VERSION = '0.0.82'
+export const PLAYWRIGHT_MCP_VERSION = '0.0.83'
 
 /** The official plugin's commit the vendored manifest was read at. */
 export const PLAYWRIGHT_PLUGIN_COMMIT = 'fa59bc9037741ecfa131aa27938272605710d7b2'

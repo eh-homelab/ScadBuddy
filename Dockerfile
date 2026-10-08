@@ -247,7 +247,8 @@ COPY --from=agent-deps /src/agent/node_modules ./node_modules
 # which is what a headless launch without a `channel` uses
 # (agent/src/harness/headlessBrowser.ts `playwrightConfig`); measured on
 # 0.0.82: 603 MB for it and its libraries, against 740 MB for full Chromium.
-# Bump with @playwright/mcp in agent/package.json.
+# The pin moved to 0.0.83 without re-measuring this; re-check the size when
+# the image is next built. Bump with @playwright/mcp in agent/package.json.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/*

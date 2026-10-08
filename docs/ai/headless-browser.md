@@ -19,7 +19,7 @@ from the next turn on, every session turn gets the browser (`main.ts` gives the
 
 | What | Where |
 |---|---|
-| The pinned server, `@playwright/mcp` **0.0.82** (Apache-2.0, [npm](https://www.npmjs.com/package/@playwright/mcp/v/0.0.82), [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)) | exact dependency in [`agent/package.json`](../../agent/package.json) |
+| The pinned server, `@playwright/mcp` **0.0.83** (Apache-2.0, [npm](https://www.npmjs.com/package/@playwright/mcp/v/0.0.83), [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)) | exact dependency in [`agent/package.json`](../../agent/package.json) |
 | The official plugin's manifest, vendored byte for byte from [`anthropics/claude-plugins-official` at `fa59bc9`](https://github.com/anthropics/claude-plugins-official/tree/fa59bc9037741ecfa131aa27938272605710d7b2/external_plugins/playwright) (Apache-2.0, the repository's root `LICENSE`) | [`agent/plugins/playwright/`](../../agent/plugins/playwright/README.md) |
 | Per-session plugin copy, server config, tier map, disallowed tools, input guard, request guard | [`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts) |
 | Where it may go: the backend, its aliases, and origins a human approved per session | [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts), table `ai_browser_origins` ([migration](../../agent/src/db/migrations/20260930T0342Z_browser_origins.sql)), `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` in [`agent/src/config.ts`](../../agent/src/config.ts) |
@@ -258,7 +258,9 @@ request through, refused again).
 
 ## Measured (the tests, and the image)
 
-On `@playwright/mcp` 0.0.82 with Claude Code 2.1.283, and again with 2.1.287 (#1540). The tests are
+On `@playwright/mcp` 0.0.82 with Claude Code 2.1.283, and again with 2.1.287 (#1540). The
+pin moved to 0.0.83 by Dependabot without these tests re-running against it yet; re-date
+this line once they have. The tests are
 [`agent/test/headlessBrowser.server.test.ts`](../../agent/test/headlessBrowser.server.test.ts)
 (the server over stdio, no model) and
 [`agent/test/headlessBrowser.e2e.test.ts`](../../agent/test/headlessBrowser.e2e.test.ts)

@@ -7,7 +7,7 @@ The headless browser for the agent harness (issue #349, AI spec D11 and §5.3).
 | Source | [`anthropics/claude-plugins-official`, `external_plugins/playwright`](https://github.com/anthropics/claude-plugins-official/tree/fa59bc9037741ecfa131aa27938272605710d7b2/external_plugins/playwright) |
 | Pinned commit | `fa59bc9037741ecfa131aa27938272605710d7b2` (HEAD on 2026-09-28) |
 | License | Apache-2.0 (the repository's root `LICENSE`; the plugin directory has none of its own) |
-| Server | [`@playwright/mcp`](https://www.npmjs.com/package/@playwright/mcp/v/0.0.82) **0.0.82**, an exact dependency in `agent/package.json`, Apache-2.0, [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp) |
+| Server | [`@playwright/mcp`](https://www.npmjs.com/package/@playwright/mcp/v/0.0.83) **0.0.83**, an exact dependency in `agent/package.json`, Apache-2.0, [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp) |
 
 `.claude-plugin/plugin.json` is the upstream file, byte for byte (sha256
 `f2d7c0f611b93287ebb07454255d0cccf3a343d7095b7f8f763ff21d1995c096`).
