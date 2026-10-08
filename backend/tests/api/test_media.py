@@ -674,7 +674,10 @@ def test_if_modified_since_compares_instants_not_wall_clocks(
     assert client.get(url, headers={"If-Modified-Since": later}).status_code == 304
 
 
-@pytest.mark.parametrize("since", ["not a date", "Fri, 99 Jan 2100 00:00:00 GMT", ""])
+@pytest.mark.parametrize(
+    "since",
+    ["not a date", "Fri, 99 Jan 2100 00:00:00 GMT", "Fri, 01 Jan 99999999999 00:00:00 GMT", ""],
+)
 def test_an_unreadable_if_modified_since_is_sent_whole(
     client: TestClient, model: str, paths: DataPaths, since: str
 ) -> None:

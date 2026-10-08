@@ -405,7 +405,7 @@ def _http_date(value: str | None) -> datetime | None:
         return None
     try:
         parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     # `-0000` reads as naive: a UTC time, its sender's zone unknown (RFC 5322 §3.3).
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
