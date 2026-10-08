@@ -13,7 +13,7 @@ from typing import Annotated
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from scadbuddy.api.deps import PrintRunsDep, SettingsStoreDep
+from scadbuddy.api.deps import PrintRunsDep, SettingsStoreDep, UploadsDep
 from scadbuddy.api.outputs import OutputPlate
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
@@ -42,13 +42,19 @@ FileIdPath = Annotated[int, Path(ge=1)]
 @router.get("", response_model=LibraryListing, summary="Bambuddy's library, one folder at a time")
 async def get_library(
     store: SettingsStoreDep,
+    uploads: UploadsDep,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
-    Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``."""
+    Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
+    A file ScadBuddy uploaded names its ``output_id`` (#1864)."""
     async with client_for(store.load()) as client:
-        return await list_library(client, folder_id=folder_id, show_all=show_all)
+        listing = await list_library(client, folder_id=folder_id, show_all=show_all)
+    made = await uploads.outputs_for_files(entry.id for entry in listing.files)
+    for entry in listing.files:
+        entry.output_id = made.get(entry.id)
+    return listing
 
 
 @router.get(

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_render
 from scadbuddy.api.outputs import (
+    LIBRARY_FILE_NOT_ARRANGEABLE,
     NEEDS_BACKFILL_PROBLEM,
     ArrangeObject,
     ArrangeRequest,
@@ -19,13 +20,14 @@ from scadbuddy.api.outputs import (
 )
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import SlotChoice
+from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
 from scadbuddy.render.job_models import Job, now
 from scadbuddy.tools.export_openapi import export
 from scadbuddy.workflows.models import ArrangeInputs
-from tests.support.arrange import saved_output
+from tests.support.arrange import copied_output, saved_output
 
 #: A well-formed output id no output has: each test fails for its own reason, not the id's.
 UNKNOWN = "0" * 32
@@ -153,7 +155,7 @@ def test_more_than_2000_copies_is_a_422(client: TestClient) -> None:
 
 def test_2000_copies_is_allowed() -> None:
     objects = [ArrangeObject(output_id=UNKNOWN, part=f"p{i}", count=500) for i in range(4)]
-    assert sum(o.count for o in ArrangeRequest(objects=objects).objects) == 2000
+    assert sum(o.count or 0 for o in ArrangeRequest(objects=objects).objects) == 2000
 
 
 class Arranger:
@@ -235,3 +237,121 @@ def test_the_needs_backfill_refusal_is_typed_in_the_spec(tmp_path: Path) -> None
     problem = schema["components"]["schemas"]["NeedsBackfillProblem"]
     assert {"type", "title", "status", "detail", "code", "output_ids"} <= set(problem["required"])
     assert problem["properties"]["code"]["const"] == "needs_backfill"
+
+
+#: Output ids for the copies a test makes of its one rendered output (#1864).
+SECOND = "b" * 32
+THIRD = "c" * 32
+
+
+async def test_the_result_is_filed_under_the_chosen_template(tmp_path: Path) -> None:
+    """#1864: outputs of two templates arrange together; the result is the first
+    object's template unless `slug` names another of theirs."""
+    paths, meta, written = await saved_output(tmp_path)
+    other = copied_output(paths, meta, slug="other", output_id=SECOND)
+    key = written.manifest[0].part
+    objects = [
+        ArrangeObject(output_id=meta.id, part=key, count=1),
+        ArrangeObject(output_id=other.id, part=key, count=1),
+    ]
+    store = OutputStore(paths)
+    assert arrange_inputs(store, ArrangeRequest(objects=objects), plate_model=None)[0] == "demo"
+    chosen = ArrangeRequest(objects=objects, slug="other")
+    slug, inputs = arrange_inputs(store, chosen, plate_model=None)
+    assert slug == "other" and inputs.sources == [meta.id, other.id]
+    with pytest.raises(ApiError) as raised:
+        arrange_inputs(store, ArrangeRequest(objects=objects, slug="third"), plate_model=None)
+    assert raised.value.status == 422 and "third" in raised.value.detail
+
+
+async def test_an_object_without_a_part_is_every_object_of_its_output(tmp_path: Path) -> None:
+    """The agent names a source, not its manifest: `part` omitted places every object,
+    each at its own count unless `count` says otherwise."""
+    paths, meta, written = await saved_output(tmp_path, count=3)
+    key = written.manifest[0].part
+    store = OutputStore(paths)
+    _, inputs = arrange_inputs(
+        store, ArrangeRequest(objects=[ArrangeObject(output_id=meta.id)]), plate_model=None
+    )
+    assert [(i.part.piece_key, i.count) for i in inputs.items] == [(key, 3)]
+    _, inputs = arrange_inputs(
+        store,
+        ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, count=5)]),
+        plate_model=None,
+    )
+    assert [i.count for i in inputs.items] == [5]
+
+
+async def test_the_copy_cap_holds_once_omitted_counts_are_read(tmp_path: Path) -> None:
+    paths, meta, _ = await saved_output(tmp_path, count=3)
+    _rewrite_manifest(paths, meta, count=500)
+    body = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id)] * 5)
+    with pytest.raises(ApiError) as raised:
+        arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert raised.value.status == 422 and "2500 copies" in raised.value.detail
+
+
+def test_an_object_names_one_source(client: TestClient) -> None:
+    for source in ({}, {"output_id": UNKNOWN, "library_file_id": 7}):
+        response = client.post(
+            "/api/v1/outputs/arrange", json={"objects": [{**source, "part": "p", "count": 1}]}
+        )
+        assert response.status_code == 422, response.text
+
+
+def test_two_templates_and_a_library_file_arrange_together(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#1864: a library file ScadBuddy uploaded arranges through the output it is a copy
+    of (`output_bambuddy_uploads`), beside outputs of two templates."""
+    paths, meta, written = asyncio.run(saved_output(tmp_path))
+    other = copied_output(paths, meta, slug="other", output_id=SECOND)
+    uploaded = copied_output(paths, meta, slug="demo", output_id=THIRD)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(
+        state.uploads.record(uploaded.id, LibraryCopy(id=77, folder_id=None, target_key="H2D"))
+    )
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    key = written.manifest[0].part
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={
+            "objects": [
+                {"output_id": meta.id, "part": key, "count": 1},
+                {"output_id": other.id, "part": key, "count": 2},
+                {"library_file_id": 77},
+            ],
+            "slug": "other",
+        },
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["slug"] == "other"
+    [inputs] = arranger.inputs
+    assert inputs.sources == [meta.id, other.id, uploaded.id]
+    assert [i.count for i in inputs.items] == [1, 2, 2]
+
+
+def test_a_library_file_no_output_made_is_not_arrangeable_yet(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """Reading a plain file's objects from its 3MF is #1863: until then it is refused,
+    by a code the UI and the agent tell apart, naming every such file."""
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={
+            "objects": [
+                {"output_id": meta.id, "part": written.manifest[0].part, "count": 1},
+                {"library_file_id": 88},
+                {"library_file_id": 89, "part": "x", "count": 1},
+            ]
+        },
+    )
+    assert response.status_code == 422, response.text
+    problem = response.json()
+    assert problem["code"] == LIBRARY_FILE_NOT_ARRANGEABLE
+    assert problem["library_file_ids"] == [88, 89]
+    assert arranger.inputs == []
