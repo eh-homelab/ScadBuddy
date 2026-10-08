@@ -150,6 +150,20 @@ export type HarnessRun = {
    */
   allowedPluginPaths?: string[]
   /**
+   * Claude Code built-ins the allowed packages' skills and subagents name
+   * (vet.ts `builtin_tools`), offered beside the run's own; ignored without
+   * `allowedPluginPaths`. They are not ScadBuddy's, so a model's call to one
+   * is `outward`: in a session it parks for a human. With an allowed package,
+   * skill shell injection is on too (`disableSkillShellExecution` off): only
+   * an allowed package can carry one, since the vetting refuses it everywhere
+   * else. Measured on Claude Code 2.1.287 (test/pluginPackages.e2e.test.ts):
+   * with Bash offered, the CLI runs an injection as it expands the skill and
+   * asks neither canUseTool nor the PreToolUse hook, so the admin's approval
+   * of the pin is its only check; without Bash it refuses the command. The
+   * headless browser's `disallowedTools` still win.
+   */
+  builtinTools?: string[]
+  /**
    * ScadBuddy's own plugin (ownPlugin.ts `OWN_PLUGIN_DIR`, #896), vetted like
    * `pluginPaths`. Loading it gives the run the Skill and Agent tools, at
    * `read`, so its skills and subagents can be used; a run without it has no
@@ -488,7 +502,13 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     return { type: 'local' as const, path: path.resolve(p) }
   })
   for (const p of run.allowedPluginPaths ?? []) plugins.push({ type: 'local', path: path.resolve(p) })
-  const builtins = [...(run.ownPlugin !== undefined ? OWN_PLUGIN_TOOLS : []), ...(questions ? [ASK_USER_QUESTION] : [])]
+  const builtins = [
+    ...new Set([
+      ...(run.ownPlugin !== undefined ? OWN_PLUGIN_TOOLS : []),
+      ...(questions ? [ASK_USER_QUESTION] : []),
+      ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
+    ]),
+  ]
   if (builtins.length) options.tools = builtins
   // Checked by assertHeadlessPlugin above instead: it is a stdio server, which
   // assertPluginAllowed refuses, but one this module wrote and starts under `env -i`.
@@ -507,8 +527,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     // started.
     options.strictMcpConfig = false
   }
-  // The same, so an allowed package's MCP servers (local ones too) start.
-  if (run.allowedPluginPaths?.length) options.strictMcpConfig = false
+  // The same, so an allowed package's MCP servers (local ones too) start; and
+  // its skills' shell injection runs (see `builtinTools`).
+  if (run.allowedPluginPaths?.length) {
+    options.strictMcpConfig = false
+    options.settings = { ...(typeof options.settings === 'object' ? options.settings : {}), disableSkillShellExecution: false }
+  }
   if (run.systemPromptAppend !== undefined) {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }
   }

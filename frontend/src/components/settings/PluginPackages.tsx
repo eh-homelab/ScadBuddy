@@ -84,6 +84,7 @@ export function ReviewParts({ review }: { review: PackageReview }) {
         label="MCP servers"
         items={review.mcp_servers.map((m) => `${m.name} (${m.type}) ${m.url}`)}
       />
+      {(review.builtin_tools?.length ?? 0) > 0 && <PartList label="Built-in tools" items={review.builtin_tools!} />}
       {(review.refused?.length ?? 0) > 0 && (
         <div className="rounded-[6px] border border-warn/40 bg-warn/8 p-2 sm:col-span-2">
           <dt className="font-medium text-warn">Refused by the vetting rules</dt>

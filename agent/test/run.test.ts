@@ -162,6 +162,14 @@ describe('buildHarnessOptions', () => {
     const options = buildHarnessOptions({ ...base, allowedPluginPaths: [allowed] })
     expect(options.plugins).toEqual([{ type: 'local', path: allowed }])
     expect(options.strictMcpConfig).toBe(false)
+    // The built-ins it names are offered, and skill shell injection runs.
+    const withTools = buildHarnessOptions({ ...base, ownPlugin: OWN_PLUGIN_DIR, allowedPluginPaths: [allowed], builtinTools: ['Read', 'Bash', 'Skill'] })
+    expect(withTools.tools).toEqual(['Skill', 'Agent', 'Read', 'Bash'])
+    expect(withTools.settings).toMatchObject({ disableSkillShellExecution: false })
+    // Without an allowed package, neither.
+    const without = buildHarnessOptions({ ...base, builtinTools: ['Read'] })
+    expect(without.tools).toEqual([])
+    expect(without.settings).toMatchObject({ disableSkillShellExecution: true })
     // The vetted list is still checked beside it.
     expect(() =>
       buildHarnessOptions({ ...base, allowedPluginPaths: [allowed], pluginPaths: ['test/fixtures/plugins/stdio-mcp'] }),

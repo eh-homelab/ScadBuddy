@@ -167,6 +167,72 @@ describe.skipIf(skip !== undefined)(`a harness run with an installed plugin pack
     }
   })
 
+  // An allowed package also gets the built-ins its skills and subagents name,
+  // and its skills' shell injection is on. Measured on Claude Code 2.1.287:
+  // with Bash offered, the CLI runs an injection before the model sees the
+  // skill and asks neither canUseTool nor the PreToolUse hook, so the
+  // admin's approval of the pin is its only check; without Bash it refuses
+  // the command itself ("Permission to use Bash has been denied").
+  it('offers an allowed package the built-ins it names, and runs its shell injection when Bash is offered', async () => {
+    const allowedRepo = gitRepo({
+      '.claude-plugin/plugin.json': JSON.stringify({ name: 'shell' }),
+      'skills/status/SKILL.md': '---\nname: status\ndescription: Shows status.\nallowed-tools: Read\n---\n\nStatus: !`echo INJ-$((40+2))`\n',
+      'agents/reader.md': '---\nname: reader\ndescription: Reads.\ntools: Read, Grep, Bash\n---\n\nRead.\n',
+    })
+    try {
+      const paths = { stateDir }
+      const installer = new PackageInstaller({
+        fetcher: localFetcher({ shell: allowedRepo }),
+        cacheRoot: pluginCacheDir(paths),
+        resolve: resolver(),
+      })
+      const prepared = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/shell.git' }))
+      expect(prepared.review.builtin_tools).toEqual(['Bash', 'Grep', 'Read'])
+      const pin = {
+        name: 'shell',
+        fetchUrl: prepared.fetchUrl,
+        fetchPath: prepared.fetchPath,
+        commit: prepared.commit,
+        contentHash: prepared.contentHash,
+        allowRefused: true,
+      }
+      const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, installer)
+      expect(loaded).toMatchObject({ builtinTools: ['Bash', 'Grep', 'Read'], problems: [] })
+      const sent = () =>
+        fake
+          .messageCalls()
+          .map((r: RecordedRequest) => JSON.stringify(r.body?.messages ?? []))
+          .join('')
+      const run = async (builtinTools: string[]) => {
+        const decisions: string[] = []
+        const r = await collect({
+          paths,
+          credential: gateway(),
+          prompt: '/shell:status',
+          allowedPluginPaths: loaded.allowedPaths,
+          builtinTools,
+          maxTurns: 2,
+          onDecision: (tool) => decisions.push(tool),
+        })
+        return { ...r, decisions }
+      }
+
+      // Without Bash: the CLI refuses the command, and no model request is made.
+      const refused = await run([])
+      expect(JSON.stringify(refused.messages)).toContain('Permission to use Bash has been denied')
+      expect(sent()).not.toContain('INJ-42')
+
+      // With Bash: offered, and the command runs without a permission call.
+      const ran = await run(loaded.builtinTools)
+      const init = ran.messages.find((m): m is SDKSystemMessage => m.type === 'system' && m.subtype === 'init')
+      expect(init?.tools).toEqual(expect.arrayContaining(['Bash', 'Grep', 'Read']))
+      expect(sent()).toContain('Status: INJ-42')
+      expect(ran.decisions).not.toContain('Bash')
+    } finally {
+      allowedRepo.remove()
+    }
+  })
+
   // vet.ts refuses a package with dynamic context injection before this
   // point; this pins the second layer. Every query sets
   // `disableSkillShellExecution` (harness/options.ts), and measured on CLI

@@ -692,8 +692,21 @@ Some checks still apply to an allowed pin, at install and at every load:
 - the content hash;
 - the egress check on every URL the package declares.
 
-Some per-query settings stay on as well. `disableSkillShellExecution` still blanks
-dynamic context injection, and `tools` still offers no `Bash`, `Read` or `Write`.
+A turn that loads an allowed pin also gets two more things:
+
+- **Built-in tools.** It gets the Claude Code built-ins the package's skills and subagents
+  name in `allowed-tools` or `tools` (`review.builtin_tools`, for example `Bash`, `Read`
+  or `Write`). They are offered beside the run's own `Skill` and `Agent` (`run.ts`
+  `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
+  `outward`, and in a session it parks for a human. The headless browser's
+  `disallowedTools` still remove `Bash` when the browser is on.
+- **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
+  false). Only an allowed package can carry it, because the vetting refuses it
+  everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):
+  - with `Bash` offered, the CLI runs the command as it expands the skill. It asks
+    neither `canUseTool` nor the PreToolUse hook, so **the approval of the pin is its
+    only check**;
+  - without `Bash`, the CLI refuses it ("Permission to use Bash has been denied").
 
 Every URL a package declares (MCP servers, http hooks) goes through the egress check at
 install and again at every load. A marketplace entry must have a git source: a relative

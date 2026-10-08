@@ -135,6 +135,8 @@ export class PackageInstaller {
   private readonly leases = new Map<string, number>()
   /** Per package, the cached directory most recently materialised: kept by prune. */
   private readonly current = new Map<string, string>()
+  /** Per cached directory, the built-ins its last vetting found (vet.ts `builtin_tools`). */
+  private readonly builtins = new Map<string, string[]>()
 
   constructor(options: InstallerOptions) {
     this.fetcher = options.fetcher
@@ -316,7 +318,7 @@ export class PackageInstaller {
    * (once the turn that loads it has ended): a newer version materialised
    * meanwhile does not delete it; it is pruned when its last lease goes.
    */
-  async acquire(pin: PackagePin): Promise<{ dir: string; release: () => void }> {
+  async acquire(pin: PackagePin): Promise<{ dir: string; release: () => void; builtinTools: string[] }> {
     const dir = await this.serial(pin.name, async () => {
       const ready = await this.materialiseNow(pin)
       this.leases.set(ready, (this.leases.get(ready) ?? 0) + 1)
@@ -336,7 +338,7 @@ export class PackageInstaller {
       this.leases.delete(dir)
       void this.serial(pin.name, () => this.prune(pin.name)).catch(() => undefined)
     }
-    return { dir, release }
+    return { dir, release, builtinTools: this.builtins.get(dir) ?? [] }
   }
 
   /** Runs `work` after every earlier queued step for package `name`. */
@@ -390,6 +392,7 @@ export class PackageInstaller {
       problems.push(`the package names itself "${vetting.review.name}", not "${pin.name}"`)
     }
     if (problems.length) throw new PackageRefusedError(problems)
+    this.builtins.set(dir, vetting.review?.builtin_tools ?? [])
     return dir
   }
 
@@ -423,6 +426,8 @@ export type PackagesForRun = {
   paths: string[]
   /** Packages approved with `allow_refused`, loaded as they are. */
   allowedPaths: string[]
+  /** The Claude Code built-ins the allowed packages name, for the turn's `tools` (run.ts `builtinTools`). */
+  builtinTools: string[]
   problems: string[]
   /** Call when the turn has ended: its package directories may then be pruned. */
   release: () => void
@@ -439,13 +444,18 @@ export async function loadPackagesForRun(
 ): Promise<PackagesForRun> {
   const paths: string[] = []
   const allowedPaths: string[] = []
+  const builtinTools = new Set<string>()
   const problems: string[] = []
   const releases: (() => void)[] = []
   for (const pin of await store.enabledPins()) {
     try {
-      const { dir, release } = await installer.acquire(pin)
-      if (pin.allowRefused) allowedPaths.push(dir)
-      else paths.push(dir)
+      const { dir, release, builtinTools: wanted } = await installer.acquire(pin)
+      if (pin.allowRefused) {
+        allowedPaths.push(dir)
+        for (const tool of wanted) builtinTools.add(tool)
+      } else {
+        paths.push(dir)
+      }
       releases.push(release)
     } catch (err) {
       if (err instanceof PackageRefusedError) {
@@ -457,5 +467,11 @@ export async function loadPackagesForRun(
       }
     }
   }
-  return { paths, allowedPaths, problems, release: () => releases.forEach((r) => r()) }
+  return {
+    paths,
+    allowedPaths,
+    builtinTools: [...builtinTools].sort(),
+    problems,
+    release: () => releases.forEach((r) => r()),
+  }
 }

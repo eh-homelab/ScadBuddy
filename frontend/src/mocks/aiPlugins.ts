@@ -68,6 +68,7 @@ const REVIEW_SHELL: PackageReview = {
   mcp_servers: [],
   files: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/status/SKILL.md'],
   refused: SHELL_PROBLEMS,
+  builtin_tools: ['Bash'],
 }
 const REVIEW_V2: PackageReview = {
   ...REVIEW_V1,

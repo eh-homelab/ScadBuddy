@@ -79,6 +79,8 @@ export interface PackageReview {
    * Such a pin loads only when approved with `allow_refused`, as it is.
    */
   refused?: string[]
+  /** The Claude Code built-ins its skills and subagents name, offered while the pin is allowed. */
+  builtin_tools?: string[]
 }
 
 export interface FileDiff {

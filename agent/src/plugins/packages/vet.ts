@@ -55,9 +55,9 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 //
 // AN ADMIN MAY ALLOW what these rules refuse, for one package at one pin: the
 // review lists every refusal (`refused`), and approving with `allow_refused`
-// loads the package as it is (store.ts). The review also lists the Claude Code
-// built-ins its skills and subagents name (`builtin_tools`); no turn offers
-// them yet, and skill shell injection stays off. That is a decision to run the package's code as the agent service itself:
+// loads the package as it is (store.ts), with the Claude Code built-ins its
+// skills and subagents name (`builtin_tools`) and skill shell injection on
+// (run.ts `builtinTools`). That is a decision to run the package's code as the agent service itself:
 // with the Claude credential in its environment, and able to read the
 // service's (the database URL, the key file behind every stored secret). A
 // reserved or non-kebab name is allowable too. Never allowable (`fatal`): a
@@ -90,8 +90,8 @@ export type PackageReview = {
   refused?: string[]
   /**
    * The Claude Code built-ins its skills and subagents name (`allowed-tools`,
-   * `tools`), for the admin to see. The harness does not offer them yet
-   * (`tools` is the run's own). Absent in an older review.
+   * `tools`). A turn offers them while the pin is allowed (run.ts
+   * `builtinTools`). Absent in an older review.
    */
   builtin_tools?: string[]
 }

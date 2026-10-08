@@ -67,6 +67,7 @@ describe('PluginPackagesPanel', () => {
     await screen.findByText('No plugin packages installed.')
     await install(user, 'https://git.example/shell.git')
     const card = await screen.findByRole('listitem', { name: 'Plugin package shell' })
+    expect(within(within(card).getByLabelText('Review of shell')).getByText('Bash')).toBeInTheDocument()
     const refused = within(card).getByRole('list', { name: 'What the rules refuse in shell' })
     expect(within(refused).getAllByRole('listitem').map((li) => li.textContent)).toEqual(SHELL_PROBLEMS)
 

@@ -1406,7 +1406,7 @@ export class SessionManager {
               }
             : {}),
           ...(pluginPaths.length ? { pluginPaths } : {}),
-          ...(allowedPluginPaths.length ? { allowedPluginPaths } : {}),
+          ...(allowedPluginPaths.length ? { allowedPluginPaths, builtinTools: packages?.builtinTools ?? [] } : {}),
           ...(ownPlugin !== undefined ? { ownPlugin } : {}),
           ...(remotePlugins.length ? { remotePlugins } : {}),
           ...(memory ? { memoryHooks: memory.hooks } : {}),
