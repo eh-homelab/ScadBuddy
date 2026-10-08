@@ -193,6 +193,15 @@ describe('vetting a package', () => {
     expect(v.problems.join('\n')).toMatch(problem)
   })
 
+  it('lists every refusal in the review, uncapped, though the problem list is capped', () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    const v = vetPackage(tree({ ...GREETER, ...many }))
+    expect(v.problems).toHaveLength(51)
+    expect(v.problems.at(-1)).toMatch(/^and \d+ more$/)
+    expect(v.review?.refused).toHaveLength(60)
+    expect(v.review?.refused?.some((p) => /more$/.test(p))).toBe(false)
+  })
+
   it('lists what an admin may allow in the review, and keeps the name and escaping paths fatal', () => {
     const hook = { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }
     const allowable = vetPackage(tree({ ...GREETER, ...hook }))

@@ -96,8 +96,8 @@ export function ReviewParts({ review }: { review: PackageReview }) {
               ))}
             </ul>
             <p className="mt-1 text-muted">
-              It loads only if you allow this when approving. Its commands, hooks and local servers then run with the
-              Claude credential in their environment.
+              It loads only if you allow this when approving. Its commands, hooks and local servers then run as the
+              assistant service, able to read the Claude credential, the database URL and the secrets key.
             </p>
           </dd>
         </div>
@@ -267,7 +267,8 @@ function ApproveDialog({
             />
             <span>
               Load it as it is, despite the {refused.length === 1 ? 'refusal' : `${refused.length} refusals`} above.
-              Its code runs with the Claude credential in its environment.
+              Its code runs as the assistant service itself: it can read the Claude credential, the database URL
+              and the key that decrypts every stored secret.
             </span>
           </label>
         )}

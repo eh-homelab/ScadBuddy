@@ -122,6 +122,8 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       await db.sql`UPDATE ai_plugin_packages SET review = review - 'refused'`
       expect((await store.get('greeter'))?.review.refused).toEqual([])
       expect((await store.approve('greeter', installed.commit_sha, installed.content_hash)).allow_refused).toBe(false)
+      // A clean pin re-approved with the flag stays without it: nothing was shown to allow.
+      expect((await store.approve('greeter', installed.commit_sha, installed.content_hash, true)).allow_refused).toBe(false)
     })
 
     it('refuses a second install of the same name, and the table refuses an unapproved enable', async () => {

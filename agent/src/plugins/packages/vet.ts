@@ -463,6 +463,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
       ? [...unique.slice(0, MAX_REPORTED_PROBLEMS), `and ${unique.length - MAX_REPORTED_PROBLEMS} more`]
       : unique
   const fatalSet = new Set(fatal)
-  if (review) review.refused = reported.filter((p) => !fatalSet.has(p))
+  // Uncapped: an admin allows exactly the list the review shows, never "and N more".
+  if (review) review.refused = unique.filter((p) => !fatalSet.has(p))
   return { review, problems: reported, fatal: [...fatalSet], endpoints }
 }

@@ -673,9 +673,12 @@ An allowed pin loads through `allowedPluginPaths` (`run.ts`), which skips
 servers start. `test/pluginPackages.e2e.test.ts` runs a command hook and a stdio server
 through the real CLI.
 
-This is a decision to run someone else's code **with the Claude credential in its
-environment**. It can read, use or send the key, and it can decide tool calls itself (a
-`PreToolUse` or `PermissionRequest` hook). Its MCP tools stay `outward`, because they
+This is a decision to run someone else's code **as the agent service itself**. It runs
+as the agent's user in its container, so it can read the Claude credential in its own
+environment. It can also read the service's environment (`/proc/<agent pid>/environ`,
+which holds `SCADBUDDY_DATABASE_URL`) and the `SCADBUDDY_SECRET_KEY_FILE` key that
+decrypts every envelope-encrypted secret. It can use or send any of them, and it can
+decide tool calls itself (a `PreToolUse` or `PermissionRequest` hook). Its MCP tools stay `outward`, because they
 are not ScadBuddy's.
 
 Some checks still apply to an allowed pin, at install and at every load:
