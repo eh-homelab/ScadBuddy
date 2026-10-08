@@ -612,4 +612,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await turn!.done
     expect(verdicts[0]).toMatchObject({ answered: true })
   })
+
+  // #1077: a question has no expiry, so a wait that re-read its row every poll would cost
+  // ~86,400 reads a night. The poll backs off; another replica's answer still arrives.
+  it('backs off its poll while the question stays unanswered, and still sees another replica’s answer', async () => {
+    const paths = await tempPaths()
+    const a = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20 })
+    const b = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20 })
+    const service = a.questions as unknown as { row(id: string): Promise<unknown> }
+    const real = service.row.bind(service)
+    let reads = 0
+    vi.spyOn(service, 'row').mockImplementation(async (rowId) => {
+      reads += 1
+      return real(rowId)
+    })
+    const { session, turn } = await a.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(a, session.id)
+    const before = reads
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    // At a fixed 20 ms that is ~50 reads; doubling from 20 ms, under 10.
+    expect(reads - before).toBeLessThan(12)
+
+    await b.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+    expect(verdicts[0]).toMatchObject({ answered: true })
+  }, 15_000)
 })

@@ -23,7 +23,8 @@ import {
 // question, sets the session to `waiting_input`, emits `question.asked`, and
 // parks the AskUserQuestion call until the row is resolved: the waiter wakes
 // at once for an answer given on this replica and polls the row every
-// `pollMs` for one given on another, as approvals do (approvals/service.ts).
+// `pollMs` for one given on another, as approvals do (approvals/service.ts),
+// backing off to QUESTION_POLL_MAX_MS while it stays open (#1077).
 // Answered, the call is allowed with the answers; anything else reaches the
 // model as the tool's error.
 //
@@ -59,6 +60,12 @@ import {
 // read can at most make it ASK, which is the model's call like any other.
 
 export const DEFAULT_QUESTION_POLL_MS = 1000
+/**
+ * The longest a wait sleeps between reads of its row (#1077). The poll doubles from
+ * `pollMs` up to this: a question has no expiry, and one left open overnight at 1 s
+ * would cost ~86,400 reads. An answer on this replica still wakes the wait at once.
+ */
+export const QUESTION_POLL_MAX_MS = 30_000
 
 /** How many rows listPending returns per group: waiting rows, then `done` summaries. */
 export const PENDING_CAP = 500
@@ -536,6 +543,7 @@ export class QuestionService {
     const set = this.waiters.get(id) ?? new Set()
     this.waiters.set(id, set)
     set.add(waiter)
+    let interval = this.pollMs
     try {
       for (;;) {
         if (signal.aborted) return undefined
@@ -543,9 +551,11 @@ export class QuestionService {
         const row = await this.row(id)
         if (!row) throw new Error(`question ${id} no longer exists`)
         if (row.outcome !== null) return row
-        const left = deadline === undefined ? this.pollMs : deadline - performance.now()
+        const left = deadline === undefined ? interval : deadline - performance.now()
         if (left <= 0) return 'due'
         if (woken) continue
+        const sleep = Math.min(interval, left)
+        interval = Math.min(interval * 2, Math.max(this.pollMs, QUESTION_POLL_MAX_MS))
         await new Promise<void>((resolve) => {
           const done = () => {
             clearTimeout(timer)
@@ -553,7 +563,7 @@ export class QuestionService {
             signal.removeEventListener('abort', done)
             resolve()
           }
-          const timer = setTimeout(done, Math.min(this.pollMs, left))
+          const timer = setTimeout(done, sleep)
           resume = done
           if (signal.aborted) return done()
           signal.addEventListener('abort', done, { once: true })
