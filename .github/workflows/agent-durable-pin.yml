@@ -38,4 +38,4 @@ jobs:
             echo "already open"; exit 0
           fi
           gh issue create --title "$title" --label dependencies --body \
-            "The weekly \`uv lock --check\` in \`agent-durable/\` failed: $RUN_URL. The pinned commit of temporalio/ai-integrations#33 may have been force-pushed away. Running images are unaffected; rebuilds fail. Bump the pin to the PR's current head (or the PyPI release) in a reviewed PR that carries the diff of \`python/claude_agent_sdk\` (spec 2026-10-01 §6.2)."
+            "The weekly pin check (\`.github/scripts/agent-durable-pin.sh\`: \`uv lock --check\`, then a no-cache \`uv sync\` that fetches the pinned commit) failed: $RUN_URL. The pinned commit of temporalio/ai-integrations#33 may have been force-pushed away. Running images are unaffected; rebuilds fail. Bump the pin to the PR's current head (or the PyPI release) in a reviewed PR that carries the diff of \`python/claude_agent_sdk\` (spec 2026-10-01 §6.2)."

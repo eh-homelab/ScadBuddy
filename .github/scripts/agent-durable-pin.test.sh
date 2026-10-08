@@ -12,8 +12,12 @@ cp "$root/agent-durable/pyproject.toml" "$root/agent-durable/uv.lock" "$work/"
 sha="$(grep -o 'ai-integrations@[0-9a-f]\{40\}' "$work/pyproject.toml" | cut -d@ -f2)"
 sed -i "s/$sha/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef/g" "$work/pyproject.toml" "$work/uv.lock"
 
-if "$here/agent-durable-pin.sh" "$work" >/dev/null 2>&1; then
+if out="$("$here/agent-durable-pin.sh" "$work" 2>&1)"; then
   echo "FAIL: a vanished pin passed the check"; exit 1
+fi
+# The failure must be the missing commit, not (say) no network.
+if ! grep -q "failed to fetch commit \`deadbeef" <<<"$out"; then
+  echo "FAIL: the check failed, but not on the vanished commit:"; echo "$out"; exit 1
 fi
 "$here/agent-durable-pin.sh" "$root/agent-durable" >/dev/null
 echo "ok: a vanished pin fails, the real pin passes"

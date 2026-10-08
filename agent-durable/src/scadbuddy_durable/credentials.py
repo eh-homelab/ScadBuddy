@@ -100,6 +100,9 @@ async def usable_credentials(conn: psycopg.AsyncConnection[Any], kek: Kek) -> li
         envelope = Envelope(
             secret_sealed=bytes(secret_sealed), dek_sealed=bytes(dek_sealed), kek_id=kek_id
         )
+        if kind not in get_args(CredentialKind):
+            log.warning("credential %d has unknown kind %r; skipped", priority + 1, kind)
+            continue
         if kek_id != kek.id:
             log.info("credential %d is sealed under another key; skipped", priority + 1)
             continue

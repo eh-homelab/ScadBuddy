@@ -578,13 +578,6 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-agent-ci || true
 
-  # ── Image build + everything that needs a real openscad ─────────────────────
-  #
-  # ONE job, on purpose. The backend's integration tests are marked
-  # `requires_openscad` and only run where the binary exists, which is inside
-  # this image and nowhere else. Splitting "build" from "test" would mean
-  # shuttling a ~1.5 GB image between jobs as an artifact (there is no registry
-  # to push a PR image to), which costs far more than it saves.
   agent-durable:
     name: Agent-durable lint, test, image
     needs: layout
@@ -677,6 +670,13 @@ jobs:
         working-directory: .
         run: docker rm -f scadbuddy-agent-durable-ci || true
 
+  # ── Image build + everything that needs a real openscad ─────────────────────
+  #
+  # ONE job, on purpose. The backend's integration tests are marked
+  # `requires_openscad` and only run where the binary exists, which is inside
+  # this image and nowhere else. Splitting "build" from "test" would mean
+  # shuttling a ~1.5 GB image between jobs as an artifact (there is no registry
+  # to push a PR image to), which costs far more than it saves.
   image:
     name: Image build, backend checks, container smoke, real-backend e2e
     needs: layout
