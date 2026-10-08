@@ -9,6 +9,7 @@ import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import type { RemoteAddress } from './routes/guard.js'
 import { ROUTES } from './routes/index.js'
+import type { TemporalHealth } from './temporal/worker.js'
 import type { TabHub } from './bridge/hub.js'
 import type { KekStatus } from './secrets.js'
 import type { SessionManager } from './sessions/manager.js'
@@ -75,6 +76,8 @@ export interface AppDeps {
    * no bridge socket, and the browser_* tools answer "no browser attached".
    */
   tabs?: TabHub | undefined
+  /** The agent-tools worker's state (#1055, temporal/worker.ts); left out without SCADBUDDY_TEMPORAL_ADDRESS. */
+  temporal?: (() => TemporalHealth) | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
@@ -124,6 +127,7 @@ export type Health = {
   backend: 'ok' | 'unreachable'
   secret_key: 'ok' | 'not configured'
   credential: CredentialState
+  temporal: TemporalHealth | 'not configured'
 }
 
 /** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep, and every session event stream. */
@@ -158,6 +162,7 @@ export function createApp(deps: AppDeps): AgentApp {
       backend: backendOk ? 'ok' : 'unreachable',
       secret_key: deps.kek.ok ? 'ok' : 'not configured',
       credential,
+      temporal: deps.temporal ? deps.temporal() : 'not configured',
     }
     return c.json(body)
   })
