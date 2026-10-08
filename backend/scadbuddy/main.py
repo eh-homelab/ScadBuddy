@@ -15,6 +15,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 import scadbuddy.api
@@ -28,6 +29,7 @@ from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, R
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.follow import FollowActivities
+from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -41,6 +43,7 @@ from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.operations.claims import ClaimStore
@@ -49,6 +52,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
@@ -69,12 +73,20 @@ from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     BACKFILL_SWEEP,
     HEARTBEAT_TIMEOUT,
+    REAP_SWEEP,
     SWEEPS,
     ensure_schedules,
     library_worker,
 )
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.previews import (
+    DUE_ACTIVITY,
+    REFRESH_ACTIVITY,
+    UNRUN_FAILURE,
+    PreviewBackfill,
+    ensure_preview_schedule,
+)
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 
 API_PREFIX = "/api/v1"
@@ -304,7 +316,7 @@ async def _backfill_store_logged(state: AppState, *, uploads: bool, fonts: bool 
 HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 
 
-async def _heartbeating(work: Coroutine[Any, Any, None]) -> None:
+async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
     """Run ``work`` in the current activity, heartbeating until it ends (review #1095
     2): a worker lost mid-sweep is then noticed within the heartbeat timeout."""
     running = asyncio.create_task(work)
@@ -313,7 +325,7 @@ async def _heartbeating(work: Coroutine[Any, Any, None]) -> None:
             activity.heartbeat()
     finally:
         running.cancel()
-    await running
+    return await running
 
 
 def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -356,7 +368,28 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # process heard (the API was down, the listener reconnecting).
         await _heartbeating(_attach_backfills_logged(state))
 
-    return [prune_jobs, sweep_assets, sweep_blobs, sweep_staging, sweep_claims, sweep_backfills]
+    @activity.defn(name=REAP_SWEEP)
+    async def reap_output_holds() -> None:
+        # A scan of every output's directory can be slow on a network volume: heartbeat.
+        await _heartbeating(_reap_output_holds_logged(state))
+
+    return [
+        prune_jobs,
+        sweep_assets,
+        sweep_blobs,
+        sweep_staging,
+        sweep_claims,
+        sweep_backfills,
+        reap_output_holds,
+    ]
+
+
+async def _reap_output_holds_logged(state: AppState) -> None:
+    try:
+        await asyncio.to_thread(reap_orphan_holds, state.refs, state.outputs)
+    except Exception:
+        logger.exception("could not reap orphaned output holds")
+        raise
 
 
 async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:
@@ -370,6 +403,37 @@ async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> 
         logger.exception("could not attach the finished output re-renders")
         if reraise:
             raise
+
+
+def _preview_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The preview backfill's steps (#1054): what the boot's pass over every model did,
+    on its Schedule. With previews off (a run left open from before), both do nothing."""
+
+    @activity.defn(name=DUE_ACTIVITY)
+    async def previews_due() -> list[str]:
+        previews = state.previews
+        if previews is None:
+            return []
+        try:
+            return await asyncio.to_thread(previews.due)
+        except Exception:
+            logger.exception("could not list the models to render their previews")
+            raise
+
+    @activity.defn(name=REFRESH_ACTIVITY)
+    async def preview_refresh(slug: str) -> bool:
+        previews = state.previews
+        if previews is None:
+            return False
+        try:
+            return await _heartbeating(previews.refresh(slug, raise_unrun=True))
+        except PreviewUnrunError as error:
+            raise ApplicationError(str(error), type=UNRUN_FAILURE) from error
+        except Exception:
+            logger.exception("could not refresh a model's preview", extra={"slug": slug})
+            raise
+
+    return [previews_due, preview_refresh]
 
 
 async def _prepare_catalogue(state: AppState) -> None:
@@ -515,19 +579,21 @@ async def _connect_until(state: AppState, stop: asyncio.Event, name: str) -> Cli
 
 
 async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
-    """Serve the ``bambuddy`` queue until ``stop`` (#1052): print runs need the data
-    volume and the Bambuddy key this process holds (#1060). It connects eagerly (a
-    worker cannot run on the lazy client), retrying while Temporal is down, so the API
-    still boots without it; print routes answer 503 meanwhile."""
+    """Serve the ``bambuddy`` queue in this process until ``stop`` (#1052): only with
+    SCADBUDDY_TEMPORAL_WORKER_INPROCESS or SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS;
+    otherwise the ``scadbuddy-print`` worker serves it (#1060). Unversioned, on this
+    process's stores and volume. It connects eagerly (a worker cannot run on the lazy
+    client), retrying while Temporal is down, so the API still boots without it; print
+    routes answer 503 meanwhile."""
     client = await _connect_until(state, stop, "print")
     if client is None:
         return
     settings = state.settings
     deps = PrintDeps(
         settings_store=state.settings_store,
-        outputs=state.outputs,
+        outputs=LocalOutputs(state.outputs, state.catalogue),
+        prints=state.outputs.prints,
         uploads=state.uploads,
-        catalogue=state.catalogue,
         store=state.print_runs.store,
         observer=state.print_progress,
         rack=state.components.get(RACK_USAGE),
@@ -538,34 +604,23 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         *PrintActivities(deps).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
     ]
-    # Beside the workers (review #1091 4): each follow it starts may wait out an RPC
-    # timeout on a slow Temporal, and the queue is polled meanwhile.
-    handoff = asyncio.create_task(_hand_off_watches(state, client))
-    try:
-        while not stop.is_set():
-            # A worker that fails is said at once and started again: until then every
-            # print run waits on a queue nothing polls.
-            queue = settings.temporal_task_queue_bambuddy
-            workers = [
-                bambuddy_worker(client, queue, activities),
-                follow_worker(
-                    client,
-                    queue,
-                    FollowActivities(
-                        state.print_follower, running=state.metrics.print_follows_running
-                    ).follow_print,
-                ),
-            ]
-            if not await _serve_until(
-                workers, stop, _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
-            ):
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
-    finally:
-        # A row whose follow did not start stays for the next boot.
-        handoff.cancel()
-        with suppress(asyncio.CancelledError):
-            await handoff
+    while not stop.is_set():
+        # A worker that fails is said at once and started again: until then every
+        # print run waits on a queue nothing polls.
+        queue = settings.temporal_task_queue_bambuddy
+        workers = [
+            bambuddy_worker(client, queue, activities),
+            follow_worker(
+                client,
+                queue,
+                FollowActivities(
+                    state.print_follower, running=state.metrics.print_follows_running
+                ).follow_print,
+            ),
+        ]
+        if not await _serve_until(workers, stop):
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
 
 async def _hand_off_watches(state: AppState, client: Client) -> None:
@@ -586,10 +641,35 @@ async def _hand_off_watches(state: AppState, client: Client) -> None:
         logger.exception("could not hand the old watcher's prints to FollowPrint")
 
 
+def serves_print_queue(settings: Settings) -> bool:
+    """Whether the API process serves the ``bambuddy`` queue itself (#1060)."""
+    return settings.temporal_worker_inprocess or settings.temporal_print_worker_inprocess
+
+
+async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
+    """What the API does for print runs whoever serves their queue (#1060): hand the old
+    watcher's prints to ``FollowPrint`` once and, beside it, end the runs and operations
+    whose execution closed without ending them, until ``stop``. Postgres and a client only."""
+    client = await _connect_until(state, stop, "print upkeep")
+    if client is None:
+        return
+    ops = state.components.get(OPERATIONS)
+    # Beside the reconciler (review #1091 4): each follow it starts may wait out an RPC
+    # timeout on a slow Temporal.
+    handoff = asyncio.create_task(_hand_off_watches(state, client))
+    try:
+        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+    finally:
+        # A row whose follow did not start stays for the next boot.
+        handoff.cancel()
+        with suppress(asyncio.CancelledError):
+            await handoff
+
+
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
-    sweeps need the data volume this process holds. Once connected it sets the
-    Schedule up; Temporal down at boot only delays that."""
+    sweeps and the preview backfill need the data volume this process holds. Once
+    connected it sets the Schedules up; Temporal down at boot only delays that."""
     client = await _connect_until(state, stop, "library")
     if client is None:
         return
@@ -597,7 +677,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     queue = settings.temporal_task_queue_library
 
     async def set_up() -> None:
-        paused = await _set_up_housekeeping(client, queue, state.config.asset_sweep_interval, stop)
+        paused = await _set_up_housekeeping(
+            client,
+            queue,
+            state.config.asset_sweep_interval,
+            state.previews.timeout if state.previews is not None else None,
+            stop,
+        )
         if paused and state.store.content is not None:
             # Its sweep would backfill the uploads (review #1095 2); paused, the start does.
             await _backfill_store_logged(state, uploads=True, fonts=False)
@@ -606,11 +692,14 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     ops = state.components.get(OPERATIONS)
     activities = [
         *_housekeeping_activities(state),
+        *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
     ]
     try:
         while not stop.is_set():
-            worker = library_worker(client, queue, activities, workflows=[OperationWorkflow])
+            worker = library_worker(
+                client, queue, activities, workflows=[PreviewBackfill, OperationWorkflow]
+            )
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
@@ -624,15 +713,21 @@ def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
 
 
 async def _set_up_housekeeping(
-    client: Client, queue: str, interval: float, stop: asyncio.Event
+    client: Client, queue: str, interval: float, previews: float | None, stop: asyncio.Event
 ) -> bool:
-    """The housekeeping Schedules, retried until Temporal takes them: a frontend can
-    answer the connect before it can create one. True when the sweeps' one is paused."""
+    """The housekeeping Schedules and the preview backfill's (``previews``: the
+    scheduler's render bound; None, previews off: none), retried until Temporal takes
+    them: a frontend can answer the connect before it can create one. Each set-up
+    triggers its Schedule, so the preview one comes last: a retry after the
+    housekeeping ones failed does not run the backfill twice. True when the sweeps'
+    one is paused."""
     while not stop.is_set():
         try:
-            return await ensure_schedules(client, queue, interval)
+            paused = await ensure_schedules(client, queue, interval)
+            await ensure_preview_schedule(client, queue, previews)
+            return paused
         except Exception:
-            logger.warning("could not set up the housekeeping Schedules; retrying", exc_info=True)
+            logger.warning("could not set up the library Schedules; retrying", exc_info=True)
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     return False
@@ -786,6 +881,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     stop = asyncio.Event()
     stop_printing = asyncio.Event()
     printing: asyncio.Task[None] | None = None
+    upkeep: asyncio.Task[None] | None = None
     try:
         # Every component's `run` (`core/components.py`), now that the database and
         # the bus are up. One that fails exits those already running and fails the
@@ -807,8 +903,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # And once now, whatever the Schedule: a re-render that settled while no replica
         # was listening (the sweeps' interval 0, or the Schedule paused).
         attach_now = asyncio.create_task(_attach_backfills_logged(state, reraise=False))
-        # Print runs (#1052): this process serves the `bambuddy` queue (#1060).
-        printing = asyncio.create_task(_run_print_worker(state, stop_printing))
+        # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
+        # or this process does when told to (#1060); the upkeep is this process's.
+        if serves_print_queue(state.settings):
+            printing = asyncio.create_task(_run_print_worker(state, stop_printing))
+        upkeep = asyncio.create_task(_print_upkeep(state, stop_printing))
         # Housekeeping (#1054): a Schedule on the `library` queue this process serves,
         # run once at once (the boot's sweep of the uploads, converging with the store;
         # review #1095 1: the boot no longer walks them itself first), then every interval.
@@ -817,19 +916,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             backfill = asyncio.create_task(
                 _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
             )
+        # The per-change requests. The pass over every model is the preview
+        # backfill's Schedule (#1054), triggered once the library worker connects.
         if state.previews is not None:
             state.previews.start()
-            # Every model without a thumbnail gets its default render, one at a time
-            # and behind any render someone asks for; one already made from the
-            # current source is left alone, so after the first boot this renders
-            # nothing. Best effort, like the migration above: a listing that fails
-            # costs the backfill, never the boot.
-            try:
-                records = await asyncio.to_thread(state.catalogue.list_models)
-            except (OSError, ValueError, GitError):
-                logger.exception("could not list the models to render their previews")
-            else:
-                state.previews.request_all(record.slug for record in records)
         logger.info(
             "scadbuddy started",
             extra={
@@ -857,6 +947,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await background
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
+        await _stop_queue_worker(upkeep, "print upkeep")
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)

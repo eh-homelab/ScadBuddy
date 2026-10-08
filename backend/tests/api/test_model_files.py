@@ -36,7 +36,9 @@ def upload(client: TestClient) -> dict[str, Any]:
 
 def put(client: TestClient, name: str, content: str, message: str | None = None) -> Any:
     return client.put(
-        f"/api/v1/models/{SLUG}/files/{name}", json={"content": content, "message": message}
+        f"/api/v1/models/{SLUG}/files/{name}",
+        json={"content": content, "message": message},
+        headers=press(),
     )
 
 
@@ -76,20 +78,29 @@ def test_a_sibling_is_removed_as_a_revision_and_restorable(
     upload(client)
     with_parts = put(client, "parts.scad", PARTS).json()["version"]
 
-    removed = client.delete(f"/api/v1/models/{SLUG}/files/parts.scad")
+    removed = client.delete(f"/api/v1/models/{SLUG}/files/parts.scad", headers=press())
 
     assert removed.status_code == 200, removed.text
     assert not (paths.model_dir(SLUG) / "parts.scad").exists()
     assert client.get(f"/api/v1/models/{SLUG}/files/parts.scad").status_code == 404
-    assert client.delete(f"/api/v1/models/{SLUG}/files/parts.scad").status_code == 404
-    assert client.post(f"/api/v1/models/{SLUG}/versions/{with_parts}/restore").status_code == 200
+    assert (
+        client.delete(f"/api/v1/models/{SLUG}/files/parts.scad", headers=press()).status_code == 404
+    )
+    assert (
+        client.post(
+            f"/api/v1/models/{SLUG}/versions/{with_parts}/restore", headers=press()
+        ).status_code
+        == 200
+    )
     assert (paths.model_dir(SLUG) / "parts.scad").read_text() == PARTS
 
 
 def test_the_main_source_is_written_only_through_put_source(client: TestClient) -> None:
     upload(client)
     assert put(client, "model.scad", "cube(1);\n").status_code == 409
-    assert client.delete(f"/api/v1/models/{SLUG}/files/model.scad").status_code == 409
+    assert (
+        client.delete(f"/api/v1/models/{SLUG}/files/model.scad", headers=press()).status_code == 409
+    )
     # And the catalogue itself refuses it, for any caller but the route (#773).
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="write_source"):
@@ -130,7 +141,9 @@ def test_a_built_in_is_read_only_and_an_unknown_model_is_a_404(client: TestClien
 
 
 def put_to(client: TestClient, slug: str) -> Any:
-    return client.put(f"/api/v1/models/{slug}/files/parts.scad", json={"content": PARTS})
+    return client.put(
+        f"/api/v1/models/{slug}/files/parts.scad", json={"content": PARTS}, headers=press()
+    )
 
 
 @pytest.mark.parametrize("git", [True, False], ids=["with history", "without history"])
@@ -192,6 +205,7 @@ def test_a_sibling_write_against_a_stale_base_is_a_conflict_and_writes_nothing(
     stale = client.put(
         f"/api/v1/models/{SLUG}/files/parts.scad",
         json={"content": "module bar(w) {}\n", "base": base},
+        headers=press(),
     )
 
     assert stale.status_code == 409, stale.text
@@ -202,6 +216,7 @@ def test_a_sibling_write_against_a_stale_base_is_a_conflict_and_writes_nothing(
     fresh = client.put(
         f"/api/v1/models/{SLUG}/files/parts.scad",
         json={"content": "module bar(w) {}\n", "base": moved[:7]},
+        headers=press(),
     )
     assert fresh.status_code == 200, fresh.text
     assert fresh.json()["version"] != moved

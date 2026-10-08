@@ -1,10 +1,12 @@
 import { Worker } from 'node:worker_threads'
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
+import type { components } from '../api/schema.js'
 import { currentOf } from './authoring.js'
 import { ok } from './call.js'
+import { commandAnswer, isRunning } from './command.js'
 import { commit, slug } from './common.js'
-import { defineTool, json, text, ToolError, type Tool } from './registry.js'
+import { defineTool, json, text, ToolError, type Tool, type ToolContext } from './registry.js'
 import { MAX_MESSAGE_CHARS, MAX_SOURCE_CHARS } from './sourceFiles.js'
 
 // The file tools coding agents already know (#813): Read, Edit, MultiEdit,
@@ -15,6 +17,8 @@ import { MAX_MESSAGE_CHARS, MAX_SOURCE_CHARS } from './sourceFiles.js'
 // (model.scad parse-checked unless `force`; bundled templates refused there).
 // An edit is made against the revision it read, so a write that lands between
 // the read and the write is a conflict, never a silent overwrite.
+
+type ModelRecord = components['schemas']['ModelRecord']
 
 const MAIN = 'model.scad'
 /** The backend's SOURCE_FILE_PATTERN (api/model_files.py): what a write may name. */
@@ -268,23 +272,32 @@ type Write = {
 }
 
 /** One revision through the backend's own routes, answered with the revision and its diff. */
-async function save(backend: BackendClient, w: Write) {
+async function save(ctx: ToolContext, w: Write) {
   if ([...w.content].length > MAX_SOURCE_CHARS) throw new ToolError(`the file would be over ${MAX_SOURCE_CHARS} characters`)
-  const answered =
+  const what = `write ${w.slug}/${w.path}`
+  // Both routes are commands (#1054): keyed, so a re-send after a lost answer writes once,
+  // and a 202 is followed to the record, as update_source and write_source_file do.
+  const answered = await commandAnswer(ctx, what, (headers) =>
     w.path === MAIN
-      ? await backend.PUT('/api/v1/models/{slug}/source', {
+      ? ctx.backend.PUT('/api/v1/models/{slug}/source', {
           params: { path: { slug: w.slug } },
           body: { source: w.content, message: w.message ?? null, base: w.base, force: w.force },
+          headers,
         })
-      : await backend.PUT('/api/v1/models/{slug}/files/{name}', {
+      : ctx.backend.PUT('/api/v1/models/{slug}/files/{name}', {
           params: { path: { slug: w.slug, name: w.path } },
           body: { content: w.content, message: w.message ?? null, base: w.base },
-        })
+          headers,
+        }),
+  )
+  if (isRunning(answered)) return json(answered)
   if (answered.response.status === 409 && w.base !== null) {
     const current = currentOf(answered.error)
     if (current !== null) return conflict(w.base, current)
   }
-  const record = await ok(Promise.resolve(answered), `write ${w.slug}/${w.path}`)
+  // A 202's Operation is in the routes' answer types, but commandAnswer followed it to
+  // the operation's result: the route's own ModelRecord.
+  const record = (await ok(Promise.resolve(answered), what)) as ModelRecord
   const revision = record.version ?? null
   const full = w.response === 'full' ? { content: w.content } : {}
   if (revision === null || revision === w.previous) {
@@ -292,7 +305,7 @@ async function save(backend: BackendClient, w: Write) {
     return json({ status: revision === null ? 'written' : 'unchanged', slug: w.slug, file_path: w.path, revision, ...full })
   }
   const diff = await ok(
-    backend.GET('/api/v1/models/{slug}/versions/{commit}/diff', { params: { path: { slug: w.slug, commit: revision } } }),
+    ctx.backend.GET('/api/v1/models/{slug}/versions/{commit}/diff', { params: { path: { slug: w.slug, commit: revision } } }),
     `diff ${w.slug}@${revision}`,
   )
   const patch = diff.patch.length > MAX_DIFF_CHARS ? `${diff.patch.slice(0, MAX_DIFF_CHARS)}\n… [diff cut; diff_version has all of it]` : diff.patch
@@ -301,15 +314,15 @@ async function save(backend: BackendClient, w: Write) {
 
 /** Read the file at the model's current revision (or refuse a stale `base`), edit it, and write it back against that revision. */
 async function edit(
-  backend: BackendClient,
+  ctx: ToolContext,
   args: { slug: string; file_path: string; edits: Edit[]; message?: string | undefined; base?: string | undefined; force: boolean; response: 'diff' | 'full' },
 ) {
   const path = writable(args.file_path)
-  const revision = await revisionOf(backend, args.slug)
+  const revision = await revisionOf(ctx.backend, args.slug)
   if (args.base !== undefined && (revision === null || !revision.startsWith(args.base))) return conflict(args.base, revision)
-  const before = await readFile(backend, args.slug, path)
+  const before = await readFile(ctx.backend, args.slug, path)
   const after = applyEdits(before, args.edits)
-  return save(backend, {
+  return save(ctx, {
     slug: args.slug,
     path,
     content: after,
@@ -410,8 +423,8 @@ export const fileTools: Tool[] = [
       'PUT /api/v1/models/{slug}/files/{name}',
       'GET /api/v1/models/{slug}/versions/{commit}/diff',
     ],
-    handler: async ({ old_string, new_string, replace_all, ...args }, { backend }) =>
-      edit(backend, { ...args, edits: [{ old_string, new_string, replace_all }] }),
+    handler: async ({ old_string, new_string, replace_all, ...args }, ctx) =>
+      edit(ctx, { ...args, edits: [{ old_string, new_string, replace_all }] }),
   }),
 
   defineTool({
@@ -440,7 +453,7 @@ export const fileTools: Tool[] = [
       'PUT /api/v1/models/{slug}/files/{name}',
       'GET /api/v1/models/{slug}/versions/{commit}/diff',
     ],
-    handler: async (args, { backend }) => edit(backend, args),
+    handler: async (args, ctx) => edit(ctx, args),
   }),
 
   defineTool({
@@ -465,11 +478,11 @@ export const fileTools: Tool[] = [
       'PUT /api/v1/models/{slug}/files/{name}',
       'GET /api/v1/models/{slug}/versions/{commit}/diff',
     ],
-    handler: async ({ slug, file_path, content, message, base, force, response }, { backend }) => {
+    handler: async ({ slug, file_path, content, message, base, force, response }, ctx) => {
       const path = writable(file_path)
-      const previous = await revisionOf(backend, slug)
+      const previous = await revisionOf(ctx.backend, slug)
       if (base !== undefined && (previous === null || !previous.startsWith(base))) return conflict(base, previous)
-      return save(backend, { slug, path, content, message, base: base ?? null, previous, force, response })
+      return save(ctx, { slug, path, content, message, base: base ?? null, previous, force, response })
     },
   }),
 

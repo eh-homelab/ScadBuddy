@@ -1,6 +1,7 @@
 import { socketUrl } from '../lib/lsp'
 import { parseAgentFrame, tabFrame, type PairingEntry, type TabFrame } from './linkProtocol'
 import { TAB_ID } from './tabId'
+import type { CallResult } from './types'
 
 /**
  * This tab's socket to the agent service (#254): the transport that lets a server-side
@@ -69,7 +70,10 @@ export interface TabLinkOptions {
   tabId?: string
   url?: string
   WebSocketImpl?: typeof WebSocket
-  /** Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`. */
+  /**
+   * Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`, of which a random half is
+   * waited, so tabs a restart dropped together do not all come back together (#747).
+   */
   baseMs?: number
   maxMs?: number
 }
@@ -113,7 +117,14 @@ export function createTabLink({
   }
 
   const run = async (id: string, tool: string, args: Record<string, unknown>) => {
-    const outcome = await bridge.call(tool, args)
+    // #747 — a call that throws (a stale catalogue chunk) still gets its answer, or the
+    // agent waits out its timeout for it.
+    const outcome = await bridge.call(tool, args).catch(
+      (error: unknown): CallResult => ({
+        ok: false,
+        error: { code: 'failed', message: `"${tool}" failed in the tab: ${String(error)}` },
+      }),
+    )
     let frame = JSON.stringify(tabFrame({ type: 'result', id, outcome }))
     const bytes = new TextEncoder().encode(frame).byteLength
     if (bytes > MAX_RESULT_BYTES) {
@@ -179,7 +190,8 @@ export function createTabLink({
       socket = undefined
       // What was pending may have been answered elsewhere; the next connection says again.
       setState({ connected: false, pending: [], paired: [] })
-      const delay = Math.min(maxMs, baseMs * 2 ** attempt)
+      const ceiling = Math.min(maxMs, baseMs * 2 ** attempt)
+      const delay = ceiling / 2 + (Math.random() * ceiling) / 2
       attempt += 1
       timer = setTimeout(open, delay)
     }

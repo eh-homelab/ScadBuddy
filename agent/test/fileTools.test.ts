@@ -9,7 +9,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 // #813: the file tools agents already know (Read/Edit/MultiEdit/Write/Glob/Grep),
 // over the model store through the backend's routes. Every write is one revision.
 
-type Seen = { method: string; path: string; query: string; body: unknown }
+type Seen = { method: string; path: string; query: string; body: unknown; key: string | null }
 
 const V1 = 'a'.repeat(40)
 const V2 = 'b'.repeat(40)
@@ -24,21 +24,30 @@ function textResponse(body: string) {
   return new Response(body, { headers: { 'content-type': 'text/plain' } })
 }
 
-/** A tiny model store: `files` per slug, a revision that moves on every write. */
+/**
+ * A tiny model store: `files` per slug, a revision that moves on every write. Writes are
+ * commands, as on the backend (#1054): refused without an Idempotency-Key, and with
+ * `accepted` answered 202 with an operation that GET /operations/{id} then reports done.
+ */
 function store(
   models: Record<string, Record<string, string>> = { plate: { 'model.scad': MAIN, 'parts.scad': PARTS } },
   beforeWrite: (versions: Record<string, string>) => void = () => {},
+  accepted = false,
 ) {
   const seen: Seen[] = []
   const versions: Record<string, string> = Object.fromEntries(Object.keys(models).map((s) => [s, V1]))
+  const operations: Record<string, unknown> = {}
   const client = createBackendClient(BACKEND, async (request) => {
     const r = request as Request
     const raw = await r.text()
     const url = new URL(r.url)
     const path = decodeURIComponent(url.pathname)
     const body = raw ? JSON.parse(raw) : undefined
-    seen.push({ method: r.method, path, query: url.search, body })
+    const key = r.headers.get('Idempotency-Key')
+    seen.push({ method: r.method, path, query: url.search, body, key })
     if (r.method === 'GET' && path === '/api/v1/models') return Response.json(Object.keys(models).map((s) => record(versions[s]!, s)))
+    const op = /^\/api\/v1\/operations\/([^/]+)$/.exec(path)?.[1]
+    if (r.method === 'GET' && op !== undefined) return Response.json({ id: op, status: 'succeeded', result: operations[op] })
     const m = /^\/api\/v1\/models\/([^/]+)(\/.*)?$/.exec(path)
     const slug = m?.[1] ?? ''
     const rest = m?.[2] ?? ''
@@ -57,15 +66,19 @@ function store(
       return files[file] === undefined ? Response.json({ detail: `no file '${file}'` }, { status: 404 }) : textResponse(files[file])
     }
     const written = (name: string, content: string) => {
+      if (!key) return Response.json({ detail: 'This request needs an Idempotency-Key header' }, { status: 428 })
       beforeWrite(versions)
       const b = body as { base?: string | null }
       if (b.base && !versions[slug]!.startsWith(b.base)) {
         return Response.json({ detail: 'moved on', base: b.base, current: versions[slug] }, { status: 409 })
       }
-      if (files[name] === content) return Response.json(record(versions[slug]!, slug))
-      files[name] = content
-      versions[slug] = versions[slug] === V1 ? V2 : 'c'.repeat(40)
-      return Response.json(record(versions[slug]!, slug))
+      if (files[name] !== content) {
+        files[name] = content
+        versions[slug] = versions[slug] === V1 ? V2 : 'c'.repeat(40)
+      }
+      if (!accepted) return Response.json(record(versions[slug]!, slug))
+      operations[`op-${key}`] = record(versions[slug]!, slug)
+      return Response.json({ id: `op-${key}`, status: 'running' }, { status: 202 })
     }
     if (r.method === 'PUT' && rest === '/source') return written('model.scad', (body as { source: string }).source)
     if (r.method === 'PUT' && file !== undefined) return written(file, (body as { content: string }).content)
@@ -175,6 +188,29 @@ describe('edit_file', () => {
     const put = seen.find((s) => s.method === 'PUT')!
     expect(put.path).toBe('/api/v1/models/plate/files/parts.scad')
     expect(put.body).toEqual({ content: PARTS.replace('cube(1)', 'cube(2)'), message: null, base: V1 })
+  })
+
+  it('sends the write as a command, keyed, and follows its 202 to the revision and diff', async () => {
+    const { client, seen } = store(undefined, undefined, true)
+    const out = payload(
+      await runTool(tool('edit_file'), { slug: 'plate', file_path: 'parts.scad', old_string: 'cube(1)', new_string: 'cube(2)' }, ctx(client)),
+    )
+    expect(out).toMatchObject({ status: 'written', revision: V2, previous: V1 })
+    const put = seen.find((s) => s.method === 'PUT')!
+    expect(put.key).toMatch(/^[0-9a-f]{32}$/)
+    expect(seen.some((s) => s.path === `/api/v1/operations/op-${put.key}`)).toBe(true)
+  })
+
+  it('hands back a write still running past the follow window, to follow with get_operation', async () => {
+    const { client, seen } = store(undefined, undefined, true)
+    const result = await runTool(
+      tool('write_file'),
+      { slug: 'plate', file_path: 'model.scad', content: 'cube(3);\n' },
+      { ...ctx(client), commandFollowMs: 0 },
+    )
+    const put = seen.find((s) => s.method === 'PUT')!
+    expect(payload(result)).toMatchObject({ status: 'running', operation_id: `op-${put.key}` })
+    expect(seen.some((s) => s.path.endsWith('/diff'))).toBe(false)
   })
 
   it('returns the whole file when asked', async () => {

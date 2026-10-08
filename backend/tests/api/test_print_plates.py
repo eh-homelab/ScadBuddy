@@ -30,6 +30,7 @@ from tests.api.test_print_run_choices import body as choices_body
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 from tests.test_bambu3mf import add_plate
 
 
@@ -114,7 +115,7 @@ def _output_without_cover(client: TestClient, slug: str) -> str:
     wait_for_job(client, job_id)
     set_plate_image(client, job_id, None)
     created: str = client.post(
-        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id, "name": "Elan"}
+        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id, "name": "Elan"}, headers=press()
     ).json()["id"]
     return created
 
@@ -225,7 +226,8 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
 
     assert answer.status_code == 502
     assert queue.call_count == 1
-    meta = json.loads(_output_3mf(paths, output_id).with_name("meta.json").read_text())
+    # In Postgres since #1060, read through the output's record.
+    meta = client.get(f"/api/v1/outputs/{output_id}").json()
     assert meta["queue_item_id"] == 9
     assert meta["print_route"] == "slice_queue"
     assert meta["slice_job_id"] == 9

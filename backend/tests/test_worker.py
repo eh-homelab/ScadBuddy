@@ -55,6 +55,7 @@ from scadbuddy.worker import (
     MAKE_CURRENT_DEADLINE,
     MAKE_CURRENT_EVERY,
     _drain,
+    _on_signal,
     _poll,
     make_current_until_polled,
     run_inprocess_worker,
@@ -257,6 +258,52 @@ async def test_the_drain_ends_when_the_build_becomes_current_again() -> None:
         return next(answers)
 
     assert await _drain(still_current, _never, timeout=5, poll=0.01, grace=0) == "current"
+
+
+async def test_a_stop_now_cuts_the_drain_short() -> None:
+    """#605: a second SIGTERM ends the drain, even while a count hangs."""
+    stop_now = asyncio.Event()
+
+    async def hangs() -> bool:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.05)
+        stop_now.set()
+
+    stopping = asyncio.create_task(stop_soon())
+    outcome = await asyncio.wait_for(
+        _drain(_never, hangs, timeout=60, poll=0.01, grace=0, stop_now=stop_now), 5
+    )
+    await stopping
+    assert outcome == "stopped"
+
+
+async def test_the_second_signal_stops_now() -> None:
+    stop, stop_now = asyncio.Event(), asyncio.Event()
+    handler = _on_signal(stop, stop_now)
+    handler()
+    assert stop.is_set() and not stop_now.is_set()
+    handler()
+    assert stop_now.is_set()
+
+
+@pytest.mark.parametrize("queue", ["render", "bambuddy"])
+async def test_both_workers_are_handed_the_second_signal(
+    queue: worker_module.Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The print worker drains for up to ``PRINT_DRAIN_TIMEOUT``: a second signal cuts
+    that short too, not only the render worker's drain."""
+    handed: dict[str, Any] = {}
+
+    async def run(settings: Settings, **kwargs: Any) -> None:
+        handed.update(kwargs)
+
+    monkeypatch.setattr(worker_module, "run_worker", run)
+    monkeypatch.setattr(worker_module, "run_print_worker", run)
+    await worker_module._main(cast(Settings, None), queue)
+    assert isinstance(handed["stop_now"], asyncio.Event)
 
 
 @workflow.defn(name="BlocksUntilReleased")
@@ -876,6 +923,7 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
         ),
         Metrics(),
         store,
+        "render",
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:

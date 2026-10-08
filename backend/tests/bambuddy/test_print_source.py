@@ -199,11 +199,13 @@ class _Sends:
         self.recorded.append((subject, list(sends)))
 
 
-class _Outputs:
+class _Prints:
+    """`OutputPrintStore`: where an output's own last print is kept (#1060)."""
+
     def __init__(self) -> None:
         self.sends: list[dict[str, Any]] = []
 
-    def record_send(self, output_id: str, **fields: Any) -> None:
+    def record(self, output_id: str, **fields: Any) -> None:
         self.sends.append({"output_id": output_id, **fields})
 
 
@@ -223,13 +225,14 @@ SENT = [
 
 async def test_an_output_print_records_its_send_by_subject() -> None:
     # #1750 (R1): both sources write one send record; an output's meta keeps its own too.
-    sends, outputs = _Sends(), _Outputs()
+    sends, prints = _Sends(), _Prints()
     meta: Any = _Meta()
     source = OutputSource(
-        store=outputs,  # type: ignore[arg-type]
+        store=None,  # type: ignore[arg-type]
         uploads=_Uploads(),  # type: ignore[arg-type]
         meta=meta,
         settings=StoredSettings(),
+        prints=prints,  # type: ignore[arg-type]
         sends=sends,  # type: ignore[arg-type]
     )
 
@@ -237,7 +240,7 @@ async def test_an_output_print_records_its_send_by_subject() -> None:
 
     assert source.subject == PrintSubject.output(meta.id)
     assert sends.recorded == [(PrintSubject.output(meta.id), SENT)]
-    assert [send["queue_item_id"] for send in outputs.sends] == [51, 52]
+    assert [send["queue_item_id"] for send in prints.sends] == [51, 52]
     assert sent == [
         PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9),
         PlateSend(plate_id=1, queue_item_id=52, slice_job_id=9),

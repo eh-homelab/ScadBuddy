@@ -32,6 +32,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
 )
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
+from tests.support.operations import press
 
 
 def test_render_is_accepted_and_the_job_completes(
@@ -431,11 +432,11 @@ def test_the_customizer_bounds_and_a_retired_option_are_accepted(
 
 def test_a_preset_outside_the_customizer_is_rejected(client: TestClient, ranged: str) -> None:
     url = f"/api/v1/models/{ranged}/presets"
-    refused = client.post(url, json={"name": "Huge", "params": {"width": 1000}})
+    refused = client.post(url, json={"name": "Huge", "params": {"width": 1000}}, headers=press())
     assert refused.status_code == 422
     assert refused.json()["parameters"] == ["width"]
     # A preset saved before an option was renamed can be saved again.
-    kept = client.post(url, json={"name": "Old", "params": {"shape": "circle"}})
+    kept = client.post(url, json={"name": "Old", "params": {"shape": "circle"}}, headers=press())
     assert kept.status_code == 201, kept.text
 
 

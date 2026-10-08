@@ -18,6 +18,7 @@ from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.settings import APPLIES, ENV_SEEDED, Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
+from tests.support.operations import press
 
 BAMBUDDY = "https://bambuddy.test/api/v1"
 
@@ -202,6 +203,7 @@ def test_the_upload_limit_is_editable_and_the_gate_follows_it(
     response = client.post(
         f"/api/v1/models/{model}/media",
         files={"file": ("v.mp4", b"\x00" * 4000, "video/mp4")},
+        headers=press(),
     )
     assert response.status_code == 413, response.text
     assert "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES" in response.json()["detail"]
