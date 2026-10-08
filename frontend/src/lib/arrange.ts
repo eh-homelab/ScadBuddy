@@ -1,7 +1,27 @@
 import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
-import type { ArrangeRequest, NeedsBackfillProblem, Output } from '../api/types'
+import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
 
 export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
+
+/**
+ * #1864 — what one arrange is built from, in any mix: a saved output of any template, or
+ * a Bambuddy library file. A file ScadBuddy uploaded arranges through its `output_id`;
+ * any other is not arrangeable until #1863 reads objects from the 3MF itself.
+ */
+export type ArrangeSource = { kind: 'output'; output: Output } | { kind: 'library'; file: LibraryEntry }
+
+export function fromOutputs(outputs: Output[]): ArrangeSource[] {
+  return outputs.map((output) => ({ kind: 'output', output }))
+}
+
+export function fromFiles(files: LibraryEntry[]): ArrangeSource[] {
+  return files.map((file) => ({ kind: 'library', file }))
+}
+
+/** One key per source, so the same output or file added twice is listed once. */
+export function sourceKey(source: ArrangeSource): string {
+  return source.kind === 'output' ? `output:${source.output.id}` : `library:${source.file.id}`
+}
 
 export const GOAL_LABELS: Record<ArrangeGoal, string> = {
   fewest_plates: 'Fewest plates',

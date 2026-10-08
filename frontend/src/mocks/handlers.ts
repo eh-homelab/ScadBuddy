@@ -96,6 +96,12 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
   )
 }
 
+/** #1864 — both uploads of the bag clip are copies of the first output (Reagan). */
+const INITIAL_LIBRARY_OUTPUTS: [number, string][] = [
+  [89, 'a'.repeat(32)],
+  [91, 'a'.repeat(32)],
+]
+
 const state = {
   models: [...fixtures.models] as ModelSummary[],
   /** #470 — the print runs `POST /print/outputs/:id/run` answered, by id. */
@@ -121,6 +127,8 @@ const state = {
   backfillsSeen: new Set<string>(),
   /** The last `POST /outputs/arrange` body, for tests to read back. */
   lastArrange: null as ArrangeRequest | null,
+  /** #1864 — the output each library file ScadBuddy uploaded is a copy of. */
+  libraryOutputs: new Map(INITIAL_LIBRARY_OUTPUTS),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
   /** #313 — per library-file choices, the store's `library_print_choices`. */
@@ -281,6 +289,7 @@ export function resetMockState(): void {
   state.arranged.clear()
   state.backfillsSeen.clear()
   state.lastArrange = null
+  state.libraryOutputs = new Map(INITIAL_LIBRARY_OUTPUTS)
   state.modelChoices = {}
   state.libraryChoices = {}
   state.printerBedTypes = {}
@@ -419,6 +428,16 @@ export function mockOutput(id: string): Output | undefined {
 
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
+}
+
+/** #1864 — an output of another template, say, for an arrange across templates. */
+export function addMockOutput(output: Output): void {
+  state.outputs.push(output)
+}
+
+/** #1864 — the output a library file is a copy of, or undefined for a file ScadBuddy did not make. */
+export function mockLibraryOutput(fileId: number): string | undefined {
+  return state.libraryOutputs.get(fileId)
 }
 
 /** The body of the last `POST /outputs/arrange`, or null when none was sent. */
@@ -2558,8 +2577,29 @@ export const handlers = [
   http.post(`${base}/outputs/arrange`, async ({ request }) => {
     const body = (await request.json()) as ArrangeRequest
     state.lastArrange = body
+    // #1864 — a library file stands for the output it is a copy of; one ScadBuddy did not
+    // make is refused, every such file named at once.
+    const plain = [
+      ...new Set(
+        body.objects.flatMap((o) =>
+          o.library_file_id != null && !state.libraryOutputs.has(o.library_file_id) ? [o.library_file_id] : [],
+        ),
+      ),
+    ]
+    if (plain.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `${plain.length} library file(s) were not made by ScadBuddy, so nothing records their objects; arranging such a file is not supported yet`,
+        { code: 'library_file_not_arrangeable', library_file_ids: plain },
+      )
+    }
+    const objects = body.objects.map((o) => ({
+      ...o,
+      output_id: o.output_id ?? state.libraryOutputs.get(o.library_file_id ?? 0) ?? '',
+    }))
     // #902 — every output saved before Arrange, named at once, as the API does.
-    const chosen = [...new Set(body.objects.map((o) => o.output_id))]
+    const chosen = [...new Set(objects.map((o) => o.output_id))]
     const missing = chosen.find((id) => !state.outputs.some((o) => o.id === id))
     if (missing) return problem(404, 'Not Found', `no output with id '${missing}'`)
     const unrecorded = chosen.filter(
@@ -2580,21 +2620,34 @@ export const handlers = [
       )
     }
     const manifest: ManifestObject[] = []
-    for (const object of body.objects) {
+    const slugs: string[] = []
+    for (const object of objects) {
       const source = state.outputs.find((o) => o.id === object.output_id)
       if (!source) return problem(404, 'Not Found', `no output with id '${object.output_id}'`)
-      const entry = (source.manifest ?? []).find((m) => m.part === object.part)
-      if (!entry) {
+      if (!slugs.includes(source.slug)) slugs.push(source.slug)
+      const entries =
+        object.part == null
+          ? (source.manifest ?? [])
+          : (source.manifest ?? []).filter((m) => m.part === object.part)
+      if (entries.length === 0) {
         return problem(422, 'Unprocessable Content', `output ${source.id} has no object ${object.part}`)
       }
-      if (object.count > 0) {
-        manifest.push({ ...entry, count: object.count, source_output: entry.source_output ?? source.id })
+      for (const entry of entries) {
+        const count = object.count ?? entry.count
+        if (count > 0) manifest.push({ ...entry, count, source_output: entry.source_output ?? source.id })
       }
     }
     if (manifest.length === 0) {
       return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
     }
-    const first = state.outputs.find((o) => o.id === body.objects[0]?.output_id)
+    if (body.slug != null && !slugs.includes(body.slug)) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `the result is filed under one of its objects' templates (${slugs.join(', ')}), not ${body.slug}`,
+      )
+    }
+    const first = state.outputs.find((o) => o.id === objects[0]?.output_id)
     if (!first?.bbox_mm) return problem(409, 'Conflict', 'the output has no dimensions')
     const colors = body.colours ?? first.colors ?? []
     const copies = manifest.reduce((sum, m) => sum + m.count, 0)
@@ -2602,7 +2655,7 @@ export const handlers = [
     const jobId = nextHexId()
     const job: Job = {
       id: jobId,
-      slug: first.slug,
+      slug: body.slug ?? first.slug,
       status: 'done',
       created_at: new Date().toISOString(),
       finished_at: new Date().toISOString(),
@@ -2614,7 +2667,7 @@ export const handlers = [
     }
     state.jobs.set(jobId, job)
     state.arranged.set(jobId, {
-      sources: [...new Set(body.objects.map((o) => o.output_id))],
+      sources: chosen,
       manifest,
     })
     return HttpResponse.json(job, { status: 202 })

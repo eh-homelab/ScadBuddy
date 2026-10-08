@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, LibraryListing } from '../api/types'
+import { ArrangeDialog } from '../components/ArrangeDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { arrangedNote, fromFiles, type Arranged } from '../lib/arrange'
+import { modelPath } from '../lib/deeplink'
 import { formatBytes } from '../lib/format'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
@@ -21,6 +25,8 @@ function readAdvanced(): boolean {
  * #313 — Bambuddy's library by folder. Each unsliced 3MF has Print, which opens the same
  * spool-first dialog an output uses; the file is sliced as it stands in Bambuddy.
  * Advanced also lists sliced files and STLs; a sliced file is printed from Bambuddy.
+ * #1864 — each printable file has a tick, kept across folders, and Arrange selected
+ * opens Arrange on the ticked files.
  */
 export function LibraryPage() {
   const [folderId, setFolderId] = useState<number | null>(null)
@@ -28,6 +34,12 @@ export function LibraryPage() {
   const [listing, setListing] = useState<LibraryListing | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [printing, setPrinting] = useState<LibraryEntry | null>(null)
+  const [picked, setPicked] = useState<LibraryEntry[]>([])
+  const [arranging, setArranging] = useState(false)
+  const [arranged, setArranged] = useState<Arranged | null>(null)
+  const isPicked = (file: LibraryEntry) => picked.some((p) => p.id === file.id)
+  const togglePicked = (file: LibraryEntry) =>
+    setPicked((now) => (now.some((p) => p.id === file.id) ? now.filter((p) => p.id !== file.id) : [...now, file]))
 
   useEffect(() => {
     let live = true
@@ -98,6 +110,16 @@ export function LibraryPage() {
         <section className="min-w-0 flex-1 space-y-4">
           <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h1 className="text-[15px] text-ink">Library</h1>
+            <Button
+              size="sm"
+              disabled={picked.length === 0}
+              onClick={() => {
+                setArranged(null)
+                setArranging(true)
+              }}
+            >
+              Arrange selected ({picked.length})
+            </Button>
             <span id="library-advanced" className="ml-auto text-[13px] text-ink">
               Advanced
             </span>
@@ -129,6 +151,14 @@ export function LibraryPage() {
               {error}
             </p>
           )}
+          {arranged && (
+            <p role="status" aria-label="Arranged" className="text-[13px] text-ink">
+              {[arrangedNote(arranged.plates), arranged.skipped].filter(Boolean).join(' ')}{' '}
+              <Link to={modelPath(arranged.output.slug, 'history')} className="text-accent underline">
+                Open in History
+              </Link>
+            </p>
+          )}
           {!listing && !error && (
             <p className="flex items-center gap-2 text-[13px] text-muted">
               <Spinner /> Reading the Bambuddy library
@@ -158,7 +188,17 @@ export function LibraryPage() {
                 ) : (
                   <div className="aspect-square w-full rounded-[4px] bg-surface-3" aria-hidden />
                 )}
-                <MiddleTruncated name={file.filename} />
+                <div className="flex min-w-0 items-center gap-1.5">
+                  {file.printable && (
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${file.filename}`}
+                      checked={isPicked(file)}
+                      onChange={() => togglePicked(file)}
+                    />
+                  )}
+                  <MiddleTruncated name={file.filename} />
+                </div>
                 <FileFacts file={file} />
                 {file.printable ? (
                   <Button
@@ -186,6 +226,16 @@ export function LibraryPage() {
           source={printing ? { kind: 'library', file: printing } : undefined}
           onClose={() => setPrinting(null)}
           onRan={() => undefined}
+        />
+        <ArrangeDialog
+          open={arranging}
+          sources={fromFiles(picked)}
+          onClose={() => setArranging(false)}
+          onArranged={(done) => {
+            setArranging(false)
+            setPicked([])
+            setArranged(done)
+          }}
         />
       </div>
     </div>
