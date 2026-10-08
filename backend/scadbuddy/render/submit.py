@@ -63,7 +63,6 @@ from scadbuddy.render.projection import (
     LEGACY_GRACE,
     VISIBILITY_GRACE,
     JobProjection,
-    execution_gone,
     legacy_unrun,
     open_runs,
     run_closed,
@@ -80,6 +79,7 @@ from scadbuddy.workflows.commands import (
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalUnavailableError,
+    execution_gone,
     late_answer,
     start_command,
 )

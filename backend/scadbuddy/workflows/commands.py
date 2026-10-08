@@ -108,12 +108,19 @@ def namespace_not_found(error: RPCError) -> bool:
     )
 
 
+def execution_gone(error: RPCError) -> bool:
+    """A NOT_FOUND about the execution, not about the namespace: a mistyped or
+    unregistered namespace answers NOT_FOUND too (review #1066 (7) 2)."""
+    return error.status == RPCStatusCode.NOT_FOUND and not namespace_not_found(error)
+
+
 def temporal_failure(error: BaseException, id: str) -> Exception | None:
     """What a failed call to Temporal means, the one reading the routes and the
     lost-run reconcilers share (review #1316 (11) 2, 5; (12) 1): unreachable,
     unavailable, busy (each worth sending again) or refused. ``None`` for a failure
     that is not about Temporal at all. A caller that expects an execution NOT_FOUND
-    tells it apart first: here it is a refusal."""
+    tells it apart first (`execution_gone`), as `start_command` does: here it is a
+    refusal."""
     if isinstance(error, TimeoutError):
         return TemporalUnavailableError(id)
     if isinstance(error, RuntimeError):
@@ -238,11 +245,7 @@ async def start_command[T](
     except TimeoutError as error:
         raise await late_answer(client, id) from error
     except (RPCError, RuntimeError) as error:
-        if (
-            isinstance(error, RPCError)
-            and error.status == RPCStatusCode.NOT_FOUND
-            and not namespace_not_found(error)
-        ):
+        if isinstance(error, RPCError) and execution_gone(error):
             # USE_EXISTING never misses an execution, so it closed under the Update.
             raise CommandClosingError(id) from error
         if (failure := temporal_failure(error, id)) is None:
