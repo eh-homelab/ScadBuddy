@@ -4,13 +4,22 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout
+from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match, Mount
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
+
+#: A route's answer when the store's database could not be reached (#1264: shared
+#: here, not borrowed from the analyzers route).
+DATABASE_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/database-unavailable"
+#: What a database that cannot be reached raises through the store.
+DATABASE_ERRORS = (psycopg.OperationalError, PoolTimeout)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +36,22 @@ _TITLES = {
     500: "Internal Server Error",
     503: "Service Unavailable",
 }
+
+
+class Problem(BaseModel):
+    """An RFC 9457 problem document, as every error response carries it. Its `type`
+    names the problem a client tells apart."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    title: str
+    status: int
+    detail: str
+    instance: str
+    #: On a command's ``temporal-unavailable`` or ``temporal-refused``: whether its start
+    #: may have reached Temporal, so the same request (never a new key) follows it.
+    may_have_started: bool | None = None
 
 
 class ApiError(Exception):
@@ -132,4 +157,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled error", extra={"path": request.url.path})
+        if isinstance(exc, psycopg.Error):
+            # The driver's text quotes the SQL and its bound values (#965).
+            return problem_response(request, 500, type(exc).__name__)
         return problem_response(request, 500, f"{type(exc).__name__}: {exc}")

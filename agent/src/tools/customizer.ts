@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
@@ -51,12 +53,12 @@ async function getJob(ctx: ToolContext, id: string) {
  * tool "submits a render and streams progress until it settles").
  */
 export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatus> {
-  const deadline = Date.now() + ctx.renderWaitMs
+  const deadline = performance.now() + ctx.renderWaitMs
   for (let step = 1; ; step++) {
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (settled(job.status) || Date.now() >= deadline) return job
+    if (settled(job.status) || performance.now() >= deadline) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
   }
 }
@@ -78,13 +80,13 @@ function settled(status: JobStatus['status']): boolean {
  * cannot be reached, or after `holdMs` (30 min) at most (#774).
  */
 async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
-  const deadline = Date.now() + holdMs
+  const deadline = performance.now() + holdMs
   try {
-    while (Date.now() < deadline) {
+    while (performance.now() < deadline) {
       await sleep(ctx.pollIntervalMs)
       const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
         params: { path: { job_id: id } },
-        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        signal: AbortSignal.timeout(Math.max(1, deadline - performance.now())),
       })
       if (!data || settled(data.status)) return
     }
@@ -184,12 +186,18 @@ export const customizerTools: Tool[] = [
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
-        const accepted = await ok(
-          ctx.backend.POST('/api/v1/models/{slug}/render', {
-            params: { path: { slug } },
-            body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
-            signal: ctx.signal,
-          }),
+        // Sent again while the backend is still accepting it (#1053), with one
+        // `Idempotency-Key`: the backend counts the re-sends as this one request's claim.
+        const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
+        const accepted = await reattach(
+          ctx,
+          () =>
+            ctx.backend.POST('/api/v1/models/{slug}/render', {
+              params: { path: { slug } },
+              headers,
+              body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
+              signal: ctx.signal,
+            }),
           `render ${slug}`,
         )
         submitted = accepted.job_id
@@ -212,12 +220,12 @@ export const customizerTools: Tool[] = [
       if (!save_output) return json(summary)
       let output
       try {
-        output = await ok(
+        output = await command(ctx, `save output of ${job.id}`, (headers) =>
           ctx.backend.POST('/api/v1/models/{slug}/outputs', {
             params: { path: { slug } },
             body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
+            headers,
           }),
-          `save output of ${job.id}`,
         )
       } catch (err) {
         // The render is done; only the save failed. Still the job's summary, so the
@@ -355,14 +363,14 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets'],
-    handler: async ({ slug, name, params, description, tags }, { backend }) =>
+    handler: async ({ slug, name, params, description, tags }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/presets', {
+        await command(ctx, `save preset ${name}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/presets', {
             params: { path: { slug } },
             body: { name, params, description, tags },
+            headers,
           }),
-          `save preset ${name}`,
         ),
       ),
   }),
@@ -381,14 +389,14 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}/presets/{preset_id}'],
-    handler: async ({ slug, preset_id, name, params, description, tags }, { backend }) =>
+    handler: async ({ slug, preset_id, name, params, description, tags }, ctx) =>
       json(
-        await ok(
-          backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
+        await command(ctx, `update preset ${preset_id}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
             params: { path: { slug, preset_id } },
             body: { name: name ?? null, params: params ?? null, description: description ?? null, tags: tags ?? null },
+            headers,
           }),
-          `update preset ${preset_id}`,
         ),
       ),
   }),
@@ -399,14 +407,14 @@ export const customizerTools: Tool[] = [
     input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80) }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets/{preset_id}/duplicate'],
-    handler: async ({ slug, preset_id, name }, { backend }) =>
+    handler: async ({ slug, preset_id, name }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/presets/{preset_id}/duplicate', {
+        await command(ctx, `duplicate preset ${preset_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/presets/{preset_id}/duplicate', {
             params: { path: { slug, preset_id } },
             body: { name },
+            headers,
           }),
-          `duplicate preset ${preset_id}`,
         ),
       ),
   }),
@@ -439,17 +447,17 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/assets'],
-    handler: async ({ slug, filename, content_base64 }, { backend }) => {
+    handler: async ({ slug, filename, content_base64 }, ctx) => {
       const type = filename.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
       const form = fileForm(decodeBase64(content_base64, 'content_base64'), filename, type)
       return json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/assets', {
+        await command(ctx, `upload ${filename}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/assets', {
             params: { path: { slug } },
             body: { file: filename },
             bodySerializer: () => form,
+            headers,
           }),
-          `upload ${filename}`,
         ),
       )
     },
@@ -472,11 +480,10 @@ export const customizerTools: Tool[] = [
     risk: 'outward',
     routes: ['POST /api/v1/models/{slug}/assets/fetch'],
     summarize: ({ slug, url }) => `Fetch ${url} (${new URL(url).host}) into model "${slug}" as a file asset`,
-    handler: async ({ slug, url }, { backend }) =>
+    handler: async ({ slug, url }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/assets/fetch', { params: { path: { slug } }, body: { url } }),
-          `fetch ${url}`,
+        await command(ctx, `fetch ${url}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/assets/fetch', { params: { path: { slug } }, body: { url }, headers }),
         ),
       ),
   }),

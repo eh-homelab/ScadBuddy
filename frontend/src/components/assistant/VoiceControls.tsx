@@ -66,14 +66,14 @@ export function MicButton({
 
   const onPointerDown = (event: PointerEvent) => {
     if (event.button !== 0 || disabled) return
-    pressed.current = { at: Date.now(), started: !dictation.listening }
+    pressed.current = { at: performance.now(), started: !dictation.listening }
     if (!dictation.listening) dictation.start()
   }
   const onPointerUp = () => {
     const press = pressed.current
     pressed.current = null
     if (!press) return
-    if (!press.started || Date.now() - press.at >= HOLD_MS) dictation.stop()
+    if (!press.started || performance.now() - press.at >= HOLD_MS) dictation.stop()
   }
   // Pointer presses are handled above; a keyboard press (detail 0) toggles.
   const onClick = (event: MouseEvent) => {

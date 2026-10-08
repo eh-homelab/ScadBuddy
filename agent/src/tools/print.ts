@@ -55,8 +55,8 @@ async function getRun(ctx: ToolContext, id: string) {
  * A read that stays unanswered names the run, so it is followed, not printed again.
  */
 async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
-  const deadline = Date.now() + ctx.renderWaitMs
-  for (let step = 1; run.status === 'running' && Date.now() < deadline; step++) {
+  const deadline = performance.now() + ctx.renderWaitMs
+  for (let step = 1; run.status === 'running' && performance.now() < deadline; step++) {
     await ctx.progress(step, undefined, 'print run: slicing and queueing')
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
     const id = run.id
@@ -140,17 +140,18 @@ const DEFAULT_NOZZLES: NozzleChoice[] = [
 ]
 
 /**
- * The model's remembered spool per slot where that spool is still in the
- * inventory, else the backend's suggestion: frontend/src/lib/filaments.ts
- * `seedPlan`, so an agent's print starts from what the dialog would show.
+ * The model's remembered spool per slot where that spool still fits the slot's
+ * colour (`colour_matches`, #933), else the backend's suggestion:
+ * frontend/src/lib/filaments.ts `seedPlan`, so an agent's print starts from
+ * what the dialog would show.
  */
 function seedPlan(
-  options: { slots?: { slot_id: number }[]; spools?: { spool_id: number }[]; suggested?: SlotChoice[] },
+  options: { slots?: { slot_id: number; colour_matches?: number[] }[]; suggested?: SlotChoice[] },
   remembered: SlotChoice[],
 ): SlotChoice[] {
-  const inventory = new Set((options.spools ?? []).map((spool) => spool.spool_id))
   return (options.slots ?? []).flatMap((slot) => {
-    const kept = remembered.find((choice) => choice.slot_id === slot.slot_id && inventory.has(choice.spool_id))
+    const fits = new Set(slot.colour_matches ?? [])
+    const kept = remembered.find((choice) => choice.slot_id === slot.slot_id && fits.has(choice.spool_id))
     const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
     return choice ? [{ slot_id: choice.slot_id, spool_id: choice.spool_id }] : []
   })

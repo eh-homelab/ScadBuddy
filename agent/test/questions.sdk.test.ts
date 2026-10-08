@@ -23,7 +23,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 // #940: the agent asks the user structured questions with Claude Code's own
 // AskUserQuestion tool, which the SDK hands to `canUseTool`; the host answers
 // by allowing the call with `answers` added to its input. Measured here
-// against the real SDK (0.3.283) and its bundled binary, pointed at the local
+// against the real SDK and its bundled binary, pointed at the local
 // fake Anthropic endpoint. Nothing reaches Anthropic.
 
 let cliMissing: string | undefined
@@ -244,7 +244,7 @@ describe.skipIf(cliMissing !== undefined)(`AskUserQuestion through the question 
   }, 60_000)
 
   // ask_user is an MCP call, which Claude Code cuts off at the server's
-  // `timeout`, else MCP_TOOL_TIMEOUT, else a default (2.1.283). A question
+  // `timeout`, else MCP_TOOL_TIMEOUT, else a default (2.1.283 and 2.1.287). A question
   // waits for a person, so the server's own timeout must be the one in force:
   // with MCP_TOOL_TIMEOUT at 1 s, an answer given after 2.5 s still arrives.
   it("ask_user's own timeout outlasts MCP_TOOL_TIMEOUT: a slow answer still arrives", async () => {

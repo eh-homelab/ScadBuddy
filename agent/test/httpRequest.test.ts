@@ -266,9 +266,9 @@ describe('the response', () => {
     const { url } = await serve(() => {
       // never answers
     })
-    const started = Date.now()
+    const started = performance.now()
     const result = await runHttpRequest(args({ url, timeout_ms: 200 }), await context())
-    expect(Date.now() - started).toBeLessThan(5000)
+    expect(performance.now() - started).toBeLessThan(5000)
     expect(result.isError).toBe(true)
     expect(json(result).error).toMatch(/within 200 ms/)
   })

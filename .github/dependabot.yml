@@ -164,9 +164,9 @@ updates:
           - "@types/node"
 
   # The AI agent service (#261). `@anthropic-ai/claude-agent-sdk` is pinned to
-  # an exact version and the Dockerfile asserts the Claude Code binary it
-  # bundles (CLAUDE_CODE_VERSION), so an SDK bump PR reds the `agent` job until
-  # that ARG is bumped with it — which is the review this pin exists to force.
+  # an exact version, and it bundles the Claude Code binary the harness runs.
+  # The `agent` job's tests run that binary against a fake endpoint, so an SDK
+  # bump that changes what the harness relies on reds the job on its PR (#1540).
   - package-ecosystem: "npm"
     directory: "/agent"
     schedule:

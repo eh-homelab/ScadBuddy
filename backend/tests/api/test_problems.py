@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -58,6 +59,20 @@ def test_an_unhandled_error_becomes_a_500_problem(app: FastAPI) -> None:
     assert response.status_code == 500
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["detail"] == "RuntimeError: boom"
+
+
+def test_a_database_error_s_text_is_not_echoed(app: FastAPI) -> None:
+    """#965: a driver message carries SQL and bound values; only its type is said."""
+
+    def explode() -> Catalogue:
+        raise psycopg.errors.UntranslatableCharacter("unnamed portal parameter $3 = 'secret'")
+
+    app.dependency_overrides[get_catalogue] = explode
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/models")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "UntranslatableCharacter"
 
 
 @pytest.fixture

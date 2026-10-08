@@ -148,21 +148,27 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
             Prints
           </Link>
           <span className="text-faint">/</span>
-          <Link to={modelPath(print.slug)} className="text-muted hover:text-ink">
-            {print.slug}
-          </Link>
+          {print.slug !== null ? (
+            <Link to={modelPath(print.slug)} className="text-muted hover:text-ink">
+              {print.slug}
+            </Link>
+          ) : (
+            <span className="text-muted">Bambuddy library file</span>
+          )}
         </nav>
         <header className="mb-5 flex flex-wrap items-center gap-3">
           <h1 className="text-[17px] font-medium">{title}</h1>
           <StatusBadge status={print.status} />
           <span className="sb-num text-[12px] text-faint">Archive #{print.archive_id}</span>
           <div className="ml-auto flex flex-wrap gap-2">
-            <Link
-              to={print.provenance.edit_url}
-              className="inline-flex items-center rounded-[6px] border border-line bg-surface-2 px-3 py-1.5 text-[13px] text-ink hover:border-line-strong"
-            >
-              Customize from this
-            </Link>
+            {print.provenance && (
+              <Link
+                to={print.provenance.edit_url}
+                className="inline-flex items-center rounded-[6px] border border-line bg-surface-2 px-3 py-1.5 text-[13px] text-ink hover:border-line-strong"
+              >
+                Customize from this
+              </Link>
+            )}
             {!deleted && (
               <Button onClick={() => setReprinting(true)}>Print again</Button>
             )}
@@ -180,7 +186,7 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
             className="mb-4 rounded-[6px] border border-warn/40 bg-warn/8 px-3 py-2 text-[13px] text-warn"
           >
             This print was deleted in Bambuddy. Its photos, timelapse and sliced file went with
-            it; ScadBuddy still has the parameters and its own files.
+            it{print.provenance ? '; ScadBuddy still has the parameters and its own files.' : '.'}
           </p>
         )}
 
@@ -189,7 +195,7 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           <RenderSection print={print} />
           {!deleted && <TimelapseSection print={print} onPulled={reload} />}
           <OutcomeSection print={print} />
-          <ProvenanceSection print={print} />
+          {print.provenance && <ProvenanceSection provenance={print.provenance} />}
           <FilesSection print={print} />
         </div>
       </div>
@@ -245,12 +251,12 @@ function GallerySection({ print }: { print: PrintDetail }) {
 function RenderSection({ print }: { print: PrintDetail }) {
   const glb = print.files.find((file) => file.kind === 'preview_glb')
   const output = useAsync(
-    async () => (glb ? await api.getOutput(print.output_id).catch(() => null) : null),
+    async () => (glb && print.output_id ? await api.getOutput(print.output_id).catch(() => null) : null),
     [print.output_id, glb?.url],
   )
   const job = useMemo<Job | undefined>(
     () =>
-      glb
+      glb && print.output_id !== null && print.slug !== null
         ? {
             id: print.output_id,
             slug: print.slug,
@@ -263,7 +269,7 @@ function RenderSection({ print }: { print: PrintDetail }) {
         : undefined,
     [glb, print.output_id, print.slug, output.data],
   )
-  if (!glb) return null
+  if (!glb || !job) return null
   return (
     <Section title="ScadBuddy render">
       <div className="aspect-[4/3] overflow-hidden rounded-[4px]">
@@ -478,16 +484,23 @@ function RunRow({ run }: { run: Run }) {
       {run.duration_seconds != null && (
         <span className="sb-num text-faint">{duration(run.duration_seconds)}</span>
       )}
-      {run.filament_used_grams != null && (
-        <span className="sb-num text-faint">{run.filament_used_grams} g</span>
-      )}
+      {run.filament_used_grams != null &&
+        (run.filament_reading_suspect ? (
+          <span
+            className="sb-num text-warn"
+            title="Far more than this print used, most likely a spool's weight; not used for the cost"
+          >
+            {`${run.filament_used_grams} g, not this print's`}
+          </span>
+        ) : (
+          <span className="sb-num text-faint">{run.filament_used_grams} g</span>
+        ))}
       {run.failure_reason && <span className="text-warn">{run.failure_reason}</span>}
     </li>
   )
 }
 
-function ProvenanceSection({ print }: { print: PrintDetail }) {
-  const { provenance } = print
+function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail['provenance']> }) {
   const params = Object.entries(provenance.params)
   const version = provenance.model_version
   return (
@@ -548,6 +561,7 @@ function FilesSection({ print }: { print: PrintDetail }) {
 
   async function saveParams() {
     setError(null)
+    if (!print.provenance) return
     const json = JSON.stringify(print.provenance.params, null, 2) + '\n'
     try {
       await downloadBlob(async () => new Blob([json], { type: 'application/json' }), paramsFileName(print))
@@ -578,20 +592,22 @@ function FilesSection({ print }: { print: PrintDetail }) {
             </Button>
           </li>
         ))}
-        <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="text-[13px] text-ink">Parameters</span>
-          <span className="sb-num min-w-0 truncate text-[12px] text-faint">
-            {paramsFileName(print)}
-          </span>
-          <Button
-            size="sm"
-            className="ml-auto"
-            aria-label="Download parameters as JSON"
-            onClick={() => void saveParams()}
-          >
-            Download
-          </Button>
-        </li>
+        {print.provenance && (
+          <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-[13px] text-ink">Parameters</span>
+            <span className="sb-num min-w-0 truncate text-[12px] text-faint">
+              {paramsFileName(print)}
+            </span>
+            <Button
+              size="sm"
+              className="ml-auto"
+              aria-label="Download parameters as JSON"
+              onClick={() => void saveParams()}
+            >
+              Download
+            </Button>
+          </li>
+        )}
       </ul>
       {error && (
         <p role="alert" className="mt-2 text-[12px] text-warn">

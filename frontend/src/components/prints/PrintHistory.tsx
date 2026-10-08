@@ -16,6 +16,7 @@ import {
 } from '../../lib/printsQuery'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
+import { usePrintProgress } from '../../lib/usePrintProgress'
 import { MediaLightbox } from '../media/MediaLightbox'
 import type { Slide } from '../media/slides'
 import { Button } from '../ui/Button'
@@ -261,7 +262,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
               key={print.archive_id}
               print={print}
               view={query.view}
-              templateName={fixedSlug ? undefined : (templateNames.get(print.slug) ?? print.slug)}
+              templateName={fixedSlug ? undefined : templateLabel(print, templateNames)}
               onOpenMedia={openMedia}
             />
           ))}
@@ -324,6 +325,11 @@ function MorePrints({
   )
 }
 
+/** The template a print was made from, or that it was a Bambuddy library file (#976). */
+function templateLabel(print: PrintSummary, names: Map<string, string>): string {
+  return print.slug === null ? 'Bambuddy library file' : (names.get(print.slug) ?? print.slug)
+}
+
 /**
  * #310 — an output sent to Bambuddy that no print is linked to yet (plan §2.4: it is not
  * a print, so the list does not carry it). While older pages are still unloaded, only
@@ -358,11 +364,12 @@ const SETTLED_LABEL: Partial<Record<PrintStage, string>> = {
 /**
  * #898 — a row asks the progress read whether anything is still coming. Bambuddy expires
  * slice jobs and drops queue items, and once the read has settled no print will be linked
- * to this output, so a spinner there would wait forever.
+ * to this output, so a spinner there would wait forever. #954 — it follows the print
+ * live, as the progress panel does, so the row changes without a reload.
  */
 function WaitingRow({ output }: { output: Output }) {
-  const progress = useAsync(() => api.getPrintProgress(output.id), [output.id])
-  const settled = progress.data?.settled ? progress.data : null
+  const { progress } = usePrintProgress(output.id, true)
+  const settled = progress?.settled ? progress : null
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
       <span className="text-ink">{output.name ?? output.id.slice(0, 8)}</span>

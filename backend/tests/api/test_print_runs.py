@@ -26,20 +26,28 @@ import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.api.enums.v1 import EventType
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunStore, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.workflows.client import connect_lazily
-from scadbuddy.workflows.commands import CommandClosedError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    TemporalUnavailableError,
+    TemporalUnreachableError,
+    temporal_failure,
+)
 from scadbuddy.workflows.print_models import AcceptAnswer
-from tests.api.test_print_filaments import prepared, queue_route
+from scadbuddy.workflows.printing import CANCELLED_QUEUEING, CANCELLED_UNQUEUED
+from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -47,8 +55,8 @@ from tests.api.test_print_run_choices import (
     run_request,
     run_routes,
 )
-from tests.api.test_send import upload_route
-from tests.support.temporal import WorkflowReaper
+from tests.api.test_send import died_after_the_upload, stored_files, upload_route
+from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.requires_postgres
@@ -59,11 +67,15 @@ class Gate:
 
     def __init__(self) -> None:
         self._open = threading.Event()
+        #: Set once a slice job's poll is held. respx records a call only after it is
+        #: answered, so a held poll never shows as ``called``.
+        self.reached = threading.Event()
 
     def open(self) -> None:
         self._open.set()
 
     async def slice_job(self, request: httpx.Request) -> httpx.Response:
+        self.reached.set()
         # Async, so the app's loop keeps serving the status route while this waits.
         while not self._open.is_set():
             await asyncio.sleep(0.01)
@@ -128,6 +140,32 @@ def test_a_run_answers_202_before_the_slice_finishes_and_ends_with_its_result(
     assert ended["result"]["route"] == "slice_queue"
     assert isinstance(ended["result"]["warnings"], list)
     assert ended["result"]["bambuddy_url"].endswith("/queue")
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_plan_retried_after_its_upload_adopts_that_file_rather_than_uploading_again(
+    client: TestClient, model: str, gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1127: ``print_plan`` retries under ``READ_RETRY``. An attempt that died after
+    Bambuddy stored the upload, and before it was recorded, left the file in the inbox;
+    the retry records it rather than leaving a spare beside a second upload."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    stored_files(upload)
+    run_routes()
+    gated_slice_routes(gate)
+    gate.open()
+    queued = queue_route()
+    asked = died_after_the_upload(monkeypatch)
+
+    response = start(client, output_id, body())
+    assert response.status_code == 202, response.text
+    ended = follow_run(client, response.json()["id"])
+
+    assert ended["status"] == "succeeded", ended
+    assert upload.call_count == 1
+    assert asked == [41, 41]
     assert queued.call_count == 1
 
 
@@ -239,7 +277,7 @@ def test_another_request_for_the_same_output_is_another_run(
     follow_run(client, first.json()["id"])
     second = start(client, output_id, run_request(copies=2))
 
-    assert second.status_code == 202
+    assert second.status_code == 202, second.text
     assert second.json()["id"] != first.json()["id"]
     follow_run(client, second.json()["id"])
     assert queued.call_count == 2
@@ -265,6 +303,59 @@ def test_a_slot_error_found_after_the_upload_is_the_runs_failure(
     assert run["error"]["status"] == 422
     assert "Slot 1 has no spool chosen." in run["error"]["detail"]
     assert not sliced.called
+
+
+@respx.mock
+def test_a_run_that_failed_after_its_202_is_the_outputs_progress(
+    client: TestClient, model: str
+) -> None:
+    """#1049: a run that failed before it queued anything recorded no print route, so
+    ``/progress`` answered ``null`` ("never printed") and the failure lived only in a
+    row nothing outside the dialog could find. It is now the output's progress."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    assert client.get(f"/api/v1/print/outputs/{output_id}/progress").json() is None
+
+    response = start(client, output_id, {**body(), "filament_plan": {"slots": []}})
+    run = follow_run(client, response.json()["id"])
+    assert run["status"] == "failed"
+
+    progress = client.get(f"/api/v1/print/outputs/{output_id}/progress")
+
+    assert progress.status_code == 200, progress.text
+    answer = progress.json()
+    assert answer["route"] == "run"
+    assert answer["stage"] == "failed"
+    assert answer["settled"] is True
+    assert answer["error_message"] == run["error"]["detail"]
+    assert answer["queue_item_id"] is None
+
+
+@respx.mock
+def test_a_print_after_a_failed_run_is_the_progress_again(client: TestClient, model: str) -> None:
+    """#1049: the failure is the progress only while it is the output's latest run."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 51, "printer_id": 1, "printer_name": "3DP-31B-598", "status": "pending"},
+        )
+    )
+
+    failed = start(client, output_id, {**body(), "filament_plan": {"slots": []}})
+    assert follow_run(client, failed.json()["id"])["status"] == "failed"
+    printed = start(client, output_id, body())
+    assert follow_run(client, printed.json()["id"])["status"] == "succeeded"
+
+    progress = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
+
+    assert progress["route"] == "slice_queue"
+    assert progress["error_message"] is None
 
 
 @respx.mock
@@ -310,7 +401,7 @@ def test_a_retry_after_a_failure_before_any_enqueue_starts_a_new_run(
     assert failed["may_have_queued"] is False
     second = start(client, output_id, request)
 
-    assert second.status_code == 202
+    assert second.status_code == 202, second.text
     assert second.json()["id"] != first.json()["id"]
     follow_run(client, second.json()["id"])
 
@@ -485,7 +576,7 @@ def test_a_request_id_retry_after_retention_pruned_its_run_does_not_invite_a_rep
         ).fetchone()
         assert row is not None
         assert workflow_reaper.client is not None
-        workflow_reaper._run(workflow_reaper.client.get_workflow_handle(row[0]).result())
+        workflow_reaper.run(workflow_reaper.client.get_workflow_handle(row[0]).result())
         conn.execute("DELETE FROM print_runs WHERE id = %s", (first.json()["id"],))
 
     retry = start(client, output_id, request)
@@ -512,8 +603,183 @@ def test_temporal_unreachable_is_a_503_and_writes_nothing(
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
     assert response.headers["Retry-After"] == "5"
+    # Which failure it is depends on the host: a refused port fails the first connect at
+    # once (CI: `TemporalUnreachableError`, nothing written), while one that hangs runs
+    # into the route's bound, which cannot say whether a start got through. Either way
+    # the flag and the detail agree (review #1316 (13) 1a); each path is pinned by the
+    # stub tests below.
+    problem = response.json()
+    if problem["may_have_started"]:
+        assert problem["detail"] == printing_api.TEMPORAL_DOWN_DETAIL
+    else:
+        assert problem["detail"] == printing_api.TEMPORAL_UNREACHABLE_DETAIL
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM print_runs").fetchone() == (0,)
+
+
+def _failure(error: BaseException) -> Exception:
+    failure = temporal_failure(error, "print-x")
+    assert failure is not None
+    return failure
+
+
+@respx.mock
+def test_only_a_failed_connect_says_nothing_was_queued(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`TemporalUnreachableError` is the lazy client's failed first connect, which wrote
+    no request, so only it says nothing was queued (review #1316 (9) 1a)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise TemporalUnreachableError("blip")
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert "cannot reach Temporal" in response.text
+    assert "Nothing was queued" in response.text
+    assert response.json()["may_have_started"] is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # An `UNAVAILABLE` response, or a bound that expired with Temporal down: either
+        # may follow a persisted start (review #1316 (9) 1a).
+        TemporalUnavailableError("blip"),
+        temporal_failure(RPCError("blip", RPCStatusCode.UNAVAILABLE, b""), "x"),
+    ],
+)
+@respx.mock
+def test_an_unavailable_temporal_may_have_started_the_run(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise error
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert "cannot reach Temporal" in response.text
+    assert "Nothing was queued" not in response.text
+    assert "follow it if it started" in response.text
+    # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
+    assert response.json()["may_have_started"] is True
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        RPCStatusCode.DEADLINE_EXCEEDED,
+        # A namespace past its rate limit, or a busy server (review #1316 4).
+        RPCStatusCode.RESOURCE_EXHAUSTED,
+        # The rest of the codes Temporal's own client retries, and a cancelled call
+        # (review #1316 1a).
+        RPCStatusCode.ABORTED,
+        RPCStatusCode.INTERNAL,
+        RPCStatusCode.UNKNOWN,
+        RPCStatusCode.DATA_LOSS,
+        RPCStatusCode.OUT_OF_RANGE,
+        RPCStatusCode.CANCELLED,
+    ],
+)
+@respx.mock
+def test_a_transient_rpc_error_is_temporal_unavailable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, code: RPCStatusCode
+) -> None:
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        # What `start_command` raises for it (`tests/test_commands.py`).
+        raise _failure(RPCError("blip", code, b""))
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    # Each may follow a persisted start, as `DEADLINE_EXCEEDED` does (review #1316 (8) 1).
+    assert "Nothing was queued" not in response.text
+    assert "follow it if it started" in response.text
+    # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
+    assert response.json()["may_have_started"] is True
+    # Temporal answered (or gRPC ended the call): not a network problem (review #1316
+    # (9) 1b).
+    assert "cannot reach" not in response.text
+    assert "could not start this print right now" in response.text
+
+
+@respx.mock
+def test_a_missing_namespace_is_temporal_unavailable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A namespace Temporal does not (yet) know is read as the reconciler reads it:
+    worth sending again, never a 500 (review #1316 (12) 1)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise _failure(namespace_not_found_error())
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == printing_api.TEMPORAL_BUSY_DETAIL
+    assert response.json()["may_have_started"] is True
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        RPCStatusCode.NOT_FOUND,
+        RPCStatusCode.PERMISSION_DENIED,
+        RPCStatusCode.UNAUTHENTICATED,
+        RPCStatusCode.INVALID_ARGUMENT,
+        RPCStatusCode.FAILED_PRECONDITION,
+        RPCStatusCode.UNIMPLEMENTED,
+    ],
+)
+@respx.mock
+def test_a_permanent_rpc_error_is_a_500_logged_at_error(
+    client: TestClient,
+    model: str,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    code: RPCStatusCode,
+) -> None:
+    """Review #1061 (3) 3: a refusal is a misconfiguration, not a blip, so it is never
+    "try again shortly", and its own problem type says so (review #1316 (2) 7)."""
+    output_id = prepared(client, model)
+
+    async def failing_start(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise _failure(RPCError("permission denied", code, b""))
+
+    monkeypatch.setattr(printing_api, "start_command", failing_start)
+
+    with caplog.at_level("ERROR"):
+        response = TestClient(app, raise_server_exceptions=False).post(
+            f"/api/v1/print/outputs/{output_id}/run", json=body()
+        )
+
+    assert response.status_code == 500, response.text
+    assert response.json()["type"].endswith("/temporal-refused")
+    assert response.json()["may_have_started"] is True
+    assert "permission denied" not in response.text
+    # Some refusals come after the start was persisted (review #1316 4).
+    assert "Nothing was queued" not in response.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
 
 
 def _insert_run(conninfo: str, output_id: str, key: str) -> str:
@@ -652,7 +918,10 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
     budget under the proxy's 15 s, or the request is answered still-accepting."""
     output_id = prepared(client, model)
     ended_run = PrintRun(
-        id="run-old", output_id=output_id, status="succeeded", created_at=datetime.now(UTC)
+        id="run-old",
+        subject=f"output:{output_id}",
+        status="succeeded",
+        created_at=datetime.now(UTC),
     )
     starts: list[timedelta] = []
 
@@ -679,6 +948,45 @@ def test_a_repeat_of_an_ended_run_never_holds_the_request_past_its_budget(
 
 
 @respx.mock
+def test_a_repeat_of_an_ended_run_still_open_after_the_wait_is_still_accepting(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Our record no longer repeats the ended run, and its execution outlived
+    `CLOSING_WAIT` (a loaded worker had not closed it yet): the second start attached to
+    it again and answered its old run, so a deliberate reprint got the last print's
+    copy back (`test_a_copy_deleted_in_bambuddy_is_dropped_and_uploaded_again`). The
+    client is told to send it again instead, and that request starts the new run."""
+    output_id = prepared(client, model)
+    ended_run = PrintRun(
+        id="run-old",
+        subject=f"output:{output_id}",
+        status="succeeded",
+        created_at=datetime.now(UTC),
+    )
+    starts: list[timedelta] = []
+
+    async def still_open(
+        *args: Any, deadline: timedelta = timedelta(seconds=10), **kwargs: Any
+    ) -> AcceptAnswer:
+        starts.append(deadline)
+        return AcceptAnswer(run=ended_run, repeated=True)
+
+    async def stored(run_id: str) -> PrintRun:
+        return ended_run
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(printing_api, "CLOSING_WAIT", 0.1)
+    monkeypatch.setattr(printing_api, "start_command", still_open)
+    monkeypatch.setattr(state.print_runs.store, "get", stored)
+
+    response = start(client, output_id, body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+    assert len(starts) == 2
+
+
+@respx.mock
 def test_an_execution_ended_before_it_answered_is_still_accepting(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -695,3 +1003,180 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/v1/print/outputs/{output_id}/run", "/api/v1/print/library/{file_id}/run"]
+)
+def test_the_run_routes_document_their_temporal_problems(app: FastAPI, path: str) -> None:
+    """Review #1316 (10) 3: the 500 and 503 problem types reach ``openapi.json``."""
+    spec = app.openapi()
+    responses = spec["paths"][path]["post"]["responses"]
+    for code, problems in (
+        ("500", [operations_api.TEMPORAL_REFUSED_PROBLEM]),
+        (
+            "503",
+            [operations_api.TEMPORAL_UNAVAILABLE_PROBLEM, operations_api.STILL_ACCEPTING_PROBLEM],
+        ),
+    ):
+        declared = responses[code]
+        assert all(problem in declared["description"] for problem in problems)
+        schema = declared["content"]["application/problem+json"]["schema"]
+        assert {"type", "status", "detail"} <= set(schema["required"])
+    # Each detail the route sends is the one its description quotes (review #1316 (11) 1,
+    # (12) 2), and the 500 names the check's unexpected failure too.
+    assert printing_api.TEMPORAL_REFUSED_DETAIL in responses["500"]["description"]
+    assert "about:blank" in responses["500"]["description"]
+    assert UNEXPECTED_DETAIL in responses["500"]["description"]
+    for detail in (
+        printing_api.TEMPORAL_UNREACHABLE_DETAIL,
+        printing_api.TEMPORAL_DOWN_DETAIL,
+        printing_api.TEMPORAL_BUSY_DETAIL,
+        printing_api.STILL_CHECKING_DETAIL,
+    ):
+        assert detail in responses["503"]["description"]
+    assert "did not answer or could not start it" in responses["503"]["description"]
+    assert "may_have_started" in responses["503"]["description"]
+    assert "may_have_started" in responses["500"]["description"]
+    # The check's refusals pass through with their own status.
+    assert "own status" in responses["default"]["description"]
+
+
+def wait_for(condition: Any, timeout: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting"
+        time.sleep(0.02)
+
+
+def cancel_run(reaper: WorkflowReaper, conninfo: str, run_id: str) -> None:
+    """Cancel the run's execution, as the Temporal UI does, and wait until its history
+    holds the request."""
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute("SELECT workflow_id FROM print_runs WHERE id = %s", (run_id,)).fetchone()
+    assert row is not None and reaper.client is not None
+    handle = reaper.client.get_workflow_handle(row[0])
+    reaper.run(handle.cancel())
+
+    def requested() -> bool:
+        history = reaper.run(handle.fetch_history())
+        return any(
+            event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+            for event in history.events
+        )
+
+    wait_for(requested)
+
+
+@respx.mock
+def test_a_cancel_before_anything_is_queued_is_a_409_that_says_so(
+    client: TestClient, model: str, gate: Gate, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """#1312: a cancel while the slice runs, before any enqueue, is recorded as a
+    cancel (409), never the 500 "failed unexpectedly while preparing"."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(gate)
+    queued = queue_route()
+
+    run = start(client, output_id, body()).json()
+    assert gate.reached.wait(60)
+    cancel_run(workflow_reaper, pg_conninfo, run["id"])
+    gate.open()
+    ended = follow_run(client, run["id"])
+
+    assert ended["status"] == "failed"
+    assert ended["error"]["status"] == 409
+    assert ended["error"]["detail"] == CANCELLED_UNQUEUED.detail
+    assert ended["may_have_queued"] is False
+    assert not queued.called
+
+
+@respx.mock
+def test_a_cancel_after_plate_1_is_queued_says_it_may_be_queued_and_queues_no_more(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    gate: Gate,
+    pg_conninfo: str,
+    workflow_reaper: WorkflowReaper,
+) -> None:
+    """#1312: all plates; plate 1 is queued, then the run is cancelled while plate 2
+    slices. The run is a 409 that says a plate may be queued, and plate 2 is not."""
+    output_id = prepared(client, model)
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(path, 2)
+    upload_route()
+    run_routes()
+    respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
+        side_effect=[
+            httpx.Response(202, json={"job_id": 9, "status": "pending"}),
+            httpx.Response(202, json={"job_id": 10, "status": "pending"}),
+        ]
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.get(f"{API}/slice-jobs/10").mock(side_effect=gate.slice_job)
+    queued = queue_route()
+
+    run = start(client, output_id, run_request(all_plates=True)).json()
+    assert gate.reached.wait(60)
+    assert queued.call_count == 1
+    cancel_run(workflow_reaper, pg_conninfo, run["id"])
+    gate.open()
+    ended = follow_run(client, run["id"])
+
+    assert ended["status"] == "failed"
+    assert ended["may_have_queued"] is True
+    assert ended["error"]["status"] == 409
+    assert ended["error"]["detail"] == CANCELLED_QUEUEING.detail
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_cancel_while_the_last_plate_is_queued_still_ends_succeeded(
+    client: TestClient, model: str, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """#1312: the cancel arrives while the only plate's ``POST /queue/`` is in flight.
+    That POST is not undone, so the run is recorded as it queued: ``succeeded``."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(opened := Gate())
+    opened.open()
+    queue_gate = threading.Event()
+    reached = threading.Event()
+
+    async def slow_queue(request: httpx.Request) -> httpx.Response:
+        reached.set()
+        while not queue_gate.is_set():
+            await asyncio.sleep(0.01)
+        return httpx.Response(
+            200,
+            json={
+                "id": 51,
+                "printer_id": 1,
+                "library_file_id": 77,
+                "position": 1,
+                "status": "queued",
+                "plate_id": 1,
+            },
+        )
+
+    queued = respx.post(f"{API}/queue/").mock(side_effect=slow_queue)
+    try:
+        run = start(client, output_id, body()).json()
+        assert reached.wait(60)
+        cancel_run(workflow_reaper, pg_conninfo, run["id"])
+    finally:
+        queue_gate.set()
+    ended = follow_run(client, run["id"])
+
+    assert ended["status"] == "succeeded", ended
+    assert ended["error"] is None
+    assert ended["result"]["queue_item_ids"] == [51]
+    assert queued.call_count == 1

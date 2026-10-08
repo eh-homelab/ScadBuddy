@@ -12,7 +12,7 @@
 // Word to put on the keychain
 name = "Reagan"; // 20
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "Lobster Two:style=Bold"; // font
 
 /* [Size] */

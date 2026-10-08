@@ -18,6 +18,7 @@ from scadbuddy.render.job_models import Job
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, job_file, wait_for_job
 from tests.conftest import read_png
+from tests.support.operations import press
 
 ERROR = Diagnostic(
     severity="error",
@@ -59,7 +60,7 @@ def test_the_model_diagnostics_are_the_latest_settled_render(
     projection = getattr(app.state, STATE_ATTR).projection
     now = datetime.now(UTC)
     job = Job(id="f" * 32, slug=model, created_at=now)
-    projection.submit(job, "planted")
+    projection.accept(job, "planted", workflow_id="render-planted", run_id="r")
     job.state = "failed"
     job.finished_at = now + timedelta(minutes=1)
     job.error = "openscad exited with 1"
@@ -141,7 +142,9 @@ def test_a_saved_output_is_drawn_from_a_named_view(
 ) -> None:
     job_id = _render(client, model)
     _real_preview(client, job_id)
-    created = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert created.status_code == 201, created.text
     output_id = created.json()["id"]
 

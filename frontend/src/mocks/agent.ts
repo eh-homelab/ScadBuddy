@@ -280,7 +280,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     const pending = s.pending
     if (!pending) return
     s.pending = undefined
-    emit({ type: 'approval.resolved', sessionId: s.sessionId, id: pending.id, approved: approve, by: BROWSER_USER })
+    emit({ type: 'approval.resolved', sessionId: s.sessionId, id: pending.id, approved: approve, decision: approve ? 'approved' : 'denied', by: BROWSER_USER })
     setStatus(s, 'running')
     play(s, [
       () =>
@@ -394,7 +394,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           s.streaming = undefined
         }
         if (s.pending) {
-          emit({ type: 'approval.resolved', sessionId: s.sessionId, id: s.pending.id, approved: false })
+          emit({ type: 'approval.resolved', sessionId: s.sessionId, id: s.pending.id, approved: false, decision: 'cancelled', reason: 'interrupted by You' })
           s.pending = undefined
         }
         if (s.asking) {

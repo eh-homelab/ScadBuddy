@@ -17,13 +17,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 import psycopg
 from pydantic import (
     BaseModel,
     Field,
     StrictStr,
+    StringConstraints,
     ValidationError,
     field_validator,
     model_validator,
@@ -68,6 +69,7 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
+from scadbuddy.library.pipelines import inputs_version_of
 from scadbuddy.library.presets import (
     PresetStore,
     TemplatePreset,
@@ -248,6 +250,18 @@ class UiDeclaration(BaseModel):
     api: int = Field(ge=1)
 
 
+#: `pipeline/` plus a Python module name: no `..`, no subdirectory, nothing outside it.
+PIPELINE_MODULE_PATTERN = r"^pipeline/[A-Za-z0-9_]+\.py$"
+
+
+class PipelineDeclaration(BaseModel):
+    """``model.json``'s ``pipeline`` (spec 2026-09-27 §5.1)."""
+
+    module: str = Field(pattern=PIPELINE_MODULE_PATTERN, max_length=200)
+    #: The pipeline-API major (§8.1). The worker decides whether it can run it.
+    api: int = Field(ge=1)
+
+
 _BOOLEAN = ("0", "1")
 
 #: Bambu's ``print_sequence`` (#907): the one list a template's ``print_settings`` and a
@@ -300,6 +314,20 @@ def _print_setting_problem(key: str, value: str) -> str | None:
     )
 
 
+#: What a create or an edit may set a model's description and tags to (review #1126 1.4):
+#: they travel inline in the operation's request, so even all-escaped they stay well
+#: under its cap (`api/operations.py` `MAX_REQUEST_BYTES`). A model.json on disk is not
+#: held to them.
+MAX_DESCRIPTION_CHARS = 10_000
+MAX_TAGS = 50
+MAX_TAG_CHARS = 100
+Description = Annotated[str, StringConstraints(max_length=MAX_DESCRIPTION_CHARS)]
+Tags = Annotated[
+    list[Annotated[str, StringConstraints(max_length=MAX_TAG_CHARS)]],
+    Field(max_length=MAX_TAGS),
+]
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -326,6 +354,38 @@ class ModelMeta(BaseModel):
     #: Why a ``ui`` on disk could not be read. The template still lists and
     #: customizes with the generated form (§4.2); never written back to model.json.
     ui_error: str | None = Field(default=None, exclude=True)
+    #: The template's own pipeline (#427), or None for the default (§5.3).
+    pipeline: PipelineDeclaration | None = None
+    #: Why a ``pipeline`` on disk could not be read; never written back.
+    pipeline_error: str | None = Field(default=None, exclude=True)
+    #: The unreadable declaration as written: `Catalogue.create` writes it back to
+    #: model.json, so the author fixes it and the host never deletes it.
+    pipeline_raw: Any = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _readable_pipeline(cls, data: Any) -> Any:
+        """A malformed ``pipeline`` costs only the pipeline: the template still lists,
+        and its jobs fail at `load_pipeline` with this error (§5.1)."""
+        if not isinstance(data, dict) or data.get("pipeline") is None:
+            return data
+        try:
+            PipelineDeclaration.model_validate(data["pipeline"])
+        except ValidationError as error:
+            problems = "; ".join(
+                f"pipeline.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                if detail["loc"]
+                else f"pipeline: {detail['msg']}"
+                for detail in error.errors()
+            )
+            return {
+                **data,
+                "pipeline": None,
+                "pipeline_raw": data["pipeline"],
+                "pipeline_error": f"model.json's pipeline is not valid: {problems}",
+            }
+        return data
+
     #: The ``ui`` as written when it could not be read, so a create writes the
     #: author's declaration back as it came rather than dropping it.
     unread_ui: Any = Field(default=None, exclude=True)
@@ -428,8 +488,8 @@ def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
 
 class ModelPatch(BaseModel):
     name: str | None = None
-    description: str | None = None
-    tags: list[str] | None = None
+    description: Description | None = None
+    tags: Tags | None = None
     #: The template's own presets (#326), replacing the list whole. Names unique
     #: ignoring case, explicit ids unique; the route writes every key down.
     presets: list[TemplatePreset] | None = None
@@ -502,6 +562,14 @@ class ModelRecord(ModelMeta):
     #: ``thumbnail.png`` lists it as one image, id ``thumbnail``. A built-in's is
     #: what it ships (``readonly``) followed by what was added to it (#722).
     media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
+
+    @field_validator("media", mode="before")
+    @classmethod
+    def _readable_media(cls, value: Any) -> Any:
+        """Views, read as given: a record is read back from its JSON as an operation's
+        answer (#1054), and model.json's leniency would turn each into a plain item."""
+        return value
+
     #: A built-in's chosen cover (#722), listed first in ``media``; None while the
     #: shipped order decides it, and always for a template of mine, whose cover is
     #: simply its first item.
@@ -510,6 +578,11 @@ class ModelRecord(ModelMeta):
     #: ``libraries`` leaves out (#217): what stops the model rendering, and why.
     invalid_libraries: list[InvalidLibraryEntry] = Field(default_factory=list)
     ui_error: str | None = None
+    pipeline_error: str | None = None
+    #: The pipeline's ``INPUTS_VERSION`` (§8.2), read without running it; 0 without one.
+    #: A factory, not ``= 0``: a literal default makes the generated TypeScript type
+    #: require the field, and every client-built record would have to carry it.
+    inputs_version: int = Field(default_factory=int)
 
 
 class Catalogue:
@@ -565,7 +638,7 @@ class Catalogue:
         if self.on_change is None:
             return
         for slug in slugs:
-            # The whole `_builtin/` mirror: the boot-time pass covers every built-in.
+            # The whole `_builtin/` mirror: the backfill Schedule covers every built-in.
             if slug == BUILTIN_DIR:
                 continue
             try:
@@ -769,6 +842,15 @@ class Catalogue:
     def record(self, slug: str) -> ModelRecord:
         return self._record(slug, self.version, self._has_history, ui_version_of=self.ui_version)
 
+    def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
+        if meta.pipeline is None:
+            return 0
+        path = self.paths.model_dir(slug) / meta.pipeline.module
+        try:
+            return inputs_version_of(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            return 0
+
     def print_settings(self, slug: str) -> dict[str, str]:
         """The template's ``print_settings`` as its model.json has them now (#770);
         none for a template that is gone. One whose model.json is invalid is
@@ -825,6 +907,8 @@ class Catalogue:
             media=media,
             media_cover=media_cover,
             ui_error=meta.ui_error,
+            pipeline_error=meta.pipeline_error,
+            inputs_version=self._inputs_version(slug, meta),
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail.source is not None,
@@ -977,6 +1061,8 @@ class Catalogue:
             raw = meta.model_dump(exclude=excluded)
             if meta.unread_ui is not None:
                 raw["ui"] = meta.unread_ui
+            if meta.pipeline is None and meta.pipeline_raw is not None:
+                raw["pipeline"] = meta.pipeline_raw  # the author's, to fix; never dropped
             self.write_raw_meta(slug, raw, presets=True)
             self._clear_media_rows(slug)
             if thumbnail is not None:
@@ -1277,6 +1363,15 @@ class Catalogue:
         self._commit_change(f"Set {slug} thumbnail", change, slug)
         self._drop_preview(slug)
         return self.record(slug)
+
+    def has_own_thumbnail(self, slug: str) -> bool:
+        """Whether :meth:`delete_thumbnail` has a thumbnail to remove: the model's
+        ``thumbnail.png``, or with media, its first item when that is an image."""
+        self._require(slug)
+        stored = self._stored_media(slug)
+        if not stored:
+            return self.thumbnail_path(slug).is_file()
+        return stored[0].kind == "image"
 
     def delete_thumbnail(self, slug: str) -> ModelRecord:
         """Remove the model's own thumbnail, as one revision. The record may still
@@ -2039,6 +2134,24 @@ class Catalogue:
             ).preview
         return UpstreamStatus(state=state, upstream=upstream, revision=revision, preview=preview)
 
+    def upstream_state(self, slug: str) -> tuple[str, UpstreamState]:
+        """The upstream's id and where this template stands against it, without the
+        merge preview :meth:`upstream_status` works out (#1054: the upstream checks)."""
+        upstream, _, state = self._upstream_now(slug)
+        return upstream.id, state
+
+    def merge_plan(self, slug: str) -> tuple[MergePlan, UpstreamState] | None:
+        """The merge a ``merge_upstream`` would make now, written nowhere, and the state
+        it was worked out in; None when there is no update to merge (#1054: the merge
+        route answers a conflict from it)."""
+        upstream, revision, state = self._upstream_now(slug)
+        if state not in ("update", "dismissed") or revision is None:
+            return None
+        plan = plan_merge(
+            self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
+        )
+        return plan, state
+
     def merge_upstream(self, slug: str) -> tuple[ModelRecord, MergePlan]:
         """Take the upstream's current revision as one commit, or raise
         :class:`MergeConflictError` having written nothing.
@@ -2060,7 +2173,7 @@ class Catalogue:
                 raise UpstreamStateError(f"{slug!r} has no upstream update to merge", state)
             plan = plan_merge(history, slug, directory, upstream, revision)
             if plan.conflicts:
-                raise MergeConflictError(plan)
+                raise MergeConflictError(plan, state)
             merge = partial(self._write_merge, slug, plan, planned)
             try:
                 self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)

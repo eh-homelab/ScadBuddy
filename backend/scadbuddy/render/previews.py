@@ -10,8 +10,10 @@ The work never sits in a request's path. A catalogue change hands the model's id
 waits out a short debounce (a burst of edits is rendered once), decides whether a
 render is needed at all, and runs one through its ``runner``
 (:meth:`~scadbuddy.render.submit.RenderService.render_preview`, on the render worker).
-One preview at a time, with a pause after each, is also what throttles the boot-time
-pass over every model without a thumbnail.
+The pass over every model is the ``PreviewBackfill`` workflow
+(:mod:`scadbuddy.workflows.previews`), on a Schedule: it lists what is due (:meth:`due`)
+and refreshes each through :meth:`PreviewScheduler.refresh`, the scheduler's own call.
+One lock makes the two take turns, so the process renders one preview at a time.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Executor
 from contextlib import suppress
 
@@ -44,6 +46,7 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.split import split_by_material
+from scadbuddy.workflows.previews import PAUSE
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +54,13 @@ logger = logging.getLogger(__name__)
 #: metadata edit, then a README is one render, not three.
 DEFAULT_DEBOUNCE = 2.0
 #: The pause after each render, so a backlog -- the first boot after an upgrade,
-#: with every thumbnail-less model to render -- never runs back to back.
-DEFAULT_INTERVAL = 1.0
+#: with every thumbnail-less model to render -- never runs back to back. The
+#: backfill's, so the two never drift apart.
+DEFAULT_INTERVAL = PAUSE.total_seconds()
+#: The longest a preview waits before trying its source's snapshot again. Each try
+#: holds the scheduler's one worker for up to `PIN_TIMEOUT`, so the wait doubles from
+#: the store's own Retry-After up to this (#1435).
+MAX_SNAPSHOT_RETRY_DELAY = 600.0
 #: A preview renders the schema, the model and its plate image, each bounded by
 #: `render_timeout`; this bounds the three together.
 TIMEOUT_FACTOR = 3
@@ -63,6 +71,10 @@ PreviewRender = Callable[[str, float], Awaitable[bytes]]
 
 class PreviewFailedError(Exception):
     pass
+
+
+class PreviewUnrunError(Exception):
+    """The render could not be run at all, which says nothing about the source."""
 
 
 #: What a render activity's failure carries as its type when it raised one of these.
@@ -158,11 +170,16 @@ class PreviewScheduler:
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._busy = False
+        #: Held by every refresh, the backfill's too: one preview at a time.
+        self._lock = asyncio.Lock()
+        #: Model id -> its tries in a row that found the snapshot still storing.
+        self._pending_tries: dict[str, int] = {}
 
     def start(self) -> None:
         # Made here, on the loop that will run the worker, not in `__init__`.
         self._due = {}
         self._wake = asyncio.Event()
+        self._lock = asyncio.Lock()
         self._loop = asyncio.get_running_loop()
         self._worker = asyncio.create_task(self._run())
 
@@ -188,10 +205,19 @@ class PreviewScheduler:
         with suppress(RuntimeError):  # the loop closed between the check and the call
             loop.call_soon_threadsafe(self._schedule, slug, self.debounce)
 
-    def request_all(self, slugs: Iterable[str]) -> None:
-        """The boot-time pass: every model, taken one at a time like any other."""
-        for slug in slugs:
-            self.request(slug)
+    def due(self) -> list[str]:
+        """The models whose preview is missing, stale or no longer wanted: the
+        backfill's listing. It only reads; each refresh plans again, and drops, under
+        the lock. One that cannot be looked at is logged and left out; a listing that
+        fails raises."""
+        due: list[str] = []
+        for slug in self.catalogue.slugs():
+            try:
+                if self.needs_refresh(slug):
+                    due.append(slug)
+            except Exception:
+                logger.exception("could not plan a model's preview", extra={"slug": slug})
+        return due
 
     async def idle(self) -> None:
         """Wait until nothing is due or running -- for tests."""
@@ -221,7 +247,7 @@ class PreviewScheduler:
             del self._due[slug]
             self._busy = True
             try:
-                rendered = await self._refresh(slug)
+                rendered = await self.refresh(slug)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -232,9 +258,18 @@ class PreviewScheduler:
             if rendered and self.interval > 0:
                 await asyncio.sleep(self.interval)
 
-    async def _refresh(self, slug: str) -> bool:
-        """Render ``slug``'s preview if it needs one. True when a render ran."""
-        key = await asyncio.to_thread(self._plan, slug)
+    async def refresh(self, slug: str, *, raise_unrun: bool = False) -> bool:
+        """Render ``slug``'s preview if it needs one. True when a render ran. Planned
+        under the lock, so a refresh that waited on another of the same model finds
+        its preview current and renders nothing. With ``raise_unrun``, a render that
+        could not be run raises `PreviewUnrunError` (the backfill's failure) rather
+        than counting as one that ran."""
+        async with self._lock:
+            return await self._refresh(slug, raise_unrun=raise_unrun)
+
+    async def _refresh(self, slug: str, *, raise_unrun: bool) -> bool:
+        key = await asyncio.to_thread(self.plan, slug)
+        tries = self._pending_tries.pop(slug, 0)
         if key is None:
             return False
         try:
@@ -248,21 +283,25 @@ class PreviewScheduler:
             # The source's first snapshot is still uploading and carries on (#686):
             # come back once it should be stored. Nothing else would bring the slug
             # back before its next edit or the next boot.
+            delay = min(error.retry_after * 2**tries, MAX_SNAPSHOT_RETRY_DELAY)
+            self._pending_tries[slug] = tries + 1
             logger.info(
                 "a preview waits for its source snapshot; it is tried again",
-                extra={"slug": slug, "retry_after": error.retry_after},
+                extra={"slug": slug, "retry_after": delay},
             )
-            self._schedule(slug, error.retry_after)
+            self._schedule(slug, delay)
             return True
         except Exception as error:
             reason = str(error) or type(error).__name__
             if not is_render_error(error):
                 # Not this source's fault: nothing is recorded, so the next request
-                # for it (an edit, the next boot's pass) tries again.
+                # for it (an edit, the next backfill tick, hourly) tries again.
                 logger.warning(
                     "could not run the default render for a preview; it is tried again later",
                     extra={"slug": slug, "error": reason},
                 )
+                if raise_unrun:
+                    raise PreviewUnrunError(reason) from error
                 return True
             logger.warning(
                 "the default render for a preview failed; the model keeps no thumbnail",
@@ -283,7 +322,7 @@ class PreviewScheduler:
         )
         return True
 
-    def _plan(self, slug: str) -> str | None:
+    def plan(self, slug: str) -> str | None:
         """The source key to render ``slug`` from, or None when it needs no render.
 
         A model that is gone or has its own thumbnail keeps no preview at all. One
@@ -291,10 +330,7 @@ class PreviewScheduler:
         and comes back if the output is deleted. Otherwise a preview already made
         from this source -- or already failed from it -- is left as it is.
         """
-        if not self.catalogue.exists(slug) or self.catalogue.thumbnail_path(slug).is_file():
-            self.store.drop(slug)
-            return None
-        if self.catalogue.has_output_cover(slug):
+        if not self._keeps_preview(slug):
             self.store.drop(slug)
             return None
         # A delete landing after the `exists` check above makes this None, and
@@ -306,6 +342,23 @@ class PreviewScheduler:
             return None
         return key
 
+    def needs_refresh(self, slug: str) -> bool:
+        """Whether `plan` would render ``slug``'s preview or drop it, without doing
+        either."""
+        if not self._keeps_preview(slug):
+            return self.store.record(slug) is not None
+        key = source_key(self.catalogue.paths, slug)
+        return key is not None and not self.store.current(slug, key)
+
+    def _keeps_preview(self, slug: str) -> bool:
+        """Whether ``slug`` shows a preview: it exists, with no thumbnail of its own
+        and no generated output."""
+        return (
+            self.catalogue.exists(slug)
+            and not self.catalogue.thumbnail_path(slug).is_file()
+            and not self.catalogue.has_output_cover(slug)
+        )
+
     def _still_wanted(self, slug: str, key: str) -> bool:
         """Whether a render from ``key`` is still the one to keep, now that it is done.
 
@@ -313,9 +366,4 @@ class PreviewScheduler:
         renders. An edit has requested a render of its own, so this one is dropped
         rather than kept as a stale stand-in.
         """
-        return (
-            self.catalogue.exists(slug)
-            and not self.catalogue.thumbnail_path(slug).is_file()
-            and not self.catalogue.has_output_cover(slug)
-            and source_key(self.catalogue.paths, slug) == key
-        )
+        return self._keeps_preview(slug) and source_key(self.catalogue.paths, slug) == key

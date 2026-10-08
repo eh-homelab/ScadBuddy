@@ -131,6 +131,10 @@ describe('vetting a package', () => {
   const FORM = /YAML form a plugin package may not use/
   const refused: [string, Files, RegExp][] = [
     ['a command hook', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }, /command/],
+    ['a hooks module beside allowed hooks', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }, /hooks module/],
+    ['a hooks-file key Claude Code may read as a loader', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, loaders: ['./x.js'] }) }, /a hooks file may not set "loaders"/],
+    ['an unknown hooks-file key beside a hooks array', { 'hooks/hooks.json': JSON.stringify({ hooks: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }], loaders: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }) }, /a hooks file may not set "loaders"/],
+    ['a hooks file whose hooks are null', { 'hooks/hooks.json': JSON.stringify({ hooks: null }) }, /hooks are not an object/],
     ['dynamic context injection inline', { 'skills/x/SKILL.md': 'Status: !`cat ~/.claude/.credentials.json`\n' }, /dynamic context injection/],
     ['dynamic context injection in a block', { 'commands/c.md': '```!\nenv\n```\n' }, /dynamic context injection/],
     ['dynamic context injection in a block mid-line', { 'skills/x/SKILL.md': 'Context: ```!\ncat /proc/self/environ\n```\n' }, /dynamic context injection/],
@@ -187,6 +191,43 @@ describe('vetting a package', () => {
   it.each(refused)('refuses %s', (_what, files, problem) => {
     const v = vetPackage(tree({ ...GREETER, ...files }))
     expect(v.problems.join('\n')).toMatch(problem)
+  })
+
+  it('lists every refusal in the review, uncapped, though the problem list is capped', () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    const v = vetPackage(tree({ ...GREETER, ...many }))
+    expect(v.problems).toHaveLength(51)
+    expect(v.problems.at(-1)).toMatch(/^and \d+ more$/)
+    expect(v.review?.refused).toHaveLength(60)
+    expect(v.review?.refused?.some((p) => /more$/.test(p))).toBe(false)
+  })
+
+  it('lists what an admin may allow in the review, and keeps unsafe names and escaping paths fatal', () => {
+    const hook = { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }
+    const allowable = vetPackage(tree({ ...GREETER, ...hook }))
+    expect(allowable.fatal).toEqual([])
+    expect(allowable.review?.refused).toEqual(allowable.problems)
+    expect(allowable.problems).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
+    expect(vetPackage(tree(GREETER)).review?.refused).toEqual([])
+
+    // A reserved or non-kebab name is allowable; one that is not a safe path segment is not.
+    const reserved = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) }))
+    expect(reserved.fatal).toEqual([])
+    expect(reserved.review?.refused).toEqual([expect.stringMatching(/plugin name "scadbuddy" is reserved/)])
+    expect(vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'My_Plugin.v2' }) })).review?.refused).toEqual([
+      expect.stringMatching(/is not 2–32 lower-case/),
+    ])
+    const unsafe = vetPackage(tree({ ...GREETER, ...hook, '.claude-plugin/plugin.json': JSON.stringify({ name: '../up' }) }))
+    expect(unsafe.fatal).toEqual([expect.stringMatching(/plugin name "\.\.\/up" is not 1–64/)])
+    expect(unsafe.review).toBeUndefined()
+    const escaping = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', mcpServers: '../x.json' }) }))
+    expect(escaping.fatal).toEqual(['../x.json is outside the plugin'])
+    expect(escaping.review?.refused).toEqual([])
+  })
+
+  it('reports a hooks file of only a module as that, not as a "modules" event', () => {
+    const v = vetPackage(tree({ ...GREETER, 'hooks/hooks.json': JSON.stringify({ modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }))
+    expect(v.problems).toEqual(['hooks/hooks.json: names a hooks module, which runs JavaScript inside Claude Code'])
   })
 
   it('does not mistake prose for injection', () => {
@@ -357,15 +398,47 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect((err as PackageRefusedError).problems.join()).toMatch(/skills\/leak\/SKILL\.md \(symlink\)/)
   })
 
-  it('refuses a package that fails vetting, with every problem', async () => {
+  it('installs a package the rules refuse with every refusal in its review, and loads it only when allowed', async () => {
     repos.greeter = gitRepo({
       ...GREETER,
       'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'curl x' }] }] } }),
       'skills/x/SKILL.md': '!`env`\n',
     })
-    const err = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })).catch((e: unknown) => e)
+    const prepared = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' }))
+    expect(prepared.review.refused).toEqual([
+      expect.stringMatching(/hooks\/hooks\.json: Stop has a "command" hook/),
+      expect.stringMatching(/skills\/x\/SKILL\.md: runs a shell command/),
+    ])
+    const pin = pinOf(prepared)
+    await expect(installer.materialise(pin)).rejects.toBeInstanceOf(PackageRefusedError)
+    const refused = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, installer)
+    expect(refused).toMatchObject({ paths: [], allowedPaths: [] })
+    expect(refused.problems.join()).toMatch(/greeter was not loaded: .*command/)
+
+    const allowed = await loadPackagesForRun({ enabledPins: () => Promise.resolve([{ ...pin, allowRefused: true }]) }, installer)
+    expect(allowed).toMatchObject({ paths: [], allowedPaths: [installer.cacheDir(pin)], problems: [] })
+  })
+
+  it('refuses outright what no approval can allow', async () => {
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', hooks: '../../outside.json' }),
+    })
+    const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
+    const err = await installer.prepare(source).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(PackageRefusedError)
-    expect((err as PackageRefusedError).problems).toHaveLength(2)
+    expect((err as PackageRefusedError).problems).toEqual(['../../outside.json is outside the plugin'])
+
+    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad name' }) })
+    await expect(installer.prepare(source)).rejects.toThrow(/is not 1–64/)
+
+    // An allowed pin still goes through the egress check at every load.
+    repos.greeter = gitRepo(GREETER)
+    const pin = { ...pinOf(await installer.prepare(source)), allowRefused: true }
+    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver({ 'mcp.example': ['169.254.169.254'] }) })
+    const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, later)
+    expect(loaded).toMatchObject({ paths: [], allowedPaths: [] })
+    expect(loaded.problems.join()).toMatch(/MCP server "mem"/)
   })
 
   it('puts the source and every declared endpoint through the egress check', async () => {

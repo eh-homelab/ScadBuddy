@@ -1,6 +1,6 @@
 """The Bambuddy writes as operations (#1053, spec 2026-10-01 §4.2, §4.3): a key makes a
-retry answer the first outcome without a second effect; no key keeps today's
-behaviour; a refusal writes no record."""
+retry answer the first outcome without a second effect; a request without one is
+refused (#1143); a refusal writes no record."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.bambuddy import operations as bambuddy_operations
+from scadbuddy.bambuddy import output_reader
 from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
 from tests.api.test_print_actions import TIMELAPSE, mock_enqueue
 from tests.api.test_print_history import link, mock_archive
@@ -47,18 +47,6 @@ def test_reprint_with_a_key_twice_queues_once(client: TestClient, model: str) ->
 
 
 @respx.mock
-def test_reprint_without_a_key_queues_twice(client: TestClient, model: str) -> None:
-    configure(client)
-    link(client, make_output(client, model), 35)
-    mock_archive(35, printer_id=3, plate_id=2)
-    queue = mock_enqueue(51)
-
-    assert client.post("/api/v1/prints/35/reprint").status_code == 201
-    assert client.post("/api/v1/prints/35/reprint").status_code == 201
-    assert queue.call_count == 2
-
-
-@respx.mock
 def test_a_reprint_refusal_writes_no_operation(
     client: TestClient, model: str, pg_conninfo: str
 ) -> None:
@@ -74,7 +62,9 @@ def test_a_reprint_refusal_writes_no_operation(
     assert response.status_code == 409
     assert not queue.called
     with psycopg.connect(pg_conninfo) as conn:
-        assert conn.execute("SELECT count(*) FROM operations").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM operations WHERE kind <> 'output_create'"
+        ).fetchone() == (0,)
 
 
 @respx.mock
@@ -89,7 +79,9 @@ def test_a_reprint_is_recorded_as_an_operation(
     client.post("/api/v1/prints/35/reprint", headers={"Idempotency-Key": uuid.uuid4().hex})
 
     with psycopg.connect(pg_conninfo) as conn:
-        row = conn.execute("SELECT kind, subject, status, result FROM operations").fetchone()
+        row = conn.execute(
+            "SELECT kind, subject, status, result FROM operations WHERE kind <> 'output_create'"
+        ).fetchone()
     assert row is not None and row[:3] == ("reprint", "archive:35", "succeeded")
     assert row[3]["queue_item_id"] == 51
 
@@ -136,7 +128,7 @@ def test_a_slow_check_that_is_not_bambuddy_is_not_blamed_on_bambuddy(
         await asyncio.sleep(9)
         return "never"
 
-    monkeypatch.setattr(bambuddy_operations, "output_stem", slow_stem)
+    monkeypatch.setattr(output_reader, "output_stem", slow_stem)
 
     response = client.post(
         f"/api/v1/outputs/{output_id}/project-file",
@@ -315,6 +307,27 @@ def test_a_key_sent_twice_is_one_effect(client: TestClient, model: str, kind: st
 
 @pytest.mark.parametrize("kind", list(KINDS))
 @respx.mock
+def test_a_request_without_a_key_is_428_and_does_nothing(
+    client: TestClient, model: str, pg_conninfo: str, kind: str
+) -> None:
+    """#1143: a retry of a keyless write could not be told from a second press, so it
+    is refused before the check or the effect runs."""
+    configure(client)
+    case = KINDS[kind](client, model)
+    with psycopg.connect(pg_conninfo) as conn:
+        before = conn.execute("SELECT count(*) FROM operations").fetchone()
+
+    response = client.post(case.path, json=case.body)
+
+    assert response.status_code == 428, response.text
+    assert response.json()["type"].endswith("/idempotency-key-required")
+    assert case.effect.call_count == 0
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == before
+
+
+@pytest.mark.parametrize("kind", list(KINDS))
+@respx.mock
 def test_a_bambuddy_error_in_the_effect_is_a_failed_operation_with_its_problem(
     client: TestClient, model: str, pg_conninfo: str, kind: str
 ) -> None:
@@ -325,7 +338,9 @@ def test_a_bambuddy_error_in_the_effect_is_a_failed_operation_with_its_problem(
     response = _post(client, case, uuid.uuid4().hex)
 
     with psycopg.connect(pg_conninfo) as conn:
-        row = conn.execute("SELECT kind, status, error FROM operations").fetchone()
+        row = conn.execute(
+            "SELECT kind, status, error FROM operations WHERE kind <> 'output_create'"
+        ).fetchone()
     assert row is not None and row[:2] == (kind, "failed"), row
     assert row[2]["detail"] != OPERATION_UNEXPECTED_DETAIL
     assert response.status_code == row[2]["status"] != 500, response.text

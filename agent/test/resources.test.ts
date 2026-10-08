@@ -203,6 +203,19 @@ describe('subscriptions and coalescing', () => {
     expect(sent).toHaveLength(3)
   })
 
+  it('keeps coalescing when the wall clock steps forward (#1485)', () => {
+    vi.useFakeTimers()
+    const { sent, notify } = recorder()
+    const subs = new Subscriptions(notify, { minIntervalMs: 250 })
+    subs.add('scadbuddy://jobs/j1')
+    subs.onEvent({ id: '1', kind: 'job.running', job_id: 'j1', slug: 'k' })
+    vi.setSystemTime(Date.now() + 3_600_000)
+    subs.onEvent({ id: '2', kind: 'job.running', job_id: 'j1', slug: 'k' })
+    expect(sent).toEqual(['scadbuddy://jobs/j1'])
+    vi.advanceTimersByTime(250)
+    expect(sent).toHaveLength(2)
+  })
+
   it('re-announces session resources after the bus reconnects, and nothing else (#300)', () => {
     const { sent, notify } = recorder()
     const source = new MemoryEventSource()

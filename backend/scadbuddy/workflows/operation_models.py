@@ -13,6 +13,11 @@ from scadbuddy.operations.store import Operation
 OPERATION_WORKFLOW = "Operation"
 INSERT_ACTIVITY = "op_insert"
 FINISH_ACTIVITY = "op_finish"
+#: Guards the prelude step (#1060), so a history from before it replays unchanged.
+PRELUDE_PATCH = "op-prelude"
+#: Set in the request of an operation started with a prelude: its run knows the prelude's
+#: part is done. A request without it came from an API from before the prelude (#1060).
+PRELUDE_REQUESTED = "_prelude"
 
 
 def check_activity(kind: str) -> str:
@@ -21,6 +26,22 @@ def check_activity(kind: str) -> str:
 
 def run_activity(kind: str) -> str:
     return f"op.{kind}.run"
+
+
+class OperationAuthor(BaseModel):
+    """The agent the request was made on behalf of (``core/authorship.py``), so the
+    run's commits are authored as it."""
+
+    principal: str | None = None
+    session: str | None = None
+
+
+class PreludeStep(BaseModel):
+    """A kind whose run goes first, on its own task queue (#1060)."""
+
+    kind: str
+    task_queue: str
+    run_attempts: int = 1
 
 
 class OperationInput(BaseModel):
@@ -32,8 +53,16 @@ class OperationInput(BaseModel):
     request: dict[str, Any]
     #: The kind's: 1 for an effect Bambuddy does not dedupe (§4.2).
     run_attempts: int = 1
+    #: The kind's run timeout in seconds; the workflow's ``RUN_TIMEOUT`` when None.
+    run_timeout_s: float | None = None
     #: Upsert the Scadbuddy* Search Attributes (``SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES``).
     search_attributes: bool = False
+    #: The request's agent author, when an agent made it.
+    author: OperationAuthor | None = None
+    #: The kind's prelude, when the request needs it (``OperationKind.prelude``).
+    prelude: PreludeStep | None = None
+    #: The client's ``Idempotency-Key``, when it sent one (review #1126 1.3).
+    idempotency_key: str | None = None
 
 
 class OperationAnswer(BaseModel):
@@ -52,6 +81,7 @@ class RunOp(BaseModel):
     request: dict[str, Any]
     #: What the check returned.
     checked: dict[str, Any]
+    author: OperationAuthor | None = None
 
 
 class FinishOp(BaseModel):

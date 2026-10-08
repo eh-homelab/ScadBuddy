@@ -75,6 +75,7 @@ from scadbuddy.core.events import (
     ModelEvent,
     OperationEvent,
     OutputEvent,
+    PresetsChanged,
     PrintEvent,
     PrintRunEvent,
     SessionBusEvent,
@@ -142,7 +143,7 @@ def topics_of(event: Event) -> list[str]:
             return [f"job:{event.job_id}"]
         case ModelEvent():
             return ["models", f"model:{event.slug}"]
-        case SourceChanged() | VersionCommitted() | UpstreamAvailable():
+        case SourceChanged() | VersionCommitted() | UpstreamAvailable() | PresetsChanged():
             return [f"model:{event.slug}"]
         case OutputEvent():
             return ["outputs", f"model:{event.slug}"]

@@ -16,6 +16,8 @@ import trimesh
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
     CORE_NS,
+    MAX_SETTINGS_BYTES,
+    MAX_UNCOMPRESSED_BYTES,
     MODEL_SETTINGS_NAME,
     PLACEHOLDER_NOZZLE_DIAMETER,
     PLATE_PICK,
@@ -26,11 +28,13 @@ from scadbuddy.render.bambu3mf import (
     PlateParts,
     cover_names,
     laid_out_plates,
+    nozzles_statable,
     plate_columns,
     plate_origin,
     plate_settings,
     plates_of,
     replate_3mf,
+    state_nozzles,
     write_bambu_3mf,
     write_plates_3mf,
 )
@@ -240,6 +244,37 @@ class TestReplate:
         assert settings["extruder_nozzle_stats"] == stats
         assert settings["extruder_nozzle_stats_new"] == stats
 
+    def test_replating_states_each_extruders_flow(self, written: Path) -> None:
+        """#484: the one key Bambu Studio 02.08.02.61 sets per extruder for High Flow,
+        in the slicer's order; the CLI keeps it because the H2C printer preset has
+        none. ``default_nozzle_volume_type`` is left alone (Studio keeps it Standard),
+        and ``slice_info.config`` stays the slicer's output."""
+        flows = ["High Flow", "Standard"]
+        moved = replate_3mf(
+            written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.4", nozzle_volume_type=flows
+        )
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+            names = archive.namelist()
+        assert settings["nozzle_volume_type"] == flows
+        assert "default_nozzle_volume_type" not in settings
+        assert "Metadata/slice_info.config" not in names
+        # The five keys the slicer dereferences are all still there.
+        for key in (
+            "printer_settings_id",
+            "print_settings_id",
+            "filament_settings_id",
+            "nozzle_diameter",
+            "printable_height",
+        ):
+            assert key in settings
+
+    def test_replating_without_a_flow_states_none(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.4")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert "nozzle_volume_type" not in settings
+
     def test_replating_without_nozzle_stats_states_none(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
         with zipfile.ZipFile(io.BytesIO(moved)) as archive:
@@ -264,6 +299,136 @@ class TestReplate:
         )
         with pytest.raises(PlateFitError, match="A1 mini"):
             replate_3mf(big.read_bytes(), plate_for("A1 mini"))
+
+
+def _with_entries(payload: bytes, extra: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source, zipfile.ZipFile(buffer, "w") as out:
+        for info in source.infolist():
+            if info.filename not in extra:
+                out.writestr(info.filename, source.read(info.filename))
+        for name, data in extra.items():
+            out.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_stating_the_nozzles_of_a_library_file_changes_nothing_else(written: Path) -> None:
+    """#484: a library file's copy states the flow and nozzle stats as a replated output
+    does, and is otherwise the file: same entries, same placement, same settings."""
+    payload = written.read_bytes()
+    flows, stats = ["High Flow", "High Flow"], ["High Flow#1", "High Flow#0"]
+
+    stated = state_nozzles(payload, nozzle_stats=stats, nozzle_volume_type=flows)
+
+    assert nozzles_statable(payload)
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(stated)) as after,
+    ):
+        assert after.namelist() == before.namelist()
+        for name in before.namelist():
+            if name != "Metadata/project_settings.config":
+                assert after.read(name) == before.read(name), name
+        old = json.loads(before.read("Metadata/project_settings.config"))
+        new = json.loads(after.read("Metadata/project_settings.config"))
+    assert new == {
+        **old,
+        "nozzle_volume_type": flows,
+        "extruder_nozzle_stats": stats,
+        "extruder_nozzle_stats_new": stats,
+    }
+    # The same file stated the same way is the same bytes, so its copy is found again.
+    assert state_nozzles(payload, nozzle_stats=stats, nozzle_volume_type=flows) == stated
+
+
+def test_only_an_unsliced_3mf_with_bambus_settings_can_state_its_nozzles(written: Path) -> None:
+    payload = written.read_bytes()
+    assert not nozzles_statable(_with_entries(payload, {"Metadata/plate_1.gcode": b"; G28\n"}))
+    assert not nozzles_statable(
+        _with_entries(payload, {"Metadata/project_settings.config": b"<config/>"})
+    )
+    assert not nozzles_statable(b"solid stl\nendsolid\n")
+
+
+def _settings_bomb(size: int) -> bytes:
+    """A 3MF whose ``project_settings.config`` is valid JSON of ``size`` bytes, almost
+    all whitespace, which deflates to a few KB."""
+    body = b'{"nozzle_diameter": ["0.4"]' + b" " * (size - 29) + b"}\n"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
+        out.writestr("3D/3dmodel.model", "<model/>")
+        out.writestr("Metadata/project_settings.config", body)
+    return buffer.getvalue()
+
+
+def _declaring(payload: bytes, name: str, size: int) -> bytes:
+    """``payload`` with ``name``'s uncompressed size declared as ``size`` in both its
+    local header and the central directory: a header that lies."""
+    data = bytearray(payload)
+    encoded = name.encode()
+    # (signature, offset of the uncompressed size, offset of the file name)
+    for signature, size_at, name_at in ((b"PK\x03\x04", 22, 30), (b"PK\x01\x02", 24, 46)):
+        start = data.find(signature)
+        while start != -1:
+            if data[start + name_at : start + name_at + len(encoded)] == encoded:
+                data[start + size_at : start + size_at + 4] = size.to_bytes(4, "little")
+            start = data.find(signature, start + 4)
+    return bytes(data)
+
+
+class _Inflated:
+    """Counts the bytes every zip entry read hands back."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.total = 0
+        read = zipfile.ZipExtFile.read
+
+        def counted(entry: zipfile.ZipExtFile, n: int = -1) -> bytes:
+            data = read(entry, n)
+            self.total += len(data)
+            return data
+
+        monkeypatch.setattr(zipfile.ZipExtFile, "read", counted)
+
+
+def test_settings_that_expand_past_the_cap_are_not_statable_and_not_inflated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A library file is untrusted (MakerWorld downloads land there too): a few KB that
+    inflate to gigabytes must not exhaust the worker. Over the cap is not statable, so
+    the file prints as it is, and nothing past the cap is ever decompressed."""
+    bomb = _settings_bomb(MAX_SETTINGS_BYTES * 64)
+    assert len(bomb) < MAX_SETTINGS_BYTES
+    inflated = _Inflated(monkeypatch)
+
+    assert not nozzles_statable(bomb)
+    assert inflated.total <= 64 * 1024  # the model's few bytes at most, never the settings
+
+
+def test_a_header_that_understates_its_size_does_not_get_past_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared size is checked first, but not trusted: reads are counted, and an
+    entry that inflates past what it declares is refused."""
+    lying = _declaring(
+        _settings_bomb(MAX_SETTINGS_BYTES * 64), "Metadata/project_settings.config", 1024
+    )
+    inflated = _Inflated(monkeypatch)
+
+    assert not nozzles_statable(lying)
+    assert inflated.total <= MAX_SETTINGS_BYTES + 64 * 1024
+
+
+def test_the_archive_cap_bounds_one_prints_memory_and_fits_real_projects() -> None:
+    """``state_nozzles`` holds the download and its copy at once, so the cap is that
+    print's memory, give or take. The largest real 3MF measured for #484 (a sliced
+    multi-plate archive, 18 MB compressed) inflates to 73 MB."""
+    assert 73_193_348 * 2 < MAX_UNCOMPRESSED_BYTES <= 256 * 1024 * 1024
+
+
+def test_an_archive_over_the_total_cap_is_not_statable(written: Path) -> None:
+    payload = _declaring(written.read_bytes(), "3D/3dmodel.model", MAX_UNCOMPRESSED_BYTES + 1)
+    assert not nozzles_statable(payload)
 
 
 def test_build_item_centres_the_assembly_on_the_plate_at_z0(written: Path) -> None:

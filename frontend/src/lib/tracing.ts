@@ -1,4 +1,4 @@
-import { context, propagation, trace } from '@opentelemetry/api'
+import { context, propagation, SpanKind, trace } from '@opentelemetry/api'
 import { W3CTraceContextPropagator } from '@opentelemetry/core'
 import { registerInstrumentations } from '@opentelemetry/instrumentation'
 import { DocumentLoadInstrumentation } from '@opentelemetry/instrumentation-document-load'
@@ -6,8 +6,11 @@ import { FetchInstrumentation } from '@opentelemetry/instrumentation-fetch'
 import { resourceFromAttributes } from '@opentelemetry/resources'
 import {
   BatchSpanProcessor,
+  ParentBasedSampler,
+  SamplingDecision,
   StackContextManager,
   WebTracerProvider,
+  type Sampler,
   type SpanLimits,
 } from '@opentelemetry/sdk-trace-web'
 import { RELAY_PATH, RelayExporter } from './relayExporter'
@@ -26,11 +29,23 @@ export const SPAN_LIMITS: SpanLimits = {
 /** §5.3: with `RelayExporter`'s 48 KiB requests, keeps a flush under the keepalive cap. */
 export const MAX_EXPORT_BATCH_SIZE = 64
 
+/**
+ * Spec §6's one sampling rule, the backend's `NoParentlessClients`: a `CLIENT` span with
+ * no parent (a poll's `fetch` outside any action) is dropped. Its `traceparent` still goes,
+ * unsampled, so the backend drops the request's trace too.
+ */
+const noParentlessClients: Sampler = {
+  shouldSample: (_context, _traceId, _name, kind) => ({
+    decision: kind === SpanKind.CLIENT ? SamplingDecision.NOT_RECORD : SamplingDecision.RECORD_AND_SAMPLED,
+  }),
+  toString: () => 'NoParentlessClients',
+}
+
 let stop: (() => Promise<void>) | null = null
 
 /**
  * The page's tracing (§5.3), loaded lazily by `main.tsx` after the first paint:
- * a `WebTracerProvider` whose `BatchSpanProcessor` exports through
+ * a `WebTracerProvider`, sampling as §6 says, whose `BatchSpanProcessor` exports through
  * `ScrubbingSpanExporter` → `RelayExporter`; W3C trace context only, no baggage (§4);
  * fetch instrumentation that injects `traceparent` only into same-origin requests
  * (never Bambuddy or Google Fonts), and document-load instrumentation. Calling it
@@ -46,6 +61,7 @@ export function startTracing(): () => Promise<void> {
       'service.name': TRACER_NAME,
       'service.version': import.meta.env.VITE_SCADBUDDY_VERSION || 'dev',
     }),
+    sampler: new ParentBasedSampler({ root: noParentlessClients }),
     spanLimits: SPAN_LIMITS,
     spanProcessors: [
       new BatchSpanProcessor(new ScrubbingSpanExporter(exporter), {

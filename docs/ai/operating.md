@@ -39,8 +39,10 @@ covers the same ground more briefly.
   `claude/`, `work/` and `plugins/` (the plugin package cache) and checks all three are
   writable. If it cannot, the process exits 1
   with a message naming the directory (`main.ts`).
-- **Pinned Claude Code.** The build runs `node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"`
-  (currently `2.1.283`) and fails when the SDK's bundled binary differs
+- **Pinned Claude Code.** `agent/package.json` pins the Agent SDK exactly and its lockfile
+  pins the Claude Code binary the SDK bundles, for each platform. The build runs
+  `node dist/check-cli-version.js`, which fails when that binary is missing or its
+  `--version` differs from the version the SDK declares
   ([`Dockerfile`](../../Dockerfile); [`agent/src/check-cli-version.ts`](../../agent/src/check-cli-version.ts)).
   The measurement behind this is in spec §3.1 ("Measured in PR #319").
 - **Container healthcheck.** `HEALTHCHECK` fetches `http://127.0.0.1:8081/healthz`
@@ -163,8 +165,8 @@ as unset (`present()`).
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
 
-Variables set in the image, not read by `config.ts`: `HOME`, `CLAUDE_CONFIG_DIR`,
-`CLAUDE_CODE_VERSION` and `NODE_ENV` ([`Dockerfile`](../../Dockerfile)). The Claude Code
+Variables set in the image, not read by `config.ts`: `HOME`, `CLAUDE_CONFIG_DIR` and
+`NODE_ENV` ([`Dockerfile`](../../Dockerfile)). The Claude Code
 subprocess never inherits the service's environment. `buildQueryOptions()` in
 [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts) passes an explicit
 `env` holding only `CLAUDE_CONFIG_DIR`, `HOME` and `PATH`. The pinned SDK's `sdk.d.ts`
@@ -282,7 +284,7 @@ is `classifyFailure()` in
 | Permanent | 401, 403, 402, a billing or credit message | First confirmed: the agent asks the endpoint once more with that credential (`probeCredential()`, a one-token request on `claude-haiku-4-5`, not the turn's model, so a refusal of that model or of a feature the turn used does not confirm itself). Refused again with a 401, a 402, or a 400/403 that names the key, the organisation or billing (`refusesTheKey()`), the credential becomes `disabled`, with the reason in `last_error`, and is not tried again until someone resets it or saves a new secret for it. Answered, the refusal was about the request (a gateway or WAF refusing one body, say), so the turn ends there with no fallback and nothing recorded. With no clear answer it falls back for this call without being marked. |
 | Rate limited | 429 | The credential is `cooling_down` until the time the endpoint names, then usable again on its own. It is recorded at once with the default 60 s and the turn moves on; Claude Code does not pass the response headers on, so the agent asks the endpoint once more with that credential in the background (`probeCredential()`, a one-token request; a refused one is not billed) and replaces that time with what its 429 names (`retry-after`, then the `anthropic-ratelimit-*-reset` headers). A probe that is answered makes it usable again in 1 s; one refused the same way as above (`refusesTheKey()`) disables it instead. Every probe stops with the turn: when the user stops it, the agent does not wait for a probe still running, and records nothing from it. |
 | Transient | 5xx, 529, network errors | Claude Code retries on the same credential, at most twice when there is another to fall back to (`CLAUDE_CODE_MAX_RETRIES`), then the turn moves on for this call only. The credential is not marked. |
-| Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. |
+| Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. Through a gateway, Claude Code first sends a refused 400 or 422 once more on the same credential without its `thinking.display` field (and that field's `anthropic-beta` value), so a gateway that refuses only that field still answers the turn, at the cost of one refused request a turn. |
 
 No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
 fails mid-way (after tool calls ran) resumes the session on the next
@@ -703,9 +705,9 @@ other Settings writes
 
 | Route | What it does |
 |---|---|
-| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }` or `{ "kind": "marketplace", "url", "ref"?, "entry" }` | Fetches, pins the commit, vets, and stores the package **unapproved and disabled** (201). A refused package gets 422 with every problem. |
+| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }` or `{ "kind": "marketplace", "url", "ref"?, "entry" }` | Fetches, pins the commit, vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
-| `POST /:name/approve` with `{ "commit_sha", "content_hash" }` | Approves exactly the pin the review showed. A mismatch is a 409. |
+| `POST /:name/approve` with `{ "commit_sha", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
 | `PATCH /:name` with `{ "enabled" }` | Enables an approved pin only; the table enforces this with a `CHECK` too. |
 | `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
 | `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |

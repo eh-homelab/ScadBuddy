@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { GALLERY_SLUG, media } from '../../mocks/fixtures'
@@ -27,8 +27,26 @@ describe('PreviewGallery (#280, #624)', () => {
     const strip = screen.getByRole('list', { name: 'Gallery' })
     const sources = [...strip.querySelectorAll('img')].map((img) => img.getAttribute('src'))
     expect(sources).toHaveLength(items.length)
-    for (const src of sources) expect(src).toMatch(/\/thumbnail$/)
+    for (const src of sources) expect(src).toMatch(/\/thumbnail\?v=\d+$/)
     expect(container.querySelector(`img[src$="/media/${items[0]!.id}"]`)).toBeNull()
+  })
+
+  it('falls back to the original, or a video\'s poster, when a thumbnail fails (#1427)', () => {
+    setup()
+    const strip = screen.getByRole('list', { name: 'Gallery' })
+    const imgs = () => [...strip.querySelectorAll('img')]
+    const image = items.findIndex((item) => item.kind === 'image')
+    const video = items.findIndex((item) => item.kind === 'video' && item.poster)
+
+    fireEvent.error(imgs()[image]!)
+    expect(imgs()[image]!.getAttribute('src')).toMatch(new RegExp(`/media/${items[image]!.id}$`))
+    fireEvent.error(imgs()[video]!)
+    expect(imgs()[video]!.getAttribute('src')).toMatch(new RegExp(`/media/${items[video]!.id}/poster$`))
+
+    // The fallback failing too leaves an empty tile, not a broken image.
+    const before = imgs().length
+    fireEvent.error(imgs()[image]!)
+    expect(imgs()).toHaveLength(before - 1)
   })
 
   it('points aria-controls only at a panel that is rendered', async () => {

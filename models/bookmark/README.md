@@ -145,7 +145,7 @@ bookmark can have a cutout mask *and* a colour overlay.
 | `text_style` | `inlay` | Flush inlay or raised. |
 | `text_size` | `11` | Letter height, mm. |
 | `auto_fit` | `true` | Shrink (never enlarge) the text to fit inside the rim and clear of the cord hole. |
-| `text_y` | `-12` | Move the text along the strip, mm. The text keeps clear of the ends and the cord hole; a `text_y` that would put it off the strip is pulled back with a NOTE. |
+| `text_y` | `-12` | Move the text along the strip, mm. The text keeps clear of the ends (including a pointed or ribbon end's point, a rounded tab's round and a star or heart topper) and the cord hole; a `text_y` that would put it off the strip is pulled back with a NOTE. |
 
 ### Layers
 

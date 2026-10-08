@@ -53,7 +53,9 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
         </div>
         {templateName && <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>}
         <Facts print={print} />
-        {print.status === 'printing' && <PrintingNow outputId={print.output_id} named={print.printer_name !== null} />}
+        {print.status === 'printing' && print.output_id !== null && (
+          <PrintingNow outputId={print.output_id} named={print.printer_name !== null} />
+        )}
         <ParamsDiff diff={print.params_diff} />
       </div>
     </li>

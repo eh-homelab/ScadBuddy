@@ -18,7 +18,7 @@ cd backend
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy              # strict; files = scadbuddy, tests
-uv run --frozen pytest
+uv run --frozen pytest -n auto  # pytest-xdist; drop -n to run serially
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
@@ -35,6 +35,23 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
+Under pytest-xdist each worker makes its schemas in a database of its own
+(`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
+because advisory locks and NOTIFY channels are per database: workers sharing one would
+serialise every `migrate` and hear each other's events. So the test role needs
+`CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
+Temporal dev server.
+CI runs the suite in four `backend-pytest` jobs (#1167), each `--splits 4 --group N`
+(pytest-split) by the timings in `backend/.test_durations`; `backend-pytest-split`
+checks that the four selections add up to the whole collection and that each
+shard ran what it selected. A test missing from
+the file is placed by the average, so a stale file only unbalances the shards. Refresh
+it with `uv run --frozen pytest -n auto --store-durations` (best from the test image,
+for CI's timings) and commit it; it is in `.dockerignore`, so a refresh leaves the
+image's layers alone, and a shard in the image needs it mounted where pytest-split
+looks by default (`-v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"`,
+as `ci.yml` does). Never pass `--durations-path <path>` as two words: pytest takes the
+path for its rootdir and drops `pyproject.toml`'s settings.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
@@ -83,7 +100,7 @@ cd agent
 corepack enable
 pnpm install --frozen-lockfile
 pnpm lint && pnpm typecheck && pnpm test && pnpm build
-docker build --target agent -t scadbuddy-agent:dev .   # asserts CLAUDE_CODE_VERSION
+docker build --target agent -t scadbuddy-agent:dev .   # checks the bundled Claude Code binary
 ```
 
 Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
@@ -128,9 +145,13 @@ stage (OpenSCAD plus the image's fonts):
 
 ```bash
 docker build --target base -t scadbuddy-verify:ci .
+docker build --target test -t scadbuddy:test .   # for templates with a pipeline/ (#427)
 SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-verify:ci \
+  SCADBUDDY_PIPELINE_IMAGE=scadbuddy:test \
   bash -c '.github/scripts/select-models.sh all | .github/scripts/verify-models.sh'
 ```
+
+Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 
 ## Layout
 
@@ -142,13 +163,17 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (the render stages the worker's activities run; `render_job` runs them in one
   process, which the pipeline tests use), `job_models.py` (`Job`, `render_key`,
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
-  `RenderDep`: submit inserts the row, starts the workflow, and a reconciler starts
-  any pending row nothing picked up), `projection.py` (`render_jobs` as a projection
+  `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
+  workflow's first (local) activity inserts the row, identical requests join it as
+  claims, and a supersede sends the old execution `release`, #1053), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
   backend's migrations). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
+- `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
+  quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
+  `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
@@ -157,20 +182,60 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`PrintActivities`, `PrintDeps`), `print_models.py`; `commands.py` (`start_command`,
   update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
   `bambuddy` queue's worker runs inside the API process until #1060.
+  Housekeeping (#1054): `housekeeping.py` (`Housekeeping`, `ensure_schedule`), the
+  periodic sweeps as Temporal Schedules (every sweep, and the render prune on its own
+  300 s one) on the `library` queue
+  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
+  process (it holds the data volume). A new periodic pass is an activity in its
+  `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
+  (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
+  default-render previews, on its own hourly Schedule on the same queue; the per-change
+  requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
-  attempts) and `component.py` (`OPERATIONS`, `OperationsDep`). A feature registers
-  its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
-  `scadbuddy/<feature>/operations.py`, found like components, never by editing a list;
-  the Bambuddy kinds are `bambuddy/operations.py`. `api/operations.py` `run_operation`
-  is how a route runs a kind (`Idempotency-Key` header; 202 with the operation past the
-  deadline) and serves `GET /operations/{id}`. The browser's `command()`
-  (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`) send the
+  attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
+  feature registers its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
+  `scadbuddy/<feature>/operations.py`, found like components, never by editing a list.
+  Each worker serves only its queue's kinds: the Bambuddy kinds are
+  `bambuddy/operations.py` (queue `bambuddy`); `library/operations.py` (queue
+  `library`, #1054) exports the library pins with a model's lifecycle
+  and edits (`library/model_operations.py` `model_kinds`: create, import, patch,
+  duplicate, delete, source, README, thumbnail, sibling files, restore and upstream; an
+  upstream merge that would conflict is refused by the route, so its merged text never
+  enters a history), a model's media (`media_operations.py`), outputs
+  (`output_operations.py`: create, thumbnail, delete with its inbox copies until #1060
+  splits the Bambuddy part out), assets (`asset_operations.py`: upload, fetch), font
+  install (`font_operations.py`) and the preset writes that run openscad
+  (`preset_operations.py`; a preset delete stays a plain route). Request bytes too large
+  for a workflow payload (a create's source, thumbnail, README, a patch's presets, an
+  import's or asset fetch's URL, an asset, an output's thumbnail, a media upload) go
+  by claim check: `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by
+  sha256 so a re-send keeps its key. A media upload is streamed, never read into
+  memory: `ClaimStore.hold_file` moves the streamed file in under the digest hashed
+  while it streamed, and the run links it (`ClaimStore.link`) to a staging file of its
+  own, so the claim stays for its release. `run_operation(..., claimed=)` releases them once
+  the answer is final: only what its own `hold` created, unless a later put rewrote it
+  or a running operation names the digest; the rest go to the
+  `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
+  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
+  with 413. A kind reads the state when it runs, never a route dependency, so a test
+  replaces a store on the state (`state.libraries = store`). `api/operations.py`
+  `run_operation` is how a route runs a kind (`Idempotency-Key` header; 202 with the
+  operation past the deadline) and serves `GET /operations/{id}`. The browser's
+  `command()` (`frontend/src/api/client.ts`) and the agent's (`agent/src/tools/command.ts`)
+  send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
-  renders* across jobs. Never swap them.
+  renders* across jobs. Never swap them. Template pipelines (#427): `TemplatePipeline`
+  runs a template's `pipeline/pipeline.py`, or the built-in default, `exec`'d in the
+  workflow sandbox; `MigrateInputs`; `ctx.py` (the `ctx` a pipeline gets),
+  `pipeline_activities.py` (`load_pipeline`, `pack`, `write_output`,
+  `run_template_activity`, `migrate_inputs`), `template_process.py`/`template_runner.py`
+  (template Python in its own process group, env allowlisted), `verify_pipeline.py`
+  (for `verify.sh`). `scadbuddy/template.py` is the surface a template's
+  `activities.py` imports.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -188,10 +253,22 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
-  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain).
+  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
+  (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); `PrintRun`
+  and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
+  unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
+  unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
+  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
-  error mapping (`errors.py`).
+  error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
+  `output_reader.py`'s `OutputReader` (#1060): `LocalOutputs` on the volume,
+  `RemoteOutputs` through the API's hidden `/api/v1/internal/outputs/…` routes
+  (`api/internal.py`). An output's last print is `output_last_prints` in Postgres
+  (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
+  `prelude`, another kind run first on its own queue: `output_delete` (library) names
+  `output_inbox_delete` (bambuddy).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
@@ -232,8 +309,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
   the action's trace only inside its `within`. `traceparent` goes on same-origin
   requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
-  a blocked one (an error naming `tracing-<hash>.js`) does not trigger the stale-chunk
-  reload; any other chunk's error still does.
+  a blocked one (an error naming `tracing-<hash>.js`, or Safari's naming no URL while it
+  loads) does not trigger the stale-chunk reload; any other chunk's error still does.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
   inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
   reports a failure through `onFailure`; the Customize page then falls back to the generated form
@@ -245,8 +322,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
   `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
-  variable the backend reads; the one origin allowed to write) and
-  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
+  variable the backend reads; the one origin allowed to write),
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed) and the
+  backend's `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and `_SEARCH_ATTRIBUTES`. No AI
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
@@ -284,7 +362,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,
   `pnpm start`) that registers the OTel ESM hook, then `src/telemetry/setup.ts` starts
-  the SDK (standard `OTEL_*` variables only; incoming HTTP only).
+  the SDK (standard `OTEL_*` variables only; incoming HTTP only). `main.ts` imports
+  only the SDK-free `src/telemetry/runtime.ts`, so with `OTEL_SDK_DISABLED=true` no SDK
+  package is loaded (#1351).
   `src/telemetry/scrub.ts` strips exception messages, query strings and user agents
   before export; `src/telemetry/turn.ts` (`TurnTrace`) ends a turn's spans at every
   park and opens `agent.turn.resume` under the decision (`ai_approvals.traceparent`,
@@ -304,9 +384,32 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
     value to its row and to the columns that say where it is sent (for the credential:
     `kind` and `base_url`). Comparable tokens are stored hashed instead.
+  - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
+    database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
+    every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
+    `ai_sessions.mode` is `durable`), and `AgentOperation` (`workflows.ts`, bundled by
+    `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
+    the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
+    `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
+    replays. `pnpm build` also writes `dist/tools.json` (the tool manifest the durable
+    worker declares from; never committed). Temporal tests (`test/*temporal*.test.ts`)
+    skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
+    `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
+    The `@temporalio/*` packages are pinned exactly, all one version.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
-    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
-    refused, because it would inherit the credential env.
+    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
+    plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
+    Code 2.1.287, and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` no longer turns it off) is
+    refused, because it would inherit the credential env. A hooks file may set only
+    `$schema`, `description` and `hooks` besides, so a new loader key is refused too.
+    The one way past it is a plugin package approved with `allow_refused` (store.ts,
+    column `allow_refused`, bound to that pin's approval): it loads as it is through
+    `allowedPluginPaths`, unchecked, with the built-ins it names (`builtinTools`, each
+    call `outward`) and skill shell injection on (with `Bash` offered, Claude Code
+    2.1.287 runs an injection without asking the seam). A name that is not a safe path segment
+    (`SAFE_NAME_RE`; a reserved name is allowable), paths outside the package, symlinks,
+    the hash and the egress check stay fatal (`vet.ts` `fatal`).
   - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
     `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
     plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback
@@ -445,8 +548,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
   the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
-  Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
-  currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
+  lockfile pins the Claude Code binary it bundles. The image build checks that the
+  binary reports the version the SDK declares (`agent/src/check-cli-version.ts`), so
+  no second pin moves with a bump (#1540). A bump still changes the harness under
+  every query: the `*.e2e`/`*.sdk` tests run the real binary, and a "measured on"
+  note is re-dated only when what backs it was re-checked.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,

@@ -59,8 +59,8 @@ _RETIRED_RE = re.compile(
 
 #: Bumped when the derived schema changes shape for an UNCHANGED source, so a cache
 #: entry written by an older ScadBuddy is re-derived rather than served. 2: `file`.
-#: 3: `retired` (#432).
-SCHEMA_FORMAT = 3
+#: 3: `retired` (#432). 4: a select mixing text and numbers is all text (#356).
+SCHEMA_FORMAT = 4
 
 
 @dataclass(frozen=True)
@@ -149,6 +149,15 @@ def _is_whole(value: Any) -> TypeGuard[int | float]:
     return float(value).is_integer()
 
 
+def _as_text(value: ParamValue) -> ParamValue:
+    """A number option of a select whose other options are text, as the text the
+    comment wrote it: `18650.0` is `"18650"` (#356). OpenSCAD's export types each
+    bare token on its own, but the template compares against the strings."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return value
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
+
+
 def _resolve_type(raw: dict[str, Any], annotation: Annotation | None) -> ParameterType:
     declared = raw.get("type")
     if declared == "boolean":
@@ -188,6 +197,15 @@ def _normalise_parameter(
     # frontend's colour widget and extruder numbering never need the name table.
     if resolved == "color" and isinstance(initial, str):
         initial = CSS_COLOURS.get(initial.strip().lower(), initial)
+    options = [Option(name=str(o["name"]), value=o["value"]) for o in raw.get("options", [])]
+    selected_retired = list((retired or {}).get(name, [])) if resolved == "select" else []
+    # #356: one text option makes the whole select text, which is how a render
+    # formats it, so every option (and default and retired value) is offered as one.
+    if any(isinstance(option.value, str) for option in options):
+        options = [Option(name=o.name, value=_as_text(o.value)) for o in options]
+        selected_retired = [_as_text(value) for value in selected_retired]
+        if initial is not None:
+            initial = _as_text(initial)
     return Parameter(
         name=name,
         type=resolved,
@@ -202,9 +220,9 @@ def _normalise_parameter(
         # `step=1` on a value like 1.2.
         step=raw.get("step") if resolved == "slider" else None,
         max_length=raw.get("maxLength"),
-        options=[Option(name=str(o["name"]), value=o["value"]) for o in raw.get("options", [])],
+        options=options,
         accept=list(annotation.accept) if resolved == "file" and annotation else [],
-        retired=list((retired or {}).get(name, [])) if resolved == "select" else [],
+        retired=selected_retired,
     )
 
 

@@ -13,11 +13,13 @@ import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from google.protobuf import text_format
 from psycopg_pool import PoolTimeout
 
-from scadbuddy.api.analyzers import DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.printing import RACK_ALGORITHM_SUPERSEDED_PROBLEM
+from scadbuddy.core.problems import DATABASE_UNAVAILABLE_PROBLEM
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import SettingsStore
@@ -25,7 +27,7 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
-from tests.api.test_print_library import library_file, one_color, run_library
+from tests.api.test_print_library import library_3mf, library_file, one_color, run_library
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -37,6 +39,7 @@ from tests.api.test_send import configure, upload_route
 from tests.bambuddy.conftest import recording
 from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
 from tests.support.rack_guard import foreign_rack_errors
+from tests.support.temporal import WorkflowReaper
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -53,23 +56,51 @@ def test_the_rack_algorithm_is_remembered_per_printer_and_forgotten(client: Test
     assert client.get("/api/v1/settings/remembered").json().get("printer_rack_algorithms", {}) == {}
 
 
-@pytest.mark.parametrize(
-    "error",
-    [psycopg.errors.QueryCanceled("canceling statement"), PoolTimeout("no connection")],
-    ids=["write", "pool"],
-)
-def test_a_rack_algorithm_save_that_timed_out_is_a_503_problem(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception
+def test_an_older_rack_algorithm_save_is_a_409_and_the_newer_choice_stays(
+    client: TestClient,
 ) -> None:
-    """#1129 review: the bounded save's timeouts are expected, not a crash."""
+    """#1216: the dialog's version orders its saves, whatever order they arrive in."""
+    path = "/api/v1/print/printers/1/rack-algorithm"
+    newer = client.put(path, json={"algorithm": "bambuddy", "version": 2})
+    assert newer.status_code == 200, newer.text
+    older = client.put(path, json={"algorithm": "oldest_first", "version": 1})
+    assert older.status_code == 409, older.text
+    assert older.json()["type"] == RACK_ALGORITHM_SUPERSEDED_PROBLEM
+    remembered = client.get("/api/v1/settings/remembered").json()
+    assert remembered["printer_rack_algorithms"] == {"1": "bambuddy"}
+    put = client.get("/openapi.json").json()["paths"][
+        "/api/v1/print/printers/{printer_id}/rack-algorithm"
+    ]["put"]
+    assert "409" in put["responses"]
+    assert "same version" in put["responses"]["503"]["description"]
 
-    def timed_out(*_: object) -> None:
+
+@pytest.mark.parametrize(
+    ("error", "cause"),
+    [
+        (psycopg.errors.QueryCanceled("canceling statement"), "did not answer in time"),
+        (PoolTimeout("no connection"), "no database connection came free in time"),
+        (
+            psycopg.OperationalError("server closed the connection unexpectedly"),
+            "the connection to the database failed",
+        ),
+    ],
+    ids=["write", "pool", "dropped"],
+)
+def test_a_rack_algorithm_save_that_failed_is_a_503_problem_naming_its_cause(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception, cause: str
+) -> None:
+    """#1129 review: the bounded save's failures are expected, not a crash, and the 503
+    says which one happened (#1283) rather than calling every one a timeout."""
+
+    def failed(*_: object) -> None:
         raise error
 
-    monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", timed_out)
+    monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", failed)
     response = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "bambuddy"})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    assert cause in response.json()["detail"]
 
 
 def test_a_dropped_connection_does_not_claim_nothing_was_saved(
@@ -107,6 +138,27 @@ def test_a_rack_algorithm_save_held_up_in_postgres_answers_503_and_saves_nothing
         response = client.put(path, json={"algorithm": "bambuddy"})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    remembered = client.get("/api/v1/settings/remembered").json()
+    assert remembered["printer_rack_algorithms"] == {"1": "oldest_first"}
+
+
+def test_a_rack_algorithm_save_with_the_pool_full_answers_503_and_saves_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1264: the pool-wait half against the app's real pool, not a stubbed store."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    path = "/api/v1/print/printers/1/rack-algorithm"
+    assert client.put(path, json={"algorithm": "oldest_first"}).status_code == 200
+    pool = getattr(client.app.state, STATE_ATTR).settings_store.pool  # type: ignore[attr-defined]
+    held = [pool.getconn(timeout=5) for _ in range(pool.max_size)]
+    try:
+        response = client.put(path, json={"algorithm": "bambuddy"})
+    finally:
+        for conn in held:
+            pool.putconn(conn)
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    assert "no database connection came free in time" in response.json()["detail"]
     remembered = client.get("/api/v1/settings/remembered").json()
     assert remembered["printer_rack_algorithms"] == {"1": "oldest_first"}
 
@@ -247,6 +299,49 @@ def test_the_picks_are_recorded_against_the_queue_item(client: TestClient, model
 
 
 @respx.mock
+def test_no_serial_enters_the_runs_workflow_history(
+    client: TestClient, model: str, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """Spec 2026-10-01 §7 (#1032): the pick runs inside the enqueue activity, and only
+    positions cross into history, where every activity's input and result is kept. So
+    neither the run's history nor its children's (FollowPrint) names a hotend."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(nozzles=[{"size": "0.4"}], tier="standard"))
+    assert response.status_code == 200, response.text
+    assert asyncio.run(rack_usage(client).picked_items([51])) == {51}
+
+    with psycopg.connect(pg_conninfo) as conn:
+        rows = conn.execute("SELECT workflow_id FROM print_runs").fetchall()
+    assert len(rows) == 1
+    assert workflow_reaper.client is not None
+    pending, positions = [rows[0][0]], 0
+    while pending:
+        handle = workflow_reaper.client.get_workflow_handle(pending.pop())
+        history = workflow_reaper.run(handle.fetch_history())
+        # Payloads are bytes; the text format prints their ASCII as it is. That assumes
+        # the default (JSON) payload converter: a binary or compressed one would hide
+        # both the serials and the positions, and this test would need to decode them.
+        text = "\n".join(text_format.MessageToString(event) for event in history.events)
+        positions += text.count('\\"position\\"')
+        for invented in INVENTED_SERIALS:
+            assert invented not in text, f"{invented} in {handle.id}'s history"
+        pending += [
+            event.start_child_workflow_execution_initiated_event_attributes.workflow_id
+            for event in history.events
+            if event.HasField("start_child_workflow_execution_initiated_event_attributes")
+        ]
+    # The pick's position did cross, so the check above read the payloads.
+    assert positions >= 1
+
+
+@respx.mock
 def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> None:
     """The watcher never settles a library print (its record and settle hook are keyed
     by output id), so a pick row would never be credited."""
@@ -273,9 +368,9 @@ def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> No
     assert asyncio.run(rack_usage(client).picked_items([51])) == set()
 
 
-def test_the_rack_feature_hooks_the_settle_write_into_the_watcher(client: TestClient) -> None:
+def test_the_rack_feature_hooks_the_settle_write_into_the_follow(client: TestClient) -> None:
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    assert len(state.print_watcher.on_settled) == 1
+    assert len(state.print_follower.on_settled) == 1
 
 
 CHECK_04 = {"nozzles": [{"size": "0.4"}], "tier": "standard"}
@@ -343,17 +438,49 @@ def test_a_manual_pick_that_does_not_fit_is_refused_before_anything_is_sliced(
 
 
 @respx.mock
-def test_a_high_flow_choice_is_judged_as_the_standard_slice_it_becomes(
+def test_a_high_flow_choice_on_the_rack_side_is_judged_as_high_flow(
     client: TestClient, model: str
 ) -> None:
-    """Review Focus 2 (#484): an HH position is neither offered nor accepted."""
+    """#484: the slice carries the flow chosen for the right, the side the rack swaps
+    onto, so with High Flow chosen there an HH position is offered and accepted, and an
+    HS one is not."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
     high_flow = {"nozzles": [{"size": "0.4", "flow": "high_flow"}], "tier": "standard"}
 
-    response = client.post(
+    accepted = client.post(
         f"/api/v1/print/outputs/{output_id}/check", json={**body(**high_flow), "rack_position": 3}
+    )
+    refused = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(**high_flow), "rack_position": 2}
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["errors"] == []
+    assert accepted.json()["rack"]["position"] == 3
+    assert [o["position"] for o in accepted.json()["rack"]["options"]] == [3, 5]
+    assert refused.json()["errors"] == [
+        "Rack position 2 holds a 0.4 mm Standard nozzle, and this prints with a 0.4 mm "
+        "High Flow nozzle. Choose another position, or Automatic."
+    ]
+
+
+@respx.mock
+def test_a_high_flow_choice_on_the_left_only_leaves_the_rack_side_standard(
+    client: TestClient, model: str
+) -> None:
+    """The dialog lists the left first: High Flow there says nothing of the rack side."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    left_only = {
+        "nozzles": [{"size": "0.4", "flow": "high_flow"}, {"size": "0.4", "flow": "standard"}],
+        "tier": "standard",
+    }
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(**left_only), "rack_position": 3}
     )
 
     assert response.status_code == 200, response.text
@@ -543,3 +670,151 @@ def test_a_printer_without_a_rack_makes_no_rack_pick(client: TestClient, model: 
     assert response.status_code == 200, response.text
     assert not [c for c in sliced_reads.calls if "/library/files/77/" in c.request.url.path]
     assert not [w for w in response.json()["warnings"] if w["kind"].startswith("rack-")]
+
+
+def _both_sides_high_flow() -> None:
+    """The rack recording with a 0.4 High Flow mounted on both sides (#1238)."""
+    status = invented_status()
+    high_flow = {"nozzle_type": "HH01", "nozzle_diameter": "0.4"}
+    status["nozzles"] = [high_flow, high_flow]
+    for entry in status["nozzle_rack"]:
+        if entry["id"] in (0, 1):
+            entry.update(high_flow)
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+
+
+def _high_flow_sides(warnings: list[dict[str, Any]]) -> set[str]:
+    return {
+        side
+        for warning in warnings
+        if warning["kind"] == "hf-mounted"
+        for side in ("left", "right")
+        if warning["message"].startswith(f"The {side} nozzle")
+    }
+
+
+@respx.mock
+def test_a_rack_pick_drops_the_rack_sides_high_flow_warning(client: TestClient, model: str) -> None:
+    """#1238: the rack swaps a Standard hotend onto the rack side (the right), so the
+    mounted High Flow there no longer matters. Nor does the left's: Standard is chosen,
+    and only the right has it, in its spares, so only the right is offered (#834)."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+
+    result = check(client, output_id)
+
+    assert result["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(result["warnings"]) == set()
+
+
+@respx.mock
+def test_without_a_rack_pick_the_rack_sides_high_flow_warning_stands(
+    client: TestClient, model: str
+) -> None:
+    """Left to Bambuddy, nothing is picked here, so nothing says what the right gets."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+
+    result = check(client, output_id, rack_algorithm="bambuddy")
+
+    assert result["rack"]["position"] is None
+    assert _high_flow_sides(result["warnings"]) == {"right"}
+
+
+@respx.mock
+def test_a_run_that_picked_from_the_rack_drops_the_rack_sides_high_flow_warning(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _both_sides_high_flow()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(**CHECK_04))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack_picks"]
+    assert _high_flow_sides(response.json()["warnings"]) == set()
+
+
+@respx.mock
+def test_a_library_files_rack_pick_drops_only_the_rack_sides_high_flow_warning(
+    client: TestClient,
+) -> None:
+    """A library file prints as its author left it (#313): it is offered no side, so the
+    left's warning stands beside the rack pick that drops the right's (#1238)."""
+    configure(client)
+    one_color(89)
+    library_file(89)
+    run_routes()
+    _both_sides_high_flow()
+
+    check = client.post(
+        "/api/v1/print/library/89/check",
+        json={**body(**CHECK_04), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(check.json()["warnings"]) == {"left"}
+
+
+def _library_high_flow(**extra: Any) -> dict[str, Any]:
+    return {
+        **body(nozzles=[{"size": "0.4", "flow": "high_flow"}], tier="standard"),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        **extra,
+    }
+
+
+@respx.mock
+def test_a_sliced_library_file_with_high_flow_chosen_is_judged_as_standard(
+    client: TestClient,
+) -> None:
+    """A library file that is sliced already cannot state the flow chosen (#484), so it
+    is sliced with its own, Standard unless its author saved it High Flow (#313). So the
+    mounted High Flow left is warned of, the preview picks a Standard hotend for the
+    right, and a High Flow position is refused, as Bambuddy's dispatch would refuse it."""
+    configure(client)
+    one_color(89)
+    library_file(89, content=library_3mf(sliced=True))
+    run_routes()
+    _both_sides_high_flow()
+
+    check = client.post("/api/v1/print/library/89/check", json=_library_high_flow())
+    manual = client.post("/api/v1/print/library/89/check", json=_library_high_flow(rack_position=3))
+
+    assert check.status_code == 200, check.text
+    assert check.json()["rack"]["position"] in (2, 4, 6)
+    assert _high_flow_sides(check.json()["warnings"]) == {"left"}
+    assert manual.json()["errors"] == [
+        "Rack position 3 holds a 0.4 mm High Flow nozzle, and this prints with a 0.4 mm "
+        "Standard nozzle. Choose another position, or Automatic."
+    ]
+
+
+@respx.mock
+def test_a_sliced_library_run_with_high_flow_chosen_warns_of_the_high_flow_left(
+    client: TestClient,
+) -> None:
+    configure(client)
+    one_color(89)
+    library_file(89, content=library_3mf(sliced=True))
+    run_routes()
+    _both_sides_high_flow()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_library(client, 89, json=_library_high_flow())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rack_picks"]
+    assert _high_flow_sides(response.json()["warnings"]) == {"left"}

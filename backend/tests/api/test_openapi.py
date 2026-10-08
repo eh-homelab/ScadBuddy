@@ -66,6 +66,8 @@ def test_the_new_model_file_routes_document_only_what_they_answer(tmp_path: Path
         "image/jpeg",
         "image/webp",
     }
+    # Usually WebP, but a file it cannot shrink is served as it is (#1427).
+    assert success_types("/api/v1/models/{slug}/media/{item_id}/thumbnail", "get") == {"image/*"}
     assert success_types("/api/v1/models/{slug}/source", "get") == {"text/plain"}
     for path in ("/api/v1/models/{slug}/readme", "/api/v1/models/{slug}/thumbnail"):
         for method in ("put", "delete"):

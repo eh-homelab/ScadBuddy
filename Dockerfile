@@ -258,17 +258,16 @@ COPY --from=agent-build /src/agent/dist ./dist
 # session gets a copy of it with its own `.mcp.json` (headlessBrowser.ts).
 COPY --from=agent-build /src/agent/plugins ./plugins
 
-# The Claude Code binary the Agent SDK bundles is pinned the way
-# OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
-# (https://code.claude.com/docs/en/agent-sdk/overview), so an SDK bump changes
-# the harness underneath every query. This fails the build when either the
-# SDK's declared `claudeCodeVersion` or the binary's own `--version` differs
-# from the pin. Bump it together with the SDK version in agent/package.json.
-# It runs against the node_modules that ship, for the platform being built.
-ARG CLAUDE_CODE_VERSION=2.1.283
-RUN node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
-ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
-    NODE_ENV=production \
+# The Agent SDK "runs the Claude Code binary"
+# (https://code.claude.com/docs/en/agent-sdk/overview), a per-platform optional
+# dependency. agent/package.json pins the SDK exactly and the lockfile pins each
+# platform's binary by integrity hash, so the version is not repeated here
+# (#1540; it was a CLAUDE_CODE_VERSION ARG, edited by hand on every SDK bump).
+# This fails the build when no binary installed for the platform being built,
+# or its own `--version` differs from the `claudeCodeVersion` the SDK declares.
+# It runs against the node_modules that ship.
+RUN node dist/check-cli-version.js
+ENV NODE_ENV=production \
     HOME=/var/lib/scadbuddy-agent \
     CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
 
@@ -499,7 +498,8 @@ RUN uv sync --frozen \
 
 # The Temporal CLI's dev server backs the `requires_temporal` tests
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
-# above (the release's checksums.txt).
+# above (the release's checksums.txt). ci.yml's `agent` job installs the same version
+# and amd64 digest for the agent's Temporal tests (#1055); bump them together.
 ARG TARGETARCH
 ARG TEMPORAL_CLI_VERSION=1.9.1
 ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5

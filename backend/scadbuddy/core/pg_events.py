@@ -328,18 +328,27 @@ class PgNotifyEventBus:
         self._closed = False
         self._tasks: list[asyncio.Task[None]] = []
         self._drainer: asyncio.Task[None] | None = None
+        #: Set on the listener's first connect: what `start` waits for.
+        self._listening = asyncio.Event()
         listener.listen(PG_CHANNEL, on_notify=self._received, on_connect=self._connected)
 
     # -- lifecycle ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect, then start draining the outbox, listening and pruning.
+        """Connect and listen, prune the log once, then start draining the outbox and
+        pruning on a timer.
+
+        Returns once the listener's ``LISTEN`` is in place (#1745), so whatever this
+        process publishes from then on -- the buffered early events included -- is
+        heard here too; a NOTIFY committed before it reached nobody in this process.
+        Raises `TimeoutError` if that takes longer than ``connect_timeout``.
 
         The ``events`` table must exist: open the job store (which migrates) first.
         Raises `EventLogMissingError` when it does not, rather than failing later
         in every write. A failed start closes the pool it opened, so the caller's
         `aclose` -- in a ``finally`` a failed start never reaches -- is not needed
         to release it."""
+        listening: asyncio.Task[None] | None = None
         try:
             await self._pool.open(wait=True, timeout=self.connect_timeout)
             async with self._pool.connection() as conn:
@@ -350,9 +359,17 @@ class PgNotifyEventBus:
                     f"the {EVENTS_TABLE!r} table does not exist: open the job store, which "
                     "migrates the database, before starting the event bus"
                 )
+            listening = asyncio.create_task(self.listener.run())
+            await asyncio.wait_for(self._listening.wait(), self.connect_timeout)
         except BaseException:
+            if listening is not None:
+                listening.cancel()
+                await asyncio.gather(listening, return_exceptions=True)
             await self._pool.close()
             raise
+        # The first pass is ours, not the timer's: run in a task, it would land whenever
+        # the caller next yields, after events the caller has since logged (#1787).
+        await self._prune_logged()
         outbox = _Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
         with self._lock:
             self._outbox = outbox
@@ -360,10 +377,7 @@ class PgNotifyEventBus:
         for item in early:
             outbox.offer(item)
         self._drainer = asyncio.create_task(self._drain(outbox))
-        self._tasks = [
-            asyncio.create_task(self.listener.run()),
-            asyncio.create_task(self._pruner()),
-        ]
+        self._tasks = [listening, asyncio.create_task(self._pruner())]
 
     async def aclose(self) -> None:
         with self._lock:
@@ -526,13 +540,16 @@ class PgNotifyEventBus:
 
     async def _pruner(self) -> None:
         while True:
-            try:
-                await self.prune_log()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("could not prune the event log")
             await asyncio.sleep(self.prune_interval)
+            await self._prune_logged()
+
+    async def _prune_logged(self) -> None:
+        try:
+            await self.prune_log()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("could not prune the event log")
 
     def _received(self, payload: str) -> None:
         try:
@@ -546,6 +563,7 @@ class PgNotifyEventBus:
         self.local.publish(event)
 
     def _connected(self, reconnected: bool) -> None:
+        self._listening.set()
         if not reconnected:
             return
         logger.warning(

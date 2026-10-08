@@ -28,14 +28,17 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness 
 // on the next. Each credential is tried at most once per turn, which is the
 // cap on how many keys spend on one failing turn; one whose failure is not
 // the credential's (a bad request, a turn or budget limit) is not retried at
-// all, since the next key would fail the same way.
+// all, since the next key would fail the same way. (Claude Code 2.1.287 itself
+// sends a gateway's refused 400 or 422 once more on the same key, without the
+// `thinking.display` field it added, before it reports the failure; this file
+// sees only the final refusal: credentialErrors.ts.)
 //
 // MID-TURN FAILURES RESUME, THEY DO NOT RESTART. Claude Code writes the
 // session transcript as the turn goes: the user's prompt before the first
 // model request, then every tool call and result. Measured on Claude Code
-// 2.1.283 against the fake endpoint (test/fallback.e2e.test.ts): after a
-// failed request, a query with `resume` and the prompt CONTINUE_PROMPT sends
-// the model the original prompt, every finished tool call and its result,
+// 2.1.283 and 2.1.287 against the fake endpoint (test/fallback.e2e.test.ts):
+// after a failed request, a query with `resume` and the prompt CONTINUE_PROMPT
+// sends the model the original prompt, every finished tool call and its result,
 // and then CONTINUE_PROMPT; the synthetic "API Error" message is left out.
 // No tool runs twice. Sending the original prompt again instead would put it
 // in the context twice. So the next credential always resumes the session
@@ -184,8 +187,8 @@ function apiFailure(
 }
 
 /**
- * Costs across attempts. Measured on Claude Code 2.1.283 against the fake
- * endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
+ * Costs across attempts. Measured on Claude Code 2.1.283 and 2.1.287 against
+ * the fake endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
  * already includes everything the session spent before it, restored from the
  * transcript's `cost-state` (an attempt that spent 0.000105 and failed, then
  * the resumed one: 0.00021), while `num_turns` and the `maxBudgetUsd` check
@@ -202,18 +205,30 @@ type Spend = {
   turns: number
 }
 
+/**
+ * USD: how far below what it should carry a resumed total may read and still
+ * have carried it. The prior the manager passes is a float difference
+ * (`cost_usd - unpriced_cost_usd`, #991) that can land an ulp or two above
+ * the total the transcript restores; a restore that did not happen is short
+ * by a whole turn's spend, far more than this.
+ */
+export const RESTORED_EPSILON = 1e-9
+
+/** Whether a resumed total holds `carried`, what it should have carried in. */
+export const carries = (total: number, carried: number): boolean => total >= carried - RESTORED_EPSILON
+
 /** What a result's total says this attempt spent itself. */
 function ownCost(result: SDKResultMessage, spend: Spend, resumed: boolean): number {
   const carried = resumed ? spend.prior + spend.usd : 0
   // A total below what it should have carried in: the restore did not happen.
-  return result.total_cost_usd >= carried ? result.total_cost_usd - carried : result.total_cost_usd
+  return carries(result.total_cost_usd, carried) ? Math.max(result.total_cost_usd - carried, 0) : result.total_cost_usd
 }
 
 /** The final result, with the earlier attempts' turns, and their cost when its total does not already hold it. */
 function withSpent(message: SDKMessage, spend: Spend, resumed: boolean): SDKMessage {
   if (message.type !== 'result' || (spend.usd === 0 && spend.turns === 0)) return message
   const carried = resumed ? spend.prior + spend.usd : 0
-  const total = resumed && message.total_cost_usd >= carried ? message.total_cost_usd : message.total_cost_usd + spend.usd
+  const total = resumed && carries(message.total_cost_usd, carried) ? message.total_cost_usd : message.total_cost_usd + spend.usd
   return { ...message, total_cost_usd: total, num_turns: message.num_turns + spend.turns }
 }
 
@@ -320,8 +335,9 @@ export async function* runWithFallback(
             refused = evidence
             // Before `break`, whose return() would wait on the process. The
             // SDK closes Claude Code's input and sends SIGTERM 2 s later
-            // (sdk.mjs 0.3.283), so a retry or two may still go out in that
-            // grace; they are refused like the first and cost nothing.
+            // (sdk.mjs 0.3.283 and 0.3.287), so a retry or two may still go
+            // out in that grace; they are refused like the first and cost
+            // nothing.
             controller.abort(new Error(`the credential was refused (${evidence.message})`))
             break
           }

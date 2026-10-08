@@ -36,12 +36,17 @@ function stillAccepting(result: FetchResult<unknown>): boolean {
  * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
  * from something in between, whose body is not one of the backend's problems (they
  * always carry a `detail`). Or the backend answered that it is still accepting the same
- * request. The same rule as the browser client's `unanswered`.
+ * request, or that Temporal may hold a start of it (`may_have_started`, review #1066 (10)
+ * 3): the same key follows it. The same rule as the browser client's `unanswered`.
  */
 function unanswered(result: FetchResult<unknown>): boolean {
   const { error, response } = result
-  const problem = typeof error === 'object' && error !== null ? (error as { type?: unknown; detail?: unknown }) : {}
+  const problem =
+    typeof error === 'object' && error !== null
+      ? (error as { type?: unknown; detail?: unknown; may_have_started?: unknown })
+      : {}
   if (response.status === 503 && problem.type === STILL_ACCEPTING) return true
+  if (problem.may_have_started === true) return true
   return [502, 503, 504, 524].includes(response.status) && typeof problem.detail !== 'string'
 }
 
@@ -56,7 +61,8 @@ export async function answered<T>(
   what: string,
   gaveUp = '',
 ): Promise<FetchResult<T>> {
-  const began = Date.now()
+  // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
+  const began = performance.now()
   // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
   for (let misses = 0; ; ) {
     let result: FetchResult<T>
@@ -70,11 +76,11 @@ export async function answered<T>(
     }
     if (unanswered(result)) {
       const accepting = stillAccepting(result)
-      if (accepting ? Date.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
+      if (accepting ? performance.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
-      // The backend's Retry-After paces a still-accepting re-send (review #1061 4a).
-      const after = accepting ? Number(result.response.headers.get('Retry-After')) : 0
+      // The backend's Retry-After paces a re-send it answered (review #1061 4a).
+      const after = Number(result.response.headers.get('Retry-After'))
       await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
       continue
     }
@@ -123,14 +129,30 @@ export async function command<T>(
   what: string,
   send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
 ): Promise<T | OperationRunning> {
+  const answer = await commandAnswer(ctx, what, send)
+  return isRunning(answer) ? answer : ok(Promise.resolve(answer), what)
+}
+
+/**
+ * `command`, answered as the route would have answered it, for a tool that reads a
+ * refusal's fields: the route's own result, or a followed operation's result, or its
+ * failure as the problem the route would have sent (its extensions, such as a stale
+ * base's `current`, at the top level, as in any problem document); past the follow
+ * window, the running operation, as from `command`.
+ */
+export async function commandAnswer<T>(
+  ctx: ToolContext,
+  what: string,
+  send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
+): Promise<FetchResult<T> | OperationRunning> {
   const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
   const gaveUp = ' It may have been done anyway: check before trying again.'
   const first = await answered(ctx, () => send(headers), what, gaveUp)
-  if (first.response.status !== 202) return ok(Promise.resolve(first), what)
+  if (first.response.status !== 202) return first
   let op = first.data as unknown as Operation
-  const deadline = Date.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
+  const deadline = performance.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
   for (let step = 1; op.status === 'running'; step++) {
-    if (Date.now() >= deadline) {
+    if (performance.now() >= deadline) {
       return {
         status: 'running',
         operation_id: op.id,
@@ -147,11 +169,13 @@ export async function command<T>(
     )) as Operation
   }
   if (op.status === 'failed') {
-    // The problem the route would have answered, type and extensions included, through
-    // the same `ok` as a direct answer (review #1063 4).
+    // The problem the route would have answered, type and extensions included (review #1063 4);
+    // its own fields win over an extension of the same name, as in the browser's `command()`.
     const error = op.error
-    const problem = error ? { ...error.extensions, type: error.type, title: error.title, status: error.status, detail: error.detail } : undefined
-    return ok<T>(Promise.resolve({ error: problem, response: new Response(null, { status: error?.status ?? 500 }) }), what)
+    const problem = error
+      ? { ...error.extensions, type: error.type, title: error.title, status: error.status, detail: error.detail }
+      : { status: 500, title: 'Internal Server Error', detail: `${what} failed` }
+    return { error: problem, response: new Response(null, { status: problem.status }) }
   }
-  return op.result as T
+  return { data: op.result as T, response: new Response(null, { status: 200 }) }
 }

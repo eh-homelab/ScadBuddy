@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -30,6 +32,9 @@ class LibraryEntry(BaseModel):
     print_count: int = 0
     #: Whether the dialog prints it; a sliced file is printed from Bambuddy directly.
     printable: bool
+    #: Bytes, and when it was added (UTC): what tells two files of one name apart (#935).
+    file_size: int | None = None
+    created_at: datetime | None = None
 
 
 class LibraryListing(BaseModel):
@@ -50,7 +55,14 @@ def _entry(row: LibraryListRow) -> LibraryEntry:
         has_thumbnail=row.thumbnail_path is not None,
         print_count=row.print_count,
         printable=printable(row.file_type),
+        file_size=row.file_size,
+        created_at=_utc(row.created_at) if row.created_at is not None else None,
     )
+
+
+def _utc(when: datetime) -> datetime:
+    """Bambuddy's times are naive and are UTC (as in ``bambuddy.hardware``)."""
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when.astimezone(UTC)
 
 
 async def list_library(

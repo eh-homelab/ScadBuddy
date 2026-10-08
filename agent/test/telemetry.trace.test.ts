@@ -109,4 +109,12 @@ describe('tool contexts', () => {
     expect(toolContextFor({ _meta: { 'claudecode/toolUseId': 'toolu_1' } })).toBe(context.active())
     span.end()
   })
+
+  it('falls back to the turn’s context when given one, not the active context', () => {
+    const turnSpan = tracer().startSpan('agent.turn')
+    const turnContext = trace.setSpan(ROOT_CONTEXT, turnSpan)
+    expect(toolContextFor(undefined, () => turnContext)).toBe(turnContext)
+    expect(toolContextFor({ _meta: { 'claudecode/toolUseId': 'toolu_unbound' } }, () => turnContext)).toBe(turnContext)
+    turnSpan.end()
+  })
 })

@@ -6,7 +6,8 @@
    A cancel waits it out and ends the record, which is never left ``running``.
 3. ``op.<kind>.run`` is the effect, with the kind's attempts; then ``op_finish``, which a
    cancel waits out too. From the record on, every outcome completes the execution and
-   is recorded.
+   is recorded. A kind with a prelude (#1060) runs ``op.<prelude>.run`` on the
+   prelude's own queue first.
 
 Every kind here is ``done`` (§4.2 step 4): the Update answers once the effect ended.
 """
@@ -28,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
         FINISH_ACTIVITY,
         INSERT_ACTIVITY,
         OPERATION_WORKFLOW,
+        PRELUDE_PATCH,
         FinishOp,
         InsertOp,
         OperationAnswer,
@@ -47,13 +49,14 @@ with workflow.unsafe.imports_passed_through():
 
 #: §4.2 step 4: the check answers well inside the route's deadline; retries go on.
 CHECK_TIMEOUT = timedelta(seconds=8)
-#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin. The browser's
-#: ``operationFollowMs`` (frontend ``client.ts``) is reckoned from it: change them together.
-#: The agent follows only for ``COMMAND_ANSWER_DEADLINE`` plus a margin, then hands back
-#: the running operation.
+#: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin; a kind may set its own.
+#: The browser's ``operationFollowMs`` (frontend ``client.ts``) is reckoned from it: change
+#: them together. The agent follows only for ``COMMAND_ANSWER_DEADLINE`` plus a margin, then
+#: hands back the running operation.
 RUN_TIMEOUT = timedelta(minutes=5)
-#: The run heartbeats (`operation_activities.py`), so a run on a worker that died is
-#: retired after this, not after ``RUN_TIMEOUT`` (review #1063 second review 2).
+#: The run heartbeats (`operation_activities.py`), so a timeout or cancel reaches it, and
+#: a run on a worker that died is retired after this, not after ``RUN_TIMEOUT`` (review
+#: #1063 second review 2).
 RUN_HEARTBEAT = timedelta(seconds=30)
 SHORT = timedelta(seconds=60)
 READ_RETRY = RetryPolicy(
@@ -158,13 +161,32 @@ class OperationWorkflow:
     async def _effect(
         self, input: OperationInput, operation_id: str, checked: dict[str, Any]
     ) -> FinishOp:
-        """The kind's run; whatever happened is recorded, and the execution completes."""
+        """The kind's prelude, if any, then its run; whatever happened is recorded, and
+        the execution completes. A prelude that fails is the operation's failure, and
+        the run never starts."""
         try:
+            prelude = input.prelude
+            if prelude is not None and workflow.patched(PRELUDE_PATCH):
+                await workflow.execute_activity(
+                    run_activity(prelude.kind),
+                    RunOp(request=input.request, checked={}, author=input.author),
+                    result_type=dict,
+                    task_queue=prelude.task_queue,
+                    start_to_close_timeout=RUN_TIMEOUT,
+                    heartbeat_timeout=RUN_HEARTBEAT,
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=prelude.run_attempts,
+                        initial_interval=timedelta(seconds=1),
+                        backoff_coefficient=2.0,
+                    ),
+                )
             result: dict[str, Any] = await workflow.execute_activity(
                 run_activity(input.kind),
-                RunOp(request=input.request, checked=checked),
+                RunOp(request=input.request, checked=checked, author=input.author),
                 result_type=dict,
-                start_to_close_timeout=RUN_TIMEOUT,
+                start_to_close_timeout=(
+                    timedelta(seconds=input.run_timeout_s) if input.run_timeout_s else RUN_TIMEOUT
+                ),
                 heartbeat_timeout=RUN_HEARTBEAT,
                 retry_policy=RetryPolicy(
                     maximum_attempts=input.run_attempts,

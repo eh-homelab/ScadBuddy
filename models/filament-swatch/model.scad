@@ -25,7 +25,7 @@ color_name = "Cyan"; // 20
 // Print temperature
 temp = "220°C"; // 10
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans:style=Bold"; // font
 
 /* [Card] */

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from scadbuddy.store.content import StoreFullError
 from scadbuddy.worker import worker_deps_from_state
 from tests.api.conftest import wait_for_job
 from tests.conftest import MODEL_SLUG, UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.support.operations import press
 
 
 def test_an_upload_store_without_its_database_is_a_503_problem(tmp_path: Path) -> None:
@@ -79,6 +81,7 @@ def _upload(
     response = client.post(
         f"/api/v1/models/{slug}/assets",
         files={"file": (name, data, "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, object] = response.json()
@@ -125,6 +128,7 @@ def test_anything_but_svg_or_png_is_refused(client: TestClient) -> None:
     response = client.post(
         f"/api/v1/models/{MODEL_SLUG}/assets",
         files={"file": ("sneaky.svg", b"GIF89a....", "image/svg+xml")},
+        headers=press(),
     )
     assert response.status_code == 422
     assert "only SVG and PNG" in response.json()["detail"]
@@ -134,13 +138,16 @@ def test_an_oversized_file_is_refused(client: TestClient) -> None:
     response = client.post(
         f"/api/v1/models/{MODEL_SLUG}/assets",
         files={"file": ("big.svg", b"<svg" + b" " * MAX_ASSET_BYTES, "image/svg+xml")},
+        headers=press(),
     )
     assert response.status_code == 413
 
 
 def test_uploads_need_a_model_and_ids_need_the_right_shape(client: TestClient) -> None:
     missing = client.post(
-        "/api/v1/models/nope/assets", files={"file": ("a.svg", HEART_SVG, "image/svg+xml")}
+        "/api/v1/models/nope/assets",
+        files={"file": ("a.svg", HEART_SVG, "image/svg+xml")},
+        headers=press(),
     )
     assert missing.status_code == 404
     assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{'0' * 64}").status_code == 404
@@ -157,7 +164,9 @@ def test_a_render_takes_an_uploaded_id(client: TestClient, paths: DataPaths) -> 
     assert job["params"] == {"label": asset["id"]}
 
     output = client.post(
-        f"/api/v1/models/{MODEL_SLUG}/outputs", json={"job_id": job["id"], "name": "With heart"}
+        f"/api/v1/models/{MODEL_SLUG}/outputs",
+        json={"job_id": job["id"], "name": "With heart"},
+        headers=press(),
     ).json()
     # The value IS the asset's hash, so the output's record and its 3MF name the bytes.
     directory = paths.output_dir(MODEL_SLUG, output["id"])
@@ -374,6 +383,7 @@ def test_an_upload_past_the_cap_is_a_problem_naming_the_setting(
     refused = capped_client.post(
         f"/api/v1/models/{MODEL_SLUG}/assets",
         files={"file": ("b.svg", _svg(2), "image/svg+xml")},
+        headers=press(),
     )
     assert refused.status_code == 413, refused.text
     assert refused.headers["content-type"] == "application/problem+json"
@@ -408,6 +418,7 @@ def test_a_preset_refuses_a_file_value_that_is_not_an_upload(client: TestClient)
     response = client.post(
         f"/api/v1/models/{MODEL_SLUG}/presets",
         json={"name": "Ghost", "params": {"label": "f" * 64}},
+        headers=press(),
     )
     assert response.status_code == 422, response.text
     assert "label" in response.json()["detail"]
@@ -420,11 +431,14 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     render = f"/api/v1/models/{MODEL_SLUG}/render"
     accepted = client.post(render, json={"params": {"label": in_output}})
     job = wait_for_job(client, accepted.json()["job_id"])
-    saved = client.post(f"/api/v1/models/{MODEL_SLUG}/outputs", json={"job_id": job["id"]})
+    saved = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/outputs", json={"job_id": job["id"]}, headers=press()
+    )
     assert saved.status_code == 201, saved.text
     preset = client.post(
         f"/api/v1/models/{MODEL_SLUG}/presets",
         json={"name": "Heart", "params": {"label": in_preset}},
+        headers=press(),
     )
     assert preset.status_code == 201, preset.text
     # The job and the output are the same render: drop the job, so only the output
@@ -445,6 +459,15 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     assert "scadbuddy_assets_swept_total 1.0" in client.get("/metrics").text
 
 
+def _until(done: Callable[[], bool], timeout: float = 30) -> None:
+    """The boot's sweep is the housekeeping Schedule's run (review #1095 1), which
+    starts once the app's library worker has set the Schedule up."""
+    deadline = time.monotonic() + timeout
+    while not done():
+        assert time.monotonic() < deadline, "the boot's sweep never ran"
+        time.sleep(0.1)
+
+
 @pytest.mark.parametrize(("interval", "swept"), [(86400.0, True), (0.0, False)])
 def test_the_boot_sweeps_unless_the_sweep_is_off(
     settings: Settings, pg_conninfo: str, file_model: str, interval: float, swept: bool
@@ -455,8 +478,11 @@ def test_the_boot_sweeps_unless_the_sweep_is_off(
 
     booted = settings.model_copy(update={"asset_sweep_interval": interval})
     with TestClient(create_app(booted)) as second:
-        found = second.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code
-    assert found == (404 if swept else 200)
+        url = f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}"
+        if swept:
+            _until(lambda: second.get(url).status_code == 404)
+        else:
+            assert second.get(url).status_code == 200
 
 
 def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
@@ -464,11 +490,13 @@ def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
 ) -> None:
     """No backfill (#591): the usage is the rows, whatever an old ledger says, and the
     boot's sweep removes the ledger and the sidecars; an upload writes neither."""
+    settings = settings.model_copy(update={"asset_sweep_interval": 86400.0})  # the boot's sweep
     ledger = paths.assets.with_name(f".{paths.assets.name}.usage.json")
     sidecar = paths.assets / f"{'e' * 64}.json"
     for path in (ledger, sidecar):
         path.write_text(json.dumps({"count": 42, "bytes": 4242, "dirty": False}))
     with TestClient(create_app(settings)) as test_client:
+        _until(lambda: not ledger.exists() and not sidecar.exists())
         usage = test_client.get("/api/v1/assets/usage").json()
         uploaded = _upload(test_client, _svg(1))
     assert (usage["count"], usage["bytes"]) == (0, 0)
@@ -530,6 +558,7 @@ def test_a_failed_mirror_fails_the_upload_with_its_problem(
     response = client.post(
         f"/api/v1/models/{MODEL_SLUG}/assets",
         files={"file": ("heart.svg", HEART_SVG, "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 502
     assert response.json()["detail"] == "Bambuddy is unreachable"
@@ -548,6 +577,7 @@ def test_an_upload_the_blob_store_has_no_room_for_is_a_507(
     response = client.post(
         f"/api/v1/models/{MODEL_SLUG}/assets",
         files={"file": ("heart.svg", HEART_SVG, "application/octet-stream")},
+        headers=press(),
     )
     assert response.status_code == 507, response.text
     assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]

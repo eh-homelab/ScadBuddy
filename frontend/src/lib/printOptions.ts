@@ -48,9 +48,9 @@ export const PRINT_OPTIONS: readonly OptionSpec[] = [
   { name: 'manual_start', label: 'Wait for a manual start', kind: 'boolean' },
   { name: 'insert_at_top', label: 'Insert at the top of the queue', kind: 'boolean' },
   { name: 'auto_off_after', label: 'Power off afterwards', kind: 'boolean' },
-  // No bound: Bambuddy declares `project_id` as a plain integer, so inventing one here
-  // would reject an id the user's own instance would accept.
-  { name: 'project_id', label: 'Bambuddy project', kind: 'number', hint: 'Project id', min: 1 },
+  // No `project_id`: the Project picker is the one control for it, and a run drops an
+  // options `project_id` rather than half-apply it (`print_run.py`), so a field here
+  // would be a control that never takes effect (#1047).
   { name: 'preheat_override', label: 'Preheat', kind: 'preheat' },
   {
     name: 'preheat_chamber_target_override',
@@ -61,6 +61,23 @@ export const PRINT_OPTIONS: readonly OptionSpec[] = [
     max: 65,
   },
 ]
+
+/**
+ * `min`/`max`/`step` on a number input are advisory: a browser enforces them on form
+ * submission, not on what the user types, and neither the Options disclosure nor the
+ * Copies box submits a form. This is what stops an out-of-range *or* fractional value
+ * reaching the server, where every one of these fields is an `int` and a Pydantic 422
+ * names no field. Rounding matters as much as bounding: `Math.min`/`Math.max` leave
+ * `3.5` alone.
+ */
+export function clampOption(raw: string, spec: Pick<OptionSpec, 'min' | 'max'>): number | null {
+  const whole = Math.round(Number(raw))
+  // A `type="number"` input reports a lone "-" as its value, and `??` does not fall
+  // through `NaN`, so an unguarded one sticks in the field and blanks the control.
+  if (!Number.isFinite(whole)) return null
+  const lower = spec.min === undefined ? whole : Math.max(spec.min, whole)
+  return spec.max === undefined ? lower : Math.min(spec.max, lower)
+}
 
 export const CALIBRATION_CHOICES = ['off', 'on', 'auto'] as const
 export const PREHEAT_CHOICES = ['inherit', 'on', 'off'] as const

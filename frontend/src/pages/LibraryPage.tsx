@@ -4,6 +4,7 @@ import type { LibraryEntry, LibraryListing } from '../api/types'
 import { PrintPicker } from '../components/PrintPicker'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { formatBytes } from '../lib/format'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
 const ADVANCED_KEY = 'scadbuddy.library.advanced'
@@ -67,6 +68,7 @@ export function LibraryPage() {
             type="button"
             data-testid="library-folder-root"
             onClick={() => setFolderId(null)}
+            aria-current={folderId === null ? 'true' : undefined}
             className={`block w-full rounded-[6px] px-2 py-1 text-left ${folderId === null ? 'bg-accent/8 text-ink' : 'text-muted'}`}
           >
             Top level
@@ -77,6 +79,13 @@ export function LibraryPage() {
               type="button"
               data-testid={`library-folder-${folder.id}`}
               onClick={() => setFolderId(folder.id)}
+              aria-current={folderId === folder.id ? 'true' : undefined}
+              // #975 — "MakerWorld, 49 files", not "MakerWorld49" run together.
+              aria-label={
+                folder.file_count
+                  ? `${folder.name}, ${folder.file_count} ${folder.file_count === 1 ? 'file' : 'files'}`
+                  : undefined
+              }
               style={{ paddingLeft: `${8 + (folder.depth ?? 0) * 12}px` }}
               className={`block w-full rounded-[6px] py-1 pr-2 text-left ${folderId === folder.id ? 'bg-accent/8 text-ink' : 'text-muted'}`}
             >
@@ -137,7 +146,7 @@ export function LibraryPage() {
               <li
                 key={file.id}
                 data-testid={`library-file-${file.id}`}
-                className="flex flex-col gap-2 rounded-[8px] border border-line bg-surface-2 p-2"
+                className="flex min-w-0 flex-col gap-2 rounded-[8px] border border-line bg-surface-2 p-2"
               >
                 {file.has_thumbnail ? (
                   <img
@@ -149,11 +158,15 @@ export function LibraryPage() {
                 ) : (
                   <div className="aspect-square w-full rounded-[4px] bg-surface-3" aria-hidden />
                 )}
-                <p className="truncate text-[13px] text-ink" title={file.filename}>
-                  {file.filename}
-                </p>
+                <MiddleTruncated name={file.filename} />
+                <FileFacts file={file} />
                 {file.printable ? (
-                  <Button variant="primary" data-testid={`library-print-${file.id}`} onClick={() => setPrinting(file)}>
+                  <Button
+                    variant="primary"
+                    data-testid={`library-print-${file.id}`}
+                    aria-label={`Print ${file.filename}`}
+                    onClick={() => setPrinting(file)}
+                  >
                     Print
                   </Button>
                 ) : (
@@ -176,5 +189,45 @@ export function LibraryPage() {
         />
       </div>
     </div>
+  )
+}
+
+/** The last characters of a name's stem that stay when it is cut, with its extension. */
+const KEPT_TAIL = 8
+
+/**
+ * #935 — a long name cut in the middle, not at the end. Generated names share a long
+ * prefix (`bag-clip-3155628dc2bb…`), so cutting the end hides the only part that differs.
+ * CSS has no middle ellipsis: the head truncates and the tail never shrinks.
+ */
+function MiddleTruncated({ name }: { name: string }) {
+  // The extension is found from the end: a dot early in a name (`v1.2_shelf….3mf`) is
+  // part of the stem, and must not pull the whole name into the tail that never shrinks.
+  const sliced = name.toLowerCase().endsWith('.gcode.3mf') ? name.length - '.gcode.3mf'.length : -1
+  const last = name.lastIndexOf('.')
+  const dot = sliced > 0 ? sliced : last > 0 ? last : name.length
+  const split = Math.max(0, dot - KEPT_TAIL)
+  return (
+    <p className="flex min-w-0 text-[13px] text-ink" title={name}>
+      <span className="truncate">{name.slice(0, split)}</span>
+      <span className="shrink-0 whitespace-pre">{name.slice(split)}</span>
+    </p>
+  )
+}
+
+/** When it was added and how big it is: what tells two files of one name apart (#935). */
+function FileFacts({ file }: { file: LibraryEntry }) {
+  const added = file.created_at ? new Date(file.created_at) : null
+  const facts = [
+    added && !Number.isNaN(added.getTime()) ? (
+      <time key="added" dateTime={file.created_at ?? undefined}>
+        {added.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+      </time>
+    ) : null,
+    file.file_size != null ? <span key="size">{formatBytes(file.file_size)}</span> : null,
+  ].filter((fact) => fact !== null)
+  if (facts.length === 0) return null
+  return (
+    <p className="sb-num -mt-1 flex flex-wrap gap-x-2 text-[11px] text-faint">{facts}</p>
   )
 }

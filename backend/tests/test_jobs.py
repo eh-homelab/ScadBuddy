@@ -806,6 +806,50 @@ async def test_a_render_that_drew_nothing_says_which_file_it_could_not_open(
     assert error.warnings[0] == MISSING_FILE_FAILED_WARNING.format(name="pic.svg")
 
 
+def _plate_two(fails: bool) -> object:
+    """A two-plate render whose plate 2 could not open pic.svg: OpenSCAD fails on it
+    (``fails``), or it renders and draws nothing (#451)."""
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        plate = _plate_of(kwargs.get("extra_defines"))
+        missing = ("pic.svg",) if plate == 2 else ()
+        if plate == 2 and fails:
+            raise OpenSCADError("openscad exited with 1", ["boom"], 1, missing_files=missing)
+        write_openscad_3mf(out, [] if plate == 2 else [TRAY])
+        return mock.Mock(
+            log_tail=[],
+            missing_files=missing,
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=2,
+        )
+
+    return render
+
+
+@pytest.mark.parametrize("fails", [True, False], ids=["openscad-failed", "no-geometry"])
+async def test_a_failed_plate_keeps_its_warnings_and_missing_files(
+    paths: DataPaths, fails: bool
+) -> None:
+    async def no_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    error = await _failed_render(paths, _plate_two(fails), render_solids=no_solids)
+
+    assert str(error).startswith("plate 2 of 2")
+    assert error.missing_files == ("pic.svg",)
+    assert error.warnings == [
+        MISSING_FILE_FAILED_WARNING.format(name="pic.svg"),
+        *unreadable_colour_warnings(
+            _colour_schema(("base_color", "#0047BB"), ("text_color", "#0047BB")),
+            {"text_color": "not-a-colour"},
+        ),
+    ]
+
+
 # ── #289: a template that asks for more than one plate ────────────────────────
 
 TRAY = ("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))
@@ -851,10 +895,12 @@ async def _render_plated(
     drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
     plates: int | None,
     solids: object | None = None,
+    render: object | None = None,
 ) -> tuple[JobResult, list[int]]:
     paths.model_dir("demo").mkdir(parents=True, exist_ok=True)
     paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
-    render, asked = _plated_render(drawn, plates)
+    plated, asked = _plated_render(drawn, plates)
+    render = render or plated
     schema = _colour_schema(
         ("floor_color", "#0047BB"), ("wall_color", "#FF1493"), ("lid_color", "#FFFFFF")
     )
@@ -946,6 +992,30 @@ async def test_too_many_plates_fails_the_job(paths: DataPaths) -> None:
 async def test_an_empty_plate_fails_the_job_naming_it(paths: DataPaths) -> None:
     with pytest.raises(OpenSCADError, match="plate 2 of 2 rendered no geometry"):
         await _render_plated(paths, {0: [TRAY, LID], 1: [TRAY], 2: []}, plates=2)
+
+
+async def test_a_plate_openscad_refuses_as_empty_fails_naming_it(paths: DataPaths) -> None:
+    """#1328: OpenSCAD will not export an empty plate at all; it logs "Current top
+    level object is empty." and exits 1 before there is a 3MF to split."""
+    render, _ = _plated_render({0: [TRAY, LID], 1: [TRAY]}, plates=2)
+
+    async def refuse_plate_two(*args: object, **kwargs: object) -> object:
+        if _plate_of(kwargs.get("extra_defines")) == 2:
+            raise OpenSCADError(
+                "openscad exited with 1",
+                ["ECHO: plates = 2", "Current top level object is empty."],
+                1,
+            )
+        return await render(*args, **kwargs)  # type: ignore[operator]
+
+    with pytest.raises(OpenSCADError) as raised:
+        await _render_plated(paths, {}, plates=2, render=refuse_plate_two)
+
+    message = str(raised.value)
+    assert message.startswith("plate 2 of 2 rendered no geometry")
+    assert "echo(plates = 2)" in message
+    assert raised.value.log_tail == ["ECHO: plates = 2", "Current top level object is empty."]
+    assert raised.value.returncode == 1
 
 
 # ── #424: the stages the render activities run, each from what is on disk ─────

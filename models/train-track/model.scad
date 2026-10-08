@@ -51,7 +51,7 @@ connector_clearance = 0.3; // [0.1:0.05:0.6]
 // Word inlaid between the rails of a name tile, or in the side of a straight
 text = ""; // 20
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans:style=Bold"; // font
 
 /* [Colors] */

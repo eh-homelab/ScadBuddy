@@ -21,13 +21,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from fastapi import status
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
+from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PreparedPlates,
@@ -41,13 +42,12 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import ProgressObserver
-from scadbuddy.bambuddy.project_file import output_stem
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
-from scadbuddy.bambuddy.watcher import PrintWatcher
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
-from scadbuddy.library.outputs import OutputStore, PlateSend, require_output
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
@@ -79,14 +79,17 @@ REMEMBER_BUDGET = 20.0
 @dataclass
 class PrintDeps:
     settings_store: SettingsStore
-    outputs: OutputStore
+    #: The outputs, on the volume or through the API (#1060).
+    outputs: OutputReader
+    #: Where a print records the output's last print (#1060).
+    prints: OutputPrintStore | None
     uploads: BambuddyUploadStore
-    catalogue: Catalogue
     store: PrintRunStore
     observer: ProgressObserver
-    watcher: PrintWatcher
     #: Rack hotend usage (#836): ranks the pick, and is credited with what it picked.
     rack: RackUsage | None = None
+    #: Where every run's queue items are recorded by subject (#976, #1750).
+    links: PrintLinkStore | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -100,13 +103,12 @@ def problem(error: ApiError) -> PrintRunError:
     )
 
 
-def raised_as(error: ApiError, kind: str) -> ApplicationError:
-    return ApplicationError(error.detail, problem(error), type=kind, non_retryable=True)
+def raised_as(error: ApiError, kind: str, *, non_retryable: bool = True) -> ApplicationError:
+    return ApplicationError(error.detail, problem(error), type=kind, non_retryable=non_retryable)
 
 
 async def heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
-    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive.
-    The operation activities beat with it too."""
+    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive."""
     task = asyncio.create_task(work)
     try:
         while True:
@@ -130,18 +132,22 @@ class PrintActivities:
     ) -> PrintSource:
         if spec.kind == "library":
             assert spec.file_id is not None
-            return await LibrarySource.load(client, spec.file_id)
-        return self._output_source(spec, settings)
+            return await LibrarySource.load(
+                client, spec.file_id, sends=self.d.links, settings=settings
+            )
+        return await self._output_source(spec, settings)
 
-    def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
+    async def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
         assert spec.output_id is not None
         return OutputSource(
             self.d.outputs,
             self.d.uploads,
-            require_output(self.d.outputs, spec.output_id),
+            await require(self.d.outputs, spec.output_id),
             settings,
             stem=spec.stem,
             print_settings=spec.print_settings,
+            prints=self.d.prints,
+            sends=self.d.links,
         )
 
     @activity.defn(name="print_check")
@@ -159,19 +165,21 @@ class PrintActivities:
         try:
             if spec.kind == "output":
                 assert spec.output_id is not None
-                meta = require_output(self.d.outputs, spec.output_id)
+                meta = await require(self.d.outputs, spec.output_id)
                 # A copy uploaded into a project's folder is named like the one Generate
                 # files (#317); a model.json that refuses its print settings refuses the
                 # run here, before the record (#770).
-                stem = (
-                    await output_stem(meta, self.d.outputs, self.d.catalogue)
-                    if chosen_project(input.request, settings) is not None
-                    else None
-                )
+                naming = await self.d.outputs.naming(meta)
+                if naming.invalid_meta is not None:
+                    raise invalid_meta(naming.invalid_meta)
                 spec = spec.model_copy(
                     update={
-                        "stem": stem,
-                        "print_settings": self.d.catalogue.print_settings(meta.slug),
+                        "stem": (
+                            naming.stem
+                            if chosen_project(input.request, settings) is not None
+                            else None
+                        ),
+                        "print_settings": naming.print_settings,
                     }
                 )
             async with client_for(settings) as client:
@@ -181,10 +189,6 @@ class PrintActivities:
                 )
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
-        except InvalidModelMetaError as error:
-            # As every route that reads a broken model.json answers it (`api/models.py`).
-            invalid = ApiError(status.HTTP_409_CONFLICT, str(error), title="Invalid Model Metadata")
-            raise raised_as(invalid, REFUSED) from None
         return Checked(source=spec, prepared=PreparedPlates.of(prepared))
 
     @activity.defn(name="print_insert")
@@ -195,7 +199,7 @@ class PrintActivities:
         retention = self._settings().print_run_retention_seconds
         return await self.d.store.insert_accepted(
             uuid.uuid4().hex,
-            subject=input.input.subject,
+            subject=PrintSubject.from_run_subject(input.input.subject),
             key=input.input.key,
             slug=input.input.slug,
             workflow_id=info.workflow_id,
@@ -260,21 +264,26 @@ class PrintActivities:
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
-        """One plate's queue items on the output, as soon as it is queued (#83)."""
-        if input.source.kind == "library":
-            # Recorded nowhere in ScadBuddy: Bambuddy's queue and archives are the record.
-            return input.sent
-        settings = self._settings()
+        """One plate's queue items recorded by its subject as soon as it is queued (#83,
+        #1750), for either source."""
+        spec = input.source
         try:
-            async with client_for(settings) as client:
-                source = await self._source(client, input.source, settings)
-                return await source.record(
-                    input.library_file_id,
-                    input.plate_id,
-                    input.outcome,
-                    input.project_id,
-                    input.sent,
+            if spec.kind == "library":
+                assert spec.file_id is not None
+                # Recording reads nothing of the file, so nothing is read back from
+                # Bambuddy for it: a plate already queued is not failed over a read.
+                source: PrintSource = LibrarySource(
+                    file_id=spec.file_id, colours=[], plates=[], sends=self.d.links
                 )
+            else:
+                source = await self._output_source(spec, self._settings())
+            return await source.record(
+                input.library_file_id,
+                input.plate_id,
+                input.outcome,
+                input.project_id,
+                input.sent,
+            )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 
@@ -292,14 +301,13 @@ class PrintActivities:
         # A library file's project is not remembered (``LibrarySource.remember_project``).
         if planned.project_id is not None and spec.kind == "output":
             try:
-                await asyncio.wait_for(
-                    self._output_source(spec, settings).remember_project(
+                async with asyncio.timeout(REMEMBER_BUDGET):
+                    source = await self._output_source(spec, settings)
+                    await source.remember_project(
                         planned.project_id,
                         printer_id=planned.printer_id,
                         nozzle_size=planned.nozzle_size,
-                    ),
-                    REMEMBER_BUDGET,
-                )
+                    )
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)
         try:
@@ -319,17 +327,19 @@ class PrintActivities:
         if spec.kind == "output" and spec.output_id is not None:
             # Best effort: the run is recorded, and a retry would not change it. An
             # output deleted while it printed has nothing left to follow.
+            # The workflow then starts its `FollowPrint` (#1053).
             try:
-                meta = require_output(self.d.outputs, spec.output_id)
+                meta = await require(self.d.outputs, spec.output_id)
                 self.d.observer.started(meta)
-                await self.d.watcher.started(meta.id)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)
         return run
 
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:
-        return await self.d.store.fail(input.run_id, input.slug, input.error)
+        return await self.d.store.fail(
+            input.run_id, input.slug, input.error, unqueued=input.unqueued
+        )
 
     def all(self) -> list[Callable[..., Any]]:
         return [

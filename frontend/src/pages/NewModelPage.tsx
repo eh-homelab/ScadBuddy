@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { Link } from 'react-router'
 import { api } from '../api/client'
 import { SourceWorkbench } from '../components/SourceWorkbench'
 import { modelPath } from '../lib/deeplink'
@@ -12,7 +12,6 @@ export function NewModelPage() {
   const [source, setSource] = useState('')
   // #169 — the suggestions are on unless unticked, so only the unticked are kept.
   const [declined, setDeclined] = useState<ReadonlySet<string>>(new Set())
-  const navigate = useNavigate()
   // No catalogue, no suggestions: the model can still be saved and pinned later.
   const { data: catalogue } = useAsync(() => api.listLibraries(), [])
   const detected = useMemo(
@@ -41,7 +40,7 @@ export function NewModelPage() {
       force,
       libraries: detected.filter((library) => !declined.has(library)),
     })
-    await navigate(modelPath(model.slug))
+    return modelPath(model.slug)
   }
 
   return (
@@ -111,6 +110,7 @@ export function NewModelPage() {
       onSourceChange={setSource}
       saveLabel="Save and customize"
       canSave={name.trim().length > 0}
+      dirty={source.trim() !== '' || name.trim() !== ''}
       onSave={save}
     />
   )

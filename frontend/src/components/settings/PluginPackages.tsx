@@ -24,7 +24,9 @@ import { Spinner } from '../ui/Spinner'
  * The flow follows the server's: an install only fetches, vets and stores the pin; it
  * loads nothing until you approve exactly the commit and content hash the review shows
  * (AI design spec §8.2), and only an approved pin can be enabled. A re-pin waits,
- * with its file diff, for the same approval.
+ * with its file diff, for the same approval. A pin whose review lists refusals (a
+ * command hook, a local MCP server, ...) is approved only with a second confirmation,
+ * `allow_refused`, which loads it as it is.
  *
  * Every control that installs, approves, enables, re-pins or deletes is user-only
  * (`USER_ONLY`): the in-page agent's `click` and `fill` refuse them, so an agent can
@@ -82,6 +84,25 @@ export function ReviewParts({ review }: { review: PackageReview }) {
         label="MCP servers"
         items={review.mcp_servers.map((m) => `${m.name} (${m.type}) ${m.url}`)}
       />
+      {(review.builtin_tools?.length ?? 0) > 0 && <PartList label="Built-in tools" items={review.builtin_tools!} />}
+      {(review.refused?.length ?? 0) > 0 && (
+        <div className="rounded-[6px] border border-warn/40 bg-warn/8 p-2 sm:col-span-2">
+          <dt className="font-medium text-warn">Refused by the vetting rules</dt>
+          <dd>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5" aria-label={`What the rules refuse in ${review.name}`}>
+              {review.refused!.map((problem) => (
+                <li key={problem} className="break-all">
+                  {problem}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-muted">
+              It loads only if you allow this when approving. Its commands, hooks and local servers then run as the
+              assistant service, able to read the Claude credential, the database URL and the secrets key.
+            </p>
+          </dd>
+        </div>
+      )}
       <div className="sm:col-span-2">
         <details>
           <summary className="cursor-pointer text-muted">Files to read ({review.files.length})</summary>
@@ -159,14 +180,17 @@ function ApproveDialog({
   onApproved: (pkg: PluginPackage) => void
 }) {
   const [confirmed, setConfirmed] = useState(false)
+  const [allowRefused, setAllowRefused] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   if (!target) return null
   const { pkg, pending } = target
   const pin = pending && pkg.pending ? pkg.pending : { commit_sha: pkg.commit_sha, content_hash: pkg.content_hash, review: pkg.review }
+  const refused = pin.review.refused ?? []
 
   const close = () => {
     setConfirmed(false)
+    setAllowRefused(false)
     setError(null)
     onClose()
   }
@@ -174,8 +198,9 @@ function ApproveDialog({
     setBusy(true)
     setError(null)
     try {
-      const saved = await aiPlugins.approvePackage(pkg.name, pin.commit_sha, pin.content_hash)
+      const saved = await aiPlugins.approvePackage(pkg.name, pin.commit_sha, pin.content_hash, refused.length > 0 && allowRefused)
       setConfirmed(false)
+      setAllowRefused(false)
       onApproved(saved)
     } catch (caught) {
       setError(message(caught))
@@ -198,7 +223,7 @@ function ApproveDialog({
           <Button
             variant="primary"
             onClick={() => void approve()}
-            disabled={!confirmed || busy}
+            disabled={!confirmed || (refused.length > 0 && !allowRefused) || busy}
             aria-busy={busy}
             {...USER_ONLY}
           >
@@ -233,6 +258,21 @@ function ApproveDialog({
             <span className="sb-num">{pin.content_hash.slice(0, 19)}…</span>
           </span>
         </label>
+        {refused.length > 0 && (
+          <label className="flex items-start gap-2" {...USER_ONLY}>
+            <input
+              type="checkbox"
+              checked={allowRefused}
+              onChange={(event) => setAllowRefused(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              Load it as it is, despite the {refused.length === 1 ? 'refusal' : `${refused.length} refusals`} above.
+              Its code runs as the assistant service itself: it can read the Claude credential, the database URL
+              and the key that decrypts every stored secret.
+            </span>
+          </label>
+        )}
         {error && (
           <p role="alert" className="text-warn">
             {error}
@@ -417,6 +457,7 @@ function PackageCard({
         ) : (
           <Badge tone="warn">Awaiting approval</Badge>
         )}
+        {pkg.approved && pkg.allow_refused && <Badge tone="warn">Unvetted code allowed</Badge>}
         {pkg.pending && <Badge tone="warn">Re-pin awaiting approval</Badge>}
       </div>
       {pkg.review.description && <p className="mt-1 text-[12px] text-muted">{pkg.review.description}</p>}
@@ -578,8 +619,8 @@ export function PluginPackagesPanel() {
       <div className="space-y-4 p-4">
         <p className="text-[12px] text-muted">
           Claude plugins (skills, subagents, hooks and MCP servers) from a git repository or a marketplace, pinned to a
-          commit. The assistant loads them from the next turn once approved and enabled. Plugins that run commands
-          are refused, and a plugin&rsquo;s own tools always ask before they act.
+          commit. The assistant loads them from the next turn once approved and enabled. A plugin that runs commands
+          loads only if you allow it when approving, and a plugin&rsquo;s own tools always ask before they act.
         </p>
         {state.loading && <Spinner />}
         {state.error && (

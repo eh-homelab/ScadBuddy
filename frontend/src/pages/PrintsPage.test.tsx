@@ -1,9 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output, PrintPage, PrintProgress } from '../api/types'
 import { outputs, prints, queuedSliceProgress } from '../mocks/fixtures'
+import { fakeRealtime } from '../lib/realtime.fake'
 import { server } from '../mocks/server'
 import { PRINTS_VIEW_KEY, resetStoredPrintsView } from '../lib/printsQuery'
 import { renderPage } from '../test/utils'
@@ -49,17 +50,25 @@ function location(): string {
   return screen.getByTestId('location').textContent ?? ''
 }
 
+/**
+ * The list, found by its label: a role query re-runs getComputedStyle over the whole
+ * page on every change while it loads (~0.25 s each in jsdom), which held the list past
+ * the 1 s wait under load (#1485).
+ */
+function list(): Promise<HTMLElement> {
+  return screen.findByLabelText('Prints', { selector: 'ul' })
+}
+
 /** The rendered prints, by archive id, in order. */
 async function shown(): Promise<string[]> {
-  const list = await screen.findByRole('list', { name: 'Prints' })
-  return within(list)
+  return within(await list())
     .getAllByRole('listitem')
     .map((item) => item.getAttribute('data-print') ?? '')
     .filter(Boolean)
 }
 
 async function item(archiveId: number): Promise<HTMLElement> {
-  await screen.findByRole('list', { name: 'Prints' })
+  await list()
   const found = document.querySelector(`[data-print="${archiveId}"]`)
   if (!(found instanceof HTMLElement)) throw new Error(`no print ${archiveId}`)
   return found
@@ -420,6 +429,37 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     expect(first).not.toHaveTextContent('Waiting for Bambuddy')
     expect(second).toHaveTextContent('Luna')
     expect(second).toHaveTextContent('Waiting for Bambuddy')
+  })
+
+  it('follows a waiting row live, without a reload (#954)', async () => {
+    // Real time still passes, so the page's own waits run; `signal` advances the fakes.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const luna = sent('2', 'Luna', 4500)
+    let settled = false
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([luna, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json(
+          settled
+            ? ({ ...queuedSliceProgress, stage: 'failed', settled: true, queue_item_id: 4500 } satisfies PrintProgress)
+            : ({ ...queuedSliceProgress, queue_item_id: 4500 } satisfies PrintProgress),
+        ),
+      ),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    await waitFor(() => expect(realtime.following()).toContain(`print:${luna.id}`))
+    expect(list).toHaveTextContent('Waiting for Bambuddy')
+
+    settled = true
+    await realtime.signal(`print:${luna.id}`, 'print.settled')
+    expect(await within(list).findByText('Failed in Bambuddy')).toBeInTheDocument()
+    expect(list).not.toHaveTextContent('Waiting for Bambuddy')
   })
 })
 

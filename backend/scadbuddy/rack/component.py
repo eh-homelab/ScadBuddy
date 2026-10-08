@@ -16,9 +16,9 @@ RACK_USAGE: Key[RackUsageStore] = Key("rack_usage")
 
 def _build(core: Core, components: Components) -> RackUsageStore:
     store = RackUsageStore(core.settings.database_url)
-    # The watcher is a core service and must not import a feature: the rack registers its
+    # The print follow is a core service and must not import a feature: the rack registers its
     # settle write itself (spec §4, §10).
-    core.print_watcher.on_settled.append(
+    core.print_follower.on_settled.append(
         settle_hook(store, core.print_links, core.settings_store.load)
     )
     return store

@@ -109,12 +109,20 @@ async function refusals<T>(run: () => Promise<T>): Promise<T> {
  */
 const IN_A_TURN: Pick<Owner, 'kind' | 'id'> = { kind: 'anonymous', id: '' }
 
+/**
+ * Whether a session's own model made the call: a classic turn (`harness`) or a durable
+ * session's tool activity (`workflow`, #1055). Only /mcp sets no gate.
+ */
+function inSession(ctx: ToolContext): boolean {
+  return ctx.gate !== undefined
+}
+
 function viewerOf(ctx: ToolContext): Pick<Owner, 'kind' | 'id'> {
-  return ctx.gate === 'harness' ? IN_A_TURN : ownerOf(ctx.principal)
+  return inSession(ctx) ? IN_A_TURN : ownerOf(ctx.principal)
 }
 
 function notInHarness(ctx: ToolContext, what: string): void {
-  if (ctx.gate === 'harness') {
+  if (inSession(ctx)) {
     throw new ToolError(
       `${what} is the session owner's own decision, made in the ScadBuddy UI or by an agent over /mcp; ` +
         'a session model cannot make it (spec §6, §8.2)',
@@ -131,23 +139,23 @@ function originOf(principal: Principal): Origin {
 /** Waits for a turn up to `seconds`, reporting progress; undefined when it is still running. */
 async function waitFor(turn: Turn, seconds: number, ctx: ToolContext): Promise<TurnOutcome | undefined> {
   if (seconds <= 0) return undefined
-  const deadline = Date.now() + seconds * 1000
+  const deadline = performance.now() + seconds * 1000
   let timer: NodeJS.Timeout | undefined
   const tick = (): Promise<'tick'> =>
     new Promise((resolve) => {
-      timer = setTimeout(() => resolve('tick'), Math.min(PROGRESS_EVERY_MS, Math.max(0, deadline - Date.now())))
+      timer = setTimeout(() => resolve('tick'), Math.min(PROGRESS_EVERY_MS, Math.max(0, deadline - performance.now())))
     })
   const aborted = new Promise<'aborted'>((resolve) => {
     if (ctx.signal.aborted) resolve('aborted')
     ctx.signal.addEventListener('abort', () => resolve('aborted'), { once: true })
   })
   try {
-    while (Date.now() < deadline) {
+    while (performance.now() < deadline) {
       const next = await Promise.race([turn.done, tick(), aborted])
       clearTimeout(timer)
       if (next === 'aborted') return undefined
       if (next !== 'tick') return next
-      const elapsed = Math.min(seconds, Math.round((seconds * 1000 - (deadline - Date.now())) / 1000))
+      const elapsed = Math.min(seconds, Math.round((seconds * 1000 - (deadline - performance.now())) / 1000))
       await ctx.progress(elapsed, seconds, 'waiting for the turn to finish')
     }
     return undefined
@@ -486,7 +494,8 @@ export const sessionTools: Tool[] = [
     name: 'sessions_fork',
     description:
       'Branch a session this caller may see into a new one it owns, with the conversation so far, to try an ' +
-      'alternative without changing the original.',
+      'alternative without changing the original. The fork spends from the same budget as the original: a turn in ' +
+      'either uses it up for both, so a session that has spent its budget cannot be forked; only the user can raise a budget.',
     input: z.object({ session_id: sessionId, title: z.string().max(200).optional() }),
     risk: 'write',
     routes: [],

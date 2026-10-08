@@ -32,7 +32,7 @@ from scadbuddy.core.paths import (
     DataPaths,
     model_path,
 )
-from scadbuddy.core.tracing import span
+from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
@@ -276,6 +276,17 @@ def _part_sources(
     )
 
 
+#: What OpenSCAD logs when the render it is asked to export draws nothing.
+EMPTY_TOP_LEVEL = "Current top level object is empty."
+
+
+def _empty_plate(index: int, count: int) -> str:
+    return (
+        f"plate {index} of {count} rendered no geometry: the template asks for "
+        f"echo(plates = {count}) but draws nothing when $plate = {index}"
+    )
+
+
 async def plate_layout(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -320,18 +331,31 @@ async def plate_layout(
         defines = plate_defines(index)
         raw = plate_dir / RAW_RENDER_NAME
         try:
-            await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
+            output = await render_3mf(
+                scad_path, schema, params, raw, config=config, extra_defines=defines
+            )
         except OpenSCADError as error:
+            # OpenSCAD will not export an empty top-level object: it exits 1
+            # before there is a 3MF to find empty (#1328).
+            empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
             raise OpenSCADError(
-                f"plate {index} of {count}: {error}",
+                _empty_plate(index, count) if empty else f"plate {index} of {count}: {error}",
                 error.log_tail,
                 error.returncode,
                 diagnostics=error.diagnostics,
                 diagnostics_dropped=error.diagnostics_dropped,
+                missing_files=error.missing_files,
             ) from error
         split = split_by_material(raw)
         if not split:
-            raise OpenSCADError(f"plate {index} of {count} rendered no geometry", [])
+            # A file the plate could not open is often why it drew nothing (#451).
+            raise OpenSCADError(
+                _empty_plate(index, count),
+                output.log_tail,
+                diagnostics=output.diagnostics,
+                diagnostics_dropped=output.diagnostics_dropped,
+                missing_files=output.missing_files,
+            )
         for part in split:
             if part.colour not in colours:
                 colours.append(part.colour)
@@ -363,7 +387,8 @@ async def plate_layout(
 
 def result_parts(layout: PlateLayout) -> list[PartInfo]:
     """One entry per extruder: the name the first plate to use it gives it, and whether
-    every plate's part of that colour is a closed solid."""
+    every plate's part of that colour is a closed solid. A slot no plate uses (a planned
+    filament order keeps its place, §7) has no part to name and is left out."""
     infos: list[PartInfo] = []
     for extruder, colour in enumerate(layout.colours, start=1):
         parts = [
@@ -372,6 +397,8 @@ def result_parts(layout: PlateLayout) -> list[PartInfo]:
             for part, number in zip(plate.parts, plate.extruders, strict=True)
             if number == extruder
         ]
+        if not parts:
+            continue
         infos.append(
             PartInfo(
                 name=parts[0].name,
@@ -707,18 +734,49 @@ def no_stage(name: RenderStage) -> AbstractContextManager[None]:
 
 
 @contextmanager
-def _traced_stage(name: RenderStage, timed: AbstractContextManager[None]) -> Iterator[None]:
-    """One render stage: a span (spec 2026-10-01 §5.1) around the existing timing."""
-    with span(f"render.{name}"), timed:
-        yield
+def _traced_stage(
+    name: RenderStage,
+    timed: AbstractContextManager[None],
+    *,
+    attempt: int | None = None,
+    retried: Callable[[Exception], bool] | None = None,
+) -> Iterator[None]:
+    """One render stage: a span (spec 2026-10-01 §5.1) around the existing timing.
+    ``attempt`` is the activity attempt it runs in; a failure ``retried`` says another
+    attempt follows is that attempt's, not the job's (spec §6): the span names its class
+    and ends UNSET (#1183)."""
+    failed: Exception | None = None
+    with span(f"render.{name}") as current:
+        if attempt is not None:
+            current.set_attribute("scadbuddy.attempt", attempt)
+        try:
+            with timed:
+                yield
+        except Exception as error:
+            if retried is None or not retried(error):
+                raise
+            current.set_attribute("scadbuddy.failure_class", failure_class(error))
+            failed = error
+    if failed is not None:
+        raise failed
 
 
-def timed_stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
+def timed_stage(
+    metrics: Metrics | None,
+    *,
+    attempt: int | None = None,
+    retried: Callable[[Exception], bool] | None = None,
+) -> Callable[[RenderStage], AbstractContextManager[None]]:
     """A stage timed into `stage_duration`, as `render_job`'s are, and traced; untimed
-    without metrics."""
+    without metrics. ``attempt`` and ``retried`` are `_traced_stage`'s."""
 
     def stage(name: RenderStage) -> AbstractContextManager[None]:
-        return _traced_stage(name, metrics.stage(name) if metrics is not None else nullcontext())
+        return _traced_stage(
+            name,
+            metrics.stage(name) if metrics is not None else nullcontext(),
+            attempt=attempt,
+            retried=retried,
+        )
 
     return stage
 
@@ -807,9 +865,20 @@ async def _render_solids(
     with stage("solids"):
         # One plate unless the template asked for more (spec §6.4); every plate
         # beyond the ordinary render is rendered and solidified here.
-        layout = await plate_layout(
-            prepared.scad, schema, staged, preview_parts, output.plates or 1, work, config=config
-        )
+        try:
+            layout = await plate_layout(
+                prepared.scad,
+                schema,
+                staged,
+                preview_parts,
+                output.plates or 1,
+                work,
+                config=config,
+            )
+        except OpenSCADError as error:
+            # A failed plate warns as a failed whole render does (#451).
+            error.warnings = failed_render_warnings(error.missing_files, schema, params)
+            raise
     layout.save(work / LAYOUT_NAME)
     return layout
 
@@ -858,6 +927,18 @@ async def render_solids_stage(
             )
 
 
+async def _thread_to_end[T](fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """`asyncio.to_thread`, except that a cancel returns only once the thread has: a
+    thread cannot be stopped, and a cancelled (timed-out) attempt must not still be
+    writing while its retry runs (#867)."""
+    thread = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(thread)
+    except asyncio.CancelledError:
+        await asyncio.wait({thread})
+        raise
+
+
 async def finish_piece_stage(
     prepared: Prepared,
     params: Mapping[str, ParamValue],
@@ -894,7 +975,7 @@ async def finish_piece_stage(
     # A built-in's bare slug, as download_filename names the file: the id's
     # `builtin:` prefix is not something to show as the model's title.
     with stage("write"):
-        await asyncio.to_thread(
+        await _thread_to_end(
             write_plates_3mf,
             layout.plates,
             layout.colours,

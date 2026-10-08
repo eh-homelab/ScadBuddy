@@ -77,13 +77,17 @@ dependency of `agent/`.
   store lookup key derives from the working directory, so resume from a `cwd` matching
   the original run's" (§6 therefore gives every session a stable service-owned `cwd`).
   [Sessions][sdk-sessions]
-- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283: the bundled Claude
-  Code binary prints `2.1.283 (Claude Code)` on stdout for `--version` and exits 0, so
-  the image build asserts `CLAUDE_CODE_VERSION` the way the Dockerfile asserts
-  `OPENSCAD_VERSION`. In that SDK's `sdk.d.ts`, `settingSources: []` means "disable
-  filesystem settings (SDK isolation mode)", so it loads nothing from the host (§4.4).
-- Read and measured in #300 on SDK 0.3.283 (`sdk.d.ts`, `export declare type
-  SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
+- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283, and again on 0.3.287
+  (#1540): the bundled Claude Code binary prints its version (`2.1.283 (Claude Code)`,
+  then `2.1.287 (Claude Code)`) on stdout for `--version` and exits 0, the same version
+  the SDK's `package.json` declares as `claudeCodeVersion`. `agent/package.json` pins the
+  SDK exactly and the lockfile pins the binary, so the image build asserts only that the
+  two agree (`agent/src/check-cli-version.ts`); until #1540 it also compared them with a
+  `CLAUDE_CODE_VERSION` build argument, edited by hand on every bump. In that SDK's
+  `sdk.d.ts` (both versions), `settingSources: []` means "disable filesystem settings
+  (SDK isolation mode)", so it loads nothing from the host (§4.4).
+- Read and measured in #300 on SDK 0.3.283, and re-read on 0.3.287 (#1540) (`sdk.d.ts`,
+  `export declare type SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
   `listSessions?(projectKey)`, `listSessionSummaries?(projectKey)`, `delete?(key)` and
   `listSubkeys?({projectKey, sessionId})` are optional. `SessionKey` is
   `{ projectKey, sessionId, subpath? }` (projectKey "Default: sanitized cwd"; no option
@@ -96,8 +100,10 @@ dependency of `agent/`.
   the last transcript entries (`last-prompt`, `cost-state`) are appended after the
   `result` message and before the iterator ends; a resumed query's `total_cost_usd`
   includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
-- Read and measured in #297 on SDK 0.3.283 (`agent/test/plugins.e2e.test.ts`, the real
-  bundled CLI against a local `@modelcontextprotocol/sdk` 1.30.1 Streamable HTTP server):
+- Read and measured in #297 on SDK 0.3.283, and again in #1540 on 0.3.287 except the
+  `${VAR}` expansion below, which no test measures since the forwarder replaced it
+  (`agent/test/plugins.e2e.test.ts`, the real bundled CLI against a local
+  `@modelcontextprotocol/sdk` Streamable HTTP server, 1.30.1 then 1.31.0):
   the SDK passes every non-SDK MCP server to Claude Code as `--mcp-config <json>` on its
   argv (`sdk.mjs`), so a header value written there would be on the command line; a
   header written as `${VAR}` with the value in the query's `env` is expanded by Claude
@@ -107,13 +113,17 @@ dependency of `agent/`.
   `disallowedTools: ['mcp__my-memory__forget']` removes that tool from the request;
   `alwaysLoad: true` ("never deferred behind tool search ... blocks startup until the
   server is connected (capped at the standard 5s connect timeout)", `sdk.d.ts`) puts the
-  tools in the first turn. The permission seam applies to them as to in-process tools: a
-  `read` tool runs, an unlisted one is denied as needing approval and never reaches the
-  server.
-- Read and measured in the #464 review, on the bundled Claude Code 2.1.283:
+  tools in the first turn. Since 0.3.287 that is "except a tool the server itself lists
+  with _meta anthropic/alwaysLoad set to false" (`sdk.d.ts`), and the forwarder passes a
+  plugin's `tools/list` `_meta` on, so a plugin can defer its own tools. The permission
+  seam applies to them as to in-process tools: a `read` tool runs, an unlisted one is
+  denied as needing approval and never reaches the server.
+- Read and measured in the #464 review, on the bundled Claude Code 2.1.283, and re-read
+  and re-probed in #1540 on 2.1.287:
   - **Tool-name normalisation.** Claude Code names an MCP tool
     `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
-    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe). `files.list` and
+    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe; the same code, under
+    other minified names, in 2.1.287, #1540). `files.list` and
     `files_list` therefore collide on one name, and a name with a space or a dot cannot be
     matched literally. The registry now tiers only names in that alphabet, maps disabled
     names through `vn`, and hides colliding tools (`agent/src/plugins/registry.ts`
@@ -145,7 +155,8 @@ dependency of `agent/`.
   request. Claude does not see the tool and cannot attempt it." Tool-name globs work in
   deny rules. An allow rule only pre-approves; "Auto-approved tools never reach
   `canUseTool`". [Permissions][sdk-permissions]
-- Read and measured in #258 on SDK 0.3.283 (moved up from §3.2): **`canUseTool` can
+- Read and measured in #258 on SDK 0.3.283, and again on 0.3.287 (#1540) (moved up from
+  §3.2): **`canUseTool` can
   park a tool call on an asynchronous human decision, with no deadline of its own.**
   `sdk.d.ts` on `CanUseTool`: "permission prompts have no park deadline"; the
   `dialogExpiry` setting (default 5 minutes) is for a dialog "forwarded to a remote
@@ -207,7 +218,8 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
   headers to be sent with every request. Defaults to none." [Playwright
   `browser.newContext`][pw-extra-headers]
 - **Measured in #349** on `@playwright/mcp` 0.0.82, Claude Code 2.1.283 (SDK 0.3.283)
-  and `chromium_headless_shell-1246`, by `agent/test/headlessBrowser.server.test.ts`
+  and `chromium_headless_shell-1246` (the Claude Code items again in #1540 on 2.1.287),
+  by `agent/test/headlessBrowser.server.test.ts`
   (the server over stdio), `agent/test/headlessBrowser.e2e.test.ts` (the real SDK and
   CLI against the fake endpoint) and a run inside the `agent` image
   (`docs/ai/headless-browser.md`, "Measured"):
@@ -419,12 +431,13 @@ projection, bound to the session owner's principal, and a `tierOf` that maps
 `mcp__scadbuddy__<name>` to each tool's `risk` for the permission seam (§8.1). An
 outward call that the seam approved runs at once, because the harness projection tells
 `runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
-prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
+prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validated
 arguments with its own bundled zod 4.4.3, which refused any call that left out a
-`.default()` field of our zod 4.6.5 ("expected nonoptional"). The harness projection
-therefore offers such top-level fields as optional, with the same default in the JSON
-Schema, and the tool's own schema applies the default (`agent/src/tools/projections.ts`
-`sdkShape`; `agent/test/harnessWiring.test.ts`).
+`.default()` field of our zod 4.6.5 ("expected nonoptional"), so the harness projection
+passed a whole `z.object` instead of the raw shape. Measured on SDK 0.3.287 (#1540): its
+server (zod 4.5.4) marks such a field defaulted and fills the default, so the projection
+passes the raw shape (`agent/src/tools/projections.ts` `createHarnessServer`;
+`agent/test/projections.test.ts`).
 
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
 render and streams progress until it settles, and `print_output` fills any omitted
@@ -792,7 +805,7 @@ including `disabled`. Where it is enforced:
   to approve as an option's Markdown `preview`), not a registry tool. The SDK hands each
   call to `canUseTool`, which parks it like an approval; the user's answer is returned
   by allowing the call with `answers` added to its input, and Claude Code passes them to
-  the model as the tool result (measured on SDK 0.3.283,
+  the model as the tool result (measured on SDK 0.3.283 and 0.3.287,
   `agent/test/questions.sdk.test.ts`). Only a session the browser user owns is offered
   the tool, and only the browser user answers, over the chat socket's
   `question.answer`; no tool result and no other principal can. The session waits in
@@ -801,13 +814,14 @@ including `disabled`. Where it is enforced:
   handoff, a shutdown and every other end of the turn cancel it, and the model is told
   nobody answered. Nothing answers a question by itself. A subagent cannot use
   `AskUserQuestion` (Claude Code refuses it there without asking `canUseTool`, measured
-  on 2.1.283), so the same sessions also get `mcp__scadbuddy_questions__ask_user`, an
+  on 2.1.283 and 2.1.287), so the same sessions also get `mcp__scadbuddy_questions__ask_user`, an
   in-process tool with the same input that parks on the same gate
   (`agent/test/harnessWiring.test.ts`). Its call has no timeout short of the turn's end
   (`ASK_USER_TIMEOUT_MS`, measured). `ai_questions.tool` records which tool asked. Each
   answer is an audit row of kind `question`, naming that tool and holding a keyed hash of
-  the answers, never their text (#1075). A subagent's calls are not yet in the panel feed
-  or the `tool_call` rows (#1108), and the card does not yet say who asked (#1109). Expiry and notifications
+  the answers, never their text (#1075). A subagent's calls are in the panel feed, tagged
+  with the `Agent` call that spawned it (`parent`), and have `tool_call` rows (#1108); the
+  card does not yet say who asked (#1109). Expiry and notifications
   belong to the attention requests of #815. The code is `agent/src/harness/questions.ts`
   and `agent/src/questions/service.ts`; the panel's card is `QuestionCard` in
   `frontend/src/components/assistant/FeedItemView.tsx`.

@@ -88,10 +88,10 @@ export type AttentionInput = z.output<typeof AttentionInputSchema>
 
 /**
  * The shape the tool is declared with. The SDK's MCP server validates a call
- * against it first, and a `.default()` field the model left out fails there
- * ("expected nonoptional, received undefined", measured on SDK 0.3.283; the
- * calls in test/attention.sdk.test.ts omit them), so the defaults are left to
- * `parseAttention`.
+ * against it first, and on SDK 0.3.283 a `.default()` field the model left out
+ * failed there ("expected nonoptional, received undefined"; the calls in
+ * test/attention.sdk.test.ts omit them; 0.3.287 fills it, #1540), so the
+ * defaults are left to `parseAttention`.
  * `reason` is a string here so `approval_pending` reaches parseAttention's own
  * explanation rather than a bare enum error.
  */
@@ -198,7 +198,7 @@ export const RECONNECTED_TEXT =
   'not run since, and the page may have reloaded or changed while the tab was away: re-check it (browser_status, ' +
   'then browser_snapshot) before calling a browser_* tool that changes it again.'
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283; questions.ts). */
+/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283 and 2.1.287; questions.ts). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
 const ExtraSchema = z.object({

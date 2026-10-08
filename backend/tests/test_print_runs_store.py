@@ -4,21 +4,32 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from psycopg import Connection
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.print_run import PrintRunResult
-from scadbuddy.bambuddy.runs import LOST, LOST_UNQUEUED, PrintRun, PrintRunError, PrintRunStore
+from scadbuddy.bambuddy.runs import (
+    LOST,
+    LOST_UNQUEUED,
+    UPGRADE_INTERRUPTED,
+    PrintRun,
+    PrintRunError,
+    PrintRunStore,
+)
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.client import reconcile_lost_runs
-from tests.support.temporal import temporal_client
+from tests.support.temporal import DownClient, namespace_not_found_error, temporal_client
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -63,7 +74,7 @@ async def accept(
 ) -> PrintRun:
     return await store.insert_accepted(
         run_id,
-        subject=OUTPUT,
+        subject=PrintSubject.output(OUTPUT),
         key=key,
         slug="demo",
         workflow_id=f"print-{key}",
@@ -110,6 +121,15 @@ async def test_start_enqueue_marks_may_have_queued_on_a_later_failure(store: Pri
     assert failed.may_have_queued
 
 
+async def test_an_unqueued_failure_clears_the_started_enqueue(store: PrintRunStore) -> None:
+    """A run cancelled once ``start_enqueue`` wrote, before any ``POST /queue/``, records
+    that nothing was queued (review #1316 (8) 2)."""
+    run = await accept(store)
+    await store.start_enqueue(run.id)
+    failed = await store.fail(run.id, "demo", REFUSED, unqueued=True)
+    assert failed.status == "failed" and not failed.may_have_queued
+
+
 async def test_a_failure_before_any_enqueue_may_not_have_queued(store: PrintRunStore) -> None:
     run = await accept(store)
     failed = await store.fail(run.id, "demo", REFUSED)
@@ -151,7 +171,7 @@ async def test_retention_none_keeps_every_row_and_a_number_prunes_older_finished
     await asyncio.sleep(0.05)
     await store.insert_accepted(
         "b",
-        subject=OUTPUT,
+        subject=PrintSubject.output(OUTPUT),
         key="b",
         slug="demo",
         workflow_id="print-b",
@@ -167,6 +187,45 @@ async def test_get_reads_a_row_and_an_unknown_id_is_none(store: PrintRunStore) -
     got = await store.get(run.id)
     assert got is not None and got.output_id == OUTPUT
     assert await store.get("nope") is None
+
+
+async def test_a_run_reads_back_its_subject_and_the_output_id_it_always_answered(
+    store: PrintRunStore,
+) -> None:
+    # #1750: `subject` is the key; `output_id` stays what clients read before it, an
+    # output's bare id and a library file's `library:<file id>`.
+    output = await accept(store, "k1", run_id="r1")
+    library = await store.insert_accepted(
+        "r2",
+        subject=PrintSubject.library(41),
+        key="k2",
+        slug="library-41",
+        workflow_id="print-k2",
+        workflow_run_id="w2",
+        retention=None,
+    )
+    for run, subject, output_id in (
+        (output, f"output:{OUTPUT}", OUTPUT),
+        (library, "library:41", "library:41"),
+    ):
+        got = await store.get(run.id)
+        assert got is not None
+        assert (got.subject, got.output_id) == (subject, output_id)
+        assert got.model_dump(mode="json")["output_id"] == output_id
+        assert got.model_dump(mode="json")["subject"] == subject
+
+
+def test_a_run_from_before_1750_still_reads() -> None:
+    # Temporal history and the accept Update carry runs serialized with `output_id` only.
+    old = {
+        "id": "r1",
+        "output_id": OUTPUT,
+        "status": "running",
+        "created_at": "2026-10-06T10:00:00Z",
+    }
+    run = PrintRun.model_validate(old)
+    assert (run.subject, run.output_id) == (f"output:{OUTPUT}", OUTPUT)
+    assert PrintRun.model_validate(run.model_dump(mode="json")) == run
 
 
 async def test_fail_lost_says_whether_anything_could_have_been_queued(
@@ -275,7 +334,7 @@ async def test_reconcile_fails_the_runs_whose_execution_is_gone_or_closed(
         for run_id, handle in (("live", live), ("killed", killed)):
             await store.insert_accepted(
                 run_id,
-                subject=OUTPUT,
+                subject=PrintSubject.output(OUTPUT),
                 key=run_id,
                 slug="demo",
                 workflow_id=handle.id,
@@ -306,7 +365,7 @@ async def test_reconcile_leaves_a_run_whose_workflow_was_reset_and_still_runs(
         reset = await client.start_workflow("PrintRun", "x", id=workflow_id, task_queue=queue)
         await store.insert_accepted(
             "reset",
-            subject=OUTPUT,
+            subject=PrintSubject.output(OUTPUT),
             key="reset",
             slug="demo",
             workflow_id=workflow_id,
@@ -319,3 +378,189 @@ async def test_reconcile_leaves_a_run_whose_workflow_was_reset_and_still_runs(
             await reset.terminate("test over")
     assert ended == 0
     assert (await store.get("reset")).status == "running"  # type: ignore[union-attr]
+
+
+def _insert_pre_1052(
+    jobs: JobProjection, run_id: str, beaten: timedelta | None, age: timedelta = timedelta(0)
+) -> None:
+    """A row as a pre-#1052 pod inserts it during the rolling update: no execution, and
+    a heartbeat its own task keeps moving, ``beaten`` ago (negative: ahead). ``beaten``
+    ``None`` is a row its pod never beat: its insert names no ``heartbeat_at``, so it
+    takes the column's default. ``age`` is how long ago it was inserted. The pre-#1052
+    insert is ``PrintRunStore._claim`` in ``backend/scadbuddy/bambuddy/runs.py`` at
+    30adee1b (#1061's parent): ``INSERT INTO print_runs (id, output_id,
+    idempotency_key, status)``; ``PrintRuns._beat`` sleeps
+    ``HEARTBEAT_INTERVAL`` (10 s) before its first beat (review #1316 3b)."""
+    with jobs.pool.connection() as conn:
+        if beaten is None:
+            conn.execute(
+                "INSERT INTO print_runs (id, output_id, idempotency_key, status, created_at)"
+                " VALUES (%s, %s, %s, 'running', now() - %s)",
+                (run_id, OUTPUT, run_id, age),
+            )
+            return
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, created_at,"
+            " heartbeat_at) VALUES (%s, %s, %s, 'running', now() - %s, now() - %s)",
+            (run_id, OUTPUT, run_id, age, beaten),
+        )
+
+
+async def test_stale_pre_1052_runs_are_the_unowned_rows_nothing_beats(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """Review #1061 (3) 2: an old pod that died mid-run leaves its row ``running``."""
+    _insert_pre_1052(jobs, "dead", timedelta(days=1))
+    _insert_pre_1052(jobs, "alive", timedelta(days=-1))
+    await accept(store, "owned", run_id="owned")
+
+    assert await store.stale_pre_1052_runs() == ["dead"]
+
+
+async def test_a_pre_1052_row_never_beaten_is_stale_once_it_is_old(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """Review #1316 3: the old pod's first beat comes 10 s after its insert, so one
+    killed sooner leaves the column's default, ``'infinity'``, which never goes stale.
+    That insert and beat are cited at :func:`_insert_pre_1052` (review #1316 3b)."""
+    _insert_pre_1052(jobs, "died-early", None, timedelta(days=1))
+    _insert_pre_1052(jobs, "just-started", None)
+
+    assert await store.stale_pre_1052_runs() == ["died-early"]
+
+
+async def test_reconcile_fails_a_pre_1052_pods_run_once_its_heartbeat_stops(
+    store: PrintRunStore, jobs: JobProjection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1061 (3) 2: otherwise the row is ``running`` for good, and every repeat
+    of its body-only key is answered with it. A late heartbeat does not show its pod is
+    dead: one stalled past ``PRE_1052_LOST_AFTER`` may yet queue it, so the row may have
+    queued however far it got, as the migration says of such rows (review #1316 2a).
+    It never had an execution, so it is logged in its own words and not counted among
+    the runs whose execution was gone (review #1316 (11) 4)."""
+    _insert_pre_1052(jobs, "dead", timedelta(days=1))
+    _insert_pre_1052(jobs, "alive", timedelta(days=-1))
+    with caplog.at_level(logging.WARNING, logger=client_module.__name__):
+        async with temporal_client() as client:
+            ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
+    assert ended == 0
+    logged = [r for r in caplog.records if r.name == client_module.__name__]
+    assert [(r.getMessage(), getattr(r, "count", None)) for r in logged] == [
+        ("ended print runs a pre-#1052 pod left running", 1)
+    ]
+    dead = await store.get("dead")
+    assert dead is not None
+    assert dead.error == UPGRADE_INTERRUPTED and dead.may_have_queued
+    assert (await store.get("alive")).status == "running"  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("beaten", [timedelta(days=1), None], ids=["stalled", "never"])
+async def test_a_pre_1052_row_beaten_after_the_select_is_left_running(
+    store: PrintRunStore, jobs: JobProjection, beaten: timedelta | None
+) -> None:
+    """Review #1316 (13) 4a: a stalled pod that beats between the SELECT and the UPDATE
+    is alive, and goes on to queue: its row is not ended ``UPGRADE_INTERRUPTED``."""
+    _insert_pre_1052(jobs, "resumed", beaten, timedelta(days=2))
+    assert await store.stale_pre_1052_runs() == ["resumed"]
+    with jobs.pool.connection() as conn:
+        conn.execute("UPDATE print_runs SET heartbeat_at = now() WHERE id = 'resumed'")
+
+    assert (await store.fail_pre_1052("resumed")).status == "running"
+    assert (await store.get("resumed")).status == "running"  # type: ignore[union-attr]
+
+
+async def test_one_failing_row_does_not_stop_the_reconcile(
+    store: PrintRunStore, jobs: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (9) 3a: a pre-#1052 row that cannot be ended (an old-shaped row, a
+    database blip) is logged and left for the next pass; the other pre-#1052 rows and
+    the rows whose execution is gone are still ended."""
+    _insert_pre_1052(jobs, "bad", timedelta(days=2))
+    _insert_pre_1052(jobs, "dead", timedelta(days=1))
+    await accept(store, "gone", run_id="gone", wf_run=str(uuid.uuid4()))
+    fail_pre_1052 = store.fail_pre_1052
+
+    async def failing(run_id: str) -> PrintRun:
+        if run_id == "bad":
+            raise RuntimeError("an old-shaped row")
+        return await fail_pre_1052(run_id)
+
+    monkeypatch.setattr(store, "fail_pre_1052", failing)
+    async with temporal_client() as client:
+        ended = await reconcile_lost_runs(client, store, older_than=timedelta(0))
+    assert ended == 1  # "gone"; "dead" is a pre-#1052 row, logged on its own
+    assert (await store.get("bad")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
+    assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
+
+
+async def _unavailable() -> Any:
+    raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+
+async def _hangs() -> Any:
+    await asyncio.Event().wait()
+
+
+async def _no_namespace() -> Any:
+    raise namespace_not_found_error()
+
+
+async def _exhausted() -> Any:
+    raise RPCError("namespace rate limit exceeded", RPCStatusCode.RESOURCE_EXHAUSTED, b"")
+
+
+async def _denied() -> Any:
+    raise RPCError("request unauthorized", RPCStatusCode.PERMISSION_DENIED, b"")
+
+
+async def _unauthenticated() -> Any:
+    raise RPCError("missing credentials", RPCStatusCode.UNAUTHENTICATED, b"")
+
+
+@pytest.mark.parametrize(
+    ("describe", "level"),
+    [
+        (_unavailable, logging.WARNING),
+        (_hangs, logging.WARNING),
+        (_no_namespace, logging.WARNING),
+        (_exhausted, logging.WARNING),
+        # Temporal refused: about Temporal, not the row, so it stops the pass too, but
+        # once, at ERROR (review #1316 (11) 2, (12) 1).
+        (_denied, logging.ERROR),
+        (_unauthenticated, logging.ERROR),
+    ],
+    ids=["unavailable", "hangs", "namespace", "exhausted", "denied", "unauthenticated"],
+)
+async def test_temporal_down_stops_the_pass_once_after_the_pre_1052_sweep(
+    store: PrintRunStore,
+    jobs: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    describe: Any,
+    level: int,
+) -> None:
+    """Review #1316 (10) 1: the pre-#1052 sweep needs only Postgres, so it runs first;
+    a Temporal that does not answer stops the pass at the first describe, logged once,
+    and each describe is bounded. A missing namespace's NOT_FOUND is about Temporal,
+    not the execution: it never ends a live row. Every other failure of the describe is
+    about Temporal too, read as the route reads it (review #1316 (12) 1)."""
+    monkeypatch.setattr(client_module, "DESCRIBE_SECONDS", 0.05)
+    monkeypatch.setattr(client_module, "CONNECT_MARGIN_SECONDS", 0.05)
+    _insert_pre_1052(jobs, "dead", timedelta(days=1))
+    for run_id in ("one", "two", "three"):
+        await accept(store, run_id, run_id=run_id, wf_run=str(uuid.uuid4()))
+    client = DownClient(describe)
+
+    with caplog.at_level(logging.WARNING, logger=client_module.__name__):
+        ended = await reconcile_lost_runs(cast(Any, client), store, older_than=timedelta(0))
+
+    # The pre-#1052 row never had an execution: logged on its own, not counted.
+    assert ended == 0
+    assert (await store.get("dead")).status == "failed"  # type: ignore[union-attr]
+    assert (await store.get("one")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("two")).status == "running"  # type: ignore[union-attr]
+    assert len(client.timeouts) == 1 and client.timeouts[0] is not None
+    records = [r for r in caplog.records if r.name == client_module.__name__]
+    assert records[0].getMessage() == "ended print runs a pre-#1052 pod left running"
+    assert [r.levelno for r in records[1:]] == [level]

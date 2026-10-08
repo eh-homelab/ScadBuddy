@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
-import { GREETER_V1, GREETER_V2, MOVED_URL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
+import { GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { PluginPackagesPanel } from './PluginPackages'
@@ -52,10 +52,37 @@ describe('PluginPackagesPanel', () => {
   it('lists each problem of a refused package', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
-    await install(user, 'https://git.example/shell.git')
+    await install(user, 'https://git.example/reserved.git')
     const list = await screen.findByRole('list', { name: 'Why the package was refused' })
-    expect(within(list).getAllByRole('listitem').map((li) => li.textContent)).toEqual(SHELL_PROBLEMS)
+    expect(within(list).getAllByRole('listitem').map((li) => li.textContent)).toEqual(RESERVED_PROBLEMS)
     expect(screen.queryByRole('listitem', { name: /Plugin package/ })).not.toBeInTheDocument()
+  })
+
+  it('approves a package the rules refuse only once loading it as it is is confirmed too', async () => {
+    let approved: unknown
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/approve')) void request.clone().json().then((b) => (approved = b))
+    })
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/shell.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package shell' })
+    expect(within(within(card).getByLabelText('Review of shell')).getByText('Bash')).toBeInTheDocument()
+    const refused = within(card).getByRole('list', { name: 'What the rules refuse in shell' })
+    expect(within(refused).getAllByRole('listitem').map((li) => li.textContent)).toEqual(SHELL_PROBLEMS)
+
+    await user.click(within(card).getByRole('button', { name: 'Approve…' }))
+    const dialog = await screen.findByRole('dialog')
+    const approve = within(dialog).getByRole('button', { name: 'Approve this pin' })
+    await user.click(within(dialog).getByRole('checkbox', { name: /I reviewed commit/ }))
+    expect(approve).toBeDisabled()
+    const allow = within(dialog).getByRole('checkbox', { name: /Load it as it is, despite the 2 refusals/ })
+    expect(isUserOnly(allow.closest('label')!)).toBe(true)
+    await user.click(allow)
+    await user.click(approve)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(approved).toEqual({ commit_sha: SHELL.commit, content_hash: SHELL.hash, allow_refused: true })
+    expect(within(card).getByText('Unvetted code allowed')).toBeInTheDocument()
   })
 
   it('approves only after the exact commit and hash are shown and confirmed, then enables', async () => {

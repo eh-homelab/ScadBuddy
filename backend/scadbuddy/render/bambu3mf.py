@@ -10,7 +10,7 @@ import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
@@ -500,7 +500,7 @@ def plate_settings(config: ET.Element) -> list[PlateSettings]:
     return plates
 
 
-def plates_of(path: Path) -> list[PlateEntry]:
+def plates_of(path: Path | IO[bytes]) -> list[PlateEntry]:
     """Every plate the 3MF lays out, in index order (#83).
 
     ScadBuddy's own writer produces one unless the template asks for more (#289); a
@@ -729,6 +729,7 @@ def replate_3mf(
     *,
     nozzle_diameter: str | None = None,
     nozzle_stats: Sequence[str] | None = None,
+    nozzle_volume_type: Sequence[str] | None = None,
 ) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
@@ -750,6 +751,13 @@ def replate_3mf(
     the slicer's "Auto For Flush" grouping actually follows: an extruder stated with no
     nozzle gets no filament. See
     :func:`scadbuddy.bambuddy.extruders.slicer_nozzle_stats`.
+
+    ``nozzle_volume_type``, when given, is each extruder's flow in the slicer's order
+    ("Standard" or "High Flow"), the key Bambu Studio writes for a High Flow project
+    (#484); the slicer keeps it, since the H2C printer preset states none. See
+    :func:`scadbuddy.bambuddy.extruders.slicer_volume_types`. ``default_nozzle_volume_type``
+    is left alone, as Bambu Studio leaves it, and ``slice_info.config`` is never written:
+    it is the slicer's output.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
@@ -802,21 +810,140 @@ def replate_3mf(
             if nozzle_diameter is not None:
                 settings["nozzle_diameter"] = [nozzle_diameter]
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
-            if nozzle_stats is not None:
-                settings["extruder_nozzle_stats"] = list(nozzle_stats)
-                settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
+            _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
             _set_towers(settings, [placement.tower for placement in placements])
             data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
         rewritten.append((name, data))
+    return _zipped(rewritten)
 
+
+def _state_nozzles(
+    settings: dict[str, Any],
+    nozzle_stats: Sequence[str] | None,
+    nozzle_volume_type: Sequence[str] | None,
+) -> None:
+    """Write which extruders have the nozzle and each one's flow into ``settings``
+    (#834, #484); see :func:`replate_3mf`. ``None`` leaves a key as it is."""
+    if nozzle_stats is not None:
+        settings["extruder_nozzle_stats"] = list(nozzle_stats)
+        settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
+    if nozzle_volume_type is not None:
+        settings["nozzle_volume_type"] = list(nozzle_volume_type)
+
+
+#: Bambu Studio's full project_settings.config is ~80 KB; more is not one, but a zip bomb.
+MAX_SETTINGS_BYTES = 1024 * 1024
+#: An untrusted library 3MF (#484) past this is not read at all. The largest real one
+#: measured, a sliced multi-plate archive, inflates to 73 MB; a rewrite holds the file
+#: and its copy at once, so this is about the most one print may cost in memory.
+MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+#: A plate's gcode in a 3MF: the file is sliced already.
+_GCODE = re.compile(r"Metadata/plate_\d+\.gcode")
+
+
+def nozzles_statable(payload: bytes) -> bool:
+    """Whether :func:`state_nozzles` can rewrite ``payload``: a 3MF whose
+    ``project_settings.config`` is Bambu's JSON, and which holds no gcode, so the slicer
+    will read those settings (#484). A sliced file is printed as it was sliced, and a 3MF
+    from another slicer has no such settings to write into.
+
+    A library file is untrusted, so nothing is inflated past a cap: the declared sizes
+    are checked first (the settings against :data:`MAX_SETTINGS_BYTES`, the archive
+    against :data:`MAX_UNCOMPRESSED_BYTES`), then every entry is read in bounded chunks,
+    which :mod:`zipfile` stops at its declared size, so a header that understates one is
+    a CRC failure rather than a bomb. Any of these is not statable: the file prints as
+    it is."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if PROJECT_SETTINGS_NAME not in names or any(map(_GCODE.fullmatch, names)):
+                return False
+            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
+                return False
+            if archive.getinfo(PROJECT_SETTINGS_NAME).file_size > MAX_SETTINGS_BYTES:
+                return False
+            # Reads each entry in 1 MiB chunks and checks its CRC; None when all match.
+            if archive.testzip() is not None:
+                return False
+            settings = _read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES)
+            return isinstance(json.loads(settings), dict)
+    except (zipfile.BadZipFile, ValueError):
+        return False
+
+
+class ArchiveTooLargeError(ValueError):
+    """An entry, or the whole 3MF, inflated past its cap."""
+
+
+#: The chunk every untrusted entry is inflated in.
+_CHUNK = 1024 * 1024
+
+
+def _read_capped(archive: zipfile.ZipFile, name: str, cap: int) -> bytes:
+    """``name``'s bytes, read in chunks and refused past ``cap``, whatever its header
+    declares."""
+    data = bytearray()
+    with archive.open(name) as entry:
+        while chunk := entry.read(_CHUNK):
+            data += chunk
+            if len(data) > cap:
+                raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
+    return bytes(data)
+
+
+def state_nozzles(
+    payload: bytes,
+    *,
+    nozzle_stats: Sequence[str] | None = None,
+    nozzle_volume_type: Sequence[str] | None = None,
+) -> bytes:
+    """``payload`` stating the nozzles as :func:`replate_3mf` does, and changed in
+    nothing else: a library file is printed where its author placed it (#313, #484).
+    Only for a file :func:`nozzles_statable` accepts. The same file and nozzles always
+    give the same bytes, so a copy uploaded earlier can be found by its hash.
+
+    Each entry is copied through in chunks, counted against
+    :data:`MAX_UNCOMPRESSED_BYTES`, so no more than a chunk of it is ever inflated in
+    memory (:class:`ArchiveTooLargeError` past the cap)."""
+    total = 0
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            name = info.filename
+            if name == PROJECT_SETTINGS_NAME:
+                settings = json.loads(_read_capped(archive, name, MAX_SETTINGS_BYTES))
+                _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
+                data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
+                total += len(data)
+                out.writestr(_entry(name), data)
+                continue
+            with archive.open(info) as source, out.open(_entry(name), "w") as target:
+                while chunk := source.read(_CHUNK):
+                    total += len(chunk)
+                    if total > MAX_UNCOMPRESSED_BYTES:
+                        raise ArchiveTooLargeError(
+                            f"the 3MF inflates past {MAX_UNCOMPRESSED_BYTES} bytes"
+                        )
+                    target.write(chunk)
+    return buffer.getvalue()
+
+
+def _entry(name: str) -> zipfile.ZipInfo:
+    """An entry as ScadBuddy writes one: a fixed time, and covers stored."""
+    info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
+    info.compress_type = zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
+    return info
+
+
+def _zipped(entries: Sequence[tuple[str, bytes]]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        for name, data in rewritten:
-            info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
+        for name, data in entries:
             # Same policy as the writer, so a replated file is byte-identical to
             # one written for this plate directly — covers included.
-            info.compress_type = (
-                zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
-            )
-            out.writestr(info, data)
+            out.writestr(_entry(name), data)
     return buffer.getvalue()

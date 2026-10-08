@@ -47,6 +47,8 @@ interface Props {
   readOnly?: boolean
   /** Filled in once the editor mounts; see `SourceEditHandle`. */
   editRef?: RefObject<SourceEditHandle | null>
+  /** #997 — what Ctrl/Cmd+S does in the editor: the page's own Save. */
+  onSave?: () => void
 }
 
 /** A definition's file the editor is showing in place of the model's source. */
@@ -108,13 +110,14 @@ export function SourceEditor({
   label,
   readOnly = false,
   editRef,
+  onSave,
 }: Props) {
   const editor = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const [textModel, setTextModel] = useState<Monaco.editor.ITextModel | null>(null)
   const [viewing, setViewing] = useState<Viewing | null>(null)
   // Where to put the cursor once the editor shows the model a jump switched to.
   const landing = useRef<Target | null>(null)
-  const latest = useLatest({ uri, onChange })
+  const latest = useLatest({ uri, onChange, onSave })
   // A new model ends any definition view, rather than hiding it until that model comes
   // back: by then the file's model has gone with the old session, and the view would
   // reopen on an empty one. Reset while rendering, React's way to follow a prop.
@@ -262,6 +265,31 @@ export function SourceEditor({
                 element: () => instance.getDomNode(),
               }
             }
+            // #997 — Tab indents, so on its own it can never leave the editor (WCAG 2.1.2).
+            // Escape arms Monaco's tab-focus mode for the next key: Tab or Shift+Tab then
+            // moves focus on, and any other key, or leaving, puts Tab back to indenting.
+            // Only with no widget open and nothing selected: Escape still closes completion,
+            // find and the rest, collapses a selection and removes secondary cursors.
+            instance.addCommand(
+              monaco.KeyCode.Escape,
+              () => instance.updateOptions({ tabFocusMode: true }),
+              '!suggestWidgetVisible && !findWidgetVisible && !parameterHintsVisible && ' +
+                '!renameInputVisible && !referenceSearchVisible && !inSnippetMode && !editorHasMultipleSelections && ' +
+                '!editorHasSelection',
+            )
+            const passing = new Set([
+              monaco.KeyCode.Escape,
+              monaco.KeyCode.Tab,
+              monaco.KeyCode.Shift,
+              monaco.KeyCode.Ctrl,
+              monaco.KeyCode.Alt,
+              monaco.KeyCode.Meta,
+            ])
+            instance.onKeyDown((event) => {
+              if (!passing.has(event.keyCode)) instance.updateOptions({ tabFocusMode: false })
+            })
+            instance.onDidBlurEditorText(() => instance.updateOptions({ tabFocusMode: false }))
+            instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => latest.current.onSave?.())
             instance.updateOptions({ ariaLabel: label })
             applyMarkers()
             setTextModel(instance.getModel())
@@ -277,6 +305,9 @@ export function SourceEditor({
           loading={<span className="text-[13px] text-muted">Loading the editor</span>}
         />
       </div>
+      <p className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
+        Esc, then Tab, to leave the editor
+      </p>
     </div>
   )
 }

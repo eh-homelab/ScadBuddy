@@ -516,29 +516,89 @@ describe('waiting for the tab (#815)', () => {
       waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
     })
     expect(result.isError).toBe(true)
-    expect(text(result)).toMatch(/^no browser attached: .*The tab reconnected, but not to this agent replica, so it cannot be reached from here\.$/s)
+    expect(text(result)).toMatch(
+      /^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but none is attached here now: it may have come back on another agent replica, or dropped again\.$/s,
+    )
     expect(text(result)).not.toContain(`call ${name} again`)
   })
 
-  // #1394: the check for a tab already back takes the wait's signal down to the pairing lookup it awaits.
-  it("hands the tab check's signal to the pairing lookup, so a hung lookup can be cancelled", async () => {
+  // #1410: words the reason the hub gives, not a cross-replica cause it cannot know.
+  it('a write call whose wait ended reconnected names the reason no tab is here', async () => {
+    const hub = new TabHub()
+    // The session's tab is known but not connected here: it dropped again, or is on another replica.
+    hub.pairSession('s1', TAB)
+    const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(text(result)).toMatch(/^no browser attached: the paired ScadBuddy tab is not connected .*none is attached here now/s)
+  })
+
+  // #1410: a re-check that fails keeps the not-run guidance instead of an unexpected error.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call whose re-check fails still says it was not run', async (_tier, name, args) => {
+    const pairings: PairingStore = new InMemoryPairingStore()
+    let lookups = 0
+    pairings.pairedTab = () => (++lookups === 1 ? Promise.resolve(undefined) : Promise.reject(new Error('pool is closed')))
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), agent),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(lookups).toBe(2)
+    expect(result.isError).toBe(true)
+    expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
+  })
+
+  /** A pairing lookup that answers the first call and then hangs until its signal aborts. */
+  function hangingLookups(): { pairings: PairingStore; seen: (AbortSignal | undefined)[] } {
     const seen: (AbortSignal | undefined)[] = []
     const pairings: PairingStore = new InMemoryPairingStore()
     pairings.pairedTab = (_principal, signal) => {
       seen.push(signal)
-      return Promise.resolve(undefined)
+      if (seen.length === 1) return Promise.resolve(undefined)
+      return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
     }
+    return { pairings, seen }
+  }
+
+  // #1394, #1410: the tab check's signal reaches the pairing lookup, and its abort ends a hung one.
+  it("hands the tab check's signal to the pairing lookup, so a hung lookup is cancelled", async () => {
+    const { pairings, seen } = hangingLookups()
     const hub = new TabHub({ pairings })
     const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
     const parked = new AbortController()
+    let check: Promise<boolean> | undefined
     await runTool(tool('browser_snapshot'), {}, {
       ...ctx(hub.forSession('s1'), agent),
-      waitForTab: async ({ isBack }) => {
-        await isBack(parked.signal)
-        return { back: false, message: 'x' }
+      waitForTab: ({ isBack }) => {
+        check = isBack(parked.signal)
+        return Promise.resolve({ back: false, message: 'x' })
       },
     })
-    expect(seen).toContain(parked.signal)
+    expect(seen[1]).toBe(parked.signal)
+    parked.abort(new Error('the wait ended'))
+    // Without the signal the lookup would never settle and this would time out.
+    await expect(check).rejects.toThrow('the wait ended')
+  })
+
+  // #1410: TabHub.call() gives its own signal to the pairing lookup behind every browser_* call.
+  it('cancels a browser_* call whose pairing lookup hangs', async () => {
+    const { pairings, seen } = hangingLookups()
+    seen.push(undefined) // no first answer: the call's own lookup hangs
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const stop = new AbortController()
+    const result = runTool(tool('browser_snapshot'), {}, ctx(hub.forSession('s1'), agent, stop.signal))
+    await expect.poll(() => seen.length).toBe(2)
+    expect(seen[1]).toBe(stop.signal)
+    stop.abort()
+    expect(text(await result)).toMatch(/the call was cancelled/)
   })
 
   it("words the not-run error by why the wait ended: the user's word is not a connected tab", async () => {
@@ -577,7 +637,7 @@ describe('waiting for the tab (#815)', () => {
         return Promise.resolve({ back: true, why: 'reconnected' as const })
       },
     })
-    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session.*The tab reconnected, but not to this agent replica/s)
+    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but none is attached here now/s)
     expect(waited).toBe(2)
   })
 

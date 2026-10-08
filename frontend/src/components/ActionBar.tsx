@@ -1,4 +1,12 @@
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
+import {
+  useEffect,
+  useId,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type Ref,
+} from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -18,8 +26,9 @@ import { fitLabel, fitMessages } from '../lib/plate'
 import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { sameJson, type InputsExtra } from '../lib/inputs'
-import { saveOutput } from '../lib/saveOutput'
+import { ExtraOutputsError, saveOutput, saveRemaining } from '../lib/saveOutput'
 import { traceAction } from '../lib/traceAction'
+import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { ImageDialog } from './ImageDialog'
@@ -105,7 +114,20 @@ export function ActionBar({
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [imageOpen, setImageOpen] = useState(false)
+  /** #1741 — at a phone's width the project, Download, Send and Print wait behind More. */
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const moreId = useId()
+  const footer = useRef<HTMLElement>(null)
+  const dialogOpen = sendOpen || printOpen || imageOpen
   const [error, setError] = useState<string | null>(null)
+  /** A job whose first output was saved but not the rest: Generate saves only those. */
+  const [unfinished, setUnfinished] = useState<ExtraOutputsError | null>(null)
+  /** Stops a render Generate is waiting for when the page leaves this model. */
+  const generation = useRef<AbortController | null>(null)
+  useEffect(() => () => generation.current?.abort(), [slug])
+  /** #967 — what the last Generate or download came to, for the polite live region. */
+  const [announcement, setAnnouncement] = useState('')
   /**
    * #317 — the project Generate files the editable 3MF into, shared with the print
    * dialog's picker so both show one choice. Seeded from `last_project_id`; a change on
@@ -170,8 +192,15 @@ export function ActionBar({
   /** The saved output, and the project file Generate filed it as (#931: the agent records both). */
   async function generate(): Promise<{ output: Output; filed: ProjectFile | null; extra: InputsExtra } | null> {
     if (!job) return null
+    const controller = new AbortController()
+    generation.current?.abort()
+    generation.current = controller
     setGenerating(true)
     setError(null)
+    // Matched on the job Generate was asked to save, not a re-render it made for it.
+    const resume = unfinished?.requested.id === job.id ? unfinished : null
+    setUnfinished(null)
+    setAnnouncement('')
     setFiled(null)
     setFileError(null)
     try {
@@ -179,17 +208,42 @@ export function ActionBar({
         'generate',
         { 'scadbuddy.slug': slug, 'scadbuddy.job_id': job.id },
         async (within, span) => {
-          const created = await saveOutput({ slug, job, extra, capture, within })
+          let created: Output
+          if (resume) {
+            await saveRemaining(resume)
+            created = resume.saved
+          } else {
+            // The first output shows as soon as it is saved, before a pipeline job's others.
+            created = await saveOutput({
+              slug,
+              job,
+              extra,
+              capture,
+              onSaved: (saved) => onGenerated(saved, extra),
+              signal: controller.signal,
+              within,
+            })
+          }
           span.setAttribute('scadbuddy.output_id', created.id)
-          onGenerated(created, extra)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
           const filed = await within(() => fileIntoProject(created))
+          setAnnouncement(
+            `Generated ${created.name ?? created.id.slice(0, 8)}. Download 3MF, Send to Bambuddy or Print it.`,
+          )
           return { output: created, filed, extra }
         },
       )
     } catch (cause) {
-      const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
+      if (controller.signal.aborted) return null // the page has moved on
+      if (cause instanceof ExtraOutputsError) setUnfinished(cause)
+      const message =
+        cause instanceof ExtraOutputsError
+          ? cause.message
+          : cause instanceof ApiError
+            ? cause.detail
+            : 'Could not save this output.'
       setError(message)
+      setAnnouncement(message)
       throw new AgentToolError('failed', message)
     } finally {
       setGenerating(false)
@@ -255,10 +309,32 @@ export function ActionBar({
     },
   })
 
+  // Escape, or a press outside the bar, closes More; not while one of its dialogs is up,
+  // which takes its own Escape and returns focus to the button that opened it.
+  useEffect(() => {
+    if (!phone || !moreOpen || dialogOpen) return
+    const onDown = (event: MouseEvent) => {
+      if (!footer.current?.contains(event.target as Node)) setMoreOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      const inside = !!footer.current?.contains(document.activeElement)
+      setMoreOpen(false)
+      if (inside) footer.current?.querySelector<HTMLButtonElement>('[data-testid="more-actions"]')?.focus()
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [phone, moreOpen, dialogOpen])
+
   async function download() {
-    if (!output) return
+    if (!output || downloading) return
     setDownloading(true)
     setError(null)
+    setAnnouncement('')
     try {
       // Fetched as a blob and saved through lib/embed, so it works inside Bambuddy's
       // sandboxed iframe (a popup that escapes the sandbox, opened before the fetch).
@@ -267,22 +343,102 @@ export function ActionBar({
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return await response.blob()
       }, `${slug}-${output.id}.3mf`)
+      setAnnouncement(`Downloaded ${slug}-${output.id}.3mf.`)
     } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : 'Download failed.')
+      const message = cause instanceof DownloadBlockedError ? cause.message : 'Download failed.'
+      setError(message)
+      setAnnouncement(message)
     } finally {
       setDownloading(false)
     }
   }
 
+  // #317 — Generate files the editable 3MF in this project's Bambuddy folder.
+  const projectPicker = (
+    <ProjectPicker
+      id="customize-project"
+      testId="customize-project-select"
+      inline
+      value={projectId}
+      onChange={chooseProject}
+      list={projects}
+      onProject={setProject}
+      disabled={generating}
+      onCreating={setPageCreating}
+    />
+  )
+  const generateButtons = (
+    <div className="flex">
+      <Button
+        variant="primary"
+        onClick={() => {
+          if (!generating) void generate().catch(() => undefined)
+        }}
+        // #967 — busy is aria-disabled, not disabled: a disabled button drops the
+        // keyboard focus it was pressed with to <body>.
+        disabled={!ready || creatingProject}
+        aria-disabled={generating || undefined}
+        data-testid="generate"
+        className="rounded-r-none"
+      >
+        {generating && <Spinner />}
+        {generating ? 'Generating' : 'Generate'}
+      </Button>
+      <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
+    </div>
+  )
+  const downloadButton = (
+    <Button
+      onClick={() => void download()}
+      disabled={!output}
+      aria-disabled={downloading || undefined}
+    >
+      {downloading && <Spinner />}
+      Download 3MF
+    </Button>
+  )
+  const sendButton = (
+    <Button onClick={() => setSendOpen(true)} disabled={!output}>
+      Send to Bambuddy
+    </Button>
+  )
+  const printButton = (
+    <Button
+      variant={misfit ? 'danger' : 'default'}
+      onClick={() => setPrintOpen(true)}
+      // #317 — Generate is still filing the project file, which the print reuses.
+      disabled={!output || generating || creatingProject}
+      data-testid="print"
+      title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
+    >
+      Print
+      {misfit && <span className="text-[12px]">· {misfit}</span>}
+    </Button>
+  )
+
   return (
     <>
-      <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2">
-        {/* A basis, so a crowded bar wraps its buttons below rather than squeezing "Saved …" to nothing. */}
-        <div className="flex min-w-0 grow basis-64 items-center gap-3">
+      <footer
+        ref={footer}
+        className={`flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2 ${
+          phone ? 'relative' : ''
+        }`}
+      >
+        {/* #967 — always in the page, so a change to it is announced. */}
+        <p className="sr-only" role="status" data-testid="action-status">
+          {announcement}
+        </p>
+        {/*
+          Sized by its content (#934): when the status and the buttons do not both fit,
+          the buttons wrap to their own row instead of the status running under them,
+          and on a bar too narrow for even the status alone its pieces wrap in turn.
+        */}
+        <div className="flex min-w-0 grow flex-wrap items-center gap-x-3 gap-y-1">
           {job?.colors && job.colors.length > 0 && (
             <>
               <ColorStrip colors={job.colors} />
-              <span className="text-[12px] text-muted">
+              {/* #1741 — the swatches alone on a phone, so the bar stays one row. */}
+              <span className={phone ? 'sr-only' : 'whitespace-nowrap text-[12px] text-muted'}>
                 {job.colors.length === 1 ? '1 colour' : `${job.colors.length} colours`}
               </span>
             </>
@@ -316,51 +472,53 @@ export function ActionBar({
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {/* #317 — Generate files the editable 3MF in this project's Bambuddy folder. */}
-          <ProjectPicker
-            id="customize-project"
-            testId="customize-project-select"
-            inline
-            value={projectId}
-            onChange={chooseProject}
-            list={projects}
-            onProject={setProject}
-            disabled={generating}
-            onCreating={setPageCreating}
-          />
-          <div className="flex">
+        {phone ? (
+          // #1741 — one row on a phone: Generate, and the rest behind More.
+          <div className="flex shrink-0 items-center gap-2">
+            {generateButtons}
             <Button
-              variant="primary"
-              onClick={() => void generate().catch(() => undefined)}
-              disabled={!ready || generating || creatingProject}
-              data-testid="generate"
-              className="rounded-r-none"
+              // Print's "does not fit" warning, while Print is out of sight.
+              variant={misfit ? 'danger' : 'default'}
+              onClick={() => setMoreOpen((open) => !open)}
+              aria-expanded={moreOpen}
+              aria-controls={moreOpen ? moreId : undefined}
+              data-testid="more-actions"
             >
-              {generating && <Spinner />}
-              {generating ? 'Generating' : 'Generate'}
+              More
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 12 12"
+                className={`size-3 fill-current ${moreOpen ? '' : 'rotate-180'}`}
+              >
+                <path d="M2 4.5 6 8.5 10 4.5z" />
+              </svg>
             </Button>
-            <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
           </div>
-          <Button onClick={() => void download()} disabled={!output || downloading}>
-            {downloading && <Spinner />}
-            Download 3MF
-          </Button>
-          <Button onClick={() => setSendOpen(true)} disabled={!output}>
-            Send to Bambuddy
-          </Button>
-          <Button
-            variant={misfit ? 'danger' : 'default'}
-            onClick={() => setPrintOpen(true)}
-            // #317 — Generate is still filing the project file, which the print reuses.
-            disabled={!output || generating || creatingProject}
-            data-testid="print"
-            title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            {projectPicker}
+            {generateButtons}
+            {downloadButton}
+            {sendButton}
+            {printButton}
+          </div>
+        )}
+        {phone && moreOpen && (
+          <div
+            id={moreId}
+            role="group"
+            aria-label="More actions"
+            data-testid="more-actions-panel"
+            className="absolute inset-x-0 bottom-full max-h-[60vh] space-y-3 overflow-y-auto border-t border-line bg-surface px-3 py-3 shadow-xl"
           >
-            Print
-            {misfit && <span className="text-[12px]">· {misfit}</span>}
-          </Button>
-        </div>
+            {projectPicker}
+            <div className="flex flex-wrap items-center gap-2">
+              {downloadButton}
+              {sendButton}
+              {printButton}
+            </div>
+          </div>
+        )}
       </footer>
 
       <ImageDialog
@@ -399,18 +557,43 @@ export function ActionBar({
   )
 }
 
-/** The other things Generate can make from the preview: for now, an image to share. */
+/**
+ * The other things Generate can make from the preview: for now, an image to share.
+ *
+ * #968 — the WAI-ARIA menu button pattern. Opening it (click, Enter, Space or the
+ * arrows) puts focus on an item; the arrows, Home and End move between items, which are
+ * out of the Tab order; Escape closes it back to the button, and Tab out closes it.
+ */
 function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () => void }) {
-  const [open, setOpen] = useState(false)
+  // Which item takes focus as it opens: the first, or the last for ArrowUp.
+  const [open, setOpen] = useState<'first' | 'last' | null>(null)
   const root = useRef<HTMLDivElement>(null)
+  const menu = useRef<HTMLDivElement>(null)
+  const menuId = useId()
+
+  const items = () => Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+  const close = (refocus: boolean) => {
+    setOpen(null)
+    // The shared Button takes no ref, so the trigger is found in the root.
+    if (refocus) root.current?.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')?.focus()
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const all = items()
+    const first = open === 'last' ? all.at(-1) : all[0]
+    first?.focus()
+  }, [open])
 
   useEffect(() => {
     if (!open) return
     const onDown = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
+      if (!root.current?.contains(event.target as Node)) setOpen(null)
     }
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key !== 'Escape') return
+      // Back to the button only from inside: an Escape elsewhere just closes it.
+      close(!!root.current?.contains(document.activeElement))
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -420,15 +603,46 @@ function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () =>
     }
   }, [open])
 
+  function onTriggerKey(event: ReactKeyboardEvent) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    event.preventDefault()
+    setOpen(event.key === 'ArrowUp' ? 'last' : 'first')
+  }
+
+  function onMenuKey(event: ReactKeyboardEvent) {
+    const all = items()
+    const at = all.indexOf(document.activeElement as HTMLElement)
+    const next =
+      event.key === 'ArrowDown'
+        ? all[(at + 1) % all.length]
+        : event.key === 'ArrowUp'
+          ? all[(at - 1 + all.length) % all.length]
+          : event.key === 'Home'
+            ? all[0]
+            : event.key === 'End'
+              ? all.at(-1)
+              : undefined
+    if (event.key === 'Tab') {
+      // Focus goes on to wherever Tab takes it; the menu does not stay open behind.
+      setOpen(null)
+      return
+    }
+    if (!next) return
+    event.preventDefault()
+    next.focus()
+  }
+
   return (
     <div ref={root} className="relative">
       <Button
         variant="primary"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen((value) => (value ? null : 'first'))}
+        onKeyDown={onTriggerKey}
         disabled={disabled}
         aria-label="More to generate"
         aria-haspopup="menu"
-        aria-expanded={open}
+        aria-expanded={open !== null}
+        aria-controls={open ? menuId : undefined}
         data-testid="generate-menu"
         className="rounded-l-none border-l-accent-ink/25 px-2"
       >
@@ -438,16 +652,22 @@ function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () =>
       </Button>
       {open && (
         <div
+          ref={menu}
+          id={menuId}
           role="menu"
+          aria-label="More to generate"
+          onKeyDown={onMenuKey}
           className="absolute right-0 bottom-full z-30 mb-1 min-w-48 rounded-[6px] border border-line bg-surface py-1 shadow-xl"
         >
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             data-testid="generate-image"
-            className="block w-full px-3 py-1.5 text-left text-[13px] hover:bg-surface-2"
+            className="block w-full px-3 py-1.5 text-left text-[13px] outline-none hover:bg-surface-2 focus-visible:bg-surface-2"
             onClick={() => {
-              setOpen(false)
+              // Back to the button first, so the dialog returns focus there when it closes.
+              close(true)
               onImage()
             }}
           >

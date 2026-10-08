@@ -54,13 +54,13 @@ the pitch and the length.
 | `length` | `220` | Nose to tail tip in mm when laid out straight, 120–300. |
 | `width` | `26` | Body width at its widest, 22–40 mm. The head, legs, wings and fins stick out beyond it. The body narrows towards the tail, but never below the hinge minimum (about 20 mm). |
 | `thickness` | `8` | Height in mm, 6–12. Wings and fins are 45 % of this (2.4 mm minimum). |
-| `pose` | `wave` | How it lies on the plate: `straight`, a gentle S-shaped `wave`, or a `curl` into a C. The pose bends each hinge by at most 12°. That is inside the 22° it can bend, so the joints work the same in every pose. |
+| `pose` | `wave` | How it lies on the plate: `straight`, a gentle S-shaped `wave`, or a `curl` into a C. The pose bends each hinge by at most 12°. That is inside the 22° it can bend, so the joints work the same in every pose. A critter too long for the plate in the pose asked (a long name can grow it past 300 mm) lies in the next more compact pose that fits, straight then wave then curl, and the log says `NOTE: pose changed from … to …`. |
 
 ### Name
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `name` | *(empty)* | Up to 12 characters. Each letter goes on its own body segment, centred along the body, and reads left to right with the head on the right. Segments are added if the name has more letters than `segments`. All letters are the same size: the largest that fits the smallest segment, and never under 4.5 mm. If the length has no room for a segment per letter at that size, the critter is lengthened to fit and the log says `NOTE: length raised from … to … mm to fit the N-letter name`. It never drops letters; only a name that would make the critter bigger than the plate fails the render, with a message saying to shorten the name. |
+| `name` | *(empty)* | Up to 12 characters. Each letter goes on its own body segment, centred along the body, and reads left to right with the head on the right. Segments are added if the name has more letters than `segments`. All letters are the same size: the largest that fits the smallest segment, and never under 4.5 mm. If the length has no room for a segment per letter at that size, the critter is lengthened to fit and the log says `NOTE: length raised from … to … mm to fit the N-letter name`. It never drops letters. If the grown critter does not fit the plate in the pose asked, it curls (see `pose`); every name the field accepts fits curled. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface for the name. |
 
 ### Hinges
@@ -120,7 +120,7 @@ children under 3. Supervise young children. A hinge can pinch small fingers.
 ./verify.sh
 ```
 
-Renders the defaults and fifteen variations in `scadbuddy-verify:local`:
+Renders the defaults and nineteen variations in `scadbuddy-verify:local`:
 
 - every animal, with and without a name;
 - every pose;
@@ -133,14 +133,18 @@ Renders the defaults and fifteen variations in `scadbuddy-verify:local`:
 - the smallest dragon, and a dragon too wide for its length to fit even one
   segment, so it grows;
 - names longer than the length has segments for (12 letters at 120 mm, wide
-  letters on a short caterpillar, 8 letters at the defaults), so it grows.
+  letters on a short caterpillar, 8 letters at the defaults), so it grows;
+- 12-letter names that grow the critter past the plate in the pose asked
+  (straight, and a wave with every numeric at its maximum and the widest
+  letters), so it curls; and a fish, whose wave already fits, so straight
+  falls back to wave rather than curl.
 
-Dropped segments and a raised length must each be reported with a `NOTE:`
-line in the log, and must not be when nothing changed. It also renders a
-12-letter name that would make a straight dragon longer than the plate, and
-checks that the render fails with a message saying to shorten the name.
-It does the same with the plate narrowed to 150 mm (through the hidden
-`bed_w`), to prove the plate-fit assert below fires.
+Dropped segments, a raised length and a changed pose must each be reported
+with a `NOTE:` line in the log, and must not be when nothing changed. No
+customizer combination is too big for the plate once curled, so to prove the
+plate-fit assert below still fires it narrows the plate to 150 mm (through the
+hidden `bed_w`) and checks the render fails with a message giving the curled
+size too.
 
 For each one it checks:
 

@@ -2,12 +2,17 @@
 # Render models/shape-sorter-puzzle with the defaults and each major
 # variation, then check concrete facts:
 #
-#   - the plate has exactly the colour parts the parameters imply (the tray,
+#   - the print has exactly the colour parts the parameters imply (the tray,
 #     one colour per piece, the colour hints in the hole floors), nothing on
-#     the Default material, sits on z=0, is as tall as a piece and its knob
-#     (or the tray), and fits the 300 x 320 plate;
+#     the Default material, sits on z=0, and is as tall as a piece and its
+#     knob;
 #   - the tray is exactly the size its grid of holes implies, and the print is
-#     exactly the tray plus one separate piece per hole (or either alone);
+#     exactly the tray plus one separate piece per hole;
+#   - ScadBuddy's plate convention (spec §6.4): the model echoes `plates = N`,
+#     2 exactly when the tray and the pieces cannot share the bed. Rendered
+#     with -D '$plate=k' as ScadBuddy renders each plate, plate 1 is the tray
+#     (with the pieces when they fit) and plate 2 every piece, each fits the
+#     300 x 320 bed on its own, and no piece is left off every plate;
 #   - every piece fits its hole at the set clearance: sitting in its hole and
 #     grown by clearance - 0.03 it touches nothing of the tray, and grown by
 #     clearance + 0.03 it touches the wall of every hole, so the probe
@@ -18,7 +23,7 @@
 #   - rendered once per colour the way ScadBuddy builds its closed parts, the
 #     colour parts do not overlap (the volume of the union equals the sum);
 #   - the render log's NOTE lines say what was shrunk, skipped or split onto
-#     a second plate, and a layout that does not fit falls back to the tray.
+#     a second plate.
 #
 # The checking runs on the host with python3 and the standard library only:
 # the OpenSCAD image has no Python.
@@ -65,7 +70,7 @@ NS = "{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}"
 BED_X, BED_Y = 300, 320
 
 # Defaults, mirrored from model.scad.
-D = dict(set="shapes", letters="ANNA", piece_size=55, layout="both", knobs=True,
+D = dict(set="shapes", letters="ANNA", piece_size=55, knobs=True,
          knob_diameter=12, knob_height=10, piece_thickness=8, clearance=0.5, hole_depth=5,
          floor_thickness=2.4, tray_wall=7, color_hints=True)
 TRAY = "#FFF3E0"
@@ -79,49 +84,45 @@ CASES = [
     ("animals", dict(set="animals"), [], ["NOTE"]),
     ("numbers", dict(set="numbers"), [], ["NOTE"]),
     ("letters-anna", dict(set="letters"), [], ["NOTE"]),
-    # Twelve letters with pieces too: they do not fit one plate with the
-    # tray, so the tray prints alone and the log says how to get the pieces.
-    ("letters-12-both", dict(set="letters", letters="MAXIMILIAN12"),
-     ["do not fit one plate together"], []),
-    ("letters-12-pieces", dict(set="letters", letters="MAXIMILIAN12", layout="pieces"), [], ["NOTE"]),
+    # Twelve letters: they do not fit one plate with the tray, so the pieces
+    # go on plate 2 and the log says so (#512: they were once left out).
+    ("letters-12", dict(set="letters", letters="MAXIMILIAN12"),
+     ["the pieces are on plate 2"], []),
     # Lower case is made upper case; spaces and punctuation are skipped.
     ("letters-junk", dict(set="letters", letters="a-b c!"), ["3 other character(s) skipped"], []),
     ("letters-empty", dict(set="letters", letters=""), ["one A piece is made"], []),
-    # Every glyph, at the smallest size with the biggest knob, as pieces: the
-    # knob table must put a knob on every one of them.
-    ("glyphs-1-small", dict(set="letters", letters="ABCDEFGHIJKL", layout="pieces",
-                            piece_size=35, knob_diameter=16),
+    # Every glyph, at the smallest size with the biggest knob: the knob table
+    # must put a knob on every one of them.
+    ("glyphs-1-small", dict(set="letters", letters="ABCDEFGHIJKL", piece_size=35, knob_diameter=16),
      ["narrower than 16", "1 piece(s) have no room for a knob"], []),
-    ("glyphs-2-small", dict(set="letters", letters="MNOPQRSTUVWX", layout="pieces",
-                            piece_size=35, knob_diameter=16), ["narrower than 16"], []),
-    ("glyphs-3-small", dict(set="letters", letters="YZ0123456789", layout="pieces",
-                            piece_size=35, knob_diameter=16), ["narrower than 16"], []),
-    ("glyphs-1-tray", dict(set="letters", letters="ABCDEFGHIJKL", layout="tray"), [], []),
-    ("glyphs-2-tray", dict(set="letters", letters="MNOPQRSTUVWX", layout="tray",
-                           clearance=1.0, tray_wall=5), [], []),
-    ("glyphs-3-tray", dict(set="letters", letters="YZ0123456789", layout="tray",
-                           clearance=0.3), [], []),
+    ("glyphs-2-small", dict(set="letters", letters="MNOPQRSTUVWX", piece_size=35, knob_diameter=16),
+     ["narrower than 16"], []),
+    ("glyphs-3-small", dict(set="letters", letters="YZ0123456789", piece_size=35, knob_diameter=16),
+     ["narrower than 16"], []),
+    # Every glyph's hole and colour hint at the full size (pieces on plate 2).
+    ("glyphs-1-tray", dict(set="letters", letters="ABCDEFGHIJKL"), [], []),
+    ("glyphs-2-tray", dict(set="letters", letters="MNOPQRSTUVWX", clearance=1.0, tray_wall=5), [], []),
+    ("glyphs-3-tray", dict(set="letters", letters="YZ0123456789", clearance=0.3), [], []),
     # Every glyph's colour hint at the smallest size: hint_inset is a fixed
     # 1.5 mm, so a thin stroke at piece_size 35 is where a hint would vanish.
-    ("glyphs-1-tray-small", dict(set="letters", letters="ABCDEFGHIJKL", layout="tray",
-                                 piece_size=35), [], []),
-    ("glyphs-2-tray-small", dict(set="letters", letters="MNOPQRSTUVWX", layout="tray",
-                                 piece_size=35), [], []),
-    ("glyphs-3-tray-small", dict(set="letters", letters="YZ0123456789", layout="tray",
-                                 piece_size=35), [], []),
-    # Big numbers: the pieces shrink so the tray fits, then the tray prints alone.
+    ("glyphs-1-tray-small", dict(set="letters", letters="ABCDEFGHIJKL", piece_size=35), [], []),
+    ("glyphs-2-tray-small", dict(set="letters", letters="MNOPQRSTUVWX", piece_size=35), [], []),
+    ("glyphs-3-tray-small", dict(set="letters", letters="YZ0123456789", piece_size=35), [], []),
+    # Big numbers: the pieces shrink so the tray fits, then go on plate 2.
     ("numbers-big", dict(set="numbers", piece_size=80),
-     ["pieces are 71 mm (80 asked)", "do not fit one plate together"], []),
+     ["pieces are 71 mm (80 asked)", "the pieces are on plate 2"], []),
     # Loosest, deepest, no knobs, no hints; the thin pieces rise to the hole depth.
     ("shapes-plain-deep", dict(knobs=False, color_hints=False, hole_depth=10, piece_thickness=4,
                                clearance=1.0, floor_thickness=4, tray_wall=14), [], ["NOTE"]),
-    # Pieces alone with no knobs: the plate is exactly piece_thickness tall, so
-    # a piece's rounded top edge must reach it (the last rounding step once
-    # came out empty and left every piece 0.27 mm short).
-    ("shapes-pieces-plain", dict(layout="pieces", knobs=False), [], ["NOTE"]),
+    # Pieces on a plate of their own with no knobs: the plate is exactly
+    # piece_thickness tall, so a piece's rounded top edge must reach it (the
+    # last rounding step once came out empty and left every piece 0.27 mm
+    # short).
+    ("numbers-big-plain", dict(set="numbers", piece_size=80, knobs=False, piece_thickness=10),
+     ["the pieces are on plate 2"], []),
     ("animals-small-tight", dict(set="animals", piece_size=35, clearance=0.3, knob_diameter=16,
                                  knob_height=16, tray_wall=5), [], []),
-    ("shapes-big", dict(piece_size=80, layout="both"), [], []),
+    ("shapes-big", dict(piece_size=80), [], []),
 ]
 
 
@@ -228,7 +229,7 @@ for name, ov, want_notes, bad_notes in CASES:
     log = docker("openscad --backend=Manifold %s -o %s/%s.3mf model.scad" % (d, OUT, name))
     m = re.search(r'SB_SORTER n=(\d+) size=(\S+) tray=\[(\S+), (\S+)\] grid=\[(\d+), (\d+)\] '
                   r'pieces=\[(\S+), (\S+)\] pgrid=\[(\d+), (\d+)\] both_fit=(\w+) '
-                  r'tray_shown=(\w+) pieces_shown=(\w+) piece_h=(\S+) knobs=\[\[([^\]]*)\]\] '
+                  r'.*?piece_h=(\S+) knobs=\[\[([^\]]*)\]\] '
                   r'holes=\[\[(.*)\]\]"', log)
     if not m:
         print(log[-2000:])
@@ -238,10 +239,11 @@ for name, ov, want_notes, bad_notes in CASES:
     TC, TR = int(m.group(5)), int(m.group(6))
     PW, PD = float(m.group(7)), float(m.group(8))
     both_fit = m.group(11) == "true"
-    tray_shown, pieces_shown = m.group(12) == "true", m.group(13) == "true"
-    PT = float(m.group(14))
-    knobs = nums(m.group(15))
-    hv = nums(m.group(16))
+    PT = float(m.group(12))
+    knobs = nums(m.group(13))
+    hv = nums(m.group(14))
+    plates_echo = [int(x) for x in re.findall(r"^ECHO: plates = (\d+)$", log, re.M)]
+    plates = plates_echo[-1] if plates_echo else 1
     holes = list(zip(hv[0::2], hv[1::2]))
     notes = re.findall(r'ECHO: "(NOTE: [^"]*)"', log)
 
@@ -266,14 +268,10 @@ for name, ov, want_notes, bad_notes in CASES:
           "pieces are piece_size, or smaller with a NOTE (%.0f)" % S)
     check(TW == TC * (S + p["tray_wall"]) + p["tray_wall"] and TD == TR * (S + p["tray_wall"]) + p["tray_wall"]
           and TC * TR >= n, "tray %.0f x %.0f is its %d x %d grid of holes" % (TW, TD, TC, TR))
-    want_tray = p["layout"] != "pieces"
-    want_pieces = p["layout"] == "pieces" or (p["layout"] == "both" and both_fit)
-    check(tray_shown == want_tray and pieces_shown == want_pieces,
-          "tray %s, pieces %s for layout %s" % (tray_shown, pieces_shown, p["layout"]))
     check(both_fit == (TD + 5 + PD <= BED_Y and max(TW, PW) <= BED_X),
           "tray and pieces fit together: %s (%.0f + 5 + %.0f deep)" % (both_fit, TD, PD))
-    check(both_fit or p["layout"] != "both" or any("do not fit one plate" in n_ for n_ in notes),
-          "a layout that does not fit says so")
+    check(plates_echo == [1 if both_fit else 2],
+          "echoes plates = %d once (got %s)" % (1 if both_fit else 2, plates_echo))
     check(PT == max(p["piece_thickness"], p["hole_depth"]), "pieces are %.1f mm thick" % PT)
     if p["knobs"]:
         check(all(k == 0 or KNOB_MIN <= k <= p["knob_diameter"] for k in knobs),
@@ -283,33 +281,48 @@ for name, ov, want_notes, bad_notes in CASES:
     else:
         check(not any(knobs), "no knobs")
 
-    # -- plate
-    mats, verts, tris = read_3mf("%s/%s.3mf" % (OUT, name))
-    used = Counter(t[3] for t in tris)
-    got = {col for i, (n_, col) in enumerate(mats) if n_ != "Default" and used.get(i)}
-    want = set()
-    if tray_shown:
-        want.add(TRAY)
-        if p["color_hints"]:
-            want |= {PIECE[k % 12] for k in range(n)}
-    if pieces_shown:
-        want |= {PIECE[k % 12] for k in range(n)}
-    check(got == want, "parts are %s (got %s)" % (sorted(want), sorted(got)))
-    check(used.get(0, 0) == 0, "Default material has no triangles (got %d)" % used.get(0, 0))
-    xs, ys, zs = zip(*verts)
+    # -- everything ($plate = 0, the preview): the tray and every piece
     tray_h = p["floor_thickness"] + p["hole_depth"]
-    top = max(tray_h if tray_shown else 0,
-              (PT + (p["knob_height"] if any(knobs) else 0)) if pieces_shown else 0)
-    check(abs(min(zs)) < 1e-3 and abs(max(zs) - top) < 0.02,
-          "sits on z=0 and is %.2f mm tall (z %.3f .. %.3f)" % (top, min(zs), max(zs)))
-    sx, sy = max(xs) - min(xs), max(ys) - min(ys)
-    check(sx <= BED_X and sy <= BED_Y, "fits the %dx%d bed (%.1f x %.1f)" % (BED_X, BED_Y, sx, sy))
-    if tray_shown and not pieces_shown:
-        check(abs(sx - TW) < 0.01 and abs(sy - TD) < 0.01, "tray alone is %.0f x %.0f" % (TW, TD))
-    ncomp = components(tris)
-    want_comp = (1 if tray_shown else 0) + (n if pieces_shown else 0)
-    check(ncomp == want_comp, "%d separate pieces == %s" % (
-        ncomp, " + ".join((["tray"] if tray_shown else []) + (["%d pieces" % n] if pieces_shown else []))))
+    piece_top = PT + (p["knob_height"] if any(knobs) else 0)
+    piece_cols = {PIECE[k % 12] for k in range(n)}
+    want = {TRAY} | piece_cols
+
+    def plate_facts(path):
+        mats, verts, tris = read_3mf(path)
+        used = Counter(t[3] for t in tris)
+        got = {col for i, (n_, col) in enumerate(mats) if n_ != "Default" and used.get(i)}
+        xs, ys, zs = zip(*verts)
+        return got, used.get(0, 0), (min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)), components(tris)
+
+    got, default_tris, (x0, x1, y0, y1, z0, z1), ncomp = plate_facts("%s/%s.3mf" % (OUT, name))
+    check(got == want, "parts are %s (got %s)" % (sorted(want), sorted(got)))
+    check(default_tris == 0, "Default material has no triangles (got %d)" % default_tris)
+    top = max(tray_h, piece_top)
+    check(abs(z0) < 1e-3 and abs(z1 - top) < 0.02,
+          "sits on z=0 and is %.2f mm tall (z %.3f .. %.3f)" % (top, z0, z1))
+    check(ncomp == 1 + n, "%d separate pieces == tray + %d pieces: no piece is left out" % (ncomp, n))
+
+    # -- each plate on its own, as ScadBuddy renders a multi-plate template
+    if plates == 1:
+        check(x1 - x0 <= BED_X and y1 - y0 <= BED_Y,
+              "one plate fits the %dx%d bed (%.1f x %.1f)" % (BED_X, BED_Y, x1 - x0, y1 - y0))
+    else:
+        docker("\n".join("openscad --backend=Manifold %s -D '$plate=%d' -o %s/%s_p%d.3mf model.scad"
+                         % (d, k, OUT, name, k) for k in (1, 2)))
+        for k, cols, comp, h, what in (
+                (1, {TRAY} | (piece_cols if p["color_hints"] else set()), 1, tray_h, "the tray"),
+                (2, piece_cols, n, piece_top, "every piece")):
+            got, default_tris, (x0, x1, y0, y1, z0, z1), ncomp = plate_facts(
+                "%s/%s_p%d.3mf" % (OUT, name, k))
+            check(got == cols and default_tris == 0 and ncomp == comp,
+                  "plate %d is %s: %s in %d piece(s) (got %s in %d)"
+                  % (k, what, sorted(cols), comp, sorted(got), ncomp))
+            check(abs(z0) < 1e-3 and abs(z1 - h) < 0.02 and x1 - x0 <= BED_X and y1 - y0 <= BED_Y,
+                  "plate %d sits on z=0, is %.2f mm tall and fits the %dx%d bed (%.1f x %.1f x %.2f)"
+                  % (k, h, BED_X, BED_Y, x1 - x0, y1 - y0, z1))
+            if k == 1:
+                check(abs(x1 - x0 - TW) < 0.01 and abs(y1 - y0 - TD) < 0.01,
+                      "plate 1 is the %.0f x %.0f tray" % (TW, TD))
 
     # -- probes
     jobs = []
@@ -344,15 +357,16 @@ for name, ov, want_notes, bad_notes in CASES:
     check(not pts, "every knob sits on its piece with %.1f mm to spare (%d vertices off)"
           % (KNOB_MARGIN - 0.1, len(pts)))
 
-    if tray_shown:
-        tz = [v[2] for t in read_stl("%s/%s_%s.stl" % (OUT, name, TRAY[1:])) for v in t]
-        check(abs(max(tz) - tray_h) < 1e-3, "tray is %.1f mm tall, full height to its top edge (%.3f)"
-              % (tray_h, max(tz)))
-    if tray_shown and not pieces_shown and p["color_hints"] and n <= len(PIECE):
-        # One colour per hole, so each colour's part is exactly that hole's hint.
+    tz = [v[2] for t in read_stl("%s/%s_%s.stl" % (OUT, name, TRAY[1:])) for v in t]
+    check(abs(max(tz) - tray_h) < 1e-3, "tray is %.1f mm tall, full height to its top edge (%.3f)"
+          % (tray_h, max(tz)))
+    if p["color_hints"] and n <= len(PIECE):
+        # One colour per hole, so each colour's part inside the tray (the
+        # piece of that colour lies outside it) is exactly that hole's hint.
         def hint_holes(k):
             f = "%s/%s_%s.stl" % (OUT, name, PIECE[k][1:])
-            return holes_hit(real_points(read_stl(f))) if os.path.exists(f) else set()
+            pts = [v for v in real_points(read_stl(f)) if v[0] <= TW and v[1] <= TD] if os.path.exists(f) else []
+            return holes_hit(pts)
         bad = [k for k in range(n) if hint_holes(k) != {k}]
         check(not bad, "every hole has its own colour hint (missing or misplaced: %s)" % bad)
     total = sum(volume(read_stl("%s/%s_%s.stl" % (OUT, name, col[1:]))) for col in want)

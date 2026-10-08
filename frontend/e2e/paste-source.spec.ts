@@ -50,6 +50,73 @@ test.describe('pasted source', () => {
     )
   })
 
+  test('the editor is no keyboard trap, saves on Ctrl+S and guards unsaved edits (#997)', async ({ page }) => {
+    await page.goto('/new')
+    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Keyboard Cube')
+    await typeSource(page, SOURCE)
+    const editor = page.getByRole('textbox', { name: 'OpenSCAD source' })
+    await expect(editor).toBeFocused()
+
+    // Tab is still indentation...
+    await page.keyboard.press('Tab')
+    await expect(editor).toBeFocused()
+    // ...and Escape is the way out, either way.
+    await expect(page.getByText('Esc, then Tab, to leave the editor')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Tab')
+    await expect(editor).not.toBeFocused()
+    await editor.focus()
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Shift+Tab')
+    await expect(editor).not.toBeFocused()
+
+    // Unsaved: leaving asks, and Stay keeps the edits.
+    await page.getByRole('main').getByRole('link', { name: 'Models' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Leave without saving?' })
+    await dialog.getByRole('button', { name: 'Stay' }).click()
+    await expect(page).toHaveURL(/\/new$/)
+
+    await expect(page.getByText(/^Parses cleanly/)).toBeVisible()
+    await editor.focus()
+    await page.keyboard.press('ControlOrMeta+s')
+    await expect(page).toHaveURL(/\/m\/keyboard-cube$/)
+    await expect(dialog).toBeHidden()
+  })
+
+  test('Escape with several cursors collapses them, and leaves Tab indenting (#997)', async ({ page }) => {
+    await page.goto('/new')
+    await typeSource(page, SOURCE)
+    const editor = page.getByRole('textbox', { name: 'OpenSCAD source' })
+    const lines = page.locator('.monaco-editor .view-line')
+    await lines.nth(1).click()
+    await lines.nth(3).click({ modifiers: ['Alt'] })
+    const cursors = page.locator('.monaco-editor .cursors-layer .cursor')
+    await expect(cursors).toHaveCount(2)
+
+    await page.keyboard.press('Escape')
+    await expect(cursors).toHaveCount(1)
+    // The Escape was Monaco's, not the way out: Tab still indents.
+    await page.keyboard.press('Tab')
+    await expect(editor).toBeFocused()
+  })
+
+  test('Escape with a selection collapses it, and leaves Tab indenting (#997)', async ({ page }) => {
+    await page.goto('/new')
+    await typeSource(page, SOURCE)
+    const editor = page.getByRole('textbox', { name: 'OpenSCAD source' })
+    await page.locator('.monaco-editor .view-line').nth(1).click()
+    await page.keyboard.press('Home')
+    await page.keyboard.press('Shift+End')
+    const selected = page.locator('.monaco-editor .selected-text')
+    await expect(selected).not.toHaveCount(0)
+
+    await page.keyboard.press('Escape')
+    await expect(selected).toHaveCount(0)
+    // The Escape was Monaco's, not the way out: Tab still indents.
+    await page.keyboard.press('Tab')
+    await expect(editor).toBeFocused()
+  })
+
   test('squiggles the failing line and only saves when forced', async ({ page }) => {
     await page.goto('/new')
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Half Cube')

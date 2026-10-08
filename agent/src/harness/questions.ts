@@ -8,14 +8,14 @@ import { ATTENTION_DESCRIPTION, ATTENTION_TOOL_NAME, ATTENTION_TOOL_SHAPE, type 
 // SDK hands every call of it to `canUseTool`, and the host answers by allowing
 // the call with `answers` added to its input, which Claude Code turns into the
 // tool result the model reads ("Your questions have been answered: …").
-// Measured on SDK 0.3.283 (test/questions.sdk.test.ts). The tool is not on
+// Measured on SDK 0.3.283 and 0.3.287 (test/questions.sdk.test.ts). The tool is not on
 // /mcp, where there is no user to ask.
 //
 // A SUBAGENT cannot use AskUserQuestion: Claude Code refuses the call itself
 // ("AskUserQuestion is not available inside subagents ... return findings to
 // the orchestrator") and never hands it to canUseTool, and an agent whose
 // `tools` lists it gets "not available to subagents" (measured on Claude Code
-// 2.1.283, test/harnessWiring.test.ts). So a run with a gate also gets
+// 2.1.283 and 2.1.287, test/harnessWiring.test.ts). So a run with a gate also gets
 // ASK_USER_TOOL, an in-process MCP tool with the same input that parks on the
 // same gate: a subagent's MCP calls reach the host like the parent's. Our
 // subagents list its server in their `tools`.
@@ -153,7 +153,7 @@ export async function askThroughGate(
 
 /**
  * ask_user's result: Claude Code's wording for AskUserQuestion's (measured on
- * 2.1.283), with each question and answer JSON-quoted, so an answer the user
+ * 2.1.283 and 2.1.287), with each question and answer JSON-quoted, so an answer the user
  * typed with a quote in it cannot read as a second answer.
  */
 export function answersText(answers: Record<string, string>): string {
@@ -161,12 +161,12 @@ export function answersText(answers: Record<string, string>): string {
   return `User has answered your questions: ${pairs.join(', ')}. You can now continue with the user's answers in mind.`
 }
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283). */
+/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283 and 2.1.287). */
 const TOOL_USE_ID_META = 'claudecode/toolUseId'
 
 /**
  * ask_user's call timeout. An MCP call is cut off at the server's `timeout`,
- * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283;
+ * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283 and 2.1.287;
  * the cut-off aborts the call, and the gate withdraws its card). The idle
  * timeout does not apply to `sdk` servers, and MCP auto-backgrounding is off
  * in a non-interactive session. A question waits until it is answered or its

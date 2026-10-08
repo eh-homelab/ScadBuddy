@@ -336,11 +336,11 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const gotB = collectUntil(followB, (e) => e.event.type === 'session.status' && e.event.status === 'idle', 5_000)
       await new Promise((r) => setTimeout(r, 50))
       expect(m.events.watchedSessions()).toBe(1)
-      const started = Date.now()
+      const started = performance.now()
       await (await m.send(id, agentA, 'again')).done
       expect((await gotA).at(0)?.event.type).toBe('user.turn')
       expect((await gotB).at(0)?.event.type).toBe('user.turn')
-      expect(Date.now() - started).toBeLessThan(5_000)
+      expect(performance.now() - started).toBeLessThan(5_000)
       // collectUntil stopped iterating: both followers detached, the entry is gone.
       expect(m.events.watchedSessions()).toBe(0)
 

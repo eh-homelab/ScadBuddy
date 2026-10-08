@@ -40,9 +40,9 @@ function ok<T = Record<string, unknown>>(result: Result): T {
 }
 
 async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await new Promise((r) => setTimeout(r, 10))
   }
 }
@@ -315,7 +315,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       closers.push(async () => stop.abort())
       const from = await replicaB.events.lastSeq(session.id)
       const follow = await replicaB.attach(session.id, BROWSER_USER, { afterSeq: from, signal: stop.signal })
-      const started = Date.now()
+      const started = performance.now()
       const reading = collectUntil(follow, (e) => e.event.type === 'session.status' && e.event.status === 'idle', 5000)
       // Give the follower its first (empty) read, so it is waiting when the turn runs.
       await new Promise((r) => setTimeout(r, 100))
@@ -323,7 +323,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const events = await reading
       expect(events.map((e) => e.event.type)).toContain('assistant.text.delta')
       // Far inside the 60 s poll: the NOTIFY woke it.
-      expect(Date.now() - started).toBeLessThan(5000)
+      expect(performance.now() - started).toBeLessThan(5000)
       expect(pubA.sent).toBeGreaterThan(0)
     })
 
@@ -475,7 +475,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(ok<{ session: { offer: unknown } }>(await a.call('sessions_get', { session_id: three })).session.offer).toBeNull()
     })
 
-    it('in the harness, refuses to decide approvals or hand a session off', async () => {
+    // A durable session's tool activity (`workflow`, #1055) is a session model too.
+    it.each(['harness', 'workflow'] as const)('in the %s, refuses to decide approvals or hand a session off', async (gate) => {
       const { sessions } = await setup()
       const svc = services({ sessions })
       const byName = new Map(ALL_TOOLS.map((t) => [t.name, t]))
@@ -485,7 +486,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         principal: { id: 'browser', kind: 'browser' as const, tiers: ['read', 'write', 'outward'] as Tier[] },
         progress: async () => {},
         signal: new AbortController().signal,
-        gate: 'harness' as const,
+        gate,
       }
       for (const [name, args] of [
         ['sessions_approve', { approval_id: session.id }],

@@ -13,20 +13,27 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import libraries as libraries_api
+from scadbuddy.api import library_pins
+from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import (
     DEPENDENCY_CHECK_CONCURRENCY,
     STATE_ATTR,
@@ -34,22 +41,33 @@ from scadbuddy.api.deps import (
     get_fonts,
     get_libraries,
 )
+from scadbuddy.core.components import Components
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.paths import DataPaths, model_path
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library import operations as library_operations
 from scadbuddy.library import url_import
+from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.includes import resolve_dependencies
 from scadbuddy.library.libraries import (
+    CLONE_TIMEOUT,
     STAGING_PREFIX,
     CatalogueLibrary,
     CheckoutGate,
+    CheckoutLeases,
+    InstallPermits,
+    LibraryDeclarationError,
+    LibraryNotInstalledError,
     LibraryStore,
     ModelLibrary,
 )
 from scadbuddy.library.scad import check_source
 from scadbuddy.main import sweep_library_checkouts
+from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import set_fake_env
-from tests.conftest import make_library_upstream
+from tests.conftest import make_library_upstream, open_pg_pool
+from tests.support.operations import press
 from tests.test_library_processes import _age
 
 pytestmark = pytest.mark.requires_git
@@ -84,6 +102,9 @@ def libraries_app(app: FastAPI, upstream: tuple[str, dict[str, str]]) -> FastAPI
         protocols=("file",),
     )
     app.dependency_overrides[get_libraries] = lambda: store
+    # The pin commands run on the library worker, which reads the state, not the route's
+    # dependencies.
+    state.libraries = store
     return app
 
 
@@ -94,14 +115,14 @@ def lib_client(libraries_app: FastAPI) -> Iterator[TestClient]:
 
 
 def create_model(client: TestClient, name: str = SLUG) -> dict[str, Any]:
-    response = client.post("/api/v1/models", json={"name": name, "source": SOURCE})
+    response = client.post("/api/v1/models", json={"name": name, "source": SOURCE}, headers=press())
     assert response.status_code == 201, response.text
     created: dict[str, Any] = response.json()
     return created
 
 
 def pin(client: TestClient, name: str, slug: str = SLUG, **body: Any) -> dict[str, Any]:
-    response = client.put(f"/api/v1/models/{slug}/libraries/{name}", json=body)
+    response = client.put(f"/api/v1/models/{slug}/libraries/{name}", json=body, headers=press())
     assert response.status_code == 200, response.text
     record: dict[str, Any] = response.json()
     return record
@@ -187,8 +208,8 @@ def test_removing_a_library_takes_it_off_the_model(lib_client: TestClient) -> No
     create_model(lib_client)
     pin(lib_client, "BOSL2")
 
-    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2")
-    again = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2")
+    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", headers=press())
+    again = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", headers=press())
 
     assert removed.status_code == 200, removed.text
     assert removed.json()["libraries"] == []
@@ -198,7 +219,9 @@ def test_removing_a_library_takes_it_off_the_model(lib_client: TestClient) -> No
 def test_a_built_in_takes_no_pins(lib_client: TestClient, libraries_app: FastAPI) -> None:
     store = libraries_app.dependency_overrides[get_libraries]()
     with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
-        response = lib_client.put("/api/v1/models/builtin:anything/libraries/BOSL2", json={})
+        response = lib_client.put(
+            "/api/v1/models/builtin:anything/libraries/BOSL2", json={}, headers=press()
+        )
 
     assert response.status_code == 403
 
@@ -208,7 +231,9 @@ def test_pinning_to_a_model_that_does_not_exist_is_a_404_without_a_clone(
 ) -> None:
     store = libraries_app.dependency_overrides[get_libraries]()
     with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
-        response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+        response = lib_client.put(
+            f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press()
+        )
 
     assert response.status_code == 404
 
@@ -217,7 +242,9 @@ def test_the_metadata_patch_takes_no_libraries(lib_client: TestClient) -> None:
     """A pin is a fetched commit; it is set by the pin route, never typed in."""
     create_model(lib_client)
 
-    patched = lib_client.patch(f"/api/v1/models/{SLUG}", json={"libraries": ["BOSL2"]})
+    patched = lib_client.patch(
+        f"/api/v1/models/{SLUG}", json={"libraries": ["BOSL2"]}, headers=press()
+    )
 
     assert patched.status_code == 200
     assert patched.json()["libraries"] == []
@@ -251,7 +278,9 @@ def test_installs_in_flight_are_capped(
         codes = list(
             pool.map(
                 lambda slug: (
-                    lib_client.put(f"/api/v1/models/{slug}/libraries/BOSL2", json={}).status_code
+                    lib_client.put(
+                        f"/api/v1/models/{slug}/libraries/BOSL2", json={}, headers=press()
+                    ).status_code
                 ),
                 slugs,
             )
@@ -263,7 +292,7 @@ def test_installs_in_flight_are_capped(
 
 def test_an_unknown_library_without_a_url_is_a_404(lib_client: TestClient) -> None:
     create_model(lib_client)
-    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/nothing", json={})
+    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/nothing", json={}, headers=press())
     assert response.status_code == 404
     assert response.headers["content-type"] == "application/problem+json"
     assert "catalogue" in response.json()["detail"]
@@ -274,13 +303,14 @@ def test_a_url_on_a_transport_that_is_not_allowed_is_a_422(lib_client: TestClien
     response = lib_client.put(
         f"/api/v1/models/{SLUG}/libraries/mylib",
         json={"url": "ext::sh -c touch% /tmp/x", "ref": "v1"},
+        headers=press(),
     )
     assert response.status_code == 422
 
 
 def test_a_name_that_is_not_a_directory_name_is_a_422(lib_client: TestClient) -> None:
     create_model(lib_client)
-    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/.hidden", json={})
+    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/.hidden", json={}, headers=press())
     assert response.status_code == 422
 
 
@@ -290,7 +320,9 @@ def test_a_ref_with_dot_dot_is_refused_by_validation(
     create_model(lib_client)
     store = libraries_app.dependency_overrides[get_libraries]()
     with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
-        response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "a..b"})
+        response = lib_client.put(
+            f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "a..b"}, headers=press()
+        )
 
     assert response.status_code == 422
     assert [error["loc"] for error in response.json()["errors"]] == [["body", "ref"]]
@@ -365,7 +397,7 @@ def test_a_model_lists_its_invalid_library_entries_and_they_can_be_removed(
     assert "'bad name' is not valid: name:" in invalid[3]["problem"]
 
     for name in ("threads", "gears"):
-        removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/{name}")
+        removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/{name}", headers=press())
         assert removed.status_code == 200, removed.text
     assert [entry["name"] for entry in removed.json()["invalid_libraries"]] == [None, None]
     assert [lib["name"] for lib in removed.json()["libraries"]] == ["BOSL2"]
@@ -412,7 +444,9 @@ def test_removing_an_invalid_entry_by_index_keeps_a_pin_of_the_same_name(
     [entry] = lib_client.get(f"/api/v1/models/{SLUG}").json()["invalid_libraries"]
     assert (entry["name"], entry["index"]) == ("BOSL2", 1)
 
-    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", params={"index": 1})
+    removed = lib_client.delete(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", params={"index": 1}, headers=press()
+    )
 
     assert removed.status_code == 200, removed.text
     assert removed.json()["invalid_libraries"] == []
@@ -426,7 +460,9 @@ def test_removing_one_of_two_invalid_entries_of_a_name_keeps_the_other(
     first = {"name": "threads", "url": "https://example.invalid/a.git", "ref": "v1"}
     _write_libraries(paths, ["threads", first])
 
-    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/threads", params={"index": 0})
+    removed = lib_client.delete(
+        f"/api/v1/models/{SLUG}/libraries/threads", params={"index": 0}, headers=press()
+    )
 
     assert removed.status_code == 200, removed.text
     assert _raw_libraries(paths) == [first]
@@ -447,12 +483,12 @@ def test_removing_by_index_refuses_an_entry_that_is_not_that_invalid_one(
 
     for name, index in (("BOSL2", 0), ("BOSL2", 1), ("threads", 0), ("threads", 2)):
         refused = lib_client.delete(
-            f"/api/v1/models/{SLUG}/libraries/{name}", params={"index": index}
+            f"/api/v1/models/{SLUG}/libraries/{name}", params={"index": index}, headers=press()
         )
         assert refused.status_code == 409, (name, index, refused.text)
     assert _raw_libraries(paths) == [good, "threads"]
     # Without `index`, every entry of the name goes, as before.
-    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/threads")
+    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/threads", headers=press())
     assert removed.status_code == 200, removed.text
     assert _raw_libraries(paths) == [good]
 
@@ -488,7 +524,9 @@ def test_a_ref_that_does_not_exist_upstream_is_a_502(
 ) -> None:
     create_model(lib_client)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.library.libraries"):
-        response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "v9"})
+        response = lib_client.put(
+            f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "v9"}, headers=press()
+        )
 
     assert response.status_code == 502
     detail = response.json()["detail"]
@@ -507,7 +545,7 @@ def test_a_clone_over_the_size_cap_is_a_422(libraries_app: FastAPI, lib_client: 
     store.max_bytes = 1
     create_model(lib_client)
 
-    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press())
 
     assert response.status_code == 422
     assert ", over the 1 bytes" in response.json()["detail"]
@@ -529,6 +567,7 @@ def test_a_url_on_the_cluster_network_is_a_422_without_a_clone(
     response = lib_client.put(
         f"/api/v1/models/{SLUG}/libraries/mylib",
         json={"url": "https://git.internal.example/o/r.git", "ref": "v1"},
+        headers=press(),
     )
 
     assert response.status_code == 422
@@ -554,6 +593,7 @@ def test_a_url_whose_lookup_times_out_is_a_503_to_try_again(
     response = lib_client.put(
         f"/api/v1/models/{SLUG}/libraries/mylib",
         json={"url": "https://git.example/o/r.git", "ref": "v1"},
+        headers=press(),
     )
 
     assert response.status_code == 503, response.text
@@ -574,7 +614,7 @@ def test_an_imported_model_takes_pins_like_any_other(
     _, commits = upstream
     raw = "https://raw.githubusercontent.com/someone/models/main/widget.scad"
     respx.get(raw).mock(return_value=httpx.Response(200, text=SOURCE))
-    imported = lib_client.post("/api/v1/models/import", json={"url": raw})
+    imported = lib_client.post("/api/v1/models/import", json={"url": raw}, headers=press())
     assert imported.status_code == 201, imported.text
     log = tmp_path / "openscadpath.log"
     set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
@@ -601,7 +641,9 @@ def test_the_editor_check_sees_the_models_libraries(
     set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
-    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+    saved = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"}, headers=press()
+    )
 
     assert checked.status_code == 200, checked.text
     assert saved.status_code == 200, saved.text
@@ -735,7 +777,9 @@ def test_an_old_revision_whose_checkout_is_gone_is_fetched_again(
     create_model(lib_client)
     written_against = pin(lib_client, "BOSL2")["version"]
     pin(lib_client, "BOSL2", ref="v2")
-    removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    removed = lib_client.delete(
+        "/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()
+    )
     assert removed.status_code == 204, removed.text
 
     schema = lib_client.get(f"/api/v1/models/{SLUG}/versions/{written_against}/schema")
@@ -757,7 +801,9 @@ def test_the_editor_check_and_save_fetch_a_checkout_that_is_gone(
     assert checked.status_code == 200, checked.text
     assert (checkout / "BOSL2").is_dir()
     shutil.rmtree(checkout)
-    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+    saved = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"}, headers=press()
+    )
     assert saved.status_code == 200, saved.text
     assert (checkout / "BOSL2").is_dir()
 
@@ -774,16 +820,16 @@ def test_a_preset_save_fetches_a_checkout_that_is_gone(
     presets = f"/api/v1/models/{SLUG}/presets"
 
     shutil.rmtree(checkout)
-    created = lib_client.post(presets, json={"name": "Small", "params": {}})
+    created = lib_client.post(presets, json={"name": "Small", "params": {}}, headers=press())
     assert created.status_code == 201, created.text
     assert (checkout / "BOSL2").is_dir()
     preset = f"{presets}/{created.json()['id']}"
     shutil.rmtree(checkout)
-    updated = lib_client.patch(preset, json={"params": {}})
+    updated = lib_client.patch(preset, json={"params": {}}, headers=press())
     assert updated.status_code == 200, updated.text
     assert (checkout / "BOSL2").is_dir()
     shutil.rmtree(checkout)
-    duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"})
+    duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"}, headers=press())
     assert duplicated.status_code == 201, duplicated.text
     assert (checkout / "BOSL2").is_dir()
 
@@ -800,7 +846,9 @@ def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
     _unreachable(url)
 
     checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
-    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+    saved = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"}, headers=press()
+    )
 
     assert checked.status_code == 409
     assert checked.headers["content-type"] == "application/problem+json"
@@ -839,11 +887,15 @@ def test_restoring_a_revision_restores_its_pins_and_no_others(
     create_model(lib_client, "gadget")
     pin(lib_client, "BOSL2", "gadget", ref="v2")
     written_against = pin(lib_client, "BOSL2")["version"]
-    edited = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "cube(1);\n"})
+    edited = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "cube(1);\n"}, headers=press()
+    )
     assert edited.status_code == 200, edited.text
     pin(lib_client, "BOSL2", ref="v2")
 
-    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{written_against}/restore")
+    restored = lib_client.post(
+        f"/api/v1/models/{SLUG}/versions/{written_against}/restore", headers=press()
+    )
 
     assert restored.status_code == 200, restored.text
     assert sorted(change["path"] for change in restored.json()["files"]) == [
@@ -866,6 +918,7 @@ def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Respons
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
             "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
         },
+        headers=press(),
     )
     return response
 
@@ -948,7 +1001,9 @@ def test_a_dropped_model_json_with_a_malformed_pin_is_a_422(lib_client: TestClie
 
 
 def repin(client: TestClient, name: str, slug: str = SLUG, **body: Any) -> httpx.Response:
-    response: httpx.Response = client.patch(f"/api/v1/models/{slug}/libraries/{name}", json=body)
+    response: httpx.Response = client.patch(
+        f"/api/v1/models/{slug}/libraries/{name}", json=body, headers=press()
+    )
     return response
 
 
@@ -1061,8 +1116,10 @@ def test_a_library_a_model_still_pins_is_not_removed(
     create_model(lib_client)
     pin(lib_client, "BOSL2")
 
-    refused = lib_client.delete("/api/v1/libraries/BOSL2")
-    one = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    refused = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
+    one = lib_client.delete(
+        "/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()
+    )
 
     for response in (refused, one):
         assert response.status_code == 409, response.text
@@ -1079,7 +1136,9 @@ def test_a_checkout_no_model_pins_is_removed(
     pin(lib_client, "BOSL2")
     pin(lib_client, "BOSL2", ref="v2")  # v1's checkout stays, pinned by nothing live
 
-    removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    removed = lib_client.delete(
+        "/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()
+    )
 
     assert removed.status_code == 204, removed.text
     assert not (paths.libraries / "BOSL2" / commits["v1"]).exists()
@@ -1093,10 +1152,13 @@ def test_every_checkout_goes_once_nothing_pins_the_library(
     create_model(lib_client)
     pin(lib_client, "BOSL2")
     pin(lib_client, "BOSL2", ref="v2")
-    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+    assert (
+        lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", headers=press()).status_code
+        == 200
+    )
 
-    removed = lib_client.delete("/api/v1/libraries/BOSL2")
-    again = lib_client.delete("/api/v1/libraries/BOSL2")
+    removed = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
+    again = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
 
     assert removed.status_code == 204, removed.text
     assert not (paths.libraries / "BOSL2").exists()
@@ -1114,25 +1176,30 @@ def test_a_name_only_declaration_counts_as_a_pin_of_every_commit(
     create_model(lib_client, "edited")
     create_model(lib_client, "broken")
     pin(lib_client, "BOSL2")
-    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+    assert (
+        lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", headers=press()).status_code
+        == 200
+    )
     meta = json.loads(paths.model_meta("edited").read_text(encoding="utf-8"))
     paths.model_meta("edited").write_text(
         json.dumps({**meta, "libraries": [{"name": "BOSL2"}]}), encoding="utf-8"
     )
     paths.model_meta("broken").write_text('{"libraries": ["BOSL2"', encoding="utf-8")
 
-    refused = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    refused = lib_client.delete(
+        "/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()
+    )
 
     assert refused.status_code == 409
     assert refused.json()["models"] == ["broken", "edited"]
 
 
 def test_a_removal_refuses_what_is_not_a_checkout(lib_client: TestClient) -> None:
-    assert lib_client.delete("/api/v1/libraries/BOSL2").status_code == 404
-    assert lib_client.delete("/api/v1/libraries/.git").status_code == 422
-    assert lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": "HEAD"}).status_code == (
-        422
-    )
+    assert lib_client.delete("/api/v1/libraries/BOSL2", headers=press()).status_code == 404
+    assert lib_client.delete("/api/v1/libraries/.git", headers=press()).status_code == 422
+    assert lib_client.delete(
+        "/api/v1/libraries/BOSL2", params={"commit": "HEAD"}, headers=press()
+    ).status_code == (422)
 
 
 async def test_a_removal_waits_for_pins_in_flight() -> None:
@@ -1223,16 +1290,105 @@ def test_a_checkout_a_render_is_reading_is_not_removed(
     state: AppState = getattr(libraries_app.state, STATE_ATTR)
     job_id = "a" * 32
     lease = state.checkouts.hold(job_id, [checkout])
-    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+    assert (
+        lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", headers=press()).status_code
+        == 200
+    )
 
-    whole = lib_client.delete("/api/v1/libraries/BOSL2")
-    one = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    whole = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
+    one = lib_client.delete(
+        "/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()
+    )
     state.checkouts.release(lease)
-    after = lib_client.delete("/api/v1/libraries/BOSL2")
+    after = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
 
     for response in (whole, one):
         assert response.status_code == 409, response.text
         assert response.json()["jobs"] == [job_id]
+    assert after.status_code == 204, after.text
+    assert not checkout.exists()
+
+
+def test_a_removal_refused_for_a_lease_leaves_no_operation(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    pg_conninfo: str,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """Review #1119 2-2: the removal's refusals are its check, so "try again once the
+    render has finished" is not recorded as a failed operation."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.checkouts.hold("a" * 32, [paths.libraries / "BOSL2" / commits["v1"]])
+    with psycopg.connect(pg_conninfo) as conn:
+        before = conn.execute("SELECT count(*) FROM operations").fetchone()
+
+    leased = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
+    unknown = lib_client.delete("/api/v1/libraries/nothing", headers=press())
+
+    assert leased.status_code == 409, leased.text
+    assert unknown.status_code == 404, unknown.text
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM operations").fetchone() == before
+
+
+def test_a_pin_refused_before_its_clone_leaves_no_operation(
+    lib_client: TestClient, libraries_app: FastAPI, pg_conninfo: str
+) -> None:
+    """Review #1119 2-2: an unknown catalogue name, and an address literal that is not
+    public, are refused by the pin's check."""
+    create_model(lib_client)
+    store = libraries_app.dependency_overrides[get_libraries]()
+    store.protocols = ("https",)
+
+    unknown = lib_client.put(f"/api/v1/models/{SLUG}/libraries/nothing", json={}, headers=press())
+    private = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/mylib",
+        json={"url": "https://10.0.0.7/o/r.git", "ref": "v1"},
+        headers=press(),
+    )
+
+    assert unknown.status_code == 404, unknown.text
+    assert private.status_code == 422, private.text
+    assert "public" in private.json()["detail"]
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM operations WHERE kind = 'library_pin'"
+        ).fetchone() == (0,)
+
+
+def test_a_checkout_the_render_worker_is_reading_is_not_removed(
+    lib_client: TestClient,
+    paths: DataPaths,
+    pg_conninfo: str,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """#872: the worker's lease, taken on its own gate and pool, refuses the API's
+    removal."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"]
+    assert (
+        lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", headers=press()).status_code
+        == 200
+    )
+    worker_pool = open_pg_pool(pg_conninfo, size=1)
+    try:
+        worker = CheckoutLeases(worker_pool, paths.libraries)
+        job_id = "c" * 32
+        token = worker.take(job_id, [checkout])
+        refused = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
+        worker.drop(token)
+    finally:
+        worker_pool.close()
+    after = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["jobs"] == [job_id]
     assert after.status_code == 204, after.text
     assert not checkout.exists()
 
@@ -1250,7 +1406,9 @@ def test_a_lease_elsewhere_does_not_block_a_removal(
     state: AppState = getattr(libraries_app.state, STATE_ATTR)
     state.checkouts.hold("b" * 32, [paths.libraries / "BOSL2" / commits["v2"]])
 
-    removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    removed = lib_client.delete(
+        "/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}, headers=press()
+    )
 
     assert removed.status_code == 204, removed.text
 
@@ -1281,7 +1439,7 @@ def test_the_sweep_keeps_every_checkout_any_revision_pins(
     pin(lib_client, "BOSL2", ref="v2")  # v2: pinned live
     # MCAD: pinned only by a model that has since been deleted.
     pin(lib_client, "MCAD", "gadget", url=other_url, ref="x1")
-    assert lib_client.delete("/api/v1/models/gadget").status_code == 204
+    assert lib_client.delete("/api/v1/models/gadget", headers=press()).status_code == 204
     for entry in lib_client.get("/api/v1/libraries/installed").json():
         _age(paths.libraries / entry["name"] / entry["commit"])
     unpinned = _fake_checkout(paths, "BOSL2", "c" * 40)
@@ -1298,7 +1456,9 @@ def test_the_sweep_keeps_every_checkout_any_revision_pins(
         [commits["v1"], commits["v2"], other["x1"], "d" * 40]
     )
     # Restoring the old revision needs nothing fetched: its checkout was kept.
-    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{old_revision}/restore")
+    restored = lib_client.post(
+        f"/api/v1/models/{SLUG}/versions/{old_revision}/restore", headers=press()
+    )
     assert restored.status_code == 200, restored.text
 
 
@@ -1484,7 +1644,9 @@ def test_a_candidate_ref_that_does_not_exist_is_the_pin_routes_502(
     pin(lib_client, "BOSL2")
 
     checked = check_candidate(lib_client, "BOSL2", ref="v9")
-    pinned = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "v9"})
+    pinned = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "v9"}, headers=press()
+    )
 
     assert checked.status_code == pinned.status_code == 502
     assert checked.json()["detail"] == pinned.json()["detail"]
@@ -1692,3 +1854,198 @@ def test_resolving_the_dependencies_of_a_model_that_does_not_exist_is_a_404(
     lib_client: TestClient,
 ) -> None:
     assert lib_client.post("/api/v1/models/nope/dependencies").status_code == 404
+
+
+def _commits(app: FastAPI, slug: str = SLUG) -> int:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    counted = subprocess.run(
+        [GIT, "-C", str(state.paths.model_dir(slug)), "rev-list", "--count", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env(),
+    )
+    return int(counted.stdout)
+
+
+def test_a_repeated_pin_answers_the_recorded_model_without_a_second_commit(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """§4.2: a re-send of the same press (a lost answer) never commits twice."""
+    create_model(lib_client)
+    key = uuid.uuid4().hex
+    first = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers={"Idempotency-Key": key}
+    )
+    commits = _commits(libraries_app)
+    again = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers={"Idempotency-Key": key}
+    )
+    assert first.status_code == again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert _commits(libraries_app) == commits
+
+
+def test_a_refused_removal_keeps_its_models_extension(lib_client: TestClient) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    refused = lib_client.delete("/api/v1/libraries/BOSL2", headers=press())
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["models"] == [SLUG]
+
+
+def test_a_slow_pin_answers_202_and_its_operation_ends_with_the_model(
+    lib_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clone past the answer deadline never holds the request (§4.2 step 4)."""
+    create_model(lib_client)
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    resolve = library_pins.resolve_pin
+
+    async def slowly(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(3)
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(library_operations, "resolve_pin", slowly)
+    started = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press())
+    assert started.status_code == 202, started.text
+    deadline = time.monotonic() + 60
+    op = started.json()
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = lib_client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "succeeded", op
+    assert [entry["name"] for entry in op["result"]["libraries"]] == ["BOSL2"]
+
+
+def test_a_pin_on_the_library_worker_holds_off_another_processs_removal(
+    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1131: the pin runs on this app's library worker; a removal runs the library
+    queue's activity in another process, with a gate and permits of its own over the
+    same database. Cloned but not yet recorded, the pin keeps that removal waiting, and
+    the removal then finds it pinned, rather than deleting the checkout under it."""
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    assert state.checkouts.shared is not None
+    pool = state.checkouts.shared.pool
+    elsewhere = replace(
+        state,
+        checkouts=CheckoutGate(CheckoutLeases(pool, state.paths.libraries)),
+        installs=InstallPermits(INSTALL_CONCURRENCY, pool),
+    )
+    resolve = library_pins.resolve_pin
+    cloned, record = threading.Event(), threading.Event()
+
+    async def held_after_the_clone(*args: Any, **kwargs: Any) -> Any:
+        found = await resolve(*args, **kwargs)
+        cloned.set()
+        await asyncio.to_thread(record.wait, 60)
+        return found
+
+    monkeypatch.setattr(library_operations, "resolve_pin", held_after_the_clone)
+    removal: list[BaseException | None] = []
+
+    def remove_elsewhere() -> None:
+        kinds = library_operations.library_kinds(elsewhere, _NO_COMPONENTS)
+        run = next(kind for kind in kinds if kind.name == "library_remove").run
+        try:
+            asyncio.run(run({"name": "BOSL2", "commit": None}, {}))
+        except BaseException as error:
+            removal.append(error)
+        else:
+            removal.append(None)
+
+    with ThreadPoolExecutor(2) as threads:
+        pinned = threads.submit(
+            lib_client.put, f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press()
+        )
+        assert cloned.wait(60)
+        checkouts = list((state.paths.libraries / "BOSL2").iterdir())
+        assert checkouts
+        removing = threads.submit(remove_elsewhere)
+        time.sleep(1.5)
+        assert not removing.done()
+
+        record.set()
+        assert pinned.result(timeout=120).status_code in (200, 202)
+        removing.result(timeout=60)
+
+    assert isinstance(removal[0], ApiError), removal
+    assert (removal[0].status, removal[0].extensions.get("models")) == (409, [SLUG])
+    assert all(checkout.is_dir() for checkout in checkouts)
+
+
+def test_a_pin_on_a_broken_model_json_is_its_409_not_an_unexpected_500(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """Review I1: the run answers a model.json it cannot read as every route does."""
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    (state.paths.model_dir(SLUG) / "model.json").write_text("{not json", encoding="utf-8")
+    refused = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press())
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["title"] == "Invalid Model Metadata"
+
+
+#: The library kinds read no component.
+_NO_COMPONENTS = cast(Components, SimpleNamespace())
+
+
+def test_a_pin_may_run_longer_than_its_clone() -> None:
+    """Review I2: the run outlives the clone's own limit, so a slow clone is never
+    recorded failed while it goes on to commit."""
+    kinds = library_operations.library_kinds(cast(AppState, SimpleNamespace()), _NO_COMPONENTS)
+    for name in ("library_pin", "library_repin"):
+        timeout = next(kind for kind in kinds if kind.name == name).run_timeout
+        assert timeout is not None and timeout.total_seconds() > CLONE_TIMEOUT
+
+
+def _raising_state(error: Exception) -> Any:
+    def raise_it(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    return SimpleNamespace(
+        catalogue=SimpleNamespace(unpin_library=raise_it, library_users=raise_it),
+        libraries=SimpleNamespace(paths=SimpleNamespace(libraries=Path("/nowhere"))),
+        checkouts=CheckoutGate(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "title"),
+    [
+        (InvalidModelMetaError("w", "not JSON"), "Invalid Model Metadata"),
+        (LibraryDeclarationError("bad entry"), "Invalid Library Declaration"),
+        (LibraryNotInstalledError("not on the volume"), "Conflict"),
+    ],
+)
+@pytest.mark.parametrize("kind", ["library_unpin", "library_remove"])
+async def test_a_runs_unreadable_declaration_is_the_routes_409(
+    kind: str, error: Exception, title: str
+) -> None:
+    """Review #1119 3: what the app's handlers answered 409 under the routes, the
+    runs answer 409 too, not the operation's unexpected 500."""
+    kinds = library_operations.library_kinds(_raising_state(error), _NO_COMPONENTS)
+    run = next(each for each in kinds if each.name == kind).run
+    request = {"slug": "w", "name": "BOSL2", "index": 0, "commit": None}
+    with pytest.raises(ApiError) as raised:
+        await run(request, {})
+    assert (raised.value.status, raised.value.title) == (409, title)
+
+
+def test_a_pin_on_a_model_with_a_thumbnail_answers_its_record(lib_client: TestClient) -> None:
+    """The run's record is read back as the route's answer: a model with media must
+    survive that (its items are views, not model.json entries)."""
+    create_model(lib_client)
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+    put = lib_client.put(
+        f"/api/v1/models/{SLUG}/thumbnail",
+        files={"file": ("t.png", png, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 200, put.text
+    pinned = pin(lib_client, "BOSL2")
+    assert [item["id"] for item in pinned["media"]] == ["thumbnail"]

@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-r
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
@@ -15,7 +15,8 @@ import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
-import { PresetPicker } from '../components/PresetPicker'
+import { RawInputs } from '../components/RawInputs'
+import { PresetPicker, type SelectedElsewhere } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
@@ -29,10 +30,21 @@ import {
   checkParamValue,
   defaultValues,
   diffFromDefaults,
+  outOfRange,
+  rangeProblem,
   sameValues,
   type ParamValues,
 } from '../lib/params'
-import { joinInputs, NO_EXTRA, sameJson, splitInputs, type InputsExtra, type JsonObject } from '../lib/inputs'
+import {
+  isJsonObject,
+  joinInputs,
+  NO_EXTRA,
+  sameJson,
+  splitInputs,
+  type InputsExtra,
+  type JsonObject,
+} from '../lib/inputs'
+import { migrateIfOld, type MigrateOutcome } from '../lib/useMigratedInputs'
 import { applyPreset, presetInputs } from '../lib/presets'
 import { saveOutput } from '../lib/saveOutput'
 import { findParamRow } from '../template-ui/elements'
@@ -46,7 +58,7 @@ import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
-import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
+import { RENDER_DEBOUNCE_MS, type RenderBusy, useRenderJob, canRetry } from '../lib/useRenderJob'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
@@ -58,6 +70,20 @@ const FLYOUT_ID = 'parameters-flyout'
  * column's widest, 360px, from there up.
  */
 const FLYOUT_WIDTH = 'var(--sb-flyout)'
+
+/** The banner while a refused render waits to be sent again, worded by why it waits. */
+function renderBusyText({ seconds, reason }: RenderBusy): string {
+  switch (reason) {
+    case 'temporal-unavailable':
+      return `ScadBuddy cannot reach its render service; retrying in ${seconds} s.`
+    case 'still-accepting':
+      return `The render service is still accepting this preview; checking again in ${seconds} s.`
+    case 'unanswered':
+      return `ScadBuddy did not answer; this preview will be retried in ${seconds} s.`
+    case 'queue-full':
+      return `The render queue is full; this preview will be retried in ${seconds} s.`
+  }
+}
 
 /** An import's origin for the page's label; a URL the record holds that does not parse
  *  must not take the page down. */
@@ -136,21 +162,59 @@ export function CustomizePage() {
   // spreading another model's values onto this schema is a silent wrong answer.
   const foreign = resolved && resolved.slug !== slug ? resolved : undefined
   const reopened = foreign ? undefined : resolved
+  // spec 2026-09-27 §7: an arranged output has no one set of inputs to reopen; /edit/{id}
+  // says so, as it does for a dead link.
+  const arranged = (reopened?.arranged_from ?? []).length > 0
   // Every hook below runs before the redirects further down, so a page this one is
   // only passing through must not seed any values: with none there is nothing to
   // debounce, and no render — an OpenSCAD process and a concurrency slot — is started
   // for a model the reader is not going to see.
-  const leaving = foreign !== undefined || Boolean(reopenId && reopenState.error)
+  const leaving = foreign !== undefined || arranged || Boolean(reopenId && reopenState.error)
 
   // useAsync reports loading whether or not it has anything to fetch, so reading it
   // directly would hold the values back for a render even when the target is already
   // in hand — long enough to paint the schema defaults and snap off them.
-  const resolving = Boolean(reopenId) && !preloaded && reopenState.loading
-
-  const reopenedInputs = useMemo(
-    () => (reopened ? splitInputs(reopened.inputs, reopened.params) : null),
+  // An output's inputs are brought up to the template's INPUTS_VERSION before they are
+  // applied (spec 2026-09-27 §8.2): the version is on the model record.
+  const inputsVersion = modelState.data?.inputs_version
+  const reopenedRaw = useMemo<JsonObject | null>(
+    () =>
+      reopened
+        ? isJsonObject(reopened.inputs)
+          ? (reopened.inputs as JsonObject)
+          : joinInputs(reopened.params ?? {}, NO_EXTRA)
+        : null,
     [reopened],
   )
+  const migration = useAsync(
+    async () =>
+      reopenedRaw && inputsVersion !== undefined
+        ? await migrateIfOld(slug, reopenedRaw, inputsVersion, version)
+        : null,
+    [slug, reopenedRaw, inputsVersion ?? null, version ?? null],
+  )
+  // Held back until the model says which version is current (a model that did not load
+  // applies the inputs as they are), then until the migration has answered.
+  const migrating =
+    reopenedRaw !== null &&
+    ((inputsVersion === undefined && !modelState.error) ||
+      (inputsVersion !== undefined && migration.loading))
+  const reopenOutcome: MigrateOutcome | null = migration.data ?? null
+
+  const resolving = (Boolean(reopenId) && !preloaded && reopenState.loading) || migrating
+
+  const reopenedInputs = useMemo(() => {
+    if (!reopened) return null
+    if (reopenOutcome?.kind === 'failed') return null // the current (default) state stays
+    const raw = reopenOutcome?.kind === 'ready' ? reopenOutcome.inputs : reopened.inputs
+    return splitInputs(raw, reopened.params)
+  }, [reopened, reopenOutcome])
+  // Inputs that could not be migrated, shown read-only until something else is loaded.
+  const [presetFailure, setPresetFailure] = useState<{ inputs: JsonObject; error: string } | null>(null)
+  const [dismissedReopen, setDismissedReopen] = useState<MigrateOutcome | null>(null)
+  const unmigrated =
+    presetFailure ??
+    (reopenOutcome?.kind === 'failed' && reopenOutcome !== dismissedReopen ? reopenOutcome : null)
   const seed = useMemo(
     // Null until there is something to show: the schema has to be here, and a deep
     // link's values have to have arrived, before the defaults are the right answer.
@@ -205,6 +269,17 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
+  /**
+   * #1457, #1484 — a preset the template UI just loaded or saved, for the picker. A
+   * one-shot message: cleared once the picker has rendered it, so a later remount (the
+   * form taking over from a failed UI) never brings it back over a pick made since.
+   */
+  const [presetElsewhere, setPresetElsewhere] = useState<SelectedElsewhere | null>(null)
+  useEffect(() => {
+    if (presetElsewhere) setPresetElsewhere(null)
+  }, [presetElsewhere])
+  /** #350 — counts resets to the defaults, which leave no preset selected. */
+  const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
   // The inputs as of the last write, ahead of the render that shows it: two writes in one
   // tick (`host.inputs.set`, then an `<sb-param>` edit) each start from the one before.
@@ -258,22 +333,40 @@ export function CustomizePage() {
   // revision's parameters for one submission: the wrong render at best, and a 422
   // (§6.1) on a parameter the old schema had and the new one does not.
   const settled = debounced === values
+  // #921 — a number outside its declared range is flagged on its field; the render
+  // would only answer 422, so none is started and Generate waits until it is fixed.
+  const unrenderable = schema ? outOfRange(schema, values) : undefined
+  const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
+  // Nothing to render until there is a seed; once there is, an empty one is a model
+  // with no parameters, whose defaults still render (#941).
   const {
     job,
     rendering,
     error: renderError,
     busy: renderBusy,
+    retry: retryRender,
     settledFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  // #938 — the colours the latest finished render used and the values it ran with, kept
+  // while the next one runs so the extruder labels do not fall back to a guess and back
+  // on every change. Kept per model, so another model's render never labels this one's.
+  const [rendered, setRendered] = useState<
+    { slug: string; colors: string[]; params: ParamValues } | undefined
+  >(undefined)
+  const doneColors = job?.status === 'done' ? (job.colors ?? undefined) : undefined
+  const doneParams = settledFor ?? NOTHING
+  if (doneColors && (doneColors !== rendered?.colors || doneParams !== rendered.params))
+    setRendered({ slug, colors: doneColors, params: doneParams })
+  const renderedOutput = rendered?.slug === slug ? rendered : undefined
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
-  const upToDate = settled && settledFor === debounced && !rendering
+  const upToDate = settled && settledFor === debounced && !rendering && !invalid
 
   // A parameter change invalidates the saved output — Generate has to run again. So does
   // a UI-state-only change (#848): it starts no render, but the output records the old state.
   const output =
-    settled && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
+    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
 
   // #289 — a multi-plate render is checked plate by plate.
   const targets = useMemo(() => fitTargets(job), [job])
@@ -301,15 +394,41 @@ export function CustomizePage() {
 
   const onReset = useCallback(() => {
     if (schema) {
+      setPresetFailure(null)
+      setDismissedReopen(reopenOutcome)
       latestInputs.current = joinInputs(defaultValues(schema), NO_EXTRA)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
+      setResets((n) => n + 1)
     }
-  }, [schema])
+  }, [schema, reopenOutcome])
 
-  const onApplyPreset = useCallback((next: ParamValues, nextExtra: InputsExtra) => {
-    latestInputs.current = joinInputs(next, nextExtra)
-    setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
-  }, [])
+  const onApplyPreset = useCallback(
+    (next: ParamValues, nextExtra: InputsExtra) => {
+      setPresetFailure(null)
+      setDismissedReopen(reopenOutcome)
+      latestInputs.current = joinInputs(next, nextExtra)
+      setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
+    },
+    [reopenOutcome],
+  )
+
+  // A preset's stored inputs, brought up to the template version before the picker cuts
+  // them to the schema (spec §8.2). Current ones (or a version not known yet) pass as
+  // they are, at once; ones that cannot be migrated show read-only instead.
+  const migratePreset = useCallback(
+    (saved: JsonObject): JsonObject | Promise<JsonObject | null> => {
+      const v = typeof saved.v === 'number' ? saved.v : 0
+      if (inputsVersion === undefined || v === inputsVersion) return saved
+      return migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
+        if (outcome.kind === 'failed') {
+          setPresetFailure({ inputs: outcome.inputs, error: outcome.error })
+          return null
+        }
+        return outcome.inputs
+      })
+    },
+    [slug, version, inputsVersion],
+  )
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
   const captureImage = useCallback(
@@ -412,10 +531,13 @@ export function CustomizePage() {
       presets: {
         list: () => api.listPresets(slug),
         save: async (name: string) => {
+          const { values: savedValues, extra: savedExtra } = live.current
           const created = await api.createPreset(slug, {
             name,
-            inputs: presetInputs(schemaNow(), live.current.values, live.current.extra),
+            inputs: presetInputs(schemaNow(), savedValues, savedExtra),
           })
+          // The picker shows it selected, as its own Save as preset does.
+          setPresetElsewhere({ preset: created, values: savedValues, extra: savedExtra })
           setPresetsRevision((n) => n + 1) // the picker keeps its own list; remount it
           return created
         },
@@ -424,6 +546,7 @@ export function CustomizePage() {
           if (!preset) throw new Error(`no preset ${id}`)
           const applied = applyPreset(schemaNow(), preset)
           onApplyPreset(applied.values, applied.extra)
+          setPresetElsewhere({ preset, values: applied.values, extra: applied.extra })
         },
       },
       onDescribe: (fn: (() => string) | null) => {
@@ -607,9 +730,10 @@ export function CustomizePage() {
     flyoutButton.current?.focus()
   }, [])
 
-  if (reopenId && reopenState.error) {
-    // The deep link is dead — no record and no 3MF to read it from. /edit/{id} owns
-    // that message; sending the reader there keeps one copy of it.
+  if (reopenId && (reopenState.error || arranged)) {
+    // The deep link is dead (no record and no 3MF to read it from), or names an
+    // arranged output. /edit/{id} owns both messages; sending the reader there keeps
+    // one copy of each.
     return <Navigate to={editPath(reopenId)} replace />
   }
 
@@ -623,11 +747,31 @@ export function CustomizePage() {
     )
   }
 
-  if (schemaState.loading) {
+  // Reopened inputs wait for their migration: the panel must not paint defaults first.
+  if (schemaState.loading || migrating) {
     return (
       <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
         <Spinner /> Loading model
       </p>
+    )
+  }
+
+  // #1041 — only a 404 means the model is gone. A 5xx or a gateway timeout (the schema
+  // read runs OpenSCAD) is a failed load, and may well succeed when asked again.
+  if (schemaState.error && !(schemaState.error instanceof ApiError && schemaState.error.status === 404)) {
+    return (
+      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
+        <h1 className="text-[15px] font-medium">Could not load this model</h1>
+        <p className="mt-2 text-[13px] text-muted">{schemaState.error.message}</p>
+        <div className="mt-4 flex items-center justify-center gap-3">
+          <Button size="sm" onClick={schemaState.reload}>
+            Try again
+          </Button>
+          <Link to="/" className="text-[13px] text-accent underline">
+            Back to models
+          </Link>
+        </div>
+      </div>
     )
   }
 
@@ -646,9 +790,9 @@ export function CustomizePage() {
   }
 
   // The model's own name (#179): what Edit details renames, and what the page
-  // shows once its record is in. `schema.title` is OpenSCAD's customizer title,
-  // which no metadata edit changes, so it only stands in until then.
-  const displayName = modelState.data?.name ?? schema.title ?? slug
+  // shows once its record is in. Not `schema.title`: that is the .scad file OpenSCAD
+  // exported, "model" for every model (#939), so the slug stands in until then.
+  const displayName = modelState.data?.name ?? slug
 
   const originLabel =
     record?.origin === 'builtin'
@@ -673,6 +817,11 @@ export function CustomizePage() {
         stage={renderStage}
         plate={plate}
         captureRef={captureRef}
+        sourceLink={
+          origin && (
+            <Link to={modelPath(slug, 'source')}>{origin === 'builtin' ? 'View source' : 'Edit source'}</Link>
+          )
+        }
         leading={
           // The page slot has no parameters flyout: the template's own page is the panel.
           full && customUi?.slot !== 'page' && (
@@ -687,6 +836,7 @@ export function CustomizePage() {
         controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
         // The flyout lies over the scene; the readouts move clear of it.
         covered={full && flyout ? FLYOUT_WIDTH : undefined}
+        rejected={Boolean(renderError)}
       />
     </Suspense>
   )
@@ -706,7 +856,7 @@ export function CustomizePage() {
           // `hostDeps.generate` runs one save at a time and keeps `uiGenerate` (this
           // button's state and its error) for every caller.
           onClick={() => void hostDeps.generate().catch(() => undefined)}
-          disabled={uiGenerate.generating || rendering || !settled || job?.status !== 'done'}
+          disabled={uiGenerate.generating || rendering || !settled || Boolean(invalid) || job?.status !== 'done'}
         >
           {uiGenerate.generating
             ? 'Generating…'
@@ -765,6 +915,10 @@ export function CustomizePage() {
       values={values}
       extra={extra}
       onApply={onApplyPreset}
+      migrate={migratePreset}
+      pinned={version !== undefined}
+      resetKey={resets}
+      selected={presetElsewhere}
     />
   )
   const templateUi = customUi && (
@@ -780,8 +934,16 @@ export function CustomizePage() {
   )
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
-      <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
+    // #971 — `short:` scrolls the stacked page on a short window, and #1741 `phone:` at a
+    // phone's width; full screen is the view
+    // alone, so none of it applies there. #362 — minmax(0, 1fr), not the implicit auto
+    // column: an auto track grows to its widest child's min-content (a long preset name,
+    // a row of slider boxes), which on a phone held every pane wider than the screen.
+    <div
+      className={`grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto phone:block phone:overflow-y-auto'}`}
+    >
+      {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971, #362). */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
             Models
@@ -803,7 +965,7 @@ export function CustomizePage() {
             </span>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {version && (
             <button
               type="button"
@@ -956,13 +1118,22 @@ export function CustomizePage() {
           data-testid="workspace"
           // As the panel layout: where the Fullscreen API is refused (inside Bambuddy's
           // frame) the `window` mode is this element covering the window.
-          className={`grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] ${
+          className={`grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto] ${
             full ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
           }`}
         >
-          <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
-            {uiPresets}
-            {uiOrigin}
+          {/* One grid row: the page slot has no flyout to hold unmigrated inputs (#917). */}
+          <div className="border-b border-line">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-1.5">
+              {uiPresets}
+              {uiOrigin}
+            </div>
+            {/* Capped: in full screen this row's height comes out of the template's own. */}
+            {unmigrated && (
+              <div className="max-h-[30vh] overflow-auto">
+                <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />
+              </div>
+            )}
           </div>
           {templateUi}
           {actionBar}
@@ -971,7 +1142,7 @@ export function CustomizePage() {
       <div
         ref={workspace}
         data-testid="workspace"
-        className={`grid min-h-0 grid-cols-1 ${
+        className={`grid min-h-0 grid-cols-[minmax(0,1fr)] ${
           full
             ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
                 fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
@@ -985,12 +1156,13 @@ export function CustomizePage() {
           className={
             full
               ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
-              : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
+              : 'min-h-0 min-w-0 stacked-tall:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
+          {unmigrated && <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />}
           {choosing ? null : templateUi ? (
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
+              <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
                 {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
                 {uiPresets}
                 {uiOrigin}
@@ -1007,6 +1179,8 @@ export function CustomizePage() {
               onChange={onChange}
               onReset={onReset}
               reveal={reveal}
+              rendered={renderedOutput}
+              growsWithPage={!full}
               toolbar={
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
@@ -1019,6 +1193,10 @@ export function CustomizePage() {
                     values={values}
                     extra={extra}
                     onApply={onApplyPreset}
+                    migrate={migratePreset}
+                    pinned={version !== undefined}
+                    resetKey={resets}
+                    selected={presetElsewhere}
                   />
                 </>
               }
@@ -1026,7 +1204,19 @@ export function CustomizePage() {
           )}
         </div>
 
-        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+        <div
+          className={`grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] ${full ? '' : 'short:grid-rows-[max(16rem,60vh)_auto] phone:contents'}`}
+        >
+          {/* #1741 — at a phone's width the preview and its notes are held above the
+              parameters as the page scrolls; elsewhere this box is not there. */}
+          <div
+            data-testid="preview-pane"
+            className={
+              full
+                ? 'contents'
+                : 'contents phone:sticky phone:top-0 phone:z-10 phone:order-first phone:flex phone:h-[max(15rem,45vh)] phone:flex-col phone:border-b phone:border-line phone:bg-bg'
+            }
+          >
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
             {/* Not before the layout is chosen: a page-slot template's preview moves into
@@ -1048,16 +1238,32 @@ export function CustomizePage() {
               data-testid="render-busy"
               className="border-t border-line px-3 py-2 text-[12px] text-muted"
             >
-              The render queue is full; this preview will be retried in {renderBusy} s.
+              {renderBusyText(renderBusy)}
+            </p>
+          )}
+          {/* A template UI draws its own fields, so it is not the panel that flags the value. */}
+          {invalid && templateUi && (
+            <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
+              {invalid}
             </p>
           )}
           {renderError && (
             <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
               {renderError.message}
+              {canRetry(renderError) && (
+                <>
+                  {' '}
+                  <Button size="sm" onClick={retryRender}>
+                    Try again
+                  </Button>
+                </>
+              )}
             </p>
           )}
-          {/* Full screen is the view and its parameters; the actions wait outside it. */}
-          <div hidden={full}>
+          </div>
+          {/* Full screen is the view and its parameters; the actions wait outside it. At a
+              phone's width the bar stays at the bottom of the screen (#1741). */}
+          <div hidden={full} className="phone:sticky phone:bottom-0 phone:z-10">
             {actionBar}
           </div>
         </div>

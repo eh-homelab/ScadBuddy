@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import { bbox, outputs } from '../mocks/fixtures'
+import { bbox, keychainSchema, outputs } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
@@ -37,6 +37,61 @@ async function row(name: string): Promise<HTMLElement> {
 }
 
 describe('HistoryPage', () => {
+  it('shows a pipeline output\'s bill of materials and links its files', async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([
+          {
+            ...first,
+            bom: [{ piece: 'wall', label: 'Wall', count: 8, plates: [1, 2], part: 'k1' }],
+            files: ['guide.svg'],
+          },
+        ]),
+      ),
+    )
+    render()
+    const item = await row('Reagan')
+    const table = within(item).getByRole('table')
+    expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Wall81, 2')
+    const link = within(item).getByRole('link', { name: 'guide.svg' })
+    expect(link).toHaveAttribute('href', `/api/v1/outputs/${first.id}/files/guide.svg`)
+    expect(link).toHaveAttribute('download')
+    expect(link).not.toHaveAttribute('target')
+  })
+
+  it('opens a pipeline output\'s file in a new tab when embedded, out of the sandbox', async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([{ ...first, bom: [], files: ['guide.svg'] }]),
+      ),
+    )
+    const top = window.top
+    // Inside Bambuddy's iframe: its sandbox has no allow-downloads (CLAUDE.md).
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    try {
+      render()
+      const link = within(await row('Reagan')).getByRole('link', { name: 'guide.svg' })
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener')
+    } finally {
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
+  it("names the model in the breadcrumb, not OpenSCAD's customizer title (#939)", async () => {
+    // OpenSCAD titles the schema after the .scad file it exported, so every model's
+    // reads "model"; the record's name is the one the reader knows it by.
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () => HttpResponse.json({ ...keychainSchema, title: 'model' })),
+    )
+    render()
+    await screen.findByTestId('outputs')
+    expect(screen.getByRole('link', { name: 'Name Keychain' })).toHaveAttribute('href', '/m/name-keychain')
+    expect(screen.queryByRole('link', { name: 'model' })).not.toBeInTheDocument()
+  })
+
   it('lists every output newest first', async () => {
     render()
     const list = await screen.findByTestId('outputs')
@@ -49,7 +104,11 @@ describe('HistoryPage', () => {
     const nova = await row('Nova')
     expect(within(nova).getByText(/^[\d.]+ × [\d.]+ × [\d.]+ mm$/)).toBeInTheDocument()
     act(() => setDisplayUnit('in'))
-    expect(within(nova).getByText(/^\d+\.\d\d × \d+\.\d\d × \d+\.\d\d in$/)).toBeInTheDocument()
+    // Awaited: the row reads the unit through useSyncExternalStore, which subscribes in a
+    // passive effect. findAllByText can resolve on the commit before that effect has run,
+    // and then the change is not heard inside act; the store's check on subscribe
+    // re-renders the row a moment later, outside it.
+    expect(await within(nova).findByText(/^\d+\.\d\d × \d+\.\d\d × \d+\.\d\d in$/)).toBeInTheDocument()
   })
 
   it('diffs each output against the model defaults', async () => {
@@ -142,19 +201,19 @@ describe('HistoryPage', () => {
 
   it('edits an output through its deep link', async () => {
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Edit / }))
     expect(await screen.findByTestId('edit-route')).toHaveTextContent('c'.repeat(32))
   })
 
   it('hands the row it already rendered over rather than making it be resolved again', async () => {
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Edit / }))
     expect(await screen.findByTestId('edit-route')).toHaveTextContent(':Nova')
   })
 
   it('deletes an output', async () => {
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Delete / }))
 
     await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByTestId('outputs').children).toHaveLength(2)
@@ -169,7 +228,7 @@ describe('HistoryPage', () => {
       }),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
 
     const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
     const copies = within(dialog).getByRole('list', { name: 'Library copies' })
@@ -187,7 +246,7 @@ describe('HistoryPage', () => {
   it('does not label a copy inbox or project before the settings have loaded', async () => {
     server.use(http.get('/api/v1/settings', () => delay('infinite')))
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
 
     const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
     const copies = within(dialog).getByRole('list', { name: 'Library copies' })
@@ -205,7 +264,7 @@ describe('HistoryPage', () => {
       }),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
     const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
 
@@ -223,7 +282,7 @@ describe('HistoryPage', () => {
       ),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
     const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
 
@@ -239,12 +298,83 @@ describe('HistoryPage', () => {
 
   it('offers to send an output again', async () => {
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Send again' }))
+    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Send again / }))
 
     // #312: the send bar only uploads. There is no mode to choose any more.
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
     expect(within(dialog).queryByRole('radio')).not.toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: 'Send' })).toBeInTheDocument()
+  })
+
+  it('arranges the outputs ticked on the page', async () => {
+    const { user } = render()
+    const reagan = await row('Reagan')
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    await user.click(within(reagan).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    expect(await screen.findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Copies of wall — Reagan')).not.toBeInTheDocument(),
+    )
+    // The list reloads with the arranged output, and the selection is cleared.
+    expect(await screen.findByText('Arranged from 1 output')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+  })
+
+  it('says which outputs could not be re-rendered after the dialog closes (#902)', async () => {
+    const workshop = outputs[2]!
+    server.use(
+      http.post(`/api/v1/outputs/${workshop.id}/backfill`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'revision abc is gone' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(within(await row('Workshop')).getByRole('checkbox', { name: 'Select Workshop' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (2)' }))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    await user.click(screen.getByRole('button', { name: 'Re-render' }))
+    // Reagan still arranges; the dialog closes, and History says Workshop was skipped.
+    expect(await screen.findByText('Arranged from 1 output', {}, { timeout: 5000 })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Arrange' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Workshop could not be re-rendered: revision abc is gone. It was left out of the arrange.',
+    )
+  })
+
+  it('drops a deleted output from the selection', async () => {
+    const { user } = render()
+    const workshop = await row('Workshop')
+    await user.click(within(workshop).getByRole('checkbox', { name: 'Select Workshop' }))
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+    await user.click(within(workshop).getByRole('button', { name: 'Delete Workshop' }))
+    await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+  })
+
+  it('offers no Edit on an arranged output', async () => {
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([
+          {
+            ...outputs[0],
+            id: 'f'.repeat(32),
+            name: 'Batch',
+            params: {},
+            arranged_from: ['a'.repeat(32), 'c'.repeat(32)],
+          },
+        ]),
+      ),
+    )
+    render()
+    const batch = await row('Batch')
+    expect(within(batch).queryByRole('button', { name: 'Edit Batch' })).not.toBeInTheDocument()
+    expect(within(batch).getByText('Arranged from 2 outputs')).toBeInTheDocument()
+    expect(within(batch).getByRole('button', { name: 'Send again Batch' })).toBeInTheDocument()
   })
 })
 
@@ -273,10 +403,30 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
       </Routes>,
       { route: '/m/name-keychain/history' },
     )
-    await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Edit / }))
     const generate = await screen.findByTestId('generate')
     await waitFor(() => expect(generate).toBeEnabled(), { timeout: 5000 })
     await user.click(generate)
     await waitFor(() => expect(bodies[0]).toMatchObject({ inputs: { tab: 'lid', v: 0 } }))
   }, 15000)
+})
+
+describe('HistoryPage, item context (#975)', () => {
+  it("names each row's actions after its output", async () => {
+    render()
+    const nova = await row('Nova')
+    expect(within(nova).getByRole('button', { name: 'Edit Nova' })).toBeInTheDocument()
+    expect(within(nova).getByRole('button', { name: 'Send again Nova' })).toBeInTheDocument()
+    expect(within(nova).getByRole('button', { name: 'Delete Nova' })).toBeInTheDocument()
+  })
+
+  it('reads a changed value as the value and its default, not the two run together', async () => {
+    render()
+    const nova = await row('Nova')
+    const values = [...nova.querySelectorAll('dd')].map((dd) => dd.textContent)
+    expect(values.length).toBeGreaterThan(0)
+    for (const value of values) expect(value).toMatch(/^.+, default .+$/)
+    // The old value is marked up as a deletion, not only struck through by CSS.
+    expect(nova.querySelector('dd del')).not.toBeNull()
+  })
 })

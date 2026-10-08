@@ -3,23 +3,30 @@ the session's Temporal, and the routes read the projection."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from temporalio.client import Client
+from temporalio.client import Client, ScheduleActionExecutionStartWorkflow
+from temporalio.service import RPCError
 
+from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.operations import TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.main import create_app
+from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
+from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.conftest import fake_3mf_openscad
+from tests.support.temporal import NO_TICK
 
 pytestmark = [
     pytest.mark.requires_postgres,
@@ -57,8 +64,6 @@ def test_a_render_runs_on_temporal_and_the_routes_read_the_projection(
     state: AppState = getattr(app.state, STATE_ATTR)
     service = state.render
     assert isinstance(service, RenderService)
-    service.reconcile_after = 0.5
-    service.reconcile_interval = 0.1
 
     with TestClient(app) as client:
         health = client.get("/healthz").json()
@@ -69,19 +74,11 @@ def test_a_render_runs_on_temporal_and_the_routes_read_the_projection(
             "worker_inprocess": True,
         }
 
-        # Temporal refuses the starts: both submits are answered from the one row,
-        # which waits for the reconciler.
-        async def unavailable(*_: object, **__: object) -> None:
-            raise RuntimeError("temporal is down")
-
-        with monkeypatch.context() as patched:
-            patched.setattr(service.client, "start_workflow", unavailable)
-            first = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
-            again = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+        # The answer comes after the workflow's first activity wrote the row (#1053).
+        first = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
         assert first.status_code == 202, first.text
-        assert again.status_code == 202, again.text
         job_id = first.json()["job_id"]
-        assert again.json()["job_id"] == job_id
+        assert client.get(f"/api/v1/jobs/{job_id}").status_code == 200
 
         body = _settled(client, job_id)
         assert body["status"] == "done", body
@@ -89,7 +86,7 @@ def test_a_render_runs_on_temporal_and_the_routes_read_the_projection(
         assert preview.status_code == 200
 
 
-def test_the_api_boots_while_temporal_is_down_and_queues_renders_for_the_reconciler(
+def test_the_api_boots_while_temporal_is_down_and_a_render_is_a_503_with_no_job(
     settings: Settings, model: str
 ) -> None:
     cfg = settings.model_copy(
@@ -102,24 +99,16 @@ def test_the_api_boots_while_temporal_is_down_and_queues_renders_for_the_reconci
         }
     )
     app = create_app(cfg)
+    state: AppState = getattr(app.state, STATE_ATTR)
 
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
-        accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 3}})
-        assert accepted.status_code == 202, accepted.text
-        first = accepted.json()["job_id"]
-        job = client.get(f"/api/v1/jobs/{first}").json()
-        assert job["status"] == "pending"
-
-        # The preview's next submit supersedes the first: its workflow cannot be
-        # cancelled either, and that is no reason to refuse the new render.
-        again = client.post(
-            f"/api/v1/models/{model}/render",
-            json={"params": {"width": 4}, "supersedes": first},
-        )
-        assert again.status_code == 202, again.text
-        assert client.get(f"/api/v1/jobs/{first}").json()["status"] == "cancelled"
-        assert client.get(f"/api/v1/jobs/{again.json()['job_id']}").json()["status"] == "pending"
+        refused = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 3}})
+        assert refused.status_code == 503, refused.text
+        assert refused.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+        assert refused.headers["Retry-After"] == "5"
+        assert state.projection is not None
+        assert state.projection.list_jobs() == []
 
 
 def test_a_failing_start_on_temporal_still_closes_the_projection(
@@ -154,3 +143,49 @@ def test_a_failing_start_on_temporal_still_closes_the_projection(
 
     assert closed == ["projection"]
     assert state.projection.pool.closed
+
+
+def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1054: the sweeps are a Temporal Schedule on the `library` queue this process
+    serves, triggered once at start. The boot itself does not walk the uploads too
+    (review #1095 1): the triggered run is the start's one sweep."""
+    walks: list[object] = []
+
+    def counted(state: AppState) -> list[str]:
+        walks.append(state)
+        return sweep_assets(state)
+
+    monkeypatch.setattr(main, "sweep_assets", counted)
+    settings = settings.model_copy(update={"asset_sweep_interval": NO_TICK})
+    app = create_app(settings)
+    queue = settings.temporal_task_queue_library
+
+    async def described() -> tuple[timedelta, str]:
+        temporal = await Client.connect(
+            settings.temporal_address, namespace=settings.temporal_namespace
+        )
+        handle = temporal.get_schedule_handle(schedule_id_for(queue))
+        async with asyncio.timeout(30):
+            while True:
+                try:
+                    schedule = await handle.describe()
+                except RPCError:
+                    await asyncio.sleep(0.2)
+                    continue
+                if schedule.info.recent_actions:
+                    break
+                await asyncio.sleep(0.2)
+        run = schedule.info.recent_actions[-1].action
+        assert isinstance(run, ScheduleActionExecutionStartWorkflow)
+        result = await temporal.get_workflow_handle(
+            run.workflow_id, run_id=run.first_execution_run_id
+        ).result()
+        return schedule.schedule.spec.intervals[0].every, str(result)
+
+    with TestClient(app):
+        every, result = asyncio.run(described())
+    assert every == timedelta(seconds=NO_TICK)
+    assert result == "[]"  # every sweep ran, none failed
+    assert len(walks) == 1

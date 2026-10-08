@@ -82,7 +82,7 @@ export const SERVER_NAME = 'playwright'
 /**
  * The prefix Claude Code gives a plugin MCP server's tools:
  * `mcp__plugin_<plugin>_<server>__<tool>`. Measured on the bundled Claude Code
- * 2.1.283 (the init message's `tools`, test/headlessBrowser.e2e.test.ts).
+ * 2.1.283 and 2.1.287 (the init message's `tools`, test/headlessBrowser.e2e.test.ts).
  */
 export const TOOL_PREFIX = `mcp__plugin_${PLUGIN_NAME}_${SERVER_NAME}__`
 

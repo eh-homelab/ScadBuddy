@@ -94,9 +94,8 @@ async def make_bus(pg_conninfo: str) -> AsyncIterator[BusFactory]:
     async def make(retention: EventLogRetention | None = None) -> PgNotifyEventBus:
         listener = PgListener(pg_conninfo, check_interval=1.0, backoff=0.05, max_backoff=0.2)
         bus = PgNotifyEventBus(pg_conninfo, listener=listener, retention=retention)
-        await bus.start()
+        await bus.start()  # returns once it listens
         buses.append(bus)
-        await _until(lambda: listener.backend_pid is not None)
         return bus
 
     yield make
@@ -159,6 +158,54 @@ async def test_events_published_before_start_are_sent_on_start(pg_conninfo: str)
     finally:
         await early.aclose()
         await hears.aclose()
+
+
+class _SlowListener(PgListener):
+    """A LISTEN that takes ``delay`` seconds to be in place, as a loaded host's did."""
+
+    def __init__(self, conninfo: str, delay: float) -> None:
+        super().__init__(conninfo)
+        self.delay = delay
+
+    async def _listen(self) -> None:
+        await asyncio.sleep(self.delay)
+        await super()._listen()
+
+
+@pytest.mark.requires_postgres
+async def test_start_returns_once_the_bus_listens(pg_conninfo: str) -> None:
+    """#1745 with a LISTEN that is slow to be in place, as a loaded host's was: `start`
+    still returns only once it is, and the first event published is heard."""
+    listener = _SlowListener(_migrated(pg_conninfo), delay=1.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
+    try:
+        await bus.start()
+        assert listener.backend_pid is not None
+        subscription = bus.subscribe()
+        event = _model("first")
+        bus.publish(event)
+        assert (await _next(subscription)).id == event.id
+    finally:
+        await bus.aclose()
+
+
+@pytest.mark.requires_postgres
+async def test_a_bus_hears_what_it_publishes_as_soon_as_it_has_started(
+    pg_conninfo: str,
+) -> None:
+    # #1745: `start` returned before the listener's LISTEN, so an event published
+    # straight after it (an app's first request) could commit its NOTIFY to nobody.
+    _migrated(pg_conninfo)
+    listener = PgListener(pg_conninfo, check_interval=1.0)
+    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
+    subscription = bus.subscribe()
+    await bus.start()
+    try:
+        assert listener.backend_pid is not None
+        bus.publish(_model("first"))
+        assert _slugs([await _next(subscription)]) == ["first"]
+    finally:
+        await bus.aclose()
 
 
 @pytest.mark.requires_postgres
@@ -367,17 +414,56 @@ async def test_the_log_replays_after_a_seq_in_pages(make_bus: BusFactory) -> Non
 
 
 @pytest.mark.requires_postgres
-async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
+async def test_a_started_bus_has_already_pruned_once(
     make_bus: BusFactory, pg_conninfo: str
 ) -> None:
+    """#1787: the first pass belongs to `start`, not to a background task that runs
+    whenever the caller next yields, which could be after the caller's own events
+    were logged, so a prune of its own then found them already gone."""
+    writer = await make_bus()
+    subscription = writer.subscribe()
+    for n in range(5):
+        writer.publish(_model(f"m{n}"))
+    for _ in range(5):
+        await _next(subscription)
+
+    await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
+
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT count(*) FROM events").fetchone()
+    assert row is not None and row[0] == 3
+
+
+@pytest.mark.requires_postgres
+async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
+    make_bus: BusFactory, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bus's own pruner prunes once when it starts (#1787): under load that first
+    prune came after the events below were logged and pruned them itself, so the
+    test's prune had nothing left to remove. Here it is held until they are heard,
+    and the totals are what is checked, whichever prune removed the rows."""
+    heard = asyncio.Event()
+    pruner = PgNotifyEventBus._pruner
+
+    async def late_pruner(self: PgNotifyEventBus) -> None:
+        await heard.wait()
+        await pruner(self)
+
+    monkeypatch.setattr(PgNotifyEventBus, "_pruner", late_pruner)
     bus = await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
     subscription = bus.subscribe()
     for n in range(5):
         bus.publish(_model(f"m{n}"))
     for _ in range(5):
         await _next(subscription)
+    heard.set()
 
-    assert await bus.prune_log() == 2  # by rows
+    def pruned() -> float:
+        return _sample(bus.metrics, "scadbuddy_event_log_pruned_total")
+
+    await bus.prune_log()  # by rows
+    await _until(lambda: pruned() >= 2)
+    assert pruned() == 2
     replay = await bus.replay(0)
     assert _slugs([logged.event for logged in replay.events]) == ["m2", "m3", "m4"]
     assert replay.gap  # m0 and m1 are gone: a client resuming from 0 must resync
@@ -388,9 +474,33 @@ async def test_pruning_keeps_the_newest_rows_and_drops_old_ones(
             "UPDATE events SET logged_at = now() - interval '2 hours' WHERE seq = %s",
             (replay.events[0].seq,),
         )
-    assert await bus.prune_log() == 1  # by age
+    await bus.prune_log()  # by age
+    await _until(lambda: pruned() >= 3)
+    assert pruned() == 3
     assert _slugs([logged.event for logged in (await bus.replay(0)).events]) == ["m3", "m4"]
-    assert _sample(bus.metrics, "scadbuddy_event_log_pruned_total") == 3
+
+
+@pytest.mark.requires_postgres
+async def test_prune_log_returns_the_rows_it_removed(
+    make_bus: BusFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no pruner of the bus's own (#1787), each `prune_log` is the only one: what
+    it returns is what it removed, and what the metric counts."""
+
+    async def no_pruner(self: PgNotifyEventBus) -> None:
+        return None
+
+    monkeypatch.setattr(PgNotifyEventBus, "_pruner", no_pruner)
+    bus = await make_bus(retention=EventLogRetention(seconds=3600, rows=3))
+    subscription = bus.subscribe()
+    for n in range(5):
+        bus.publish(_model(f"m{n}"))
+    for _ in range(5):
+        await _next(subscription)
+
+    assert await bus.prune_log() == 2
+    assert await bus.prune_log() == 0
+    assert _sample(bus.metrics, "scadbuddy_event_log_pruned_total") == 2
 
 
 @pytest.mark.requires_postgres

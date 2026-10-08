@@ -23,7 +23,7 @@
 // The word on the sign
 text = "Emma"; // 20
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans:style=Bold"; // font
 
 // Letter size in mm (about the height of a capital); auto-fit only ever shrinks it

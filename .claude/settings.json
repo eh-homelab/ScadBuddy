@@ -5,7 +5,8 @@
     ]
   },
   "enabledPlugins": {
-    "project-ops@wonderforgelabs-project-ops": true
+    "project-ops@wonderforgelabs-project-ops": true,
+    "gh-stack@wonderforgelabs-project-ops": true
   },
   "extraKnownMarketplaces": {
     "wonderforgelabs-project-ops": {

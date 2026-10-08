@@ -15,14 +15,17 @@ import asyncio
 import itertools
 import subprocess
 import threading
+import uuid
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from temporalio.client import WorkflowFailureError
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import ScheduleActionExecutionStartWorkflow, WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -32,8 +35,14 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.previews import PreviewScheduler
 from scadbuddy.render.runner import OpenSCADError
-from scadbuddy.render.submit import RenderService
+from scadbuddy.workflows.housekeeping import prune_schedule_id_for
+from scadbuddy.workflows.previews import (
+    PREVIEW_BACKFILL_WORKFLOW,
+    REFRESH_ACTIVITY,
+    preview_schedule_id_for,
+)
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
+from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -94,8 +103,11 @@ def stub(state: AppState, paths: DataPaths) -> StubRender:
 
 
 @pytest.fixture
-def client(app: FastAPI, stub: StubRender) -> Iterator[TestClient]:
+def client(app: FastAPI, state: AppState, stub: StubRender) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
+        # The boot's backfill run (the Schedule's trigger) has listed nothing yet to
+        # render; done before the test's own requests, as the boot's pass was.
+        backfilled(test_client, state)
         yield test_client
 
 
@@ -109,12 +121,56 @@ def settle(client: TestClient, state: AppState) -> None:
     client.portal.call(scheduler(state).idle)  # type: ignore[union-attr]
 
 
+async def _schedule_runs(state: AppState, schedule_id: str, runs: int) -> Any:
+    """The Schedule's description once it has started ``runs`` runs, within ~30 s."""
+    assert state.temporal is not None
+    handle = state.temporal.get_schedule_handle(schedule_id)
+    for _ in range(600):
+        with suppress(RPCError):  # not made yet: the library worker is still connecting
+            described = await handle.describe()
+            if described.info.num_actions >= runs and described.info.recent_actions:
+                return described
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{schedule_id} never started {runs} runs")
+
+
+async def _schedule_gone(state: AppState, schedule_id: str) -> None:
+    """Return once the Schedule is deleted, within ~30 s."""
+    assert state.temporal is not None
+    handle = state.temporal.get_schedule_handle(schedule_id)
+    for _ in range(600):
+        try:
+            await handle.describe()
+        except RPCError:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{schedule_id} was never deleted")
+
+
+def backfilled(client: TestClient, state: AppState, runs: int = 1) -> None:
+    """Wait for the preview backfill's ``runs``-th run (one per boot) to end; raises
+    as that run failed."""
+
+    async def wait() -> None:
+        assert state.temporal is not None
+        queue = state.settings.temporal_task_queue_library
+        described = await _schedule_runs(state, preview_schedule_id_for(queue), runs)
+        started = described.info.recent_actions[-1].action
+        assert isinstance(started, ScheduleActionExecutionStartWorkflow)
+        await state.temporal.get_workflow_handle(
+            started.workflow_id, run_id=started.first_execution_run_id
+        ).result()
+
+    client.portal.call(wait)  # type: ignore[union-attr]
+
+
 def _create(
     client: TestClient, source: str = SOURCE, **files: tuple[str, bytes, str]
 ) -> dict[str, Any]:
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream"), **files},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()
@@ -132,7 +188,9 @@ def _generate(client: TestClient, paths: DataPaths, cover: bytes) -> str:
     ).json()["job_id"]
     wait_for_job(client, job_id)
     set_plate_image(client, job_id, cover)
-    response = client.post(f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id})
+    response = client.post(
+        f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]
     return output_id
@@ -191,7 +249,7 @@ def test_a_duplicate_gets_a_preview_of_its_own(
     client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
 ) -> None:
     _create(client)
-    copy = client.post(f"/api/v1/models/{SLUG}/duplicate", json={"name": "Copy"})
+    copy = client.post(f"/api/v1/models/{SLUG}/duplicate", json={"name": "Copy"}, headers=press())
     assert copy.status_code == 201, copy.text
     settle(client, state)
 
@@ -207,7 +265,7 @@ def test_a_model_can_be_deleted_while_its_preview_is_pending(
     stub.released.clear()
     _create(client)
 
-    assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
+    assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code == 204
     stub.released.set()
     settle(client, state)
     assert scheduler(state).store.record(SLUG) is None
@@ -224,7 +282,9 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
     assert scheduler(state).store.image(SLUG) is not None
 
     own = client.put(
-        f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
+        f"/api/v1/models/{SLUG}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
     )
     assert own.json()["thumbnail_source"] == "model"
     # Dropped with the write, not later: there is nothing left for it to stand in for.
@@ -232,7 +292,7 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
     settle(client, state)
     assert len(stub.calls) == 1
 
-    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail").status_code == 200
+    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press()).status_code == 200
     settle(client, state)
     assert len(stub.calls) == 2
     assert _model(client)["thumbnail_source"] == "preview"
@@ -253,7 +313,7 @@ def test_a_generated_output_outranks_the_preview_until_it_is_deleted(
     # Nothing left for it to stand in for.
     assert scheduler(state).store.record(SLUG) is None
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     settle(client, state)
     assert _model(client)["thumbnail_source"] == "preview"
 
@@ -281,7 +341,7 @@ def test_a_source_edit_re_renders_and_changes_the_preview_id(
     edited = SOURCE.replace("width = 10", "width = 12")
     assert (
         client.put(
-            f"/api/v1/models/{SLUG}/source", json={"source": edited, "force": True}
+            f"/api/v1/models/{SLUG}/source", json={"source": edited, "force": True}, headers=press()
         ).status_code
         == 200
     )
@@ -302,10 +362,11 @@ def test_a_restored_revision_is_rendered_again(
     client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": SOURCE.replace("10", "12"), "force": True},
+        headers=press(),
     )
     settle(client, state)
 
-    restored = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore")
+    restored = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore", headers=press())
     assert restored.status_code == 200, restored.text
     settle(client, state)
 
@@ -318,8 +379,8 @@ def test_a_readme_or_metadata_edit_does_not_re_render(
     _create(client)
     settle(client, state)
 
-    client.put(f"/api/v1/models/{SLUG}/readme", json={"content": "# Widget\n"})
-    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Widget Two"})
+    client.put(f"/api/v1/models/{SLUG}/readme", json={"content": "# Widget\n"}, headers=press())
+    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Widget Two"}, headers=press())
     settle(client, state)
 
     assert len(stub.calls) == 1
@@ -331,7 +392,7 @@ def test_a_burst_of_changes_renders_once(
     scheduler(state).debounce = 0.3
     _create(client)
     for tags in ("a", "b", "c"):
-        client.patch(f"/api/v1/models/{SLUG}", json={"tags": [tags]})
+        client.patch(f"/api/v1/models/{SLUG}", json={"tags": [tags]}, headers=press())
     settle(client, state)
 
     assert stub.calls == [(SLUG, SOURCE)]
@@ -358,7 +419,7 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
 
     # Asked again with nothing changed: no second attempt.
     scheduler(state).request(SLUG)
-    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Still Broken"})
+    client.patch(f"/api/v1/models/{SLUG}", json={"name": "Still Broken"}, headers=press())
     settle(client, state)
     assert len(stub.calls) == 1
 
@@ -367,6 +428,7 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
     client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": SOURCE.replace("10", "11"), "force": True},
+        headers=press(),
     )
     settle(client, state)
     assert len(stub.calls) == 2
@@ -447,6 +509,7 @@ def test_boot_renders_each_model_without_a_thumbnail_once(
 
     app, booted = _boot(settings, stub)
     with TestClient(app) as client:
+        backfilled(client, booted)
         settle(client, booted)
         bare = _model(client, f"{BUILTIN_PREFIX}bare")
         pictured = _model(client, f"{BUILTIN_PREFIX}pictured")
@@ -460,6 +523,7 @@ def test_boot_renders_each_model_without_a_thumbnail_once(
     # A second boot finds every preview current and renders nothing.
     app, booted = _boot(settings, stub)
     with TestClient(app) as client:
+        backfilled(client, booted, runs=2)
         settle(client, booted)
     assert len(stub.calls) == 2
 
@@ -501,63 +565,161 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
     assert len(stub.calls) == 1
 
 
-# ── startup: the backfill never leaks the queue ───────────────────────────────
-
-
-def _failing_backfill(
-    booted: AppState, monkeypatch: pytest.MonkeyPatch, error: Exception
-) -> list[str]:
-    """`list_models` fails: its first call at boot is the preview backfill's, after
-    the queue has opened. Returns the log of what was closed."""
-
-    def listing() -> Any:
-        raise error
-
-    monkeypatch.setattr(booted.catalogue, "list_models", listing)
-    closed: list[str] = []
-    for name, part in (("previews", scheduler(booted)), ("queue", booted.render)):
-        aclose = part.aclose
-
-        async def recording(name: str = name, aclose: Any = aclose) -> None:
-            closed.append(name)
-            await aclose()
-
-        monkeypatch.setattr(part, "aclose", recording)
-    return closed
-
-
-def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
-    settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Anything the backfill raises past the render service starting is cleaned up as
-    a shutdown is: its reconciler and the projection's pool are released."""
-    app, booted = _boot(settings, StubRender(paths))
-    closed = _failing_backfill(booted, monkeypatch, RuntimeError("listing blew up"))
-
-    with pytest.raises(RuntimeError, match="listing blew up"), TestClient(app):
-        pass
-
-    assert closed == ["previews", "queue"]
-    assert isinstance(booted.render, RenderService)
-    assert booted.render._reconciler is None
-    assert booted.projection is not None and booted.projection.pool.closed
+# ── the backfill: a Schedule-triggered workflow (#1054) ──────────────────────
 
 
 def test_a_listing_error_costs_the_backfill_not_the_boot(
-    settings: Settings,
-    paths: DataPaths,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The listing is the backfill run's first activity: one that fails fails that
+    run (the next tick tries again), never the boot."""
     app, booted = _boot(settings, StubRender(paths))
-    closed = _failing_backfill(booted, monkeypatch, OSError("volume went away"))
 
+    def listing() -> Any:
+        raise OSError("volume went away")
+
+    monkeypatch.setattr(booted.catalogue, "slugs", listing)
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
-    # `_boot` configures logging after `caplog` would have hooked in; the app logs
-    # JSON to stdout, which is captured here.
-    assert "could not list the models to render their previews" in capsys.readouterr().out
-    assert closed == ["previews", "queue"]
+        with pytest.raises(WorkflowFailureError):
+            backfilled(client, booted)
+
+
+def test_an_edit_and_the_backfill_render_a_model_once(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    """The backfill's refresh of a model the edit path is rendering waits for it, then
+    finds the preview current: one render, one write."""
+    stub.released.clear()
+    _create(client)
+    for _ in range(600):
+        if stub.started:
+            break
+        threading.Event().wait(0.05)
+    assert stub.started == [SLUG]
+    backfill = client.portal.start_task_soon(scheduler(state).refresh, SLUG)  # type: ignore[union-attr]
+    threading.Event().wait(0.2)
+    stub.released.set()
+    assert backfill.result(timeout=30) is False
+    settle(client, state)
+
+    assert stub.started == [SLUG]
+    assert len(stub.calls) == 1
+    assert _model(client)["thumbnail_source"] == "preview"
+
+
+async def _run_backfill(state: AppState, refreshing: threading.Event | None = None) -> Any:
+    """Start a backfill run on the app's library queue, as the Schedule does, and
+    return its result; ``refreshing`` is set once its refresh activity has started."""
+    assert state.temporal is not None
+    handle = await state.temporal.start_workflow(
+        PREVIEW_BACKFILL_WORKFLOW,
+        id=f"previews-test-{uuid.uuid4().hex}",
+        task_queue=state.settings.temporal_task_queue_library,
+    )
+    if refreshing is not None:
+        for _ in range(600):
+            history = await handle.fetch_history()
+            if any(
+                event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+                and event.activity_task_scheduled_event_attributes.activity_type.name
+                == REFRESH_ACTIVITY
+                for event in history.events
+            ):
+                refreshing.set()
+                break
+            await asyncio.sleep(0.05)
+    return await handle.result()
+
+
+def test_the_backfill_waits_for_the_edit_paths_render_through_its_activity(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    """Review #1195 4: the backfill's refresh activity, on the library worker, takes
+    the scheduler's lock: while the edit path renders a model, the run's refresh of it
+    waits, then finds the preview current. One render, one write."""
+    stub.released.clear()
+    _create(client)
+    for _ in range(600):
+        if stub.started:
+            break
+        threading.Event().wait(0.05)
+    assert stub.started == [SLUG]
+    refreshing = threading.Event()
+    backfill = client.portal.start_task_soon(_run_backfill, state, refreshing)  # type: ignore[union-attr]
+    assert refreshing.wait(30)
+    threading.Event().wait(0.2)
+    assert not backfill.done()
+    stub.released.set()
+    assert backfill.result(timeout=30) == []
+    settle(client, state)
+
+    assert stub.started == [SLUG]
+    assert len(stub.calls) == 1
+    assert _model(client)["thumbnail_source"] == "preview"
+
+
+def test_a_render_that_could_not_run_is_a_failure_of_the_backfill_run(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    """Review #1195 2: a dead render queue is in the run's failures, not a clean run."""
+    stub.fail = RPCError("no worker is polling", RPCStatusCode.UNAVAILABLE, b"")
+    _create(client)
+    settle(client, state)
+
+    assert client.portal.call(_run_backfill, state) == [SLUG]  # type: ignore[union-attr]
+    assert scheduler(state).store.record(SLUG) is None
+
+
+def test_the_listing_drops_nothing(
+    client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
+) -> None:
+    """Review #1195 1: the listing only reads. A preview no longer wanted is listed,
+    and the refresh, under the scheduler's lock, drops it."""
+    _create(client)
+    settle(client, state)
+    previews = scheduler(state)
+    assert previews.store.record(SLUG) is not None
+    previews.catalogue.thumbnail_path(SLUG).write_bytes(PNG_BYTES)
+
+    assert previews.due() == [SLUG]
+    assert previews.store.record(SLUG) is not None
+    assert client.portal.call(previews.refresh, SLUG) is False  # type: ignore[union-attr]
+    assert previews.store.record(SLUG) is None
+    assert previews.due() == []
+
+
+def test_due_skips_a_model_it_cannot_plan(
+    client: TestClient, state: AppState, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    previews = scheduler(state)
+    for slug in (SLUG, "gadget"):
+        paths.model_dir(slug).mkdir(parents=True)
+        paths.model_source(slug).write_text(SOURCE, encoding="utf-8")
+
+    def needs_refresh(slug: str) -> bool:
+        if slug == SLUG:
+            raise OSError("unreadable")
+        return True
+
+    monkeypatch.setattr(previews, "needs_refresh", needs_refresh)
+    due = previews.due()
+    assert "gadget" in due
+    assert SLUG not in due
+
+
+def test_previews_off_leaves_no_backfill_schedule(settings: Settings, paths: DataPaths) -> None:
+    queue = settings.temporal_task_queue_library
+    app, booted = _boot(settings, StubRender(paths))
+    with TestClient(app) as client:
+        backfilled(client, booted)
+
+    app, off = _boot(settings.model_copy(update={"preview_renders": False}), StubRender(paths))
+    with TestClient(app) as client:
+        # The preview Schedule is set up after the housekeeping ones (final review M3):
+        # once the prune's has this boot's run, the preview one is deleted shortly.
+        client.portal.call(_schedule_runs, off, prune_schedule_id_for(queue), 2)  # type: ignore[union-attr]
+        client.portal.call(_schedule_gone, off, preview_schedule_id_for(queue))  # type: ignore[union-attr]
 
 
 def test_a_render_that_failed_on_the_worker_is_recorded_like_one_that_failed_here(

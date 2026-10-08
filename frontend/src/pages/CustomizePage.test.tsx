@@ -16,7 +16,7 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import * as fixtures from '../mocks/fixtures'
-import { setMockPlates } from '../mocks/handlers'
+import { setMockJobOutputs, setMockPlates, setMockPresets, setMockRenderColors } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
@@ -36,14 +36,17 @@ vi.mock('../components/Preview', () => ({
     plate,
     leading,
     controls,
+    rejected,
   }: {
     job?: Job
     rendering: boolean
     plate?: Plate
     leading?: ReactNode
     controls?: ReactNode
+    rejected?: boolean
   }) => (
     <div data-testid="preview">
+      {rejected && <span data-testid="preview-rejected" />}
       {leading}
       {controls}
       {rendering && <span>rendering</span>}
@@ -99,10 +102,28 @@ function watchRenders(): Promise<{ inputs: { params: Record<string, unknown> }; 
 }
 
 async function firstRender() {
-  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 4000 })
+  // The whole mocked render pipeline; on a loaded host it took over 4 s to show (#1485).
+  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 10_000 })
 }
 
 describe('CustomizePage', () => {
+  it("never heads the page with OpenSCAD's customizer title while the record loads (#939)", async () => {
+    // The schema's title is the .scad file's name, "model" for every model.
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...fixtures.keychainSchema, title: 'model' }),
+      ),
+      http.get('/api/v1/models/:slug', async () => {
+        await delay('infinite')
+        return HttpResponse.json({})
+      }),
+    )
+    render()
+    const heading = await screen.findByRole('heading', { level: 1 })
+    expect(heading).not.toHaveTextContent(/^model$/)
+    expect(heading).toHaveTextContent('name-keychain')
+  })
+
   it('offers to delete the model, naming it', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
@@ -154,10 +175,51 @@ describe('CustomizePage', () => {
     expect(within(duplicate).getByLabelText('Name')).toHaveValue('Keyring copy')
   })
 
+  // #938 — the extruder a colour parameter gets is the render's, not its place among
+  // the colour parameters: a hard-coded colour can take extruder 1, and an unused
+  // parameter takes none.
+  it("labels each colour parameter with the render's extruder, or as not in the render", async () => {
+    setMockRenderColors('name-keychain', ['#3366FF', '#E8532F'])
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const field = (name: string) => screen.getByRole('textbox', { name: `${name} hex` }).closest('[data-param]')!
+    await waitFor(() => expect(field('Text')).toHaveTextContent('extruder 2'))
+    expect(field('Plate')).toHaveTextContent('not in this render')
+    expect(field('Plate')).not.toHaveTextContent(/extruder \d/)
+  })
+
+  // #938 review — the previous render's colours cannot speak for a colour changed since:
+  // while its render is pending, the edited field must not claim it is not printed.
+  it('does not label a just-changed colour "not in this render" while it renders', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const field = hex.closest('[data-param]')!
+    await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
+    await user.clear(hex)
+    await user.type(hex, '#00FF00')
+    expect(field).not.toHaveTextContent('not in this render')
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()
     expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
+  })
+
+  it('renders and generates a model with no customizer parameters (#941)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...keychainSchema, groups: [], parameters: [] }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
   })
 
   it('says the queue is full and renders anyway once the delay passes', async () => {
@@ -185,6 +247,67 @@ describe('CustomizePage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await firstRender()
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('says it cannot reach the render service, not that the queue is full', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: 'Temporal is unavailable',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent('ScadBuddy cannot reach its render service; retrying in 1 s')
+    expect(busy).not.toHaveTextContent('queue is full')
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('does not invite a parameter change over a render the server refused (#367)', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Unprocessable Content',
+              status: 422,
+              detail: "parameter 'size' expects a number, got \"big\"",
+            },
+            { status: 422 },
+          ),
+      ),
+    )
+    render()
+    expect(await screen.findByText(/expects a number/, {}, { timeout: 4000 })).toBeInTheDocument()
+    // The viewer is told, so it drops its "Change a parameter to render." placeholder.
+    expect(screen.getByTestId('preview-rejected')).toBeInTheDocument()
+  })
+
+  it('offers no "Try again" for a refusal no retry fixes, a 422 (review #1066 (13) 2)', async () => {
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'width must be at most 100' },
+          { status: 422 },
+        ),
+      ),
+    )
+    render()
+    expect(await screen.findByRole('alert', {}, { timeout: 4000 })).toHaveTextContent('width must be at most 100')
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 
   it('re-renders after a parameter change and updates the dimensions', async () => {
@@ -250,6 +373,97 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
     expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
+  })
+
+  it('shows the first output once it is saved, and names the others that failed', async () => {
+    const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
+    setMockJobOutputs('name-keychain', [summary(0), summary(1)])
+    let refuse = true
+    const indexes: unknown[] = []
+    server.use(
+      http.post('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { index?: number }
+        indexes.push(body.index)
+        if (refuse && body.index === 1) {
+          return HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'the disk is full' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return undefined // the default handler saves it
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+
+    // The alert, not its announcement in the status region (#967).
+    await waitFor(() => expect(screen.getByText(/^Saved /, { selector: '[role="alert"]' })).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled()
+    expect(
+      await screen.findByText('Saved the first output; output 2 could not be saved: the disk is full', {
+        selector: '[role="alert"]',
+      }),
+    ).toBeInTheDocument()
+    // Generate again saves only the one that is missing.
+    refuse = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(indexes).toEqual([undefined, 1, 1]))
+    await waitFor(() => expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument())
+  })
+
+  it('retries only the missing outputs of a re-render Generate had to start', async () => {
+    // The page's job did not render these inputs (a UI-state change): Generate renders
+    // them, saves output 0 of that job, and output 1 fails. A retry saves only output 1.
+    const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
+    setMockJobOutputs('name-keychain', [summary(0), summary(1)])
+    let refuse = true
+    let pageJob: unknown
+    const posts: [unknown, unknown][] = []
+    server.use(
+      http.post('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { job_id?: string; index?: number }
+        pageJob ??= body.job_id
+        posts.push([body.job_id === pageJob ? 'page' : 'rerender', body.index])
+        if (body.job_id === pageJob) {
+          return HttpResponse.json(
+            { title: 'Unprocessable Content', status: 422, detail: `inputs are not the ones job ${String(body.job_id)} rendered` },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        if (refuse && body.index === 1) {
+          return HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'the disk is full' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return undefined // the default handler saves it
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    expect(
+      await screen.findByText(
+        'Saved the first output; output 2 could not be saved: the disk is full',
+        { selector: '[role="alert"]' },
+        { timeout: 5000 },
+      ),
+    ).toBeInTheDocument()
+    refuse = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(posts).toHaveLength(4))
+    await waitFor(() => expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument())
+    expect(posts).toEqual([
+      ['page', undefined],
+      ['rerender', undefined],
+      ['rerender', 1],
+      ['rerender', 1],
+    ])
   })
 
   it('says to allow pop-ups when the download popup is blocked inside Bambuddy (#612)', async () => {
@@ -495,6 +709,34 @@ describe('CustomizePage', () => {
     expect(sent).toEqual([-12])
   }, 20000)
 
+  it('flags an out-of-range number on its field and neither renders nor generates it (#921)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(size)
+    await user.type(size, '500{Enter}')
+
+    expect(size).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Text size must be between 6 and 28.')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    // Longer than the debounce: a render of 500 would have been asked for by now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    await user.clear(size)
+    await user.type(size, '20')
+    expect(screen.queryByText(/must be between/)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_size'])
+    expect(sent).not.toContain(500)
+    expect(sent.at(-1)).toBe(20)
+  }, 20000)
+
   it('links to the versions panel', async () => {
     render()
     await firstRender()
@@ -543,8 +785,13 @@ describe('CustomizePage', () => {
       </AssistantOpenerContext.Provider>,
       { route: `/m/name-keychain?from=${id}`, path: '/m/:slug' },
     )
-    expect(await screen.findByRole('button', { name: 'Changed by assistant (2)' })).toBeInTheDocument()
-    await user.click(await screen.findByRole('button', { name: 'Output changed by assistant (1)' }))
+    // Waited for by text, then found by role once: a role query re-run on every change
+    // while the page loads costs ~0.2-0.45 s each in jsdom (a computed style per
+    // element), which kept the menu from appearing within the 1 s wait (#1485).
+    await screen.findByText('Changed by assistant (2)')
+    await screen.findByText('Output changed by assistant (1)')
+    expect(screen.getByRole('button', { name: 'Changed by assistant (2)' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Output changed by assistant (1)' }))
     await user.click(screen.getByRole('button', { name: /Saved it/ }))
     expect(openSession).toHaveBeenCalledWith('sess-output')
   })
@@ -672,6 +919,34 @@ describe('CustomizePage', () => {
       { route: `/m/name-keychain?from=${id}` },
     )
     expect(await screen.findByTestId('gone')).toBeInTheDocument()
+  })
+
+  it('hands an arranged output to /edit rather than opening it', async () => {
+    // spec 2026-09-27 §7: an arranged output has no one set of inputs to reopen, and
+    // /edit/{id} owns the page that says so.
+    const id = 'f'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:outputId/edit', () =>
+        HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: 'Batch',
+          params: {},
+          inputs: {},
+          model_version: null,
+          source: 'record',
+          arranged_from: ['a'.repeat(32)],
+        }),
+      ),
+    )
+    renderPage(
+      <Routes>
+        <Route path="/m/:slug" element={<CustomizePage />} />
+        <Route path="/edit/:outputId" element={<div data-testid="arranged" />} />
+      </Routes>,
+      { route: `/m/name-keychain?from=${id}` },
+    )
+    expect(await screen.findByTestId('arranged')).toBeInTheDocument()
   })
 
   it('renders nothing for a page it is only passing through', async () => {
@@ -1339,6 +1614,29 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(ran).toHaveLength(1))
     expect(await ran[0]).toHaveProperty('project_id', null)
   })
+
+  it('leaves project_id out of a run while the list is unknown (#1045)', async () => {
+    // The server then files it under the remembered project, not "No project".
+    server.use(
+      http.get(
+        '/api/v1/print/projects',
+        () => new HttpResponse('upstream request timeout', { status: 504 }),
+      ),
+    )
+    const ran = watchBodies('POST', /\/print\/outputs\/[^/]+\/run$/)
+    const { user } = render()
+    await generate(user)
+
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    const print = await within(dialog).findByTestId('run-print')
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+
+    await waitFor(() => expect(ran).toHaveLength(1))
+    expect(await ran[0]).not.toHaveProperty('project_id')
+  })
 })
 
 describe('template inputs (spec 2026-09-27 §4.3)', () => {
@@ -1371,5 +1669,116 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     await waitFor(() =>
       expect(bodies[0]).toMatchObject({ inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 } }),
     )
+  })
+
+  function reopenOld(migrate: () => Response) {
+    const outputId = 'c'.repeat(32)
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: 'name-keychain',
+          name: 'Old',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+      http.post('/api/v1/models/name-keychain/inputs/migrate', migrate),
+    )
+    return render(`/m/name-keychain?from=${outputId}`)
+  }
+
+  it('brings an older output\'s inputs up to the template version before applying them', async () => {
+    reopenOld(() =>
+      HttpResponse.json({ inputs: { params: { name: 'Migrated' }, v: 1 }, from_version: 0, to_version: 1 }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Migrated'),
+    )
+    expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).not.toBeInTheDocument()
+  })
+
+  it('shows inputs it cannot migrate read-only and keeps the current values', async () => {
+    reopenOld(() =>
+      HttpResponse.json(
+        { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+        { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+    expect(await screen.findByText(/could not be brought up to this template version: defines no migrate/)).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    // The schema default, as before the output was reopened.
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+  })
+
+  it('migrates a preset from its stored inputs before cutting them to the schema', async () => {
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    setMockPresets('name-keychain', [
+      {
+        id: 'e'.repeat(32),
+        name: 'Renamed',
+        description: '',
+        tags: [],
+        origin: 'mine',
+        params: { old_name: 'x' },
+        inputs: { params: { old_name: 'x' }, v: 0 },
+        updated_at: '2026-09-20T10:00:00Z',
+      },
+    ])
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      // The template's migrate renames old_name to name.
+      http.post('/api/v1/models/name-keychain/inputs/migrate', async ({ request }) => {
+        const { inputs } = (await request.json()) as { inputs: { params: Record<string, unknown> } }
+        const { old_name: oldName, ...rest } = inputs.params
+        return HttpResponse.json({
+          inputs: { params: { ...rest, name: oldName }, v: 1 },
+          from_version: 0,
+          to_version: 1,
+        })
+      }),
+    )
+    const { user } = render('/m/name-keychain')
+    const select = await screen.findByLabelText('Preset')
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Renamed' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Renamed')
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('x'),
+    )
+  })
+
+  it('says a model that failed to load could not be loaded, not that it is gone (#1041)', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        fail
+          ? HttpResponse.json({ title: 'Gateway Timeout', status: 504, detail: 'injected 504' }, { status: 504 })
+          : undefined,
+      ),
+    )
+    const { user } = render()
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByRole('heading', { name: 'Could not load this model' })).toBeInTheDocument()
+    expect(alert).toHaveTextContent('injected 504')
+    expect(screen.queryByText('That model is not here')).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await firstRender()
+  })
+
+  it('says a model that is not there is not there (#1041)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ title: 'Not Found', status: 404, detail: 'no model named x' }, { status: 404 }),
+      ),
+    )
+    render()
+    expect(await screen.findByRole('heading', { name: 'That model is not here' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 })

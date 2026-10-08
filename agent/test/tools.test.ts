@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -217,6 +217,84 @@ describe('render_model', () => {
     expect(posts).toBe(1)
   })
 
+  it('re-sends a render the backend is still accepting, with the same key (#1053)', async () => {
+    let posts = 0
+    const keys: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        posts += 1
+        keys.push(request.headers.get('Idempotency-Key'))
+        return posts === 1
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/command-still-accepting',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'ScadBuddy is still checking this request.',
+              },
+              { status: 503, headers: { 'Retry-After': '2' } },
+            )
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ status: 'done' })
+    expect(posts).toBe(2)
+    // One request to the backend, so one claim on the job (review #1066 2.1).
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it.each([
+    [503, 'https://scadbuddy.dev/problems/temporal-unavailable'],
+    [500, 'https://scadbuddy.dev/problems/render-unstartable'],
+  ])('re-sends a %i that may have started, with the same key (review #1066 (10) 3)', async (status, type) => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? HttpResponse.json(
+              { type, title: 'Unavailable', status, detail: 'Send the same request again.', may_have_started: true },
+              { status },
+            )
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('does not re-send a problem that started nothing (review #1066 (10) 3)', async () => {
+    let posts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+        posts += 1
+        return HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+            title: 'Service Unavailable',
+            status: 503,
+            detail: 'Nothing was queued; try again shortly.',
+            may_have_started: false,
+          },
+          { status: 503 },
+        )
+      }),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(posts).toBe(1)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())
@@ -258,6 +336,28 @@ describe('render_model', () => {
     expect(saved).toEqual({ job_id: 'j', name: 'v1' })
   })
 
+  it('waits out renderWaitMs in elapsed time, whatever the wall clock does (#1485)', async () => {
+    let polls = 0
+    const now = Date.now
+    const stepped = vi.spyOn(Date, 'now')
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => {
+        polls += 1
+        // The clock steps an hour on during the first poll.
+        if (polls === 1) stepped.mockImplementation(() => now.call(Date) + 3_600_000)
+        return HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: polls < 3 ? 'running' : 'done' })
+      }),
+    )
+    try {
+      const result = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 60_000 }))
+      expect(firstText(result)).toMatchObject({ status: 'done' })
+    } finally {
+      stepped.mockRestore()
+    }
+  })
+
   it('reports a cancelled render as a tool error with its log, settling immediately rather than waiting out renderWaitMs', async () => {
     server.use(
       http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
@@ -273,11 +373,11 @@ describe('render_model', () => {
         }),
       ),
     )
-    const started = Date.now()
+    const started = performance.now()
     // A generous renderWaitMs: settling on `cancelled` must return well before it
     // elapses, the way it already does for `failed` -- not poll until the deadline.
     const result = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 5000 }))
-    expect(Date.now() - started).toBeLessThan(1000)
+    expect(performance.now() - started).toBeLessThan(1000)
     expect(result.isError).toBe(true)
     expect(firstText(result)).toMatchObject({
       status: 'cancelled',
@@ -346,7 +446,10 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   const OUT = '0123456789abcdef0123456789abcdef'
   const FILAMENTS = {
     library_file_id: 5,
-    slots: [{ slot_id: 1 }, { slot_id: 2 }],
+    slots: [
+      { slot_id: 1, colour_matches: [10, 12] },
+      { slot_id: 2, colour_matches: [11, 12] },
+    ],
     spools: [{ spool_id: 10, material: 'PLA' }, { spool_id: 11, material: 'PETG' }, { spool_id: 12, material: 'PLA' }],
     suggested: [
       { slot_id: 1, spool_id: 10 },
@@ -495,8 +598,8 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     it("waits the still-accepting answer's Retry-After before re-sending (review #1061 4a)", async () => {
       const sent: number[] = []
       const { ids, handler } = posts([
-        () => (sent.push(Date.now()), accepting('0.2')()),
-        () => (sent.push(Date.now()), HttpResponse.json(running, { status: 202 })),
+        () => (sent.push(performance.now()), accepting('0.2')()),
+        () => (sent.push(performance.now()), HttpResponse.json(running, { status: 202 })),
       ])
       server.use(handler, done)
       const result = await tool('print_output').execute(args, ctx())
@@ -515,6 +618,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(result.isError).toBeFalsy()
       expect(ids).toHaveLength(RUN_REATTEMPTS + 4)
       expect(new Set(ids).size).toBe(1)
+    })
+
+    it('re-sends the same request_id after a temporal-unavailable that may have started it (review #1316 (13) 1a)', async () => {
+      const { ids, handler } = posts([
+        () =>
+          HttpResponse.json(
+            { type: 'https://scadbuddy.dev/problems/temporal-unavailable', title: 'Service Unavailable', status: 503, detail: 'Send it again.', may_have_started: true },
+            { status: 503 },
+          ),
+        () => HttpResponse.json(running, { status: 202 }),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
     })
 
     it("never re-sends a problem the backend wrote, even a 503", async () => {
@@ -624,6 +743,17 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       },
       choices: { nozzles: [{ size: '0.2', flow: 'standard' }], tier: null, process_name: '0.06mm Fine @BBL H2C 0.2 nozzle' },
     })
+  })
+
+  it('drops a remembered spool whose colour no longer fits the slot (#933)', async () => {
+    const run: { body?: unknown } = {}
+    server.use(
+      // Spool 10 is still in the inventory but no longer matches slot 2's colour.
+      choicesView({ filament_plan: [{ slot_id: 2, spool_id: 10 }] }),
+      ...capturedRun(run),
+    )
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(run.body).toMatchObject({ filament_plan: { slots: FILAMENTS.suggested } })
   })
 
   it('reads the filament step for all plates itself', async () => {
@@ -1234,6 +1364,44 @@ describe('Bambuddy writes as operations (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  // Review #1316 (13) 1a: a start that may have reached Temporal is followed only by the
+  // same key; a new one would do it twice.
+  const temporalProblem = (type: string, status: number, mayHaveStarted: boolean) =>
+    HttpResponse.json(
+      { type: `https://scadbuddy.dev/problems/${type}`, title: 'Unavailable', status, detail: 'Send it again.', may_have_started: mayHaveStarted },
+      { status },
+    )
+
+  it.each([
+    ['temporal-unavailable', 503],
+    ['temporal-refused', 500],
+  ])('print_again re-sends the same Idempotency-Key after a %s that may have started it', async (type, status) => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2 ? temporalProblem(type, status, true) : HttpResponse.json(again, { status: 201 })
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('print_again does not re-send a temporal-unavailable that started nothing', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return temporalProblem('temporal-unavailable', 503, false)
+      }),
+    )
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(keys).toHaveLength(1)
+  })
+
   it('follows a 202 to the operation result', async () => {
     let reads = 0
     server.use(
@@ -1269,9 +1437,9 @@ describe('Bambuddy writes as operations (#1053)', () => {
       http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => HttpResponse.json(op, { status: 202 })),
       http.get(`${BACKEND}/api/v1/operations/op-1`, () => HttpResponse.json(op)),
     )
-    const started = Date.now()
+    const started = performance.now()
     const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx({ commandFollowMs: 50 }))
-    expect(Date.now() - started).toBeLessThan(5000)
+    expect(performance.now() - started).toBeLessThan(5000)
     expect(result.isError).toBeFalsy()
     const body = firstText(result)
     expect(body).toMatchObject({ status: 'running', operation_id: 'op-1' })
@@ -1349,6 +1517,202 @@ describe('Bambuddy writes as operations (#1053)', () => {
     const result = await runTool(tool('get_operation'), { operation_id: 'op-1' }, ctx())
     expect(result.isError).toBe(true)
     expect(asked).toBe(false)
+  })
+})
+
+describe('library pins as operations (#1054)', () => {
+  const op = { id: 'op-7', kind: 'library_pin', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+  const pinned = { name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', commit: 'a'.repeat(40) }
+  const CATALOGUE = [{ name: 'BOSL2', url: pinned.url, ref: 'v2.0.0', homepage: '', licence: '' }]
+
+  it.each([
+    ['pin_library', { slug: 'w', name: 'BOSL2' }, 'put', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['pin_library_from_url', { slug: 'w', name: 'X', url: 'https://g.example/x.git', ref: 'v1' }, 'put', '/api/v1/models/w/libraries/X', { slug: 'w' }],
+    ['repin_library', { slug: 'w', name: 'BOSL2' }, 'patch', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['repin_library_from_pinned_url', { slug: 'w', name: 'X' }, 'patch', '/api/v1/models/w/libraries/X', { slug: 'w' }],
+    ['unpin_library', { slug: 'w', name: 'BOSL2' }, 'delete', '/api/v1/models/w/libraries/BOSL2', { slug: 'w' }],
+    ['remove_library_checkout', { name: 'BOSL2' }, 'delete', '/api/v1/libraries/BOSL2', { removed: 'BOSL2' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path, expected) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+      // repin_library's two reads before its PATCH.
+      http.get(`${BACKEND}/api/v1/models/w`, () => HttpResponse.json({ ...model, libraries: [pinned] })),
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+    // The operation's result, not the 202's body.
+    const answer = firstText(result)
+    expect(answer).toMatchObject(expected)
+    expect(answer).not.toHaveProperty('status')
+  })
+
+  it('remove_library_checkout hands back a removal still running past the follow, not "removed" (review #1119)', async () => {
+    const removing = { ...op, kind: 'library_remove', subject: 'library:BOSL2' }
+    server.use(
+      http.delete(`${BACKEND}/api/v1/libraries/BOSL2`, () => HttpResponse.json(removing, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-7`, () => HttpResponse.json(removing)),
+    )
+    const result = await runTool(
+      { ...tool('remove_library_checkout'), gated: false },
+      { name: 'BOSL2' },
+      ctx({ commandFollowMs: 50 }),
+    )
+    expect(result.isError).toBeFalsy()
+    const answer = firstText(result)
+    expect(answer).toMatchObject({ status: 'running', operation_id: 'op-7' })
+    expect(answer).not.toHaveProperty('removed')
+  })
+})
+
+describe("a model's lifecycle as operations (#1054)", () => {
+  const op = { id: 'op-8', kind: 'model_create', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+
+  it.each([
+    ['create_model', { name: 'W', source: 'cube(1);' }, 'post', '/api/v1/models'],
+    ['import_model', { url: 'https://example.com/w.scad' }, 'post', '/api/v1/models/import'],
+    ['duplicate_model', { slug: 'v', name: 'W' }, 'post', '/api/v1/models/v/duplicate'],
+    ['update_model_details', { slug: 'w', description: 'd' }, 'patch', '/api/v1/models/w'],
+    ['delete_model', { slug: 'w' }, 'delete', '/api/v1/models/w'],
+    ['create_from_template', { name: 'W', from: 'blank' }, 'post', '/api/v1/models'],
+    ['create_from_template', { name: 'W', from: 'v' }, 'post', '/api/v1/models/v/duplicate'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-8`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('delete_model accepts a 204 at once', async () => {
+    let key: string | null = null
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_model'), gated: false }, { slug: 'w' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
+describe("a model's edits as operations (#1054)", () => {
+  const op = { id: 'op-9', kind: 'model_source_put', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+  const base = 'abc1234'
+
+  it.each([
+    ['update_source', { slug: 'w', source: 'cube(2);' }, 'put', '/api/v1/models/w/source'],
+    ['apply_patch', { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, 'post', '/api/v1/models/w/source/patch'],
+    ['set_readme', { slug: 'w', content: '# W' }, 'put', '/api/v1/models/w/readme'],
+    ['delete_readme', { slug: 'w' }, 'delete', '/api/v1/models/w/readme'],
+    ['set_model_thumbnail', { slug: 'w', png_base64: 'iVBORw0KGgo=' }, 'put', '/api/v1/models/w/thumbnail'],
+    ['delete_model_thumbnail', { slug: 'w' }, 'delete', '/api/v1/models/w/thumbnail'],
+    ['write_source_file', { slug: 'w', name: 'part.scad', content: 'module p() {}' }, 'put', '/api/v1/models/w/files/part.scad'],
+    ['delete_source_file', { slug: 'w', name: 'part.scad' }, 'delete', '/api/v1/models/w/files/part.scad'],
+    ['restore_version', { slug: 'w', commit: base }, 'post', `/api/v1/models/w/versions/${base}/restore`],
+    ['update_from_upstream', { slug: 'w', action: 'merge' }, 'post', '/api/v1/models/w/upstream/merge'],
+    ['update_from_upstream', { slug: 'w', action: 'dismiss' }, 'post', '/api/v1/models/w/upstream/dismiss'],
+    ['update_from_upstream', { slug: 'w', action: 'detach' }, 'post', '/api/v1/models/w/upstream/detach'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it("apply_patch reads `current` from a stale base the operation's run found", async () => {
+    const stale = { status: 409, title: 'Conflict', detail: 'moved on', type: 'about:blank', extensions: { base, current: 'def5678' } }
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/w/source/patch`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'failed', error: stale })),
+    )
+    const result = await runTool(tool('apply_patch'), { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toMatchObject({ status: 'conflict', current: 'def5678' })
+  })
+
+  it("an extension named like a problem field does not replace the operation's own", async () => {
+    const failed = { status: 404, title: 'Not Found', detail: 'w has no README to remove', type: 'about:blank', extensions: { detail: 'spoofed' } }
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w/readme`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'failed', error: failed })),
+    )
+    const result = await runTool({ ...tool('delete_readme'), gated: false }, { slug: 'w' }, ctx())
+    expect(result.isError).toBe(true)
+    const text = JSON.stringify(firstText(result))
+    expect(text).toContain('w has no README to remove')
+    expect(text).not.toContain('spoofed')
+  })
+})
+
+describe('uploads, outputs, fonts and presets as operations (#1054)', () => {
+  const op = { id: 'op-6', kind: 'output_create', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const OUT = 'b'.repeat(32)
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')
+
+  it.each([
+    ['save_output', { slug: 'w', job_id: 'j' }, 'post', '/api/v1/models/w/outputs', { id: OUT }],
+    ['delete_output', { output_id: OUT }, 'delete', `/api/v1/outputs/${OUT}`, {}],
+    ['upload_asset', { slug: 'w', filename: 'logo.svg', content_base64: svg }, 'post', '/api/v1/models/w/assets', { id: 'a1' }],
+    ['fetch_asset', { slug: 'w', url: 'https://openmoji.org/x.svg' }, 'post', '/api/v1/models/w/assets/fetch', { id: 'a1' }],
+    ['install_font', { family: 'Pacifico' }, 'post', '/api/v1/fonts/install', { family: 'Pacifico' }],
+    ['save_preset', { slug: 'w', name: 'Wide' }, 'post', '/api/v1/models/w/presets', { id: 'p1' }],
+    ['update_preset', { slug: 'w', preset_id: 'p1', name: 'Wider' }, 'patch', '/api/v1/models/w/presets/p1', { id: 'p1' }],
+    ['duplicate_preset', { slug: 'w', preset_id: 'p1', name: 'Copy' }, 'post', '/api/v1/models/w/presets/p1/duplicate', { id: 'p2' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path, result) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-6`, () => HttpResponse.json({ ...op, status: 'succeeded', result })),
+    )
+    const answer = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(answer.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+    expect(JSON.stringify(answer.content)).not.toContain('"running"')
+  })
+
+  it("render_model's save sends an Idempotency-Key and follows a 202 to the output", async () => {
+    let key: string | null = null
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-6`, () => HttpResponse.json({ ...op, status: 'succeeded', result: { id: OUT } })),
+    )
+    const done = await runTool(tool('render_model'), { slug: 'box', save_output: true }, ctx())
+    expect(firstText(done)).toMatchObject({ status: 'done', output: { id: OUT } })
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
 })
 

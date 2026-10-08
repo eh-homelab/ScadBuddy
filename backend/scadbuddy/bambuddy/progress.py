@@ -26,6 +26,7 @@ from scadbuddy.bambuddy.linking import link_by_hash, link_item
 from scadbuddy.bambuddy.models import QueueItem, SliceJob
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.stages import Stage, stage_of
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
@@ -59,7 +60,9 @@ class CopyProgress(BaseModel):
 class PrintProgress(BaseModel):
     """What the send bar shows until every copy is queued, failed or cancelled."""
 
-    route: PrintRoute
+    #: ``run`` is a print whose run failed before it queued anything (#1049): there is
+    #: no slice job or queue item, only the run's own refusal in ``error_message``.
+    route: PrintRoute | Literal["run"]
     stage: Stage = "unknown"
     #: True when nothing further will change without another print. Polling stops here.
     settled: bool = False
@@ -88,6 +91,25 @@ QUEUED_THEN_FAILED_FIX = (
     "The queue entry was created and then refused. Check the filament mapping and the "
     "loaded spools, then retry it from Bambuddy's queue."
 )
+
+
+#: A run that failed before queueing anything (#1049): nothing reached Bambuddy's queue.
+RUN_FAILED_FIX = "Nothing was queued. Fix what it says, then print again."
+
+
+def from_failed_run(detail: str, *, bambuddy_url: str) -> PrintProgress:
+    """The progress of a print whose run failed before it queued anything (#1049).
+
+    Such a run records no print route on the output, so without this the output reads
+    as never printed, and the failure is in a row only its run id finds."""
+    return PrintProgress(
+        route="run",
+        stage="failed",
+        settled=True,
+        error_message=detail,
+        fix=RUN_FAILED_FIX,
+        bambuddy_url=bambuddy_url,
+    )
 
 
 def from_queue(
@@ -217,7 +239,7 @@ class _Linker:
         # An item linked before it went needs nothing; another plate's gone item still
         # may, so this item's own link must not spend the read's one scan (#522 review).
         if queue_item_id is not None:
-            known = await self.links.for_output(self.meta.id)
+            known = await self.links.for_subject(PrintSubject.output(self.meta.id))
             if any(link.queue_item_id == queue_item_id for link in known) or self._searched:
                 return
         # Once per read, however many plates' items are gone: one scan covers them all.
@@ -424,7 +446,7 @@ OBSERVED_OUTPUTS = 256
 class ProgressObserver:
     """Turns the progress reads the backend makes into ``print.*`` events.
 
-    Its reads come from the per-print watcher (#268, ``bambuddy/watcher.py``) and
+    Its reads come from each print's `FollowPrint` (#1053, ``bambuddy/follow.py``) and
     from the progress route, which the UI still calls when it subscribes and
     while its realtime socket is down. Each read is compared with the last one seen
     for that output, so a read that finds nothing new publishes nothing, and

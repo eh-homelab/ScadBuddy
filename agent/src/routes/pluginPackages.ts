@@ -2,12 +2,15 @@ import type { Context, Hono } from 'hono'
 import { z } from 'zod'
 import { EgressError } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
+import type { Commands } from '../operations/run.js'
 import { PackageRefusedError, type PackageInstaller } from '../plugins/packages/install.js'
-import { validateRef, validateSource } from '../plugins/packages/source.js'
+import { INSTALL_KIND, REPIN_KIND } from '../plugins/packages/operations.js'
 import type { PackageRepo } from '../plugins/packages/store.js'
+import { type PackageSource, validateRef, validateSource } from '../plugins/packages/source.js'
 import { PluginError } from '../plugins/registry.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
+import { commandResponse, NO_COMMANDS } from './operations.js'
 
 // /api/v1/ai/plugin-packages (issue #297, "Installing a plugin"): Claude plugin
 // packages (skills, subagents, hooks, .mcp.json) from a git URL or a
@@ -15,10 +18,10 @@ import { ready, type RouteModule } from './module.js'
 //
 //   GET    /api/v1/ai/plugin-packages                  list
 //   GET    /api/v1/ai/plugin-packages/:name            one, with its review and any pending re-pin + diff
-//   POST   /api/v1/ai/plugin-packages                  install: fetch, pin, vet → stored UNAPPROVED (201)
-//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash } as reviewed
+//   POST   /api/v1/ai/plugin-packages                  install: fetch, pin, vet → stored UNAPPROVED (201), a command
+//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash, allow_refused? } as reviewed
 //   PATCH  /api/v1/ai/plugin-packages/:name            { enabled } (an approved pin only)
-//   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref } → pending pin + file diff
+//   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref } → pending pin + file diff, a command
 //   DELETE /api/v1/ai/plugin-packages/:name/pending    drop the pending re-pin
 //   DELETE /api/v1/ai/plugin-packages/:name            uninstall (and evict the cache)
 //
@@ -29,16 +32,27 @@ import { ready, type RouteModule } from './module.js'
 // review showed them. Every write, and the fetches, go through the UI guard
 // the other Settings writes use (guard.ts: HTTPS through a trusted proxy or
 // loopback, the UI's origin, JSON bodies).
+//
+// A package whose review lists refusals (vet.ts `refused`) installs, and is
+// approved only with `allow_refused: true`, the admin's decision to load it
+// as it is. Fatal problems (vet.ts `fatal`, egress, symlinks) still refuse
+// the install with a 422.
+//
+// The two fetches are commands (spec 2026-10-01 §4.2, #1055): AgentOperation runs them
+// on `agent-tools` (plugins/packages/operations.ts), keyed by the client's
+// `Idempotency-Key`, so a re-send after a lost answer fetches nothing twice. Within the
+// deadline they answer as before; past it, 202 with the operation to follow at
+// GET /api/v1/ai/operations/{id}.
 
 export type PackageRouteDeps = {
   /** Undefined when there is no database (spec §9). */
   packages: PackageRepo | undefined
   installer: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
+  /** Install and re-pin run here; undefined without Temporal (503). */
+  commands: Commands | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
-  /** Fetches at once across all packages; more get a 429. */
-  maxConcurrentFetches?: number
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -62,6 +76,8 @@ const InstallBody = z.strictObject({ source: Source })
 const ApproveBody = z.strictObject({
   commit_sha: z.string().max(64),
   content_hash: z.string().max(80),
+  /** Load the pin despite what its review's `refused` lists (store.ts). */
+  allow_refused: z.boolean().optional(),
 })
 const PatchBody = z.strictObject({ enabled: z.boolean() })
 const RepinBody = z.strictObject({ ref: z.string().max(200).optional() })
@@ -78,10 +94,6 @@ async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.
 
 export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): void {
   const base = '/api/v1/ai/plugin-packages'
-  const maxFetches = deps.maxConcurrentFetches ?? 2
-  let fetching = 0
-  const busy = new Set<string>()
-
   async function store(): Promise<PackageRepo | string> {
     if (!deps.packages) return NO_DATABASE
     return (await deps.ready()) ? deps.packages : NOT_READY
@@ -96,20 +108,14 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     throw err
   }
 
-  /** Runs a fetch under the concurrency cap, one per package name. */
-  async function withFetch<T>(c: Context, key: string, work: () => Promise<T>): Promise<T | Response> {
+  /** Why a fetch cannot start here, before any command. */
+  function cannotFetch(c: Context): Response | undefined {
     if (!deps.installer) return c.json({ detail: 'plugin packages are not available: no package cache' }, 503)
-    if (busy.has(key)) return c.json({ detail: `a fetch for ${key} is already running` }, 429)
-    if (fetching >= maxFetches) return c.json({ detail: 'too many plugin fetches are running; try again' }, 429)
-    busy.add(key)
-    fetching++
-    try {
-      return await work()
-    } finally {
-      busy.delete(key)
-      fetching--
-    }
+    if (!deps.commands) return c.json({ detail: NO_COMMANDS }, 503)
+    return undefined
   }
+
+  const key = (c: Context): string | undefined => c.req.header('idempotency-key')?.slice(0, 128) || undefined
 
   app.on(['POST', 'PATCH', 'PUT', 'DELETE'], [base, `${base}/*`], async (c, next) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'plugin package changes')
@@ -148,16 +154,17 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, InstallBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
+    // Validated here, before anything crosses: the request is the command's workflow
+    // input, in Temporal history, and a URL with a token in it is refused (source.ts).
+    let source: PackageSource
     try {
-      const source = validateSource(body.source)
-      const result = await withFetch(c, `${source.url}#${source.kind === 'git' ? source.path : source.entry}`, async () => {
-        const prepared = await deps.installer!.prepare(source)
-        return repo.create(prepared)
-      })
-      return result instanceof Response ? result : c.json(result, 201)
+      source = validateSource(body.source)
     } catch (err) {
       return refusal(c, err)
     }
+    const blocked = cannotFetch(c)
+    if (blocked) return blocked
+    return commandResponse(c, await deps.commands!.run(INSTALL_KIND, { source }, key(c)), 201)
   })
 
   app.post(`${base}/:name/approve`, async (c) => {
@@ -166,7 +173,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const body = await parseBody(c, ApproveBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     try {
-      return c.json(await repo.approve(c.req.param('name'), body.commit_sha, body.content_hash))
+      return c.json(await repo.approve(c.req.param('name'), body.commit_sha, body.content_hash, body.allow_refused ?? false))
     } catch (err) {
       return refusal(c, err)
     }
@@ -189,19 +196,16 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, RepinBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
-    const name = c.req.param('name')
+    let ref: string | undefined
     try {
-      const current = await repo.pinOf(name)
-      if (!current) return c.json({ detail: `no plugin package named "${name}"` }, 404)
-      const ref = validateRef(body.ref ?? current.source.ref)
-      const result = await withFetch(c, name, async () => {
-        const prepared = await deps.installer!.prepare({ ...current.source, ref })
-        return repo.setPending(name, prepared)
-      })
-      return result instanceof Response ? result : c.json(result)
+      ref = body.ref === undefined ? undefined : validateRef(body.ref)
     } catch (err) {
       return refusal(c, err)
     }
+    const blocked = cannotFetch(c)
+    if (blocked) return blocked
+    const request = { name: c.req.param('name'), ...(ref === undefined ? {} : { ref }) }
+    return commandResponse(c, await deps.commands!.run(REPIN_KIND, request, key(c)), 200)
   })
 
   app.delete(`${base}/:name/pending`, async (c) => {
@@ -239,6 +243,7 @@ export const route: RouteModule = {
     registerPluginPackageRoutes(app, {
       packages: deps.pluginPackages,
       installer: deps.packageInstaller,
+      commands: deps.commands,
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,

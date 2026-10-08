@@ -26,9 +26,9 @@ if TYPE_CHECKING:
     import asyncio
 
     from scadbuddy.api.deps import PrintCommands
+    from scadbuddy.bambuddy.follow import Follower
     from scadbuddy.bambuddy.print_links import PrintLinkStore
     from scadbuddy.bambuddy.uploads import BambuddyUploadStore
-    from scadbuddy.bambuddy.watcher import PrintWatcher
     from scadbuddy.core.config import Config
     from scadbuddy.core.events import EventBus
     from scadbuddy.core.metrics import Metrics
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from scadbuddy.core.settings import Settings
     from scadbuddy.library.catalogue import Catalogue
     from scadbuddy.library.history import ModelHistory
-    from scadbuddy.library.libraries import CheckoutGate
+    from scadbuddy.library.libraries import CheckoutGate, InstallPermits, LibraryStore
     from scadbuddy.library.outputs import OutputStore
     from scadbuddy.library.settings_store import SettingsStore
     from scadbuddy.render.projection import JobProjection
@@ -61,11 +61,12 @@ class Core(Protocol):
     render: RenderService
     metrics: Metrics
     checkouts: CheckoutGate
-    installs: asyncio.Semaphore
+    libraries: LibraryStore
+    installs: InstallPermits
     checks: asyncio.Semaphore
     settings_store: SettingsStore
     print_links: PrintLinkStore
-    print_watcher: PrintWatcher
+    print_follower: Follower
     uploads: BambuddyUploadStore
     projection: JobProjection
     print_runs: PrintCommands

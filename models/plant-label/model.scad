@@ -16,7 +16,7 @@
 // Plant name
 text = "Basil"; // 20
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "Lobster Two:style=Bold"; // font
 
 // Letter height in mm; shrinks automatically if the name does not fit the label

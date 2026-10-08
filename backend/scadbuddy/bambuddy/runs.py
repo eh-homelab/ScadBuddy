@@ -34,15 +34,16 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, LiteralString, Protocol
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,9 @@ class PrintRun(BaseModel):
     """One ``POST .../run``, as ``GET /print/runs/{id}`` reads it."""
 
     id: str
-    output_id: str
+    #: What the run prints, as a print subject's key: ``output:<id>`` or
+    #: ``library:<file id>`` (#1750).
+    subject: str
     #: ``running`` until the print is queued (``succeeded``) or refused (``failed``).
     #: Both are final.
     status: RunStatus
@@ -102,6 +105,22 @@ class PrintRun(BaseModel):
     #: and the POST started nothing.
     repeated: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def _from_output_id(cls, data: Any) -> Any:
+        # A row (its column is still ``output_id``) and a run serialized before #1750
+        # (Temporal history, the accept Update) carry the run subject only.
+        if isinstance(data, dict) and "subject" not in data and "output_id" in data:
+            data = {**data, "subject": PrintSubject.from_run_subject(data["output_id"]).key}
+        return data
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def output_id(self) -> str:
+        """The subject as clients read it before #1750: an output's id, or
+        ``library:<file id>``. Kept so they work unchanged; read ``subject``."""
+        return PrintSubject.parse(self.subject).run_subject
+
 
 LOST_DETAIL = (
     "This print's run ended without recording an outcome, after it had started queueing "
@@ -111,14 +130,36 @@ LOST_UNQUEUED_DETAIL = (
     "This print's run ended without recording an outcome, before it queued anything. "
     "Nothing was queued; print again to retry."
 )
+#: A pre-#1052 pod beat its run's ``heartbeat_at`` and expired it past this: its
+#: ``LOST_AFTER``.
+PRE_1052_LOST_AFTER = timedelta(seconds=60)
+#: A row a pre-#1052 pod inserted (no execution) whose heartbeat is older than
+#: ``PRE_1052_LOST_AFTER`` (twice, as parameters). Never beaten: the old pod died before
+#: its first beat, so the row kept the column's default (review #1316 3).
+_PRE_1052_STALE: LiteralString = (
+    "workflow_id IS NULL AND (heartbeat_at < now() - %s"
+    " OR (heartbeat_at = 'infinity' AND created_at < now() - %s))"
+)
 #: A run whose execution closed, or is gone, while its row still said ``running``: one
 #: terminated or reset in the Temporal UI (review #1061, :func:`reconcile_lost_runs`).
+#: Never a pre-#1052 pod's row, which had no execution: that is ``UPGRADE_INTERRUPTED``.
 LOST = PrintRunError(status=500, title="Internal Server Error", detail=LOST_DETAIL)
 LOST_UNQUEUED = LOST.model_copy(update={"detail": LOST_UNQUEUED_DETAIL})
+#: A pre-#1052 pod's run that stopped beating, in the words the migration
+#: (``20261003T0223Z_print_runs_on_temporal.sql``) gives the rows it ended. A late beat
+#: does not show the pod is dead, and one only stalled may yet queue the print, so such a
+#: run may have queued however far it got (review #1316 2a, 2b).
+UPGRADE_INTERRUPTED = LOST.model_copy(
+    update={
+        "detail": "ScadBuddy was upgraded while it was preparing this print, so it cannot"
+        " tell whether the print was queued; check Bambuddy's queue before printing again."
+    }
+)
 
 
 def run_key(output_id: str, request: PrintRunRequest) -> str:
-    """The output plus the request as parsed, so key order and spacing do not matter.
+    """The run subject (``PrintSubject.run_subject``) plus the request as parsed, so key
+    order and spacing do not matter.
 
     ``request_id``, ``print_sequence``, ``rack_position`` and ``rack_algorithm`` are part
     of it when sent; without them the key is what it was before the fields existed.
@@ -181,22 +222,34 @@ class PrintRunStore:
     async def get(self, run_id: str) -> PrintRun | None:
         return await asyncio.to_thread(self._get, run_id)
 
+    async def latest_for_output(self, output_id: str) -> PrintRun | None:
+        """The output's newest run, for as long as retention keeps it (#1049): the one
+        place a run that failed before it queued anything is recorded."""
+        return await asyncio.to_thread(self._latest_for_output, output_id)
+
     async def insert_accepted(
         self,
         run_id: str,
         *,
-        subject: str,
+        subject: PrintSubject,
         key: str,
         slug: str,
         workflow_id: str,
         workflow_run_id: str,
         retention: timedelta | None,
     ) -> PrintRun:
-        """Record an accepted run; the execution's row if it has one already (a retried
-        activity, §4.2 step 3), announced only when inserted. Prunes runs that finished
-        more than ``retention`` ago; ``None`` keeps every one."""
+        """Record an accepted run of ``subject``; the execution's row if it has one
+        already (a retried activity, §4.2 step 3), announced only when inserted. Prunes
+        runs that finished more than ``retention`` ago; ``None`` keeps every one."""
         return await asyncio.to_thread(
-            self._insert, run_id, subject, key, slug, workflow_id, workflow_run_id, retention
+            self._insert,
+            run_id,
+            subject.run_subject,
+            key,
+            slug,
+            workflow_id,
+            workflow_run_id,
+            retention,
         )
 
     async def start_enqueue(self, run_id: str) -> None:
@@ -208,9 +261,19 @@ class PrintRunStore:
             self._finish, run_id, slug, "succeeded", "result", result.model_dump(mode="json")
         )
 
-    async def fail(self, run_id: str, slug: str, error: PrintRunError) -> PrintRun:
+    async def fail(
+        self, run_id: str, slug: str, error: PrintRunError, *, unqueued: bool = False
+    ) -> PrintRun:
+        """End the run failed; ``unqueued``, it stopped before any ``POST /queue/``
+        although it had called :meth:`start_enqueue`, so it may not have queued."""
         return await asyncio.to_thread(
-            self._finish, run_id, slug, "failed", "error", error.model_dump(mode="json")
+            self._finish,
+            run_id,
+            slug,
+            "failed",
+            "error",
+            error.model_dump(mode="json"),
+            unqueued,
         )
 
     async def fail_lost(self, run_id: str) -> PrintRun:
@@ -218,10 +281,21 @@ class PrintRunStore:
         ``LOST_UNQUEUED`` before. A run that has ended is left as it is."""
         return await asyncio.to_thread(self._fail_lost, run_id)
 
+    async def fail_pre_1052(self, run_id: str) -> PrintRun:
+        """End a :meth:`stale_pre_1052_runs` row with ``UPGRADE_INTERRUPTED``, as one that
+        may have queued. A run that has ended is left as it is."""
+        return await asyncio.to_thread(self._fail_pre_1052, run_id)
+
     async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
         """``(run id, workflow id, workflow run id)`` of each run still ``running`` that
         was accepted more than ``older_than`` ago."""
         return await asyncio.to_thread(self._running_executions, older_than)
+
+    async def stale_pre_1052_runs(self) -> list[str]:
+        """Ids of the ``running`` rows a pre-#1052 pod inserted during the rolling update
+        and stopped beating: it died mid-run, or stalled, and no execution will end them
+        (review #1061 (3) 2). Goes with ``heartbeat_at`` (review #1061 3a)."""
+        return await asyncio.to_thread(self._stale_pre_1052_runs)
 
     # The blocking bodies, run in a worker thread by the coroutines above.
 
@@ -249,6 +323,15 @@ class PrintRunStore:
             args = (key, self.repeat_window)
         with self._require().connection() as conn:
             row = conn.execute(query, args).fetchone()
+        return PrintRun.model_validate(row) if row else None
+
+    def _latest_for_output(self, output_id: str) -> PrintRun | None:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s"
+                " ORDER BY created_at DESC LIMIT 1",
+                (output_id,),
+            ).fetchone()
         return PrintRun.model_validate(row) if row else None
 
     def _get(self, run_id: str) -> PrintRun | None:
@@ -292,16 +375,40 @@ class PrintRunStore:
         return PrintRun.model_validate(existing)
 
     def _fail_lost(self, run_id: str) -> PrintRun:
+        return self._end_running(
+            run_id,
+            "error = CASE WHEN enqueue_attempted THEN %s ELSE %s END",
+            (Jsonb(LOST.model_dump(mode="json")), Jsonb(LOST_UNQUEUED.model_dump(mode="json"))),
+        )
+
+    def _fail_pre_1052(self, run_id: str) -> PrintRun:
+        # Still stale: a stalled pod that beat since the SELECT is alive, and goes on to
+        # queue (review #1316 (13) 4a).
+        return self._end_running(
+            run_id,
+            "enqueue_attempted = true, error = %s",
+            (Jsonb(UPGRADE_INTERRUPTED.model_dump(mode="json")),),
+            where=_PRE_1052_STALE,
+            where_params=(PRE_1052_LOST_AFTER, PRE_1052_LOST_AFTER),
+        )
+
+    def _end_running(
+        self,
+        run_id: str,
+        assignments: LiteralString,
+        params: tuple[Jsonb, ...],
+        *,
+        where: LiteralString = "true",
+        where_params: tuple[object, ...] = (),
+    ) -> PrintRun:
+        """Fail a ``running`` run that matches ``where`` with ``assignments`` and announce
+        it; any other is answered as it is."""
         with self._require().connection() as conn, conn.transaction():
             row = conn.execute(
-                "UPDATE print_runs SET status = 'failed', finished_at = now(),"
-                " error = CASE WHEN enqueue_attempted THEN %s ELSE %s END"
-                f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}, slug",
-                (
-                    Jsonb(LOST.model_dump(mode="json")),
-                    Jsonb(LOST_UNQUEUED.model_dump(mode="json")),
-                    run_id,
-                ),
+                f"UPDATE print_runs SET status = 'failed', finished_at = now(), {assignments}"
+                f" WHERE id = %s AND status = 'running' AND {where}"
+                f" RETURNING {_COLUMNS}, slug",
+                (*params, run_id, *where_params),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)
@@ -324,6 +431,15 @@ class PrintRunStore:
             ).fetchall()
         return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]
 
+    def _stale_pre_1052_runs(self) -> list[str]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                f"SELECT id FROM print_runs WHERE status = 'running' AND {_PRE_1052_STALE}"
+                " ORDER BY created_at",
+                (PRE_1052_LOST_AFTER, PRE_1052_LOST_AFTER),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def _start_enqueue(self, run_id: str) -> None:
         with self._require().connection() as conn:
             conn.execute(
@@ -333,14 +449,21 @@ class PrintRunStore:
             )
 
     def _finish(
-        self, run_id: str, slug: str, state: RunStatus, column: str, value: dict[str, Any]
+        self,
+        run_id: str,
+        slug: str,
+        state: RunStatus,
+        column: str,
+        value: dict[str, Any],
+        unqueued: bool = False,
     ) -> PrintRun:
         # Only a run still `running`: a retried end finds it ended and changes nothing.
         with self._require().connection() as conn, conn.transaction():
             row = conn.execute(
-                f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now()"
+                f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now(),"
+                " enqueue_attempted = enqueue_attempted AND NOT %s"
                 f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}",
-                (state, Jsonb(value), run_id),
+                (state, Jsonb(value), unqueued, run_id),
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)

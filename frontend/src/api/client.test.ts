@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
@@ -5,11 +6,14 @@ import { server } from '../mocks/server'
 import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
+  MEDIA_THUMBNAIL_VERSION,
   OPERATION_UNFINISHED,
+  TEMPORAL_UNAVAILABLE,
   UNANSWERED,
   api,
   mayHaveRun,
   newRequestId,
+  STILL_ACCEPTING,
   printRunPoll,
 } from './client'
 import type { MediaView } from './types'
@@ -41,6 +45,7 @@ describe('media URLs (#274)', () => {
 /** Just enough of an `XMLHttpRequest` to see what `uploadMedia` sends and to answer it. */
 class FakeXhr {
   static last: FakeXhr | undefined
+  static all: FakeXhr[] = []
   method = ''
   url = ''
   body: FormData | undefined
@@ -56,6 +61,7 @@ class FakeXhr {
 
   constructor() {
     FakeXhr.last = this
+    FakeXhr.all.push(this)
   }
   open(method: string, url: string) {
     this.method = method
@@ -87,6 +93,7 @@ describe('uploadMedia (#274)', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     FakeXhr.last = undefined
+    printRunPoll.reattempts = 3
   })
 
   function upload(
@@ -147,6 +154,8 @@ describe('uploadMedia (#274)', () => {
   })
 
   it('rejects with what the status means when the answer is not a problem', async () => {
+    // No re-send (#1054), so the first unanswered attempt is the last.
+    printRunPoll.reattempts = 0
     const { pending, xhr } = upload()
     xhr.status = 502
     xhr.statusText = 'Bad Gateway'
@@ -160,6 +169,7 @@ describe('uploadMedia (#274)', () => {
   })
 
   it('rejects when the connection fails', async () => {
+    printRunPoll.reattempts = 0
     const { pending, xhr } = upload()
     xhr.onerror?.()
     await expect(pending).rejects.toThrow('The upload failed')
@@ -253,18 +263,26 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
   it("waits the still-accepting answer's Retry-After before sending again (review #1061 4a)", async () => {
     printRunPoll.intervalMs = 1
     const result = { queue_item_ids: [7], warnings: [] }
-    const sent: number[] = []
+    let posts = 0
     server.use(
       http.post('/api/v1/print/outputs/out-1/run', () => {
-        sent.push(Date.now())
-        return sent.length < 2 ? stillAccepting('0.2') : HttpResponse.json(started, { status: 202 })
+        posts += 1
+        return posts < 2 ? stillAccepting('0.2') : HttpResponse.json(started, { status: 202 })
       }),
       http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
     )
-
-    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
-    expect(sent).toHaveLength(2)
-    expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190)
+    // The wait the client asks for, not one timed with a clock: this host's clock can
+    // step back seconds mid-test (the gap read -11707 ms once).
+    const timeout = vi.spyOn(globalThis, 'setTimeout')
+    let waits: number[]
+    try {
+      await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+      waits = timeout.mock.calls.map(([, ms]) => ms ?? 0)
+    } finally {
+      timeout.mockRestore()
+    }
+    expect(posts).toBe(2)
+    expect(waits).toContain(200)
   })
 
   it('keeps sending while still accepting, past the re-sends for an unanswered request (#1052)', async () => {
@@ -305,6 +323,73 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
 
     await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
     expect(posts).toBe(2)
+  })
+
+  // Review #1316 (13) 1a: the backend's `may_have_started` says whether the start may
+  // have reached Temporal; true, only the same request_id may follow it.
+  const temporalProblem = (type: string, status: number, mayHaveStarted: boolean) =>
+    HttpResponse.json(
+      {
+        type: `https://scadbuddy.dev/problems/${type}`,
+        title: status === 500 ? 'Internal Server Error' : 'Service Unavailable',
+        status,
+        detail: 'Send the same request again shortly to follow it if it started.',
+        may_have_started: mayHaveStarted,
+      },
+      { status },
+    )
+
+  it.each([
+    ['temporal-unavailable', 503],
+    ['temporal-refused', 500],
+  ])('re-sends the same request_id after a %s that may have started it', async (type, status) => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const ids: unknown[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        ids.push(((await request.json()) as { request_id?: unknown }).request_id)
+        return ids.length < 2 ? temporalProblem(type, status, true) : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', { ...body, request_id: 'press-1' })).resolves.toEqual(result)
+    expect(ids).toEqual(['press-1', 'press-1'])
+  })
+
+  it.each([
+    ['temporal-unavailable', 503],
+    ['temporal-refused', 500],
+  ])('says a %s that may have started it, once it gives up, may have run', async (type, status) => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return temporalProblem(type, status, true)
+      }),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(posts).toBe(printRunPoll.reattempts + 1)
+    // The dialog says to check the queue instead of offering a press with a new key.
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('does not re-send a temporal-unavailable that started nothing', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return temporalProblem('temporal-unavailable', 503, false)
+      }),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(posts).toBe(1)
+    expect(mayHaveRun(error)).toBe(false)
   })
 
   it("follows a library file's run the same way (#742)", async () => {
@@ -811,6 +896,32 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('re-sends the same Idempotency-Key after a temporal-unavailable that may have started it (review #1316 (13) 1a)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/prints/35/reprint', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'Temporal could not start this right now.',
+                may_have_started: true,
+              },
+              { status: 503 },
+            )
+          : HttpResponse.json(again, { status: 201 })
+      }),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
   it("follows a 202 to the operation's result", async () => {
     printRunPoll.intervalMs = 1
     let reads = 0
@@ -841,6 +952,8 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     expect((caught as ApiError).problem.type).toBe(OPERATION_UNFINISHED)
     expect((caught as ApiError).problem.detail).toContain('op-1')
     expect((caught as ApiError).problem.detail).toContain('check before trying again')
+    // It may have been done: a caller must not offer the same press with a new key.
+    expect(mayHaveRun(caught)).toBe(true)
   })
 
   it("turns a failed operation into the route's ApiError", async () => {
@@ -877,6 +990,512 @@ describe('command() sends a key and follows an operation (#1053)', () => {
   })
 })
 
+describe('library pins are commands (#1054)', () => {
+  const defaults = { ...printRunPoll }
+  afterEach(() => {
+    Object.assign(printRunPoll, defaults)
+  })
+
+  it.each([
+    ['pinModelLibrary', () => api.pinModelLibrary('w', 'BOSL2', {}), 'put'],
+    ['repinModelLibrary', () => api.repinModelLibrary('w', 'BOSL2', {}), 'patch'],
+    ['unpinModelLibrary', () => api.unpinModelLibrary('w', 'BOSL2'), 'delete'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to the model', async (_name, call, method) => {
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    const operation = {
+      id: 'op-9',
+      kind: 'library_pin',
+      subject: 'w',
+      status: 'running',
+      created_at: '2026-10-03T00:00:00Z',
+    }
+    let key: string | null = null
+    server.use(
+      http[method]('/api/v1/models/w/libraries/BOSL2', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () =>
+        HttpResponse.json({ ...operation, status: 'succeeded', result: model }),
+      ),
+    )
+    await expect(call()).resolves.toEqual(model)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it("rejects with a failed operation's problem, so the pin dialog's 409 still applies", async () => {
+    printRunPoll.intervalMs = 1
+    const operation = {
+      id: 'op-9',
+      kind: 'library_pin',
+      subject: 'w',
+      status: 'running',
+      created_at: '2026-10-03T00:00:00Z',
+    }
+    const detail = "'w''s 'BOSL2' was changed or removed while this re-pin ran; nothing was recorded"
+    server.use(
+      http.put('/api/v1/models/w/libraries/BOSL2', () => HttpResponse.json(operation, { status: 202 })),
+      http.get('/api/v1/operations/op-9', () =>
+        HttpResponse.json({
+          ...operation,
+          status: 'failed',
+          error: { status: 409, title: 'Conflict', detail, extensions: {} },
+        }),
+      ),
+    )
+    const error = await api.pinModelLibrary('w', 'BOSL2', {}).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(409)
+    expect((error as ApiError).message).toBe(detail)
+  })
+})
+
+describe("a model's lifecycle is commands (#1054)", () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
+  const operation = { id: 'op-9', kind: 'model_create', subject: 'w', status: 'running', created_at: '2026-10-03T00:00:00Z' }
+
+  it.each([
+    ['createModelFromSource', () => api.createModelFromSource({ name: 'W', source: 'cube(1);', description: '', force: false }), 'post', '/api/v1/models'],
+    ['importModel', () => api.importModel({ url: 'https://example.com/w.scad', force: false }), 'post', '/api/v1/models/import'],
+    ['updateModel', () => api.updateModel('w', { description: 'd' }), 'patch', '/api/v1/models/w'],
+    ['duplicateModel', () => api.duplicateModel('v', 'W'), 'post', '/api/v1/models/v/duplicate'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to the model', async (_name, call, method, path) => {
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () => HttpResponse.json({ ...operation, status: 'succeeded', result: model })),
+    )
+    await expect(call()).resolves.toEqual(model)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('uploadModel sends an Idempotency-Key and follows a 202 to the model', async () => {
+    // Stubbed below msw: jsdom's File cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const model = { slug: 'w', name: 'W' }
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-9')
+        ? Response.json({ ...operation, status: 'succeeded', result: model })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(api.uploadModel(new File(['cube(1);'], 'w.scad'))).resolves.toEqual(model)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('deleteModel sends an Idempotency-Key and follows a 202 to its end', async () => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http.delete('/api/v1/models/w', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-9', () => HttpResponse.json({ ...operation, status: 'succeeded', result: {} })),
+    )
+    await expect(api.deleteModel('w')).resolves.toBeUndefined()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('deleteModel answers a 204 at once', async () => {
+    server.use(http.delete('/api/v1/models/w', () => new HttpResponse(null, { status: 204 })))
+    await expect(api.deleteModel('w')).resolves.toBeUndefined()
+  })
+})
+
+describe("a model's edits are commands (#1054)", () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
+  const operation = { id: 'op-8', kind: 'model_source_put', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W' }
+
+  it.each([
+    ['replaceSource', () => api.replaceSource('w', 'cube(2);'), 'put', '/api/v1/models/w/source', model],
+    ['resolveUpstreamMerge', () => api.resolveUpstreamMerge('w', 'cube(2);', 'abc1234'), 'put', '/api/v1/models/w/source', model],
+    ['removeThumbnail', () => api.removeThumbnail('w'), 'delete', '/api/v1/models/w/thumbnail', model],
+    ['setReadme', () => api.setReadme('w', '# W'), 'put', '/api/v1/models/w/readme', model],
+    ['removeReadme', () => api.removeReadme('w'), 'delete', '/api/v1/models/w/readme', model],
+    ['mergeUpstream', () => api.mergeUpstream('w'), 'post', '/api/v1/models/w/upstream/merge', { model, taken: [], kept: [] }],
+    ['dismissUpstream', () => api.dismissUpstream('w'), 'post', '/api/v1/models/w/upstream/dismiss', model],
+    ['detachUpstream', () => api.detachUpstream('w'), 'post', '/api/v1/models/w/upstream/detach', model],
+    ['restoreVersion', () => api.restoreVersion('w', 'abc1234'), 'post', '/api/v1/models/w/versions/abc1234/restore', { id: 'abc1234', current: true }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to its result', async (_name, call, method, path, result) => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-8', () => HttpResponse.json({ ...operation, status: 'succeeded', result })),
+    )
+    await expect(call()).resolves.toEqual(result)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('setThumbnail sends an Idempotency-Key and follows a 202 to the model', async () => {
+    // Stubbed below msw, as uploadModel's: jsdom's Blob cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-8')
+        ? Response.json({ ...operation, status: 'succeeded', result: model })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(api.setThumbnail('w', new Blob(['png']))).resolves.toEqual(model)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('replaceSource sends the base the edit was made against', async () => {
+    let sent: unknown
+    server.use(
+      http.put('/api/v1/models/w/source', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(model)
+      }),
+    )
+    await api.replaceSource('w', 'cube(2);', false, undefined, 'abc1234')
+    expect(sent).toMatchObject({ source: 'cube(2);', base: 'abc1234' })
+  })
+
+  it("keeps a merge conflict's merged text, answered by the route", async () => {
+    server.use(
+      http.post('/api/v1/models/w/upstream/merge', () =>
+        HttpResponse.json({ title: 'Conflict', status: 409, detail: 'conflicts', merged: '<<<<<<< w', merge_base: 'abc1234' }, { status: 409 }),
+      ),
+    )
+    const caught = await api.mergeUpstream('w').catch((e: unknown) => e)
+    expect((caught as ApiError).status).toBe(409)
+    expect((caught as ApiError).problem.merged).toBe('<<<<<<< w')
+  })
+})
+
+describe('uploads, outputs, fonts and presets are commands (#1054)', () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+    vi.unstubAllGlobals()
+    FakeXhr.last = undefined
+  })
+
+  const operation = { id: 'op-7', kind: 'output_create', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W' }
+  const preset = { id: 'p1', name: 'Wide', params: {} }
+
+  it.each([
+    ['patchMedia', () => api.patchMedia('w', 'm1', 'c'), 'patch', '/api/v1/models/w/media/m1', model],
+    ['reorderMedia', () => api.reorderMedia('w', ['m1']), 'put', '/api/v1/models/w/media/order', model],
+    ['setMediaCover', () => api.setMediaCover('w', 'm1'), 'put', '/api/v1/models/w/media/cover', model],
+    ['deleteMedia', () => api.deleteMedia('w', 'm1'), 'delete', '/api/v1/models/w/media/m1', model],
+    ['createOutput', () => api.createOutput('w', 'j1'), 'post', '/api/v1/models/w/outputs', { id: 'o1' }],
+    ['deleteOutput', () => api.deleteOutput('o1'), 'delete', '/api/v1/outputs/o1', {}],
+    ['installFont', () => api.installFont('Pacifico'), 'post', '/api/v1/fonts/install', { family: 'Pacifico', styles: [] }],
+    ['createPreset', () => api.createPreset('w', { name: 'Wide' }), 'post', '/api/v1/models/w/presets', preset],
+    ['updatePreset', () => api.updatePreset('w', 'p1', { name: 'Wider' }), 'patch', '/api/v1/models/w/presets/p1', preset],
+    ['duplicatePreset', () => api.duplicatePreset('w', 'p1', { name: 'Copy' }), 'post', '/api/v1/models/w/presets/p1/duplicate', preset],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to its result', async (_name, call, method, path, result) => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-7', () => HttpResponse.json({ ...operation, status: 'succeeded', result })),
+    )
+    await expect(call()).resolves.toEqual(result)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it.each([
+    ['putThumbnail', () => api.putThumbnail('o1', new Blob(['png'])), {}],
+    ['uploadAsset', () => api.uploadAsset('w', new File(['<svg/>'], 'a.svg')), { id: 'a1' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to its result', async (_name, call, result) => {
+    // Stubbed below msw, as setThumbnail's: jsdom's Blob cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-7')
+        ? Response.json({ ...operation, status: 'succeeded', result })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(call()).resolves.toEqual(result)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('uploadMedia sends an Idempotency-Key, reports progress and follows a 202', async () => {
+    printRunPoll.intervalMs = 1
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    server.use(
+      http.get('/api/v1/operations/op-7', () => HttpResponse.json({ ...operation, status: 'succeeded', result: model })),
+    )
+    const seen: number[] = []
+    const pending = api.uploadMedia('w', new File([new Uint8Array([1])], 'a.png'), {}, (f) => seen.push(f))
+    const xhr = FakeXhr.last!
+    expect(xhr.headers['Idempotency-Key']).toMatch(/^[0-9a-f]{32}$/)
+    xhr.progress(50, 100)
+    expect(seen).toEqual([0.5])
+    xhr.answer(202, operation)
+    await expect(pending).resolves.toEqual(model)
+  })
+
+  it('uploadMedia sends the same key again after an answer that never arrived', async () => {
+    printRunPoll.intervalMs = 1
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    const pending = api.uploadMedia('w', new File([new Uint8Array([1])], 'a.png'))
+    const first = FakeXhr.last!
+    first.onerror?.()
+    await vi.waitFor(() => expect(FakeXhr.last).not.toBe(first))
+    const again = FakeXhr.last!
+    expect(again.headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key'])
+    again.answer(200, model)
+    await expect(pending).resolves.toEqual(model)
+  })
+
+  it('uploadMedia re-sends a still-accepting upload at most printRunPoll.reattempts times', async () => {
+    // Review 3e final I2: each re-send streams the whole file again, so the 240 s a
+    // small command may keep re-sending for would be many gigabytes.
+    printRunPoll.intervalMs = 1
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    FakeXhr.all = []
+    const stillAccepting = { type: STILL_ACCEPTING, title: 'Service Unavailable', status: 503 }
+    const pending = api.uploadMedia('w', new File([new Uint8Array([1])], 'a.mp4'))
+    const outcome = pending.catch((caught: unknown) => caught)
+    for (let sent = 1; sent <= printRunPoll.reattempts + 1; sent++) {
+      await vi.waitFor(() => expect(FakeXhr.all).toHaveLength(sent))
+      FakeXhr.all[sent - 1]!.answer(503, stillAccepting)
+    }
+    await expect(outcome).resolves.toMatchObject({ problem: { type: STILL_ACCEPTING } })
+    expect(FakeXhr.all).toHaveLength(printRunPoll.reattempts + 1)
+    expect(new Set(FakeXhr.all.map((xhr) => xhr.headers['Idempotency-Key'])).size).toBe(1)
+  })
+})
+
+describe('render (#1053)', () => {
+  const defaults = { ...printRunPoll }
+  afterEach(() => {
+    Object.assign(printRunPoll, defaults)
+  })
+
+  it('sends a render again while the server is still accepting it', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return posts === 1
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/command-still-accepting',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'ScadBuddy is still checking this request.',
+              },
+              { status: 503, headers: { 'Retry-After': '2' } },
+            )
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(posts).toBe(2)
+  })
+
+  const unavailable = (mayHaveStarted: boolean, retryAfter = '5') =>
+    HttpResponse.json(
+      {
+        type: TEMPORAL_UNAVAILABLE,
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'ScadBuddy cannot reach Temporal, where renders run.',
+        may_have_started: mayHaveStarted,
+      },
+      { status: 503, headers: { 'Retry-After': retryAfter } },
+    )
+
+  it("answers temporal-unavailable that started nothing once, with its Retry-After as retry_after for the caller's re-send", async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return unavailable(false)
+      }),
+    )
+
+    // `useRenderJob` waits that long and sends it again with the same key (review #1066 (8) 3).
+    await expect(api.render('box', { params: {} })).rejects.toMatchObject({
+      status: 503,
+      problem: { type: TEMPORAL_UNAVAILABLE, retry_after: 5 },
+    })
+    expect(posts).toBe(1)
+  })
+
+  it('sends temporal-unavailable that may have started again with the same key (review #1066 (10) 4)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? unavailable(true, '0')
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('after temporal-unavailable that may have started and an abort, still sends once more (review #1066 (10) 4)', async () => {
+    printRunPoll.intervalMs = 50
+    const keys: (string | null)[] = []
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length > 1) return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+        setTimeout(() => controller.abort(), 10)
+        return unavailable(true, '0')
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('does not send a render-unstartable that started nothing again (review #1066 (10) 3)', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        return HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/render-unstartable',
+            title: 'Internal Server Error',
+            status: 500,
+            detail: 'the render could not be started',
+            may_have_started: false,
+          },
+          { status: 500 },
+        )
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).rejects.toMatchObject({ status: 500 })
+    expect(posts).toBe(1)
+  })
+
+  const accepting = () =>
+    HttpResponse.json(
+      {
+        type: 'https://scadbuddy.dev/problems/command-still-accepting',
+        title: 'Service Unavailable',
+        status: 503,
+        detail: 'ScadBuddy is still checking this request.',
+      },
+      { status: 503, headers: { 'Retry-After': '2' } },
+    )
+
+  it('re-sends with the same Idempotency-Key, so the server counts one request', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? accepting()
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await api.render('box', { params: {} })
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it("sends the caller's key when it passes one (review #1066 (7) 3)", async () => {
+    let key: string | null = null
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+    )
+
+    await api.render('box', { params: {} }, undefined, undefined, undefined, 'k'.repeat(32))
+    expect(key).toBe('k'.repeat(32))
+  })
+
+  it('after an abort between re-sends, sends once more to learn the job it claimed (review #1066 1.1)', async () => {
+    printRunPoll.intervalMs = 50
+    const keys: (string | null)[] = []
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length > 1) return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+        setTimeout(() => controller.abort(), 10)
+        return accepting()
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('gives up after that one last send when it is still being accepted', async () => {
+    printRunPoll.intervalMs = 20
+    let posts = 0
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        posts += 1
+        controller.abort()
+        return accepting()
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).rejects.toBeDefined()
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(posts).toBe(2)
+  })
+})
+
 describe('Retry-After on problems (#1000)', () => {
   it("keeps a 429's or 503's delay in seconds, and nothing on other statuses", async () => {
     server.use(
@@ -890,5 +1509,51 @@ describe('Retry-After on problems (#1000)', () => {
     await expect(api.testAiCredential('default')).rejects.toMatchObject({ status: 429, problem: { retry_after: 7 } })
     const other = await api.listAiCredentials().catch((cause: unknown) => cause)
     expect((other as ApiError).problem).not.toHaveProperty('retry_after')
+  })
+})
+
+describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
+  it("is the backend's THUMBNAIL_VERSION, or no thumbnail is ever cached as immutable", () => {
+    const media = readFileSync(`${import.meta.dirname}/../../../backend/scadbuddy/api/media.py`, 'utf8')
+    const found = [...media.matchAll(/^THUMBNAIL_VERSION = (\d+)$/gm)].map((match) => Number(match[1]))
+    expect(found).toEqual([MEDIA_THUMBNAIL_VERSION])
+  })
+
+  describe('getSettings (#1039)', () => {
+    function counting() {
+      let reads = 0
+      server.use(
+        http.get('/api/v1/settings', () => {
+          reads += 1
+          return HttpResponse.json({ display_unit: 'mm', n: reads })
+        }),
+      )
+      return () => reads
+    }
+
+    it('shares one request among callers that ask at once, each with its own copy', async () => {
+      const reads = counting()
+      const [a, b] = await Promise.all([api.getSettings(), api.getSettings()])
+      expect(reads()).toBe(1)
+      expect(a).toEqual(b)
+      expect(a).not.toBe(b)
+    })
+
+    it('reads afresh once the shared request has answered', async () => {
+      const reads = counting()
+      await api.getSettings()
+      await api.getSettings()
+      expect(reads()).toBe(2)
+    })
+
+    it('never lets a caller after a save join a read started before it', async () => {
+      const reads = counting()
+      server.use(http.put('/api/v1/settings', () => HttpResponse.json({})))
+      const before = api.getSettings()
+      const saved = api.putSettings({})
+      const after = api.getSettings()
+      await Promise.all([before, saved, after])
+      expect(reads()).toBe(2)
+    })
   })
 })

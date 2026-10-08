@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.progress import (
     progress_for,
 )
 from scadbuddy.bambuddy.stages import stage_of
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
@@ -77,6 +78,46 @@ def test_the_queue_route_reports_the_slice_failure_rather_than_an_absent_item() 
     assert progress.settled is True
     assert progress.error_message == "object outside the build plate"
     assert progress.fix == SLICE_FIX
+
+
+def test_a_failed_slice_job_reports_bambuddys_own_error_detail() -> None:
+    """Bambuddy's ``GET /slice-jobs/{id}`` reports a failure as ``error_status`` and
+    ``error_detail`` (``backend/app/api/routes/slice_jobs.py``), not ``error``. This is
+    that route's whole failed body."""
+    job = SliceJob.model_validate(
+        {
+            "job_id": 9,
+            "status": "failed",
+            "kind": "library_file",
+            "source_id": 12,
+            "source_name": "dice.3mf",
+            "created_at": "2026-10-06T10:00:00+00:00",
+            "started_at": "2026-10-06T10:00:01+00:00",
+            "completed_at": "2026-10-06T10:00:09+00:00",
+            "progress": None,
+            "error_status": 422,
+            "error_detail": "object outside the build plate",
+        }
+    )
+    assert job.failure == "object outside the build plate"
+    progress = from_queue(None, slice_job=job, slice_job_id=9, bambuddy_url=URL)
+    assert progress.error_message == "object outside the build plate"
+
+
+def test_a_structured_slice_error_detail_still_reads_as_a_message() -> None:
+    """``error_detail`` is FastAPI's ``HTTPException.detail``, which may be a dict. It
+    must not fail validation of the whole poll."""
+    job = SliceJob.model_validate(
+        {"job_id": 9, "status": "failed", "error_status": 400, "error_detail": {"msg": "bad plate"}}
+    )
+    assert job.failure is not None
+    assert "bad plate" in job.failure
+
+
+def test_a_failed_slice_with_only_a_status_code_says_so() -> None:
+    job = SliceJob.model_validate({"job_id": 9, "status": "failed", "error_status": 500})
+    assert job.failure is not None
+    assert "500" in job.failure
 
 
 def test_a_queued_item_is_not_settled_and_waiting_is_not_failing() -> None:
@@ -501,15 +542,15 @@ class FakeLinks(PrintLinkStore):
         self.fail = fail
         self.recorded: list[PrintLink] = []
 
-    async def record(self, output_id: str, link: PrintLink) -> None:
+    async def record(self, subject: PrintSubject, link: PrintLink) -> None:
         if self.fail:
             raise psycopg.OperationalError("the database went away")
         self.recorded.append(link)
 
-    async def for_output(self, output_id: str) -> list[PrintLink]:
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
         return list(self.recorded)
 
-    async def linked_queue_items(self, output_id: str) -> set[int]:
+    async def linked_queue_items(self, subject: PrintSubject) -> set[int]:
         return {link.queue_item_id for link in self.recorded if link.queue_item_id is not None}
 
 

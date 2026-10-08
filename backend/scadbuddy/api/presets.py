@@ -6,22 +6,26 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from scadbuddy.api.deps import (
-    AssetsDep,
+    AppState,
     CatalogueDep,
-    ConfigDep,
-    FetcherDep,
-    FontsDep,
-    HistoryDep,
-    PathsDep,
+    EventsDep,
     PresetsDep,
     SlugPath,
 )
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.api.params import require_valid_presets
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, PresetsChanged, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
@@ -40,9 +44,11 @@ from scadbuddy.library.presets import (
     ParamPresetUpdate,
     PresetExistsError,
     PresetNotFoundError,
+    PresetStore,
     TooManyPresetsError,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.inputs import InputsError, legacy_inputs
 from scadbuddy.render.schema import ParamValue
 
@@ -79,22 +85,54 @@ async def _require_valid(
     )
 
 
-def _taken(slug: str, name: str) -> ApiError:
+# #357: problems are shown as they are, so they are written for people: no template
+# or preset ids, and no Python quoting. The ids stay in the problem's own fields.
+
+
+def invalid_copy_detail(error: InputsError | ValidationError) -> str:
+    """Every problem with a copy that failed validation, not only the first (#1274)."""
+    if isinstance(error, ValidationError):
+        return "; ".join(str(e["msg"]) for e in error.errors())
+    return str(error)
+
+
+def _taken(error: PresetExistsError) -> ApiError:
+    """Names the preset that has the name, as it is spelled, not the spelling asked for."""
+    (name,) = error.args
     return ApiError(
-        status.HTTP_409_CONFLICT, f"{slug!r} already has a preset named {name!r}", name=name
+        status.HTTP_409_CONFLICT,
+        f'A preset named "{error.existing}" already exists.',
+        name=name,
+        existing=error.existing,
     )
 
 
-def _missing(slug: str, preset_id: str) -> ApiError:
-    return ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no preset {preset_id!r}")
+def _missing(preset_id: str) -> ApiError:
+    return ApiError(
+        status.HTTP_404_NOT_FOUND,
+        "That preset no longer exists; it may have been deleted elsewhere.",
+        preset_id=preset_id,
+    )
 
 
-def _require_saved(slug: str, preset_id: str) -> None:
-    if preset_id.startswith(TEMPLATE_ID_PREFIX):
-        raise ApiError(
-            status.HTTP_403_FORBIDDEN,
-            f"{preset_id!r} ships with {slug!r} and is read-only; duplicate it to change it",
-        )
+def require_saved(presets: PresetStore, slug: str, preset_id: str) -> None:
+    """403 for a preset the template ships; 404 for a `template-*` id it does not have."""
+    if not preset_id.startswith(TEMPLATE_ID_PREFIX):
+        return
+    try:
+        presets.find(slug, preset_id)
+    except PresetNotFoundError:
+        raise _missing(preset_id) from None
+    raise ApiError(
+        status.HTTP_403_FORBIDDEN,
+        "This preset ships with the template and is read-only; duplicate it to change it.",
+        preset_id=preset_id,
+    )
+
+
+def _changed(events: EventBus, slug: str) -> None:
+    """Tells another tab, or the assistant's page, to read the presets again (#357)."""
+    emit(events, PresetsChanged(slug=slug))
 
 
 @router.get(
@@ -127,36 +165,50 @@ def list_presets(slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep) -
         f"{MAX_PRESET_TAGS}, each at most {MAX_PRESET_TAG} characters; trimmed, and "
         "each kept once ignoring case) describe it (422 past a limit)."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def create_preset(
     slug: SlugPath,
     body: ParamPresetCreate,
-    catalogue: CatalogueDep,
-    presets: PresetsDep,
-    paths: PathsDep,
-    assets: AssetsDep,
-    history: HistoryDep,
-    config: ConfigDep,
-    fetcher: FetcherDep,
-    fonts: FontsDep,
-) -> ParamPreset:
-    require_model_exists(catalogue, slug)
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ParamPreset | JSONResponse:
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["preset_create"],
+        subject=slug,
+        request={"slug": slug, "body": body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ParamPreset)
+
+
+async def _validated(slug: str, params: dict[str, ParamValue], state: AppState) -> None:
     await _require_valid(
         slug,
-        body.params,
-        paths=paths,
-        history=history,
-        config=config,
-        assets=assets,
-        fetcher=fetcher,
-        fonts=fonts,
+        params,
+        paths=state.paths,
+        history=state.history,
+        config=state.config,
+        assets=state.assets,
+        fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
+        fonts=state.fonts,
     )
+
+
+async def create_run(slug: str, body: ParamPresetCreate, state: AppState) -> ParamPreset:
+    """The ``preset_create`` operation's run (#1054)."""
+    await _validated(slug, body.params, state)
     try:
-        return await asyncio.to_thread(presets.create, slug, body)
-    except PresetExistsError:
-        raise _taken(slug, body.name) from None
+        created = await asyncio.to_thread(state.presets.create, slug, body)
+    except PresetExistsError as error:
+        raise _taken(error) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    _changed(state.events, slug)
+    return created
 
 
 @router.post(
@@ -171,35 +223,36 @@ async def create_preset(
         "shipped preset naming a parameter the template has since dropped cannot be "
         "copied as it is. Names are unique per template, ignoring case (409)."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def duplicate_preset(
     slug: SlugPath,
     preset_id: PresetIdPath,
     body: ParamPresetDuplicate,
-    catalogue: CatalogueDep,
-    presets: PresetsDep,
-    paths: PathsDep,
-    assets: AssetsDep,
-    history: HistoryDep,
-    config: ConfigDep,
-    fetcher: FetcherDep,
-    fonts: FontsDep,
-) -> ParamPreset:
-    require_model_exists(catalogue, slug)
-    try:
-        source = await asyncio.to_thread(presets.find, slug, preset_id)
-    except PresetNotFoundError:
-        raise _missing(slug, preset_id) from None
-    await _require_valid(
-        slug,
-        source.params,
-        paths=paths,
-        history=history,
-        config=config,
-        assets=assets,
-        fetcher=fetcher,
-        fonts=fonts,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ParamPreset | JSONResponse:
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["preset_duplicate"],
+        subject=slug,
+        request={"slug": slug, "preset_id": preset_id, "body": body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
     )
+    return operation_answer(result, ParamPreset)
+
+
+async def duplicate_run(
+    slug: str, preset_id: str, body: ParamPresetDuplicate, state: AppState
+) -> ParamPreset:
+    """The ``preset_duplicate`` operation's run (#1054)."""
+    try:
+        source = await asyncio.to_thread(state.presets.find, slug, preset_id)
+    except PresetNotFoundError:
+        raise _missing(preset_id) from None
+    await _validated(slug, source.params, state)
     # The original's details come along too (#327): only the name is the copy's own.
     # Every write path checks inputs before storing them, so this should not fail; a
     # stored value that slipped past those checks is a 422 here, never a 500.
@@ -211,14 +264,15 @@ async def duplicate_preset(
             tags=source.tags,
         )
     except (InputsError, ValidationError) as error:
-        detail = str(error.errors()[0]["msg"]) if isinstance(error, ValidationError) else str(error)
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, detail) from None
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, invalid_copy_detail(error)) from None
     try:
-        return await asyncio.to_thread(presets.create, slug, copy)
-    except PresetExistsError:
-        raise _taken(slug, body.name) from None
+        created = await asyncio.to_thread(state.presets.create, slug, copy)
+    except PresetExistsError as error:
+        raise _taken(error) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    _changed(state.events, slug)
+    return created
 
 
 @router.patch(
@@ -230,41 +284,49 @@ async def duplicate_preset(
         "`description` and `tags` its details (an empty string or list clears them). "
         "A template's own presets are read-only (403)."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def update_preset(
     slug: SlugPath,
     preset_id: PresetIdPath,
     body: ParamPresetUpdate,
-    catalogue: CatalogueDep,
-    presets: PresetsDep,
-    paths: PathsDep,
-    assets: AssetsDep,
-    history: HistoryDep,
-    config: ConfigDep,
-    fetcher: FetcherDep,
-    fonts: FontsDep,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ParamPreset | JSONResponse:
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["preset_update"],
+        subject=slug,
+        # Only the fields given: a field left out is kept, and None is never a value.
+        request={
+            "slug": slug,
+            "preset_id": preset_id,
+            "body": body.model_dump(mode="json", exclude_none=True),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ParamPreset)
+
+
+async def update_run(
+    slug: str, preset_id: str, body: ParamPresetUpdate, state: AppState
 ) -> ParamPreset:
-    require_model_exists(catalogue, slug)
-    _require_saved(slug, preset_id)
+    """The ``preset_update`` operation's run (#1054); without ``params`` nothing is
+    validated against the template, as before."""
     if body.params is not None:
-        await _require_valid(
-            slug,
-            body.params,
-            paths=paths,
-            history=history,
-            config=config,
-            assets=assets,
-            fetcher=fetcher,
-            fonts=fonts,
-        )
+        await _validated(slug, body.params, state)
     try:
-        return await asyncio.to_thread(presets.update, slug, preset_id, body)
+        updated = await asyncio.to_thread(state.presets.update, slug, preset_id, body)
     except InputsError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except PresetNotFoundError:
-        raise _missing(slug, preset_id) from None
-    except PresetExistsError:
-        raise _taken(slug, body.name or "") from None
+        raise _missing(preset_id) from None
+    except PresetExistsError as error:
+        raise _taken(error) from None
+    _changed(state.events, slug)
+    return updated
 
 
 @router.delete(
@@ -274,12 +336,17 @@ async def update_preset(
     description="A template's own presets are read-only (403).",
 )
 def delete_preset(
-    slug: SlugPath, preset_id: PresetIdPath, catalogue: CatalogueDep, presets: PresetsDep
+    slug: SlugPath,
+    preset_id: PresetIdPath,
+    catalogue: CatalogueDep,
+    presets: PresetsDep,
+    events: EventsDep,
 ) -> Response:
     require_model_exists(catalogue, slug)
-    _require_saved(slug, preset_id)
+    require_saved(presets, slug, preset_id)
     try:
         presets.delete(slug, preset_id)
     except PresetNotFoundError:
-        raise _missing(slug, preset_id) from None
+        raise _missing(preset_id) from None
+    _changed(events, slug)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
