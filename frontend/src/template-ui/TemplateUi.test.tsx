@@ -93,6 +93,69 @@ describe('TemplateUi', () => {
     }
   })
 
+  it('logs a late cleanup that throws instead of leaving an unhandled rejection (#1470)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      let finish: (cleanup: () => void) => void = () => {}
+      withModule(() => new Promise((resolve) => (finish = resolve)))
+      const onFailure = vi.fn()
+      render(<TemplateUi slug="name-keychain" ui={UI} version={undefined} deps={deps()} inputs={{ params: {} }} onFailure={onFailure} />)
+      await vi.advanceTimersByTimeAsync(MOUNT_TIMEOUT_MS)
+      expect(onFailure).toHaveBeenCalledOnce()
+      const boom = new Error('cleanup boom')
+      await act(async () =>
+        finish(() => {
+          throw boom
+        }),
+      )
+      expect(error).toHaveBeenCalledWith('ui/index.js: its cleanup threw', boom)
+    } finally {
+      error.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['returns', () => undefined],
+    [
+      'throws',
+      () => {
+        throw new Error('cleanup boom')
+      },
+    ],
+  ])(
+    'runs once, and never fails, a cleanup that %s after an unmount while mount was pending (#1470)',
+    async (name, body) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      try {
+        let finish: (cleanup: () => void) => void = () => {}
+        let called: () => void = () => {}
+        const mounted = new Promise<void>((resolve) => (called = resolve))
+        withModule(() => {
+          called()
+          return new Promise((resolve) => (finish = resolve))
+        })
+        const onFailure = vi.fn()
+        const { unmount } = render(
+          <TemplateUi slug="name-keychain" ui={UI} version={undefined} deps={deps()} inputs={{ params: {} }} onFailure={onFailure} />,
+        )
+        await mounted
+        unmount()
+        const cleanup = vi.fn(body)
+        await act(async () => finish(cleanup))
+        await vi.advanceTimersByTimeAsync(MOUNT_TIMEOUT_MS * 2)
+        expect(cleanup).toHaveBeenCalledOnce()
+        expect(onFailure).not.toHaveBeenCalled()
+        if (name === 'throws') expect(error).toHaveBeenCalledWith('ui/index.js: its cleanup threw', expect.any(Error))
+      } finally {
+        error.mockRestore()
+        vi.useRealTimers()
+      }
+    },
+  )
+
   it('falls back when the module import never settles, and never mounts it late (#847)', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
