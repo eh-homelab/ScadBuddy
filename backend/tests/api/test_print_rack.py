@@ -205,6 +205,25 @@ def test_the_check_records_the_racks_hotends_as_seen(client: TestClient, model: 
     assert usage[serial(1)].first_seen_at is None  # the left hotend is not a rack hotend
 
 
+@respx.mock
+def test_the_check_lists_each_positions_open_picks(client: TestClient, model: str) -> None:
+    """#1079: the dialog can say why a hotend with fewer settled prints was passed over."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+    asyncio.run(
+        rack_usage(client).record_picks(
+            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17))]
+        )
+    )
+
+    options = check(client, output_id)["rack"]["options"]
+
+    assert {option["position"]: option["pending"] for option in options}[2] == 1
+    assert {option["pending"] for option in options if option["position"] != 2} == {0}
+
+
 def assert_seen(client: TestClient) -> None:
     usage = asyncio.run(rack_usage(client).usage([serial(17), serial(0)]))
     assert usage[serial(17)].first_seen_at is not None

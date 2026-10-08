@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -106,6 +106,81 @@ async def test_a_serial_with_no_rows_is_zeros_and_ranks_before_a_used_one(
     assert usage[A].prints == 1 and usage[A].grams == 0.0
     picks = rank_rack([group()], [slot(2), slot(3)], "least_used", usage, {})
     assert picks[0].position == 3
+
+
+def _age_picks(conninfo: str, by: timedelta) -> None:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute("UPDATE rack_nozzle_picks SET picked_at = picked_at - %s", (by,))
+
+
+async def test_an_open_pick_counts_as_pending_until_its_print_settles(
+    store: RackUsageStore,
+) -> None:
+    """#1079: a pick with no print row yet is pending; its settle moves it into the
+    totals and out of ``pending``, and another group of the same item stays pending."""
+    await store.record_picks(
+        51,
+        1,
+        [
+            PickedHotend(group_id=0, position=2, serial=A),
+            PickedHotend(group_id=1, position=3, serial=B),
+        ],
+    )
+    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=2, serial=A)])
+    usage = await store.usage([A, B])
+    assert (usage[A].pending, usage[B].pending) == (2, 1)
+
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=60, grams=None
+    )
+
+    usage = await store.usage([A, B])
+    assert (usage[A].prints, usage[A].pending) == (1, 1)
+    assert (usage[B].prints, usage[B].pending) == (1, 0)
+
+
+async def test_an_open_pick_stops_counting_once_it_is_older_than_the_pending_age(
+    store: RackUsageStore, pg_conninfo: str
+) -> None:
+    """#1079: a cancelled queue item never settles, so its pick ages out."""
+    await store.record_picks(51, 1, [PickedHotend(group_id=0, position=2, serial=A)])
+    _age_picks(pg_conninfo, usage.PENDING_PICK_MAX_AGE - timedelta(minutes=5))
+    assert (await store.usage([A]))[A].pending == 1
+
+    _age_picks(pg_conninfo, timedelta(minutes=10))
+
+    assert (await store.usage([A]))[A] == Usage()
+
+
+async def test_a_print_settled_before_the_pending_migration_closes_its_pick(
+    pg_conninfo: str,
+) -> None:
+    """#1079: a print row written before ``queue_item_id`` existed gets it from the
+    archive's link, so its pick is not counted as open after the upgrade."""
+    pending = "20261008T1351Z_rack_nozzle_pending"
+    with psycopg.connect(pg_conninfo) as conn:
+        pg_store.migrate(conn, tuple(m for m in pg_store.MIGRATIONS if m.id < pending))
+        conn.execute(
+            "INSERT INTO rack_nozzle_picks (queue_item_id, group_id, printer_id, serial)"
+            " VALUES (51, 0, 1, %s), (52, 0, 1, %s)",
+            (A, A),
+        )
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by, queue_item_id)"
+            " VALUES ('output:o1', 101, 'queue_item', 51)"
+        )
+        conn.execute(
+            "INSERT INTO rack_nozzle_prints (archive_id, group_id, serial, settled_at)"
+            " VALUES (101, 0, %s, now())",
+            (A,),
+        )
+        conn.commit()
+    opened = RackUsageStore(pg_conninfo)
+    try:
+        found = (await opened.usage([A]))[A]
+    finally:
+        opened.close()
+    assert (found.prints, found.pending) == (1, 1)
 
 
 async def test_a_pick_written_twice_writes_once_and_says_so(store: RackUsageStore) -> None:
