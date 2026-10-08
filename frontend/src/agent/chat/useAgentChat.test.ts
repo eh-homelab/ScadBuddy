@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { trace } from '@opentelemetry/api'
+import { describe, expect, it, vi } from 'vitest'
 import { server } from '../../mocks/server'
 import { installTestTracing } from '../../test/tracing'
 import { PROTOCOL_VERSION, type ClientMessage } from './protocol'
@@ -442,6 +443,40 @@ describe('useAgentChat', () => {
       // Each turn is its own trace (§4).
       expect(spans[0]?.spanContext().traceId).not.toBe(spans[1]?.spanContext().traceId)
     } finally {
+      tracing.uninstall()
+    }
+  })
+
+  it('sends a decision and an answer inside an assistant.respond span, so the POST carries its traceparent (#1384)', async () => {
+    const tracing = installTestTracing()
+    const original = globalThis.fetch.bind(globalThis)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const activeAtFetch: (string | undefined)[] = []
+    fetchSpy.mockImplementation((...args: Parameters<typeof fetch>) => {
+      activeAtFetch.push(trace.getActiveSpan()?.spanContext().spanId)
+      return original(...args)
+    })
+    try {
+      capture()
+      const t = scripted()
+      const { result } = renderHook(() => useAgentChat(t.factory))
+      act(() => {
+        t.h().onOpen?.()
+        parked(t.h())
+        t.h().onFrame(frame({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't2', questions: [{ question: 'Which?', header: 'Pick', multiSelect: false, options: [{ label: 'A', description: '' }, { label: 'B', description: '' }] }] }))
+      })
+      act(() => result.current.decide('s1', 'a1', false))
+      await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'denied' }))
+      act(() => result.current.answer('s1', 'q1', ['A']))
+      await waitFor(() => expect(tracing.exporter.getFinishedSpans()).toHaveLength(2))
+      const spans = tracing.exporter.getFinishedSpans()
+      expect(spans.map((s) => [s.name, s.attributes['scadbuddy.respond_kind']])).toEqual([
+        ['assistant.respond', 'approval'],
+        ['assistant.respond', 'answer'],
+      ])
+      expect(activeAtFetch).toEqual(spans.map((s) => s.spanContext().spanId))
+    } finally {
+      fetchSpy.mockRestore()
       tracing.uninstall()
     }
   })
