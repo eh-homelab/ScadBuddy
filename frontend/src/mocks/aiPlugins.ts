@@ -7,8 +7,10 @@
  * pending with a diff until approved; a refused package answers 422 with `problems`.
  *
  * Git URLs the mock knows: `https://git.example/greeter.git` (clean; `ref: "v2"`
- * gives a second commit), `https://git.example/shell.git` (refused), and the
- * marketplace `https://git.example/market.git` with entry `greeter`.
+ * gives a second commit), `https://git.example/shell.git` (installs, but its review
+ * lists refusals, so it is approved only with `allow_refused`),
+ * `https://git.example/reserved.git` (a name that is not a path segment: refused outright), and the marketplace
+ * `https://git.example/market.git` with entry `greeter`.
  */
 import { HttpResponse, delay, http } from 'msw'
 import { packageFetch } from '../api/aiPlugins'
@@ -37,6 +39,11 @@ export const SHELL_PROBLEMS = [
   'skills/status/SKILL.md: runs a shell command through dynamic context injection (!`...`)',
   'hooks/hooks.json: Stop has a "command" hook',
 ]
+export const RESERVED_PROBLEMS = ['plugin name "bad name" is not 1–64 letters, digits, ".", "_" and "-", starting with a letter or digit']
+export const SHELL = {
+  commit: '5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f',
+  hash: 'sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e',
+}
 
 const REVIEW_V1: PackageReview = {
   name: 'greeter',
@@ -48,6 +55,20 @@ const REVIEW_V1: PackageReview = {
   hooks: [{ event: 'Stop', type: 'prompt' }],
   mcp_servers: [{ name: 'mem', type: 'http', url: 'https://mcp.example/mcp/' }],
   files: ['.claude-plugin/plugin.json', '.mcp.json', 'README.md', 'agents/helper.md', 'commands/wave.md', 'hooks/hooks.json', 'skills/hello/SKILL.md'],
+  refused: [],
+}
+const REVIEW_SHELL: PackageReview = {
+  name: 'shell',
+  description: 'Runs commands.',
+  version: null,
+  skills: ['shell:status'],
+  commands: [],
+  agents: [],
+  hooks: [{ event: 'Stop', type: 'command' }],
+  mcp_servers: [],
+  files: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/status/SKILL.md'],
+  refused: SHELL_PROBLEMS,
+  builtin_tools: ['Bash'],
 }
 const REVIEW_V2: PackageReview = {
   ...REVIEW_V1,
@@ -89,7 +110,23 @@ const detail = (status: number, text: string, extra: Record<string, unknown> = {
 
 function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry?: string): PluginPackage | string[] | undefined {
   const known = url === 'https://git.example/greeter.git' || (kind === 'marketplace' && url === 'https://git.example/market.git' && entry === 'greeter')
-  if (url === 'https://git.example/shell.git') return SHELL_PROBLEMS
+  if (url === 'https://git.example/reserved.git') return RESERVED_PROBLEMS
+  if (url === 'https://git.example/shell.git') {
+    return {
+      name: 'shell',
+      source: { kind: 'git', url, ref, path: '' },
+      commit_sha: SHELL.commit,
+      content_hash: SHELL.hash,
+      review: REVIEW_SHELL,
+      approved: false,
+      approved_at: null,
+      allow_refused: false,
+      enabled: false,
+      pending: null,
+      created_at: now(),
+      updated_at: now(),
+    }
+  }
   if (!known) return undefined
   // A marketplace re-pin to `moved` finds the entry in another repository.
   const v = ref === 'v2' || ref === 'moved' ? GREETER_V2 : GREETER_V1
@@ -104,6 +141,7 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
     review: ref === 'v2' ? REVIEW_V2 : REVIEW_V1,
     approved: false,
     approved_at: null,
+    allow_refused: false,
     enabled: false,
     pending: null,
     created_at: now(),
@@ -215,8 +253,14 @@ export const aiPluginHandlers = [
   http.post(`${base}/plugin-packages/:name/approve`, async ({ params, request }) => {
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
-    const body = (await request.json()) as { commit_sha: string; content_hash: string }
-    if (pkg.pending && body.commit_sha === pkg.pending.commit_sha && body.content_hash === pkg.pending.content_hash) {
+    const body = (await request.json()) as { commit_sha: string; content_hash: string; allow_refused?: boolean }
+    const isPending = pkg.pending && body.commit_sha === pkg.pending.commit_sha && body.content_hash === pkg.pending.content_hash
+    const refused = (isPending ? pkg.pending!.review : pkg.review).refused ?? []
+    if (refused.length && !body.allow_refused && (isPending || body.commit_sha === pkg.commit_sha)) {
+      return detail(409, `the review lists what the rules refuse (${refused.length}); approve with allow_refused to load the package as it is`)
+    }
+    const allow_refused = Boolean(body.allow_refused) && refused.length > 0
+    if (pkg.pending && isPending) {
       const { url, path } = packageFetch(pkg)
       const moved = pkg.pending.plugin_url !== url || pkg.pending.plugin_path !== path
       const next: PluginPackage = {
@@ -231,13 +275,14 @@ export const aiPluginHandlers = [
         review: pkg.pending.review,
         approved: true,
         approved_at: now(),
+        allow_refused,
         pending: null,
       }
       state.packages.set(pkg.name, next)
       return HttpResponse.json(next)
     }
     if (body.commit_sha === pkg.commit_sha && body.content_hash === pkg.content_hash) {
-      const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now() }
+      const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now(), allow_refused }
       state.packages.set(pkg.name, next)
       return HttpResponse.json(next)
     }

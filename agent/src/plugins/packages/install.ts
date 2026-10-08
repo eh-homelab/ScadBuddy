@@ -38,7 +38,10 @@ import { type Endpoint, vetPackage } from './vet.js'
 //
 // Vetting (vet.ts, on top of src/harness/plugins.ts) runs at install, at
 // re-pin and at every load; a package the current rules refuse is not
-// loaded even if it was approved under older ones.
+// loaded even if it was approved under older ones, unless its pin was
+// approved with `allow_refused` (store.ts). Install and re-pin refuse only the
+// fatal problems (vet.ts `fatal`, the egress check, symlinks, the hash); the
+// rest are stored in the review for the admin to allow or not.
 
 export class PackageRefusedError extends Error {
   override name = 'PackageRefusedError'
@@ -132,6 +135,8 @@ export class PackageInstaller {
   private readonly leases = new Map<string, number>()
   /** Per package, the cached directory most recently materialised: kept by prune. */
   private readonly current = new Map<string, string>()
+  /** Per cached directory, the built-ins its last vetting found (vet.ts `builtin_tools`). */
+  private readonly builtins = new Map<string, string[]>()
 
   constructor(options: InstallerOptions) {
     this.fetcher = options.fetcher
@@ -183,7 +188,8 @@ export class PackageInstaller {
   /**
    * Copies the plugin's directory out of a checkout into `dest`, refusing
    * symlinks and submodules, and hashes and vets it. Throws
-   * PackageRefusedError with every problem found.
+   * PackageRefusedError with every fatal problem found; what an admin may
+   * allow is in the review's `refused`.
    */
   private async extractAndVet(checkout: Checkout, subpath: string, dest: string, fallbackName: string) {
     const special = await this.fetcher.specialPaths(checkout, subpath)
@@ -204,8 +210,8 @@ export class PackageInstaller {
       throw err
     }
     const vetting = vetPackage(dest, fallbackName)
-    const problems = [...vetting.problems, ...(await this.endpointProblems(vetting.endpoints))]
-    if (problems.length || !vetting.review) throw new PackageRefusedError(problems)
+    const problems = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
+    if (problems.length || !vetting.review) throw new PackageRefusedError(problems.length ? problems : vetting.problems)
     return { tree, review: vetting.review }
   }
 
@@ -312,7 +318,7 @@ export class PackageInstaller {
    * (once the turn that loads it has ended): a newer version materialised
    * meanwhile does not delete it; it is pruned when its last lease goes.
    */
-  async acquire(pin: PackagePin): Promise<{ dir: string; release: () => void }> {
+  async acquire(pin: PackagePin): Promise<{ dir: string; release: () => void; builtinTools: string[] }> {
     const dir = await this.serial(pin.name, async () => {
       const ready = await this.materialiseNow(pin)
       this.leases.set(ready, (this.leases.get(ready) ?? 0) + 1)
@@ -332,7 +338,7 @@ export class PackageInstaller {
       this.leases.delete(dir)
       void this.serial(pin.name, () => this.prune(pin.name)).catch(() => undefined)
     }
-    return { dir, release }
+    return { dir, release, builtinTools: this.builtins.get(dir) ?? [] }
   }
 
   /** Runs `work` after every earlier queued step for package `name`. */
@@ -374,13 +380,19 @@ export class PackageInstaller {
         throw new PluginError(`the cached copy of ${pin.name} does not match its pin after fetching`, 502)
       }
     }
-    // Re-vetted at every load: the rules may be stricter than when it was approved.
+    // Re-vetted at every load: the rules may be stricter than when it was
+    // approved. A pin approved with `allow_refused` skips the allowable ones,
+    // including any a later rule adds: the admin allowed this exact content.
     const vetting = vetPackage(dir, pin.name)
-    const problems = [...vetting.problems, ...(await this.endpointProblems(vetting.endpoints))]
+    const problems = [
+      ...(pin.allowRefused ? vetting.fatal : vetting.problems),
+      ...(await this.endpointProblems(vetting.endpoints)),
+    ]
     if (vetting.review && vetting.review.name !== pin.name) {
       problems.push(`the package names itself "${vetting.review.name}", not "${pin.name}"`)
     }
     if (problems.length) throw new PackageRefusedError(problems)
+    this.builtins.set(dir, vetting.review?.builtin_tools ?? [])
     return dir
   }
 
@@ -410,7 +422,12 @@ export class PackageInstaller {
 }
 
 export type PackagesForRun = {
+  /** Packages that pass the rules, which the harness checks again (harness/plugins.ts). */
   paths: string[]
+  /** Packages approved with `allow_refused`, loaded as they are. */
+  allowedPaths: string[]
+  /** The Claude Code built-ins the allowed packages name, for the turn's `tools` (run.ts `builtinTools`). */
+  builtinTools: string[]
   problems: string[]
   /** Call when the turn has ended: its package directories may then be pruned. */
   release: () => void
@@ -426,12 +443,19 @@ export async function loadPackagesForRun(
   installer: Pick<PackageInstaller, 'acquire'>,
 ): Promise<PackagesForRun> {
   const paths: string[] = []
+  const allowedPaths: string[] = []
+  const builtinTools = new Set<string>()
   const problems: string[] = []
   const releases: (() => void)[] = []
   for (const pin of await store.enabledPins()) {
     try {
-      const { dir, release } = await installer.acquire(pin)
-      paths.push(dir)
+      const { dir, release, builtinTools: wanted } = await installer.acquire(pin)
+      if (pin.allowRefused) {
+        allowedPaths.push(dir)
+        for (const tool of wanted) builtinTools.add(tool)
+      } else {
+        paths.push(dir)
+      }
       releases.push(release)
     } catch (err) {
       if (err instanceof PackageRefusedError) {
@@ -443,5 +467,11 @@ export async function loadPackagesForRun(
       }
     }
   }
-  return { paths, problems, release: () => releases.forEach((r) => r()) }
+  return {
+    paths,
+    allowedPaths,
+    builtinTools: [...builtinTools].sort(),
+    problems,
+    release: () => releases.forEach((r) => r()),
+  }
 }

@@ -14,6 +14,10 @@ import type { PackageReview } from './vet.js'
 //   install   fetched, vetted and hashed; stored UNAPPROVED and disabled
 //   approve   the admin approves exactly the (commit, hash) the review showed;
 //             anything else is a 409, so a pin cannot change under an approval
+//             A pin whose review lists refusals (vet.ts `refused`: a command
+//             hook, a hooks module, a stdio MCP server, ...) is approved only
+//             with `allow_refused`, which loads it as it is; the flag belongs
+//             to that approval, so a re-pin is approved, and allowed, anew
 //   enable    only an approved pin (also a CHECK in the table)
 //   repin     a new commit is fetched and vetted into `pending_*`; the current
 //             pin keeps loading until the admin approves the pending one, after
@@ -37,6 +41,8 @@ export type PackagePin = {
   fetchPath: string
   commit: string
   contentHash: string
+  /** Approved with `allow_refused`: loaded despite what the rules refuse (vet.ts). */
+  allowRefused?: boolean
 }
 
 export type PendingPin = {
@@ -61,6 +67,8 @@ export type PackageView = {
   review: PackageReview
   approved: boolean
   approved_at: string | null
+  /** Approved with what the review's `refused` lists allowed. */
+  allow_refused: boolean
   enabled: boolean
   pending: PendingPin | null
   created_at: string
@@ -80,6 +88,7 @@ type Row = {
   files: FileList
   review: PackageReview
   approved_at: Date | null
+  allow_refused: boolean
   enabled: boolean
   pending_ref: string | null
   pending_fetch_url: string | null
@@ -90,6 +99,11 @@ type Row = {
   pending_review: PackageReview | null
   created_at: Date
   updated_at: Date
+}
+
+/** A review stored before `refused` existed had none: it would have been refused outright. */
+function withRefused(review: PackageReview): PackageReview & { refused: string[] } {
+  return { ...review, refused: review.refused ?? [] }
 }
 
 function view(row: Row): PackageView {
@@ -108,9 +122,10 @@ function view(row: Row): PackageView {
           },
     commit_sha: row.commit_sha,
     content_hash: row.content_hash,
-    review: row.review,
+    review: withRefused(row.review),
     approved: row.approved_at !== null,
     approved_at: row.approved_at?.toISOString() ?? null,
+    allow_refused: row.allow_refused,
     enabled: row.enabled,
     pending:
       row.pending_commit_sha && row.pending_content_hash && row.pending_review && row.pending_files && row.pending_ref &&
@@ -121,7 +136,7 @@ function view(row: Row): PackageView {
             plugin_path: row.pending_fetch_path,
             commit_sha: row.pending_commit_sha,
             content_hash: row.pending_content_hash,
-            review: row.pending_review,
+            review: withRefused(row.pending_review),
             diff: diffFiles(row.files, row.pending_files),
           }
         : null,
@@ -137,6 +152,7 @@ function pin(row: Row): PackagePin {
     fetchPath: row.fetch_path,
     commit: row.commit_sha,
     contentHash: row.content_hash,
+    allowRefused: row.allow_refused,
   }
 }
 
@@ -149,7 +165,8 @@ export type PackageRepo = {
   create(prepared: PreparedPackage): Promise<PackageView>
   setPending(name: string, prepared: PreparedPackage): Promise<PackageView>
   discardPending(name: string): Promise<PackageView>
-  approve(name: string, commit: string, contentHash: string): Promise<PackageView>
+  /** `allowRefused` must be true when the reviewed pin's `refused` is not empty. */
+  approve(name: string, commit: string, contentHash: string, allowRefused?: boolean): Promise<PackageView>
   setEnabled(name: string, enabled: boolean): Promise<PackageView>
   delete(name: string): Promise<boolean>
   /** Every enabled (so approved) pin, for a harness run. */
@@ -235,11 +252,29 @@ export class PackageStore implements PackageRepo {
     return view(row)
   }
 
-  async approve(name: string, commit: string, contentHash: string): Promise<PackageView> {
+  async approve(name: string, commit: string, contentHash: string, allowRefused = false): Promise<PackageView> {
     return this.sql.begin(async (tx) => {
       const [current] = await tx<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
       if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
-      if (current.pending_commit_sha === commit && current.pending_content_hash === contentHash) {
+      const isPending = current.pending_commit_sha === commit && current.pending_content_hash === contentHash
+      const isCurrent = current.commit_sha === commit && current.content_hash === contentHash
+      if (!isPending && !isCurrent) {
+        throw new PluginError(
+          'the commit and content hash do not match the pin under review; reload the review and approve what it shows',
+          409,
+        )
+      }
+      // Only what the admin was shown is allowed: a pin with nothing refused
+      // is stored without the flag, so a later rule still refuses it.
+      const refused = withRefused(isPending ? current.pending_review! : current.review).refused
+      if (refused.length && !allowRefused) {
+        throw new PluginError(
+          `the review lists what the rules refuse (${refused.length}); approve with allow_refused to load the package as it is`,
+          409,
+        )
+      }
+      const allow = allowRefused && refused.length > 0
+      if (isPending) {
         // The re-pin under review becomes the pin. A new commit from the same
         // place keeps `enabled`; one fetched from another repository or path
         // (a marketplace entry that moved) is a new source to trust, so it is
@@ -249,23 +284,18 @@ export class PackageStore implements PackageRepo {
           UPDATE ai_plugin_packages SET
             enabled = enabled AND NOT ${moved}, source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
             commit_sha = pending_commit_sha, content_hash = pending_content_hash,
-            files = pending_files, review = pending_review, approved_at = now(),
+            files = pending_files, review = pending_review, approved_at = now(), allow_refused = ${allow},
             pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,
             pending_files = NULL, pending_review = NULL, updated_at = now()
           WHERE name = ${name}
           RETURNING *`
         return view(row!)
       }
-      if (current.commit_sha === commit && current.content_hash === contentHash) {
-        if (current.approved_at !== null) return view(current)
-        const [row] = await tx<Row[]>`
-          UPDATE ai_plugin_packages SET approved_at = now(), updated_at = now() WHERE name = ${name} RETURNING *`
-        return view(row!)
-      }
-      throw new PluginError(
-        'the commit and content hash do not match the pin under review; reload the review and approve what it shows',
-        409,
-      )
+      if (current.approved_at !== null && current.allow_refused === allow) return view(current)
+      const [row] = await tx<Row[]>`
+        UPDATE ai_plugin_packages SET approved_at = now(), allow_refused = ${allow}, updated_at = now()
+        WHERE name = ${name} RETURNING *`
+      return view(row!)
     })
   }
 

@@ -403,6 +403,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     Code 2.1.287, and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` no longer turns it off) is
     refused, because it would inherit the credential env. A hooks file may set only
     `$schema`, `description` and `hooks` besides, so a new loader key is refused too.
+    The one way past it is a plugin package approved with `allow_refused` (store.ts,
+    column `allow_refused`, bound to that pin's approval): it loads as it is through
+    `allowedPluginPaths`, unchecked, with the built-ins it names (`builtinTools`, each
+    call `outward`) and skill shell injection on (with `Bash` offered, Claude Code
+    2.1.287 runs an injection without asking the seam). A name that is not a safe path segment
+    (`SAFE_NAME_RE`; a reserved name is allowable), paths outside the package, symlinks,
+    the hash and the egress check stay fatal (`vet.ts` `fatal`).
   - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
     `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
     plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback

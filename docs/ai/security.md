@@ -609,8 +609,9 @@ not caught; such a process already controls the pod.
   A package may have at most 2000 files and 20 MB.
 - Like the gateway check, this is point-in-time: git resolves the name again itself.
 
-**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). The whole package
-is refused, with every problem listed, if it has any of the following:
+**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). A package with any
+of the following does not load, and its review lists every problem (`review.refused`),
+unless the admin allows it at approval (below):
 
 - **Dynamic context injection** (`` !`cmd` `` or a ```` ```! ```` block, anywhere in a
   line, as the CLI matches it) in any Markdown file. These run a shell "before the
@@ -640,8 +641,8 @@ is refused, with every problem listed, if it has any of the following:
   [hooks reference](https://code.claude.com/docs/en/hooks) ("MCP tool hook fields")
   does not say their call is permission-checked. `http` hooks may not use `$` or
   `allowedEnvVars` ("HTTP hook fields"). `pluginProblems()` already refuses command
-  hooks. There is deliberately no switch to allow one, because it would inherit the
-  credential env (above). Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
+  hooks, because they inherit the credential env (above); only the per-pin approval
+  below can let one run. Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
   `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PostToolUse`,
   `PostToolUseFailure`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`,
   `SubagentStop`, `PreCompact` and `PostCompact`. A `PermissionRequest` hook of any
@@ -654,7 +655,58 @@ is refused, with every problem listed, if it has any of the following:
   `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
   agent), and `workflows` (JavaScript).
 - **A name** that is not 2–32 lower-case letters, digits and single hyphens, or that is
-  reserved. The name namespaces the skills (`/<name>:<skill>`).
+  reserved (it may clash with ScadBuddy's own plugin or tools). The name namespaces the
+  skills (`/<name>:<skill>`). A name that is not a safe path segment (`SAFE_NAME_RE`:
+  1–64 letters, digits, `.`, `_` and `-`, starting with a letter or digit) refuses the
+  install outright, because it names the cache directory and the row.
+
+**Allowing what the vetting refuses.** An admin may load a package exactly as it is, for one
+pin. Everything in `review.refused` is allowable, including a reserved name: command hooks, hooks modules, stdio MCP
+servers, LSP servers, monitors, dynamic context injection, the frontmatter and tool rules,
+the hook-event allowlist and the manifest fields. Such a pin installs and shows its
+refusals in the review. `POST …/approve` then answers 409 unless the body also carries
+`allow_refused: true`. In Settings that is a second, user-only checkbox, "Load it as it
+is". The flag (`ai_plugin_packages.allow_refused`) belongs to that approval. Approving a
+re-pin sets it again from that review. A pin with nothing refused is stored without it,
+so a rule added later still refuses that pin.
+
+An allowed pin loads through `allowedPluginPaths` (`run.ts`), which skips
+`assertPluginAllowed()`, and its turn runs with `strictMcpConfig` off so the package's MCP
+servers start. `test/pluginPackages.e2e.test.ts` runs a command hook and a stdio server
+through the real CLI.
+
+This is a decision to run someone else's code **as the agent service itself**. It runs
+as the agent's user in its container, so it can read the Claude credential in its own
+environment. It can also read the service's environment (`/proc/<agent pid>/environ`,
+which holds `SCADBUDDY_DATABASE_URL`) and the `SCADBUDDY_SECRET_KEY_FILE` key that
+decrypts every envelope-encrypted secret. It can use or send any of them, and it can
+decide tool calls itself (a `PreToolUse` or `PermissionRequest` hook). Its MCP tools stay `outward`, because they
+are not ScadBuddy's.
+
+Some checks still apply to an allowed pin, at install and at every load:
+
+- the name must be a safe path segment (`SAFE_NAME_RE`);
+- a declared file outside the package (`isOutsideProblem()`), which the pinned hash does
+  not cover;
+- symlinks and submodules;
+- the content hash;
+- the egress check on every URL the package declares.
+
+A turn that loads an allowed pin also gets two more things:
+
+- **Built-in tools.** It gets the Claude Code built-ins the package's skills and subagents
+  name in `allowed-tools` or `tools` (`review.builtin_tools`, for example `Bash`, `Read`
+  or `Write`). They are offered beside the run's own `Skill` and `Agent` (`run.ts`
+  `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
+  `outward`, and in a session it parks for a human. The headless browser's
+  `disallowedTools` still remove `Bash` when the browser is on.
+- **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
+  false). Only an allowed package can carry it, because the vetting refuses it
+  everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):
+  - with `Bash` offered, the CLI runs the command as it expands the skill. It asks
+    neither `canUseTool` nor the PreToolUse hook, so **the approval of the pin is its
+    only check**;
+  - without `Bash`, the CLI refuses it ("Permission to use Bash has been denied").
 
 Every URL a package declares (MCP servers, http hooks) goes through the egress check at
 install and again at every load. A marketplace entry must have a git source: a relative

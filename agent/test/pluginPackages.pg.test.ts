@@ -82,8 +82,50 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
           fetchPath: '',
           commit: installed.commit_sha,
           contentHash: installed.content_hash,
+          allowRefused: false,
         },
       ])
+    })
+
+    it('approves a pin the rules refuse only with allow_refused, and a re-pin is allowed anew', async () => {
+      const hook = { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] }
+      repos.greeter!.remove()
+      const repo = (repos.greeter = gitRepo({ ...GREETER, 'hooks/hooks.json': JSON.stringify({ hooks: hook }) }))
+      const installed = await install()
+      expect(installed).toMatchObject({ approved: false, allow_refused: false })
+      expect(installed.review.refused).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
+      await expect(store.approve('greeter', installed.commit_sha, installed.content_hash)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringMatching(/allow_refused/),
+      })
+      const approved = await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      expect(approved).toMatchObject({ approved: true, allow_refused: true })
+      await store.setEnabled('greeter', true)
+      expect((await store.enabledPins())[0]?.allowRefused).toBe(true)
+      // Re-approving it without the flag is refused, not a silent downgrade.
+      await expect(store.approve('greeter', installed.commit_sha, installed.content_hash, false)).rejects.toMatchObject({
+        status: 409,
+      })
+
+      // A clean re-pin: approved without the flag, and the allowance does not carry over.
+      const next = repo.commitFiles({ 'hooks/hooks.json': null })
+      const current = await store.pinOf('greeter')
+      const pending = await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      expect(pending.pending?.review.refused).toEqual([])
+      const promoted = await store.approve('greeter', next, pending.pending!.content_hash, true)
+      expect(promoted).toMatchObject({ commit_sha: next, allow_refused: false, enabled: true })
+      await expect(db.sql`UPDATE ai_plugin_packages SET allow_refused = true, approved_at = NULL`).rejects.toThrow(
+        /check constraint/,
+      )
+    })
+
+    it('shows a review stored before refusals were listed as refusing nothing', async () => {
+      const installed = await install()
+      await db.sql`UPDATE ai_plugin_packages SET review = review - 'refused'`
+      expect((await store.get('greeter'))?.review.refused).toEqual([])
+      expect((await store.approve('greeter', installed.commit_sha, installed.content_hash)).allow_refused).toBe(false)
+      // A clean pin re-approved with the flag stays without it: nothing was shown to allow.
+      expect((await store.approve('greeter', installed.commit_sha, installed.content_hash, true)).allow_refused).toBe(false)
     })
 
     it('refuses a second install of the same name, and the table refuses an unapproved enable', async () => {
@@ -240,18 +282,39 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(await store.list()).toEqual([])
     })
 
-    it('answers 422 with every problem for a refused package, and stores nothing', async () => {
+    it('installs a package the rules refuse, and approves it only with allow_refused', async () => {
       repos.bad = gitRepo({
         ...GREETER,
+        '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad' }),
         'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }),
       })
       const res = await app().request(
         '/api/v1/ai/plugin-packages',
         json('POST', { source: { kind: 'git', url: 'https://git.test/bad.git' } }),
       )
+      expect(res.status).toBe(201)
+      const installed = (await res.json()) as PackageView
+      expect(installed.review.refused).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
+      const pin = { commit_sha: installed.commit_sha, content_hash: installed.content_hash }
+      const plain = await app().request('/api/v1/ai/plugin-packages/bad/approve', json('POST', pin))
+      expect(plain.status).toBe(409)
+      const allowed = await app().request(
+        '/api/v1/ai/plugin-packages/bad/approve',
+        json('POST', { ...pin, allow_refused: true }),
+      )
+      expect(allowed.status).toBe(200)
+      expect(await allowed.json()).toMatchObject({ approved: true, allow_refused: true })
+    })
+
+    it('answers 422 with every problem for a package no approval can allow, and stores nothing', async () => {
+      repos.bad = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad name' }) })
+      const res = await app().request(
+        '/api/v1/ai/plugin-packages',
+        json('POST', { source: { kind: 'git', url: 'https://git.test/bad.git' } }),
+      )
       expect(res.status).toBe(422)
       expect(((await res.json()) as { problems: string[] }).problems).toEqual([
-        expect.stringMatching(/Stop has a "command" hook/),
+        expect.stringMatching(/^plugin name "bad name" is not 1–64/),
       ])
       expect(await store.list()).toEqual([])
     })
@@ -309,6 +372,32 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         // The fake init message lists no plugins: the loaded one is reported as not loaded by Claude Code.
         'plugin package greeter was not loaded by Claude Code',
       ])
+    })
+
+    it('hands a package approved with allow_refused to the turn as allowed, not vetted', async () => {
+      repos.greeter!.remove()
+      repos.greeter = gitRepo({
+        ...GREETER,
+        'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }),
+      })
+      const installed = await install()
+      await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      await store.setEnabled('greeter', true)
+      const scripted = scriptedRunner(() => ({ reply: 'hi' }))
+      const runs: HarnessRun[] = []
+      const m = manager({
+        sql: db.sql,
+        paths: await tempPaths(),
+        run: (run) => {
+          runs.push(run)
+          return scripted.runner(run)
+        },
+        packagePlugins: () => loadPackagesForRun(store, installer),
+      })
+      const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+      await turn!.done
+      expect(runs[0]?.pluginPaths).toBeUndefined()
+      expect(runs[0]?.allowedPluginPaths).toEqual([installer.cacheDir((await store.enabledPins())[0]!)])
     })
   })
 })
