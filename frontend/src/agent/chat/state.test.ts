@@ -113,6 +113,31 @@ describe('chatReducer', () => {
     expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
     // The route's own 2xx resolves the card without the socket.
     expect(run([{ type: 'responded', sessionId: 's1', id: 'a1', outcome: 'denied', by: you }], sent).sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
+    // A decision whose answer was lost (#1359): the resolve frame drops the stale error,
+    // and an error added after it gets an id of its own.
+    const lostDecision = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'unreachable' },
+        server({ type: 'error', sessionId: 's1', message: 'something else' }),
+        server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: true, by: you }),
+        server({ type: 'error', sessionId: 's1', message: 'and another' }),
+      ],
+      sent,
+    )
+    const items = lostDecision.sessions.s1?.items ?? []
+    expect(items.map((i) => (i.kind === 'error' ? i.message : i.kind))).toEqual(['approval', 'something else', 'and another'])
+    expect(new Set(items.map((i) => i.id)).size).toBe(items.length)
+    expect(items[0]).toMatchObject({ state: 'approved' })
+    // A second click that the route refuses as no longer pending ends the card; the first error goes.
+    const twice = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'unreachable' },
+        { type: 'decided', sessionId: 's1', approvalId: 'a1' },
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x', closed: 'it was already approved' },
+      ],
+      sent,
+    )
+    expect(twice.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'approval', state: 'closed' })])
     // A failure that lands after the server resolved it changes nothing on the card.
     expect(run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x' }], resolved).sessions.s1?.items[0]).toMatchObject({ state: 'approved' })
   })
@@ -172,6 +197,29 @@ describe('chatReducer', () => {
     const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: stale' }], sent)
     expect(failed.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
     expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your answer was not taken: stale' })
+
+    // The POST landed but its answer was lost (#1359): the card is live again with the
+    // error, and the resolve frame that follows ends the card and takes the error with it.
+    const lost = run(
+      [
+        server({ type: 'tool.call', sessionId: 's1', id: 't9', name: 'x', input: {}, risk: 'read' }),
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: The assistant could not be reached; try again.' },
+        server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you }),
+      ],
+      sent,
+    )
+    expect(lost.sessions.s1?.items.map((i) => i.kind)).toEqual(['question', 'tool'])
+    expect(lost.sessions.s1?.items[0]).toMatchObject({ state: 'answered' })
+    // A retry the route took clears it as well.
+    const retried = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'unreachable' },
+        { type: 'answered', sessionId: 's1', questionId: 'q1' },
+        { type: 'responded', sessionId: 's1', id: 'q1', outcome: 'answered', answers: ['Approve'], by: you },
+      ],
+      sent,
+    )
+    expect(retried.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
 
     // Refused by the agent over the socket (a panel loaded before #815): the same.
     const refused = run(
