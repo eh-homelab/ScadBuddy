@@ -30,6 +30,7 @@ from scadbuddy.api.models import (
     announce_source_change,
     require_mine,
     require_model_exists,
+    stale_edit,
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -44,9 +45,15 @@ from scadbuddy.library.catalogue import (
     ModelNotFoundError,
     ModelRecord,
     SidecarNotFoundError,
+    StaleVersionError,
     TooManySourceFilesError,
 )
-from scadbuddy.library.history import MAX_SUBJECT, GitError
+from scadbuddy.library.history import (
+    COMMIT_ID_PATTERN,
+    MAX_SUBJECT,
+    GitError,
+    GitUnavailableError,
+)
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
 
@@ -76,6 +83,15 @@ class SourceFileUpdate(BaseModel):
         default=None,
         max_length=MAX_SUBJECT,
         description="What the revision is called in the history; a default when omitted",
+    )
+    base: str | None = Field(
+        default=None,
+        pattern=COMMIT_ID_PATTERN,
+        description=(
+            "The model's revision this content was made from (its `version` when the file "
+            "was read). When given and the model has moved on since, 409 with the "
+            "`current` revision, writing nothing (#813)"
+        ),
     )
 
 
@@ -119,9 +135,13 @@ def list_source_files(slug: SlugPath, catalogue: CatalogueDep) -> list[SourceFil
         "`include` or `use`, as one revision named by `message`. `model.scad` itself is "
         "a 409: write it with `PUT /models/{slug}/source`. Not parse-checked on its own; "
         f"check the model with `POST /models/check` and its `slug`. At most "
-        f"{MAX_SOURCE_FILES} `.scad` files per model (#252)."
+        f"{MAX_SOURCE_FILES} `.scad` files per model (#252). With `base`, a 409 naming "
+        "the `current` revision when the model has moved on since, writing nothing (#813)."
     ),
-    responses=OPERATION_RESPONSES,
+    responses={
+        **OPERATION_RESPONSES,
+        409: {"description": "`model.scad`, or the model is no longer at `base`"},
+    },
 )
 async def put_source_file(
     slug: SlugPath,
@@ -149,7 +169,13 @@ async def put_source_file(
         response,
         kind=ops.kinds["model_file_put"],
         subject=slug,
-        request={"slug": slug, "name": name, "content": claimed.name, "message": body.message},
+        request={
+            "slug": slug,
+            "name": name,
+            "content": claimed.name,
+            "message": body.message,
+            "base": body.base,
+        },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [claimed]),
     )
@@ -176,9 +202,10 @@ def file_put_check(slug: str, name: str, state: AppState) -> None:
 
 
 async def file_put_run(
-    slug: str, name: str, content: str, message: str | None, state: AppState
+    slug: str, name: str, content: str, message: str | None, base: str | None, state: AppState
 ) -> ModelRecord:
-    """The ``model_file_put`` operation's run (#1054)."""
+    """The ``model_file_put`` operation's run (#1054). With ``base``, the write is
+    refused unless the model is still at it, checked under the history's lock (#813)."""
     try:
         record = await asyncio.to_thread(
             state.catalogue.write_file,
@@ -187,7 +214,15 @@ async def file_put_run(
             content,
             message=message,
             max_files=MAX_SOURCE_FILES,
+            expected_version=base,
         )
+    except StaleVersionError as error:
+        raise stale_edit(slug, error.expected, error.current) from None
+    except GitUnavailableError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "model history is unavailable, so the edit's base cannot be checked",
+        ) from None
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except TooManySourceFilesError as error:
