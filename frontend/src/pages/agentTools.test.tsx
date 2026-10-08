@@ -56,8 +56,10 @@ describe('catalogue tools', () => {
     await screen.findByRole('heading', { name: 'Gridfinity Bin' })
 
     const found = await bridge.call('search', { query: 'grid' })
+    // dollhouse-kit's fixture (#1737) mentions a grid too, so the search finds both.
     expect(found.ok && (found.result as { slug: string }[]).map((model) => model.slug)).toEqual([
       'gridfinity-bin',
+      'builtin:dollhouse-kit',
     ])
 
     const missing = await bridge.call('open_model', { slug: 'nope' })
@@ -86,7 +88,7 @@ describe('catalogue filters through navigate (#276)', () => {
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
     ).toEqual(['Keychain Template', 'Name Keychain'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 7')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 8')
   })
 
   it('answers with the route the page settles on, even when asked between its two commits (#761)', async () => {
