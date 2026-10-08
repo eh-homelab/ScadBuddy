@@ -53,11 +53,19 @@ EDGE=(
     "no-hole-small|name=\"Jo\";hole=false;text_size=8;outline=1"
     "big-ring|name=\"Sam\";hole_diameter=8;ring_wall=4;base_thickness=8;letter_height=5"
     "empty|name=\"\""
+    "spaces-only|name=\"   \""
+    "only-missing-glyph|name=\"🦄\""
     "two-words|name=\"Ann Lee\""
     "wide-gap|name=\"Ann    Lee\""
     "missing-glyph|name=\"Zoë 🦄 ß\""
     "leading-gap|name=\"   Ann\""
     "leading-missing-glyph|name=\"🦄 Zoë\""
+    "no-hole-gap|name=\"Ann Lee\";hole=false"
+    "no-hole-leading-gap|name=\"   Ann\";hole=false"
+    "trailing-dots|name=\"Ann ...\";outline=1"
+    "trailing-underscore|name=\"Ann _\";outline=1"
+    "trailing-quote|name=\"Ann '\";outline=1"
+    "big-counters|name=\"OOO\";text_size=40;font=\"DejaVu Sans:style=Bold\""
 )
 : > "$OUT/edge.txt"
 for c in "${EDGE[@]}"; do
@@ -189,6 +197,11 @@ from collections import Counter
 NS = "{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}"
 OUT = sys.argv[1]
 BED_X, BED_Y, TOL = 300, 320, 0.001
+# Names that render no glyph at all: the keychain is the keyring tab alone (#920, #1453).
+GLYPHLESS = {"empty", "spaces-only", "only-missing-glyph"}
+# Through-holes a case must keep: each "O" counter at 40 mm is far wider than
+# 2 * outline, so it stays see-through, and the keyring hole is one more (#1450).
+HOLES = {"big-counters": 4}
 failures = []
 
 
@@ -198,43 +211,21 @@ def check(ok, msg):
         failures.append(msg)
 
 
-for line in open("%s/edge.txt" % OUT):
-    name, _, rest = line.strip().partition(" ")
-    p = dict(kv.split("=", 1) for kv in rest.split(";"))
-    base = float(p.get("base_thickness", 4))
-    top = base + float(p.get("letter_height", 2.8))
-    empty = p.get("name") == '""'
-    root = ET.fromstring(zipfile.ZipFile("%s/edge-%s.3mf" % (OUT, name)).read("3D/3dmodel.model"))
-    mats = [b.get("name") for b in root.iter(NS + "base")]
-    verts = [(float(v.get("x")), float(v.get("y")), float(v.get("z")))
-             for v in root.iter(NS + "vertex")]
-    counts = Counter(int(t.get("p1") or 0) for t in root.iter(NS + "triangle"))
-    xs, ys, zs = zip(*verts)
-    print("\n%s: %s" % (name, rest))
-    named = [i for i, n in enumerate(mats) if n != "Default" and counts.get(i)]
-    want = 1 if empty else 2
-    check(len(named) == want, "%d non-empty material(s) besides Default (got %d)" % (want, len(named)))
-    check(counts.get(0, 0) == 0, "Default material carries no geometry")
-    check(max(xs) - min(xs) <= BED_X and max(ys) - min(ys) <= BED_Y,
-          "fits the H2C bed, %d x %d with both nozzles (%.1f x %.1f)"
-          % (BED_X, BED_Y, max(xs) - min(xs), max(ys) - min(ys)))
-    check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.3f)" % min(zs))
-    want_top = base if empty else top
-    check(abs(max(zs) - want_top) <= TOL, "top at z=%.1f (got %.3f)" % (want_top, max(zs)))
-    if empty:
-        # An empty name is the keyring tab alone, with no stray lump of base (#920).
-        tab = float(p.get("hole_diameter", 4)) + 2 * float(p.get("ring_wall", 1.6))
-        check(max(ys) - min(ys) <= tab + TOL,
-              "empty name is just the tab, %.1f mm tall (got %.3f)" % (tab, max(ys) - min(ys)))
+def model(path):
+    return ET.fromstring(zipfile.ZipFile(path).read("3D/3dmodel.model"))
 
-    # One piece (#920): a space or a glyph the font lacks must not leave part
-    # of the word on a base island that falls off the keyring. Union-find over
-    # the shared vertex indices of every triangle, both materials: the base
-    # inside a letter's counter touches only letter triangles, so the base
-    # material alone would count each counter as an island. This relies on the
-    # Manifold 3MF export writing one object whose materials share one vertex
-    # pool; an exporter that duplicated coincident vertices per part would make
-    # a one-piece model count as several.
+
+def topology(root):
+    """(connected pieces, through-holes) of the whole model.
+
+    Union-find over the shared vertex indices of every triangle, both materials:
+    the base inside a letter's counter touches only letter triangles, so the base
+    material alone would count each counter as an island. This relies on the
+    Manifold 3MF export writing one object whose materials share one vertex pool;
+    an exporter that duplicated coincident vertices per part would make a one-piece
+    model count as several. Holes come from the Euler characteristic of the closed
+    surface, V - E + F = 2 * (pieces - holes).
+    """
     parent = {}
 
     def find(a):
@@ -243,16 +234,67 @@ for line in open("%s/edge.txt" % OUT):
             a = parent[a]
         return a
 
+    edges = set()
+    faces = 0
     for t in root.iter(NS + "triangle"):
         a, b, c = (int(t.get(k)) for k in ("v1", "v2", "v3"))
+        faces += 1
+        for u, w in ((a, b), (b, c), (c, a)):
+            edges.add((min(u, w), max(u, w)))
         for v in (a, b, c):
             parent.setdefault(v, v)
         for u, w in ((a, b), (b, c)):
             ru, rw = find(u), find(w)
             if ru != rw:
                 parent[ru] = rw
-    comps = len({find(v) for v in parent})
-    check(comps == 1, "prints as one connected piece (%d component(s))" % comps)
+    pieces = len({find(v) for v in parent})
+    euler = len(parent) - len(edges) + faces
+    return pieces, pieces - euler // 2
+
+
+# The default render (#1453): the reference keychain itself must be one piece.
+pieces, _ = topology(model("%s/out.3mf" % OUT))
+print("\ndefault: name=\"Reagan\"")
+check(pieces == 1, "prints as one connected piece (%d component(s))" % pieces)
+
+for line in open("%s/edge.txt" % OUT):
+    name, _, rest = line.strip().partition(" ")
+    p = dict(kv.split("=", 1) for kv in rest.split(";"))
+    base = float(p.get("base_thickness", 4))
+    top = base + float(p.get("letter_height", 2.8))
+    glyphless = name in GLYPHLESS
+    root = model("%s/edge-%s.3mf" % (OUT, name))
+    mats = [b.get("name") for b in root.iter(NS + "base")]
+    verts = [(float(v.get("x")), float(v.get("y")), float(v.get("z")))
+             for v in root.iter(NS + "vertex")]
+    counts = Counter(int(t.get("p1") or 0) for t in root.iter(NS + "triangle"))
+    xs, ys, zs = zip(*verts)
+    print("\n%s: %s" % (name, rest))
+    named = [i for i, n in enumerate(mats) if n != "Default" and counts.get(i)]
+    want = 1 if glyphless else 2
+    check(len(named) == want, "%d non-empty material(s) besides Default (got %d)" % (want, len(named)))
+    check(counts.get(0, 0) == 0, "Default material carries no geometry")
+    check(max(xs) - min(xs) <= BED_X and max(ys) - min(ys) <= BED_Y,
+          "fits the H2C bed, %d x %d with both nozzles (%.1f x %.1f)"
+          % (BED_X, BED_Y, max(xs) - min(xs), max(ys) - min(ys)))
+    check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.3f)" % min(zs))
+    want_top = base if glyphless else top
+    check(abs(max(zs) - want_top) <= TOL, "top at z=%.1f (got %.3f)" % (want_top, max(zs)))
+    if glyphless:
+        # A name with no glyphs is the keyring tab alone, with no stray lump of base
+        # (#920, #1453).
+        tab = float(p.get("hole_diameter", 4)) + 2 * float(p.get("ring_wall", 1.6))
+        check(max(ys) - min(ys) <= tab + TOL,
+              "a name with no glyphs is just the tab, %.1f mm tall (got %.3f)" % (tab, max(ys) - min(ys)))
+
+    # One piece (#920): a space, a glyph the font lacks, or a run of glyphs off the
+    # centre line must not leave part of the word on a base island that falls off
+    # the keyring.
+    pieces, holes = topology(root)
+    check(pieces == 1, "prints as one connected piece (%d component(s))" % pieces)
+    if name in HOLES:
+        check(holes == HOLES[name],
+              "keeps its %d see-through hole(s) (got %d)" % (HOLES[name], holes))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))
