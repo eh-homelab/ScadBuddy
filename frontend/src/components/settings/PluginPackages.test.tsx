@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
-import { GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
+import { BUILT_IN_ANSWER, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { PluginPackagesPanel } from './PluginPackages'
@@ -17,6 +17,37 @@ describe('PluginPackagesPanel', () => {
   it('says when nothing is installed', async () => {
     renderPage(<PluginPackagesPanel />)
     expect(await screen.findByText('No plugin packages installed.')).toBeInTheDocument()
+  })
+
+  it('lists the built-in plugins first; they switch on and off but are never removed or re-pinned', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    const own = await screen.findByRole('listitem', { name: 'Built-in plugin scadbuddy' })
+    expect(within(own).getByText('Built in')).toBeInTheDocument()
+    expect(within(own).getByText('Enabled')).toBeInTheDocument()
+    expect(within(own).getByText('agent/plugins/scadbuddy')).toBeInTheDocument()
+    expect(within(within(own).getByLabelText('Review of scadbuddy')).getByText('/scadbuddy:authoring')).toBeInTheDocument()
+    expect(within(own).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+    expect(within(own).queryByLabelText('Re-pin to branch, tag or commit')).not.toBeInTheDocument()
+
+    const browser = screen.getByRole('listitem', { name: 'Built-in plugin playwright' })
+    const enable = within(browser).getByRole('button', { name: 'Enable' })
+    expect(isUserOnly(enable)).toBe(true)
+    await user.click(enable)
+    expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
+    expect(within(browser).getByRole('button', { name: 'Disable' })).toBeInTheDocument()
+    // Built-ins are not installed packages.
+    expect(screen.getByText('No plugin packages installed.')).toBeInTheDocument()
+  })
+
+  it('answers an install of ScadBuddy\'s own plugin with a notice, not a refusal', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://github.com/eh-homelab/ScadBuddy')
+    await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'scadbuddy')
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(BUILT_IN_ANSWER)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('installs from git into an unapproved package and shows every part of the review', async () => {

@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createApp } from '../src/app.js'
+import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -12,6 +12,10 @@ import { validateSource } from '../src/plugins/packages/source.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
 import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
 import { PluginError } from '../src/plugins/registry.js'
+import { ownPluginEnabled, SETTING_OWN_PLUGIN } from '../src/plugins/packages/builtins.js'
+import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
+import { SettingsStore } from '../src/credentials.js'
+import { UI_ACTOR } from '../src/audit/writes.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 import { InlineCommands } from './support/commands.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -207,8 +211,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
   })
 
   describe('the routes', () => {
-    const app = () =>
-      createApp({
+    const appDeps = (): AppDeps => ({
         database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
         backend: () => Promise.resolve(true),
         kek: { ok: false, reason: 'not configured' },
@@ -220,6 +223,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         remoteAddress: () => '10.0.0.7',
         origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
       })
+    const app = () => createApp(appDeps())
     const json = (method: string, body: unknown, headers: Record<string, string> = UI) => ({
       method,
       headers: { ...headers, 'content-type': 'application/json' },
@@ -258,6 +262,52 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(del.status).toBe(204)
       expect(await store.list()).toEqual([])
       expect(() => rmSync(dir)).toThrow() // evicted from the cache
+    })
+
+    it('lists the built-in plugins first; they enable and disable through their settings, and are never removed', async () => {
+      const settings = new SettingsStore(db.sql)
+      const a = createApp({ ...appDeps(), settings })
+      const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
+        name: string
+        built_in?: boolean
+        enabled: boolean
+        review: { skills: string[] }
+      }[]
+      expect(listed.map((p) => [p.name, p.built_in, p.enabled])).toEqual([
+        ['scadbuddy', true, true],
+        ['playwright', true, false],
+      ])
+      expect(listed[0]!.review.skills).toContain('scadbuddy:authoring')
+
+      const off = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
+      expect(((await off.json()) as { enabled: boolean }).enabled).toBe(false)
+      expect(await settings.get(SETTING_OWN_PLUGIN)).toBe(false)
+      expect(await ownPluginEnabled(settings)).toBe(false)
+      // The browser's switch is the headless-browser setting itself.
+      await a.request('/api/v1/ai/plugin-packages/playwright', json('PATCH', { enabled: true }))
+      expect(await settings.get(SETTING_HEADLESS_BROWSER)).toBe(true)
+      const one = await a.request('/api/v1/ai/plugin-packages/playwright', { headers: READ })
+      expect(await one.json()).toMatchObject({ name: 'playwright', built_in: true, enabled: true })
+
+      for (const [method, url, body] of [
+        ['DELETE', '/api/v1/ai/plugin-packages/scadbuddy', undefined],
+        ['POST', '/api/v1/ai/plugin-packages/scadbuddy/approve', { commit_sha: 'a', content_hash: 'b' }],
+        ['POST', '/api/v1/ai/plugin-packages/playwright/repin', {}],
+        ['DELETE', '/api/v1/ai/plugin-packages/playwright/pending', undefined],
+      ] as const) {
+        const res = await a.request(url, body === undefined ? { method, headers: UI } : json(method, body))
+        expect(res.status, `${method} ${url}`).toBe(409)
+        expect(await res.json()).toMatchObject({ built_in: true })
+      }
+    })
+
+    it('answers an install of a built-in plugin with 409 built_in, not a refusal', async () => {
+      repos.greeter!.remove()
+      repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })
+      const res = await app().request('/api/v1/ai/plugin-packages', json('POST', { source: { kind: 'git', url: GIT_URL } }))
+      expect(res.status).toBe(409)
+      expect(await res.json()).toMatchObject({ built_in: true, detail: expect.stringMatching(/built in/) })
+      expect(await store.list()).toEqual([])
     })
 
     it('refuses writes and reads from outside the UI, and plain-text bodies', async () => {
@@ -372,6 +422,28 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         // The fake init message lists no plugins: the loaded one is reported as not loaded by Claude Code.
         'plugin package greeter was not loaded by Claude Code',
       ])
+    })
+
+    it('loads ScadBuddy\'s own plugin unless Settings switched it off', async () => {
+      const settings = new SettingsStore(db.sql)
+      const runs: HarnessRun[] = []
+      const scripted = scriptedRunner(() => ({ reply: 'hi' }))
+      const m = manager({
+        sql: db.sql,
+        paths: await tempPaths(),
+        settings,
+        ownPlugin: '/opt/own-plugin',
+        run: (run) => {
+          runs.push(run)
+          return scripted.runner(run)
+        },
+      })
+      await (await m.start(agentA, { origin: 'mcp', prompt: 'hi' })).turn!.done
+      expect(runs[0]?.ownPlugin).toBe('/opt/own-plugin')
+
+      await settings.set(SETTING_OWN_PLUGIN, false, { actor: UI_ACTOR, surface: 'http' })
+      await (await m.start(agentA, { origin: 'mcp', prompt: 'hi' })).turn!.done
+      expect(runs[1]?.ownPlugin).toBeUndefined()
     })
 
     it('hands a package approved with allow_refused to the turn as allowed, not vetted', async () => {

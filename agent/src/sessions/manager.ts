@@ -82,6 +82,7 @@ import { UnpricedSpend } from './unpricedSpend.js'
 import { previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
+import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -1251,7 +1252,11 @@ export class SessionManager {
         // forwarder adds them), but a plugin could echo one in a tool result.
         secrets.push(...(forwarded?.secrets ?? []))
         const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-        const ownPlugin = this.deps.ownPlugin
+        // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
+        const ownPlugin =
+          this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
+            ? this.deps.ownPlugin
+            : undefined
         const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
         eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
         // A plugin left out of this turn is said so in the session, not only in the log.

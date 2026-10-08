@@ -14,6 +14,7 @@ import {
   validateRef,
 } from './source.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
+import { builtInNamed } from './builtins.js'
 import { capProblems, type Endpoint, vetPackage } from './vet.js'
 
 // Installing a plugin package, and turning its pin back into a directory for a
@@ -50,6 +51,14 @@ export class PackageRefusedError extends Error {
     super(`the plugin package is refused: ${problems.join('; ')}`)
     this.problems = problems
   }
+}
+
+/**
+ * The package names a plugin that ships with the agent (builtins.ts): nothing to
+ * install, and not a refusal. Settings lists the built-in one instead.
+ */
+export class BuiltInPluginError extends Error {
+  override name = 'BuiltInPluginError'
 }
 
 export type InstallerOptions = {
@@ -210,6 +219,8 @@ export class PackageInstaller {
       throw err
     }
     const vetting = vetPackage(dest, fallbackName)
+    const builtIn = vetting.review && builtInNamed(vetting.review.name)
+    if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
     const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
     // A fatal problem refuses the package outright, but the refusal names
     // every problem: the allowable ones are reasons too. Fatal first, so the

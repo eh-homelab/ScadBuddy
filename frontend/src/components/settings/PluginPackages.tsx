@@ -2,10 +2,14 @@ import { useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import {
   aiPlugins,
+  isBuiltIn,
+  isBuiltInAnswer,
   packageFetch,
   refusalProblems,
   repinMoves,
+  type BuiltInPluginPackage,
   type FileDiff,
+  type ListedPackage,
   type PackageInstall,
   type PackageReview,
   type PluginPackage,
@@ -27,6 +31,10 @@ import { Spinner } from '../ui/Spinner'
  * with its file diff, for the same approval. A pin whose review lists refusals (a
  * command hook, a local MCP server, ...) is approved only with a second confirmation,
  * `allow_refused`, which loads it as it is.
+ *
+ * The plugins that ship with the agent (ScadBuddy's own, the headless browser) are
+ * listed first as "Built in": reviewable and switchable like any other, never removed
+ * or re-pinned. An install that names one is answered "built in", not refused.
  *
  * Every control that installs, approves, enables, re-pins or deletes is user-only
  * (`USER_ONLY`): the in-page agent's `click` and `fill` refuse them, so an agent can
@@ -292,12 +300,14 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [problems, setProblems] = useState<string[]>([])
+  const [notice, setNotice] = useState<string | null>(null)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     setBusy(true)
     setError(null)
     setProblems([])
+    setNotice(null)
     const source: PackageInstall =
       kind === 'git'
         ? { kind, url: url.trim(), ...(ref.trim() ? { ref: ref.trim() } : {}), ...(path.trim() ? { path: path.trim() } : {}) }
@@ -310,6 +320,10 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
       setEntry('')
       onInstalled(pkg)
     } catch (caught) {
+      if (isBuiltInAnswer(caught)) {
+        setNotice(message(caught))
+        return
+      }
       setError(message(caught))
       setProblems(refusalProblems(caught))
     } finally {
@@ -392,6 +406,11 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
         </Button>
         <p className="text-[12px] text-muted">Nothing loads until you approve the pin.</p>
       </div>
+      {notice && (
+        <p role="status" className="rounded-[6px] border border-line p-2 text-[12px] text-muted">
+          {notice}
+        </p>
+      )}
       {error && (
         <div role="alert" className="text-[12px] text-warn">
           <p>{error}</p>
@@ -413,6 +432,59 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
 function Badge({ tone, children }: { tone: 'ok' | 'warn' | 'muted'; children: ReactNode }) {
   const cls = tone === 'ok' ? 'border-ok/40 text-ok' : tone === 'warn' ? 'border-warn/40 text-warn' : 'border-line text-muted'
   return <span className={`rounded-full border px-2 py-px text-[11px] ${cls}`}>{children}</span>
+}
+
+function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (pkg: ListedPackage) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function toggle() {
+    setBusy(true)
+    setError(null)
+    try {
+      onChange(await aiPlugins.setPackageEnabled<BuiltInPluginPackage>(pkg.name, !pkg.enabled))
+    } catch (caught) {
+      setError(message(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li className="rounded-[6px] border border-line p-3" aria-label={`Built-in plugin ${pkg.name}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[13px] font-medium">{pkg.name}</span>
+        {pkg.review.version && <span className="sb-num text-[12px] text-muted">v{pkg.review.version}</span>}
+        <Badge tone="muted">Built in</Badge>
+        {pkg.enabled ? <Badge tone="ok">Enabled</Badge> : <Badge tone="muted">Disabled</Badge>}
+      </div>
+      {pkg.review.description && <p className="mt-1 text-[12px] text-muted">{pkg.review.description}</p>}
+      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
+        <dt className="text-muted">Source</dt>
+        <dd>
+          Ships with ScadBuddy · <span className="sb-num break-all">{pkg.source.path}</span>
+        </dd>
+      </dl>
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[12px] text-muted">Review</summary>
+        <div className="mt-2">
+          <ReviewParts review={pkg.review} />
+        </div>
+      </details>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button size="sm" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
+          {busy && <Spinner />}
+          {pkg.enabled ? 'Disable' : 'Enable'}
+        </Button>
+        <p className="text-[12px] text-muted">Built in: it cannot be removed or re-pinned.</p>
+      </div>
+      {error && (
+        <p role="alert" className="mt-2 text-[12px] text-warn">
+          {error}
+        </p>
+      )}
+    </li>
+  )
 }
 
 function PackageCard({
@@ -606,7 +678,7 @@ export function PluginPackagesPanel() {
   const [approve, setApprove] = useState<ApproveTarget | null>(null)
   const packages = state.data ?? []
 
-  const replace = (pkg: PluginPackage) =>
+  const replace = (pkg: ListedPackage) =>
     state.setData(
       packages.some((p) => p.name === pkg.name) ? packages.map((p) => (p.name === pkg.name ? pkg : p)) : [...packages, pkg],
     )
@@ -621,6 +693,7 @@ export function PluginPackagesPanel() {
           Claude plugins (skills, subagents, hooks and MCP servers) from a git repository or a marketplace, pinned to a
           commit. The assistant loads them from the next turn once approved and enabled. A plugin that runs commands
           loads only if you allow it when approving, and a plugin&rsquo;s own tools always ask before they act.
+          ScadBuddy&rsquo;s own plugin and the headless browser are built in: switch them here like any other.
         </p>
         {state.loading && <Spinner />}
         {state.error && (
@@ -630,18 +703,22 @@ export function PluginPackagesPanel() {
         )}
         {packages.length > 0 && (
           <ul className="space-y-3" aria-label="Installed plugin packages">
-            {packages.map((pkg) => (
-              <PackageCard
-                key={pkg.name}
-                pkg={pkg}
-                onChange={replace}
-                onRemoved={(name) => state.setData(packages.filter((p) => p.name !== name))}
-                onApprove={setApprove}
-              />
-            ))}
+            {packages.map((pkg) =>
+              isBuiltIn(pkg) ? (
+                <BuiltInCard key={`built-in:${pkg.name}`} pkg={pkg} onChange={replace} />
+              ) : (
+                <PackageCard
+                  key={pkg.name}
+                  pkg={pkg}
+                  onChange={replace}
+                  onRemoved={(name) => state.setData(packages.filter((p) => p.name !== name))}
+                  onApprove={setApprove}
+                />
+              ),
+            )}
           </ul>
         )}
-        {!state.loading && !state.error && packages.length === 0 && (
+        {!state.loading && !state.error && !packages.some((p) => !isBuiltIn(p)) && (
           <p className="text-[12px] text-muted">No plugin packages installed.</p>
         )}
         <InstallForm onInstalled={replace} />

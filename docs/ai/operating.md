@@ -696,6 +696,15 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
   and every URL a package declares, go through the same egress check as the gateway
   (see [security.md](security.md#plugin-packages)).
+- **Built-in plugins.** The two plugins in the image are listed first by
+  `GET /api/v1/ai/plugin-packages`, with `built_in: true`
+  ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
+  `scadbuddy`, ScadBuddy's own plugin (on unless the `ai_settings` key
+  `scadbuddy_plugin_enabled` is `false`), and `playwright`, the headless browser (its
+  switch is `headless_browser_enabled`, [headless-browser.md](headless-browser.md)).
+  `PATCH` with `{ enabled }` sets that key; approve, re-pin and `DELETE` answer 409. An
+  install whose package names one answers 409 with `built_in: true` instead of
+  refusing it, and Settings shows that as a notice.
 
 ### The routes
 
