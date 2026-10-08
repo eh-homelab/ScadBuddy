@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import QueueItem
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.stages import stage_of
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
@@ -86,7 +87,7 @@ async def link_item(
         plate_id=plate_id if plate_id is not None else item.plate_id,
         printer_id=item.printer_id,
     )
-    await links.record(output_id, link)
+    await links.record(PrintSubject.output(output_id), link)
     return link
 
 
@@ -110,7 +111,7 @@ async def owned_queue_items(
     if meta.queue_item_id is not None:
         owned.add(meta.queue_item_id)
     try:
-        known = await links.for_output(meta.id)
+        known = await links.for_subject(PrintSubject.output(meta.id))
     except (psycopg.Error, DatabaseRequiredError):
         logger.exception("could not read an output's print links", extra={"output_id": meta.id})
     else:
@@ -181,7 +182,7 @@ async def link_by_hash(
                     plate_id=row.plate_id,
                     printer_id=row.printer_id,
                 )
-                await links.record(meta.id, link)
+                await links.record(PrintSubject.output(meta.id), link)
                 found.append(link)
         if len(rows) < ARCHIVE_PAGE:
             break

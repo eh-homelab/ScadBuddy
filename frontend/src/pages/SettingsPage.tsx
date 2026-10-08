@@ -500,6 +500,21 @@ export function SettingsPage() {
     }
   }
 
+  // #1041 — a failed load is not "loading": say so, and offer the read again. Settings
+  // is the page someone opens because something is wrong.
+  if (settingsState.error && !settings) {
+    return (
+      <div role="alert" className="mx-auto max-w-lg px-4 py-16">
+        <div className="rounded-[6px] border border-warn/40 bg-warn/8 p-4">
+          <p className="text-[13px] text-warn">Could not load settings: {settingsState.error.message}</p>
+          <Button size="sm" className="mt-3" onClick={settingsState.reload}>
+            Try again
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   if (settingsState.loading || !settings) {
     return (
       <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
@@ -584,7 +599,7 @@ export function SettingsPage() {
   const unit = value('display_unit') as DisplayUnit
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="sb-settings h-full overflow-y-auto">
       <nav aria-label="Settings sections" className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur">
         {/* #969: wraps from sm up so every section shows at a glance; on a phone it
             scrolls sideways, with a fade on the right edge to say there is more. */}
@@ -1216,7 +1231,7 @@ export function SettingsPage() {
           )}
 
           <Section id="about" title={sectionTitle('about')}>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]" data-testid="about">
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[13px]" data-testid="about">
               <dt className="text-muted">ScadBuddy</dt>
               <dd className="sb-num">
                 {settings.about?.version ?? 'unknown'} ({settings.about?.revision ?? 'unknown'})
@@ -1232,15 +1247,18 @@ export function SettingsPage() {
                 These cannot be changed here. Each is its <span className="sb-num">SCADBUDDY_*</span> variable or
                 the image&rsquo;s default.
               </p>
+              {/* #1035 — `overflow-wrap: anywhere` on the variable names and values: they are
+                  single unbroken tokens (a comma-joined origin list runs ~570 px), and without
+                  a break point the table ran past the card at every width. */}
               <table className="mt-2 w-full text-left text-[12px]" aria-label="Deployment values">
                 <tbody>
                   {(settings.bootstrap ?? []).map((entry) => (
                     <tr key={entry.name} className="border-t border-line align-top">
-                      <th scope="row" className="sb-num py-1.5 pr-3 font-normal">
+                      <th scope="row" className="sb-num py-1.5 pr-3 font-normal [overflow-wrap:anywhere]">
                         {entry.env_var}
                       </th>
                       <td className="py-1.5">
-                        <span className="sb-num">{entry.value ?? 'unset'}</span>{' '}
+                        <span className="sb-num [overflow-wrap:anywhere]">{entry.value ?? 'unset'}</span>{' '}
                         <span className="text-muted">({entry.source === 'env' ? 'set' : 'default'})</span>
                         <p className="mt-0.5 text-muted">{entry.reason}</p>
                       </td>

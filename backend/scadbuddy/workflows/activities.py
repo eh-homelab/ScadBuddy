@@ -11,6 +11,7 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -22,7 +23,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.metrics import Metrics, RenderOutcome
+from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
@@ -89,6 +90,32 @@ class WorkerDeps:
     openscad_version: str = ""
     #: The interpreter template activities run under: this worker's own (§5.2).
     template_python: str = sys.executable
+
+
+def _retried(error: Exception) -> bool:
+    """Whether Temporal runs another attempt of the current activity after ``error``.
+    Never for what the activities make non-retryable once the stage has raised it: an
+    `OpenSCADError` (`_failure`) and an `AssetUnavailableError` (`_unavailable`, which
+    retries only a copy the sweep removed, and is counted final here)."""
+    if isinstance(error, (OpenSCADError, AssetUnavailableError)):
+        return False
+    if isinstance(error, ApplicationError) and error.non_retryable:
+        return False
+    info = activity.info()
+    policy = info.retry_policy
+    if policy is None or (policy.maximum_attempts and info.attempt >= policy.maximum_attempts):
+        return False
+    kind = error.type if isinstance(error, ApplicationError) else type(error).__name__
+    return kind not in (policy.non_retryable_error_types or ())
+
+
+def _stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
+    """The current activity's stages: traced with its attempt, and a failed attempt
+    that is retried is no failed span (#1183). Called outside an activity (a test, or
+    a caller that runs the stage directly) there is no attempt, and nothing retries."""
+    if not activity.in_activity():
+        return timed_stage(metrics)
+    return timed_stage(metrics, attempt=activity.info().attempt, retried=_retried)
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -341,7 +368,7 @@ class RenderActivities:
         d = self.deps
         await self.materialize(req.slug, req.revision)
         try:
-            with timed_stage(d.metrics)("source"):
+            with _stage(d.metrics)("source"):
                 prepared, _ = await _heartbeating(
                     asyncio.create_task(
                         prepare_source(
@@ -406,7 +433,7 @@ class RenderActivities:
                 assets=d.assets,
                 checkouts=d.checkouts,
                 holder=f"piece:{req.piece_key}",
-                stage=timed_stage(d.metrics),
+                stage=_stage(d.metrics),
             )
         )
         try:
@@ -442,7 +469,7 @@ class RenderActivities:
                 assets=d.assets,
                 checkouts=d.checkouts,
                 holder=f"piece:{req.piece_key}",
-                stage=timed_stage(d.metrics),
+                stage=_stage(d.metrics),
             )
         )
         try:
@@ -475,17 +502,22 @@ class RenderActivities:
             # It is safe because every lease re-checks its checkouts (`require_checkouts`),
             # so a removal between two activities fails the next one fast and, once the
             # fetcher restores the pin, its retry renders.
+            # #867 — as `render_main`'s: a cancel (a timeout) returns once the stage has.
             async with library_lease(d.checkouts, f"piece:{req.piece_key}", source.library_path):
-                result = await finish_piece_stage(
-                    source,
-                    req.params,
-                    work,
-                    _process_output(main),
-                    config=self._config(prepared),
-                    paths=d.paths,
-                    slug=req.slug,
-                    thumbnail_executor=d.thumbnail_executor,
-                    stage=timed_stage(d.metrics),
+                result = await _heartbeating(
+                    asyncio.create_task(
+                        finish_piece_stage(
+                            source,
+                            req.params,
+                            work,
+                            _process_output(main),
+                            config=self._config(prepared),
+                            paths=d.paths,
+                            slug=req.slug,
+                            thumbnail_executor=d.thumbnail_executor,
+                            stage=_stage(d.metrics),
+                        )
+                    )
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
@@ -622,6 +654,8 @@ class RenderActivities:
             try:
                 job = await asyncio.to_thread(p.read, projection.job_id)
             except JobNotFoundError:
+                # Gone (pruned): nothing to render into. Unlike the writes below, where
+                # a missing row lets the pipeline carry on, here False stops it.
                 return False
             return job.state == "running"
         if projection.state is None:

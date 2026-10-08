@@ -1612,6 +1612,110 @@ describe("a model's lifecycle as operations (#1054)", () => {
   })
 })
 
+describe("a model's edits as operations (#1054)", () => {
+  const op = { id: 'op-9', kind: 'model_source_put', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W', libraries: [] }
+  const base = 'abc1234'
+
+  it.each([
+    ['update_source', { slug: 'w', source: 'cube(2);' }, 'put', '/api/v1/models/w/source'],
+    ['apply_patch', { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, 'post', '/api/v1/models/w/source/patch'],
+    ['set_readme', { slug: 'w', content: '# W' }, 'put', '/api/v1/models/w/readme'],
+    ['delete_readme', { slug: 'w' }, 'delete', '/api/v1/models/w/readme'],
+    ['set_model_thumbnail', { slug: 'w', png_base64: 'iVBORw0KGgo=' }, 'put', '/api/v1/models/w/thumbnail'],
+    ['delete_model_thumbnail', { slug: 'w' }, 'delete', '/api/v1/models/w/thumbnail'],
+    ['write_source_file', { slug: 'w', name: 'part.scad', content: 'module p() {}' }, 'put', '/api/v1/models/w/files/part.scad'],
+    ['delete_source_file', { slug: 'w', name: 'part.scad' }, 'delete', '/api/v1/models/w/files/part.scad'],
+    ['restore_version', { slug: 'w', commit: base }, 'post', `/api/v1/models/w/versions/${base}/restore`],
+    ['update_from_upstream', { slug: 'w', action: 'merge' }, 'post', '/api/v1/models/w/upstream/merge'],
+    ['update_from_upstream', { slug: 'w', action: 'dismiss' }, 'post', '/api/v1/models/w/upstream/dismiss'],
+    ['update_from_upstream', { slug: 'w', action: 'detach' }, 'post', '/api/v1/models/w/upstream/detach'],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'succeeded', result: model })),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it("apply_patch reads `current` from a stale base the operation's run found", async () => {
+    const stale = { status: 409, title: 'Conflict', detail: 'moved on', type: 'about:blank', extensions: { base, current: 'def5678' } }
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/w/source/patch`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'failed', error: stale })),
+    )
+    const result = await runTool(tool('apply_patch'), { slug: 'w', base, edits: [{ search: '1', replace: '2' }] }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toMatchObject({ status: 'conflict', current: 'def5678' })
+  })
+
+  it("an extension named like a problem field does not replace the operation's own", async () => {
+    const failed = { status: 404, title: 'Not Found', detail: 'w has no README to remove', type: 'about:blank', extensions: { detail: 'spoofed' } }
+    server.use(
+      http.delete(`${BACKEND}/api/v1/models/w/readme`, () => HttpResponse.json(op, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/operations/op-9`, () => HttpResponse.json({ ...op, status: 'failed', error: failed })),
+    )
+    const result = await runTool({ ...tool('delete_readme'), gated: false }, { slug: 'w' }, ctx())
+    expect(result.isError).toBe(true)
+    const text = JSON.stringify(firstText(result))
+    expect(text).toContain('w has no README to remove')
+    expect(text).not.toContain('spoofed')
+  })
+})
+
+describe('uploads, outputs, fonts and presets as operations (#1054)', () => {
+  const op = { id: 'op-6', kind: 'output_create', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const OUT = 'b'.repeat(32)
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')
+
+  it.each([
+    ['save_output', { slug: 'w', job_id: 'j' }, 'post', '/api/v1/models/w/outputs', { id: OUT }],
+    ['delete_output', { output_id: OUT }, 'delete', `/api/v1/outputs/${OUT}`, {}],
+    ['upload_asset', { slug: 'w', filename: 'logo.svg', content_base64: svg }, 'post', '/api/v1/models/w/assets', { id: 'a1' }],
+    ['fetch_asset', { slug: 'w', url: 'https://openmoji.org/x.svg' }, 'post', '/api/v1/models/w/assets/fetch', { id: 'a1' }],
+    ['install_font', { family: 'Pacifico' }, 'post', '/api/v1/fonts/install', { family: 'Pacifico' }],
+    ['save_preset', { slug: 'w', name: 'Wide' }, 'post', '/api/v1/models/w/presets', { id: 'p1' }],
+    ['update_preset', { slug: 'w', preset_id: 'p1', name: 'Wider' }, 'patch', '/api/v1/models/w/presets/p1', { id: 'p1' }],
+    ['duplicate_preset', { slug: 'w', preset_id: 'p1', name: 'Copy' }, 'post', '/api/v1/models/w/presets/p1/duplicate', { id: 'p2' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202', async (name, args, method, path, result) => {
+    let key: string | null = null
+    server.use(
+      http[method](`${BACKEND}${path}`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-6`, () => HttpResponse.json({ ...op, status: 'succeeded', result })),
+    )
+    const answer = await runTool({ ...tool(name), gated: false }, args, ctx())
+    expect(answer.isError).toBeFalsy()
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+    expect(JSON.stringify(answer.content)).not.toContain('"running"')
+  })
+
+  it("render_model's save sends an Idempotency-Key and follows a 202 to the output", async () => {
+    let key: string | null = null
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(op, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/op-6`, () => HttpResponse.json({ ...op, status: 'succeeded', result: { id: OUT } })),
+    )
+    const done = await runTool(tool('render_model'), { slug: 'box', save_output: true }, ctx())
+    expect(firstText(done)).toMatchObject({ status: 'done', output: { id: OUT } })
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
 describe('get_output_preview (#308)', () => {
   it("embeds the output's preview mesh", async () => {
     const id = 'a'.repeat(32)

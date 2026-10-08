@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from tests.api.conftest import PNG_BYTES
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -54,8 +55,10 @@ def test_a_built_ins_bundled_media_is_listed(client: TestClient) -> None:
 
 def test_the_thumbnail_routes_still_work(client: TestClient, model: str) -> None:
     put = client.put(
-        f"/api/v1/models/{model}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
+        f"/api/v1/models/{model}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
     )
     assert put.status_code == 200, put.text
     assert [item["id"] for item in put.json()["media"]] == ["thumbnail"]
-    assert client.delete(f"/api/v1/models/{model}/thumbnail").json()["media"] == []
+    assert client.delete(f"/api/v1/models/{model}/thumbnail", headers=press()).json()["media"] == []

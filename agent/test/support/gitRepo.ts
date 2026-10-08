@@ -75,12 +75,12 @@ export function localFetcher(repos: Record<string, TestRepo>): RepoFetcher & { c
   const checkouts: string[] = []
   return {
     checkouts,
-    checkout(url: string, ref: string, into: string): Promise<Checkout> {
+    checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
       checkouts.push(`${url}@${ref}`)
       const key = /^https:\/\/git\.test\/(.+)\.git$/.exec(url)?.[1]
       const repo = key === undefined ? undefined : repos[key]
       if (!repo) return Promise.reject(new FetchError(`no test repository for ${url}`))
-      return real.checkout(pathToFileURL(repo.dir).href, ref, into)
+      return real.checkout(pathToFileURL(repo.dir).href, ref, into, signal)
     },
     specialPaths: (checkout, subpath) => real.specialPaths(checkout, subpath),
   }

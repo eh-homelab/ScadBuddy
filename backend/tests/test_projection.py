@@ -594,3 +594,20 @@ def test_recent_render_seconds_is_the_median_of_the_latest_renders(
         _rendered(projection, f"run-{index}", seconds)
     _accept(projection, "run-pending", width=7)  # not finished: never counted
     assert projection.recent_render_seconds() == pytest.approx(6.0, abs=0.1)
+
+
+def test_recent_render_seconds_leaves_out_cache_hits(
+    projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1731 review: renders the piece cache answered finish in well under a second and
+    say nothing about how long a full queue takes to drain, so a history mostly of them
+    still gives the slow renders' median, and one only of them gives none."""
+    monkeypatch.setattr(projection_module, "RECENT_RENDERS", 5)
+    for index in range(8):
+        _rendered(projection, f"hit-{index}", 0.05)
+    assert projection.recent_render_seconds() is None
+    for index, seconds in enumerate((20.0, 30.0, 40.0)):
+        _rendered(projection, f"slow-{index}", seconds)
+    for index in range(8, 16):
+        _rendered(projection, f"hit-{index}", 0.05)
+    assert projection.recent_render_seconds() == pytest.approx(30.0, abs=0.1)

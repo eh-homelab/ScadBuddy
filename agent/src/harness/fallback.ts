@@ -28,7 +28,10 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness 
 // on the next. Each credential is tried at most once per turn, which is the
 // cap on how many keys spend on one failing turn; one whose failure is not
 // the credential's (a bad request, a turn or budget limit) is not retried at
-// all, since the next key would fail the same way.
+// all, since the next key would fail the same way. (Claude Code 2.1.287 itself
+// sends a gateway's refused 400 or 422 once more on the same key, without the
+// `thinking.display` field it added, before it reports the failure; this file
+// sees only the final refusal: credentialErrors.ts.)
 //
 // MID-TURN FAILURES RESUME, THEY DO NOT RESTART. Claude Code writes the
 // session transcript as the turn goes: the user's prompt before the first
@@ -184,8 +187,8 @@ function apiFailure(
 }
 
 /**
- * Costs across attempts. Measured on Claude Code 2.1.283 against the fake
- * endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
+ * Costs across attempts. Measured on Claude Code 2.1.283 and 2.1.287 against
+ * the fake endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
  * already includes everything the session spent before it, restored from the
  * transcript's `cost-state` (an attempt that spent 0.000105 and failed, then
  * the resumed one: 0.00021), while `num_turns` and the `maxBudgetUsd` check

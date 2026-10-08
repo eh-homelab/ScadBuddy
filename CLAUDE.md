@@ -43,11 +43,15 @@ serialise every `migrate` and hear each other's events. So the test role needs
 Temporal dev server.
 CI runs the suite in four `backend-pytest` jobs (#1167), each `--splits 4 --group N`
 (pytest-split) by the timings in `backend/.test_durations`; `backend-pytest-split`
-checks that the four selections add up to the whole collection. A test missing from
+checks that the four selections add up to the whole collection and that each
+shard ran what it selected. A test missing from
 the file is placed by the average, so a stale file only unbalances the shards. Refresh
 it with `uv run --frozen pytest -n auto --store-durations` (best from the test image,
 for CI's timings) and commit it; it is in `.dockerignore`, so a refresh leaves the
-image's layers alone.
+image's layers alone, and a shard in the image needs it mounted where pytest-split
+looks by default (`-v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"`,
+as `ci.yml` does). Never pass `--durations-path <path>` as two words: pytest takes the
+path for its rootdir and drops `pyproject.toml`'s settings.
 Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
 but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
@@ -183,7 +187,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   300 s one) on the `library` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
   process (it holds the data volume). A new periodic pass is an activity in its
-  `SWEEPS`, never a loop in the API.
+  `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
+  (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
+  default-render previews, on its own hourly Schedule on the same queue; the per-change
+  requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
@@ -194,10 +201,21 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   Each worker serves only its queue's kinds: the Bambuddy kinds are
   `bambuddy/operations.py` (queue `bambuddy`); `library/operations.py` (queue
   `library`, #1054) exports the library pins with a model's lifecycle
-  (`library/model_operations.py` `model_kinds`). Request bytes too large for a workflow
-  payload (a create's source, thumbnail, README, a patch's presets, an import's URL) go
+  and edits (`library/model_operations.py` `model_kinds`: create, import, patch,
+  duplicate, delete, source, README, thumbnail, sibling files, restore and upstream; an
+  upstream merge that would conflict is refused by the route, so its merged text never
+  enters a history), a model's media (`media_operations.py`), outputs
+  (`output_operations.py`: create, thumbnail, delete with its inbox copies until #1060
+  splits the Bambuddy part out), assets (`asset_operations.py`: upload, fetch), font
+  install (`font_operations.py`) and the preset writes that run openscad
+  (`preset_operations.py`; a preset delete stays a plain route). Request bytes too large
+  for a workflow payload (a create's source, thumbnail, README, a patch's presets, an
+  import's or asset fetch's URL, an asset, an output's thumbnail, a media upload) go
   by claim check: `operations/claims.py` `ClaimStore`, under `cache/claims/`, named by
-  sha256 so a re-send keeps its key. `run_operation(..., claimed=)` releases them once
+  sha256 so a re-send keeps its key. A media upload is streamed, never read into
+  memory: `ClaimStore.hold_file` moves the streamed file in under the digest hashed
+  while it streamed, and the run links it (`ClaimStore.link`) to a staging file of its
+  own, so the claim stays for its release. `run_operation(..., claimed=)` releases them once
   the answer is final: only what its own `hold` created, unless a later put rewrote it
   or a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
@@ -235,10 +253,22 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
-  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain).
+  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
+  (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); `PrintRun`
+  and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
+  unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
+  unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
+  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
-  error mapping (`errors.py`).
+  error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
+  `output_reader.py`'s `OutputReader` (#1060): `LocalOutputs` on the volume,
+  `RemoteOutputs` through the API's hidden `/api/v1/internal/outputs/…` routes
+  (`api/internal.py`). An output's last print is `output_last_prints` in Postgres
+  (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
+  `prelude`, another kind run first on its own queue: `output_delete` (library) names
+  `output_inbox_delete` (bambuddy).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
@@ -292,8 +322,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
   `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
-  variable the backend reads; the one origin allowed to write) and
-  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
+  variable the backend reads; the one origin allowed to write),
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed) and the
+  backend's `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and `_SEARCH_ATTRIBUTES`. No AI
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
@@ -353,9 +384,25 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
     value to its row and to the columns that say where it is sent (for the credential:
     `kind` and `base_url`). Comparable tokens are stored hashed instead.
+  - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
+    database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
+    every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
+    `ai_sessions.mode` is `durable`), and `AgentOperation` (`workflows.ts`, bundled by
+    `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
+    the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
+    `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
+    replays. `pnpm build` also writes `dist/tools.json` (the tool manifest the durable
+    worker declares from; never committed). Temporal tests (`test/*temporal*.test.ts`)
+    skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
+    `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
+    The `@temporalio/*` packages are pinned exactly, all one version.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
-    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
-    refused, because it would inherit the credential env.
+    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
+    plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
+    Code 2.1.287, and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` no longer turns it off) is
+    refused, because it would inherit the credential env. A hooks file may set only
+    `$schema`, `description` and `hooks` besides, so a new loader key is refused too.
   - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
     `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
     plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback

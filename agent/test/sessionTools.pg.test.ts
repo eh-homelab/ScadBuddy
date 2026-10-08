@@ -475,7 +475,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(ok<{ session: { offer: unknown } }>(await a.call('sessions_get', { session_id: three })).session.offer).toBeNull()
     })
 
-    it('in the harness, refuses to decide approvals or hand a session off', async () => {
+    // A durable session's tool activity (`workflow`, #1055) is a session model too.
+    it.each(['harness', 'workflow'] as const)('in the %s, refuses to decide approvals or hand a session off', async (gate) => {
       const { sessions } = await setup()
       const svc = services({ sessions })
       const byName = new Map(ALL_TOOLS.map((t) => [t.name, t]))
@@ -485,7 +486,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         principal: { id: 'browser', kind: 'browser' as const, tiers: ['read', 'write', 'outward'] as Tier[] },
         progress: async () => {},
         signal: new AbortController().signal,
-        gate: 'harness' as const,
+        gate,
       }
       for (const [name, args] of [
         ['sessions_approve', { approval_id: session.id }],

@@ -95,7 +95,7 @@ def _url(model_id: str, preset_id: str | None = None) -> str:
 
 
 def _save(client: TestClient, model_id: str, name: str, params: dict[str, Any]) -> Any:
-    response = client.post(_url(model_id), json={"name": name, "params": params})
+    response = client.post(_url(model_id), json={"name": name, "params": params}, headers=press())
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -127,10 +127,12 @@ def test_presets_are_kept_outside_the_template(
 
 
 def test_a_preset_is_checked_as_a_render_is(client: TestClient, model: str) -> None:
-    unknown = client.post(_url(model), json={"name": "X", "params": {"depth": 3}})
+    unknown = client.post(_url(model), json={"name": "X", "params": {"depth": 3}}, headers=press())
     assert unknown.status_code == 422
     assert unknown.json()["parameters"] == ["depth"]
-    wrong_type = client.post(_url(model), json={"name": "X", "params": {"width": "wide"}})
+    wrong_type = client.post(
+        _url(model), json={"name": "X", "params": {"width": "wide"}}, headers=press()
+    )
     assert wrong_type.status_code == 422
     assert client.get(_url(model)).json() == []
 
@@ -154,11 +156,15 @@ def test_a_dropdown_value_has_to_be_one_of_its_options(
         return None, schema
 
     monkeypatch.setattr(params_api, "schema_of", with_a_dropdown)
-    refused = client.post(_url(model), json={"name": "X", "params": {"style": "zigzag"}})
+    refused = client.post(
+        _url(model), json={"name": "X", "params": {"style": "zigzag"}}, headers=press()
+    )
     assert refused.status_code == 422
     assert refused.json()["parameters"] == ["style"]
     saved = _save(client, model, "Wavy", {"style": "wavy"})
-    update = client.patch(_url(model, saved["id"]), json={"params": {"style": "zigzag"}})
+    update = client.patch(
+        _url(model, saved["id"]), json={"params": {"style": "zigzag"}}, headers=press()
+    )
     assert update.status_code == 422
 
 
@@ -175,11 +181,15 @@ def test_a_text_value_past_its_max_length_is_refused(
         return None, schema
 
     monkeypatch.setattr(params_api, "schema_of", with_a_limit)
-    refused = client.post(_url(model), json={"name": "X", "params": {"label": "x" * 16}})
+    refused = client.post(
+        _url(model), json={"name": "X", "params": {"label": "x" * 16}}, headers=press()
+    )
     assert refused.status_code == 422
     assert refused.json()["parameters"] == ["label"]
     saved = _save(client, model, "Short", {"label": "x" * 8})
-    update = client.patch(_url(model, saved["id"]), json={"params": {"label": "x" * 9}})
+    update = client.patch(
+        _url(model, saved["id"]), json={"params": {"label": "x" * 9}}, headers=press()
+    )
     assert update.status_code == 422
     assert client.get(_url(model)).json()[0]["params"] == {"label": "x" * 8}
 
@@ -201,11 +211,15 @@ def test_a_colour_value_has_to_be_a_hex_colour(
 
     monkeypatch.setattr(params_api, "schema_of", with_a_colour)
     for value in ("red", "red; cube(100)", "#12345", "#1234567", "#GGGGGG", "00FF00", ""):
-        refused = client.post(_url(model), json={"name": "X", "params": {"col": value}})
+        refused = client.post(
+            _url(model), json={"name": "X", "params": {"col": value}}, headers=press()
+        )
         assert refused.status_code == 422, value
         assert refused.json()["parameters"] == ["col"]
     saved = _save(client, model, "Blue", {"col": "#0000ff"})
-    update = client.patch(_url(model, saved["id"]), json={"params": {"col": "blue"}})
+    update = client.patch(
+        _url(model, saved["id"]), json={"params": {"col": "blue"}}, headers=press()
+    )
     assert update.status_code == 422
     assert client.get(_url(model)).json()[0]["params"] == {"col": "#0000ff"}
     # The template's own default is its business, whatever it spells.
@@ -223,7 +237,7 @@ def test_a_colour_value_has_to_be_a_hex_colour(
 )
 def test_a_nul_in_a_preset_is_a_422(client: TestClient, model: str, body: dict[str, Any]) -> None:
     """#965: Postgres cannot hold a NUL, so a save was a 500 echoing the driver's error."""
-    response = client.post(_url(model), json=body)
+    response = client.post(_url(model), json=body, headers=press())
     assert response.status_code == 422, response.text
     assert "NUL byte" in response.text
     assert client.get(_url(model)).json() == []
@@ -232,7 +246,7 @@ def test_a_nul_in_a_preset_is_a_422(client: TestClient, model: str, body: dict[s
 def test_a_nul_in_a_preset_update_or_duplicate_is_a_422(client: TestClient, model: str) -> None:
     saved = _save(client, model, "Big", {"width": 25})
     for body in ({"name": "x\x00"}, {"params": {"label": "a\x00"}}, {"tags": ["\x00"]}):
-        response = client.patch(_url(model, saved["id"]), json=body)
+        response = client.patch(_url(model, saved["id"]), json=body, headers=press())
         assert response.status_code == 422, response.text
         assert "NUL byte" in response.text
     duplicate = _duplicate(client, model, saved["id"], "y\x00")
@@ -243,24 +257,32 @@ def test_a_nul_in_a_preset_update_or_duplicate_is_a_422(client: TestClient, mode
 
 def test_names_are_unique_per_template_ignoring_case(client: TestClient, model: str) -> None:
     _save(client, model, "Big", {"width": 25})
-    clash = client.post(_url(model), json={"name": "big", "params": {}})
+    clash = client.post(_url(model), json={"name": "big", "params": {}}, headers=press())
     assert clash.status_code == 409
     assert clash.json()["name"] == "big"
 
 
 def test_a_blank_or_long_name_is_refused(client: TestClient, model: str) -> None:
-    assert client.post(_url(model), json={"name": "   ", "params": {}}).status_code == 422
+    assert (
+        client.post(_url(model), json={"name": "   ", "params": {}}, headers=press()).status_code
+        == 422
+    )
     too_long = "x" * (MAX_PRESET_NAME + 1)
-    assert client.post(_url(model), json={"name": too_long, "params": {}}).status_code == 422
+    assert (
+        client.post(_url(model), json={"name": too_long, "params": {}}, headers=press()).status_code
+        == 422
+    )
 
 
 def test_a_preset_can_be_renamed_and_its_values_replaced(client: TestClient, model: str) -> None:
     saved = _save(client, model, "Big", {"width": 25, "label": "Ada"})
-    response = client.patch(_url(model, saved["id"]), json={"params": {"width": 30}})
+    response = client.patch(
+        _url(model, saved["id"]), json={"params": {"width": 30}}, headers=press()
+    )
     assert response.status_code == 200, response.text
     assert response.json()["params"] == {"width": 30}
     assert response.json()["name"] == "Big"
-    renamed = client.patch(_url(model, saved["id"]), json={"name": "Bigger"})
+    renamed = client.patch(_url(model, saved["id"]), json={"name": "Bigger"}, headers=press())
     assert renamed.json()["name"] == "Bigger"
     assert renamed.json()["params"] == {"width": 30}
 
@@ -268,13 +290,13 @@ def test_a_preset_can_be_renamed_and_its_values_replaced(client: TestClient, mod
 def test_a_rename_onto_another_preset_is_refused(client: TestClient, model: str) -> None:
     _save(client, model, "Big", {"width": 25})
     small = _save(client, model, "Small", {"width": 5})
-    response = client.patch(_url(model, small["id"]), json={"name": "BIG"})
+    response = client.patch(_url(model, small["id"]), json={"name": "BIG"}, headers=press())
     assert response.status_code == 409
 
 
 def test_an_update_is_checked_too(client: TestClient, model: str) -> None:
     saved = _save(client, model, "Big", {"width": 25})
-    response = client.patch(_url(model, saved["id"]), json={"params": {"nope": 1}})
+    response = client.patch(_url(model, saved["id"]), json={"params": {"nope": 1}}, headers=press())
     assert response.status_code == 422
     assert client.get(_url(model)).json()[0]["params"] == {"width": 25}
 
@@ -289,25 +311,31 @@ def test_a_preset_can_be_deleted(client: TestClient, model: str, pg_conninfo: st
 
 def test_an_unknown_preset_is_a_404(client: TestClient, model: str) -> None:
     missing = "0" * 32
-    assert client.patch(_url(model, missing), json={"name": "X"}).status_code == 404
+    assert (
+        client.patch(_url(model, missing), json={"name": "X"}, headers=press()).status_code == 404
+    )
 
 
 def test_problems_read_for_people(client: TestClient, model: str) -> None:
     """#357: no internal ids, no Python quoting, and a clash names the preset that
     has the name, as it is spelled, not the spelling just typed."""
     saved = _save(client, model, "C· d6 Numbers - Red team", {"width": 25})
-    clash = client.post(_url(model), json={"name": "c· d6 numbers - red TEAM", "params": {}})
+    clash = client.post(
+        _url(model), json={"name": "c· d6 numbers - red TEAM", "params": {}}, headers=press()
+    )
     assert clash.status_code == 409
     assert clash.json()["detail"] == 'A preset named "C· d6 Numbers - Red team" already exists.'
     assert clash.json()["existing"] == "C· d6 Numbers - Red team"
     other = _save(client, model, "Small", {"width": 5})
-    rename = client.patch(_url(model, other["id"]), json={"name": "C· D6 NUMBERS - RED TEAM"})
+    rename = client.patch(
+        _url(model, other["id"]), json={"name": "C· D6 NUMBERS - RED TEAM"}, headers=press()
+    )
     assert rename.json()["detail"] == clash.json()["detail"]
 
     assert client.delete(_url(model, saved["id"])).status_code == 204
     for gone in (
         client.delete(_url(model, saved["id"])),
-        client.patch(_url(model, saved["id"]), json={"name": "X"}),
+        client.patch(_url(model, saved["id"]), json={"name": "X"}, headers=press()),
         _duplicate(client, model, saved["id"], "Copy"),
     ):
         assert gone.status_code == 404
@@ -319,12 +347,23 @@ def test_problems_read_for_people(client: TestClient, model: str) -> None:
 def test_an_unknown_template_preset_is_a_404_not_read_only(client: TestClient, model: str) -> None:
     """#357: a `template-*` id the template does not have was refused as read-only."""
     assert client.delete(_url(model, "template-0")).status_code == 404
-    assert client.patch(_url(model, "template-0"), json={"name": "X"}).status_code == 404
+    assert (
+        client.patch(_url(model, "template-0"), json={"name": "X"}, headers=press()).status_code
+        == 404
+    )
 
 
 def test_an_unknown_model_is_a_404(client: TestClient) -> None:
     assert client.get(_url("nope")).status_code == 404
-    assert client.post(_url("nope"), json={"name": "X", "params": {}}).status_code == 404
+    assert (
+        client.post(_url("nope"), json={"name": "X", "params": {}}, headers=press()).status_code
+        == 404
+    )
+    # Review #1194 2.3: the missing model answers before a shipped preset's id would.
+    assert (
+        client.patch(_url("nope", "template-wide"), json={"name": "X"}, headers=press()).status_code
+        == 404
+    )
 
 
 @pytest.mark.requires_git
@@ -341,11 +380,14 @@ def test_a_built_in_lists_its_shipped_presets_first(client: TestClient) -> None:
 @pytest.mark.requires_git
 def test_shipped_presets_are_read_only(client: TestClient) -> None:
     shipped = client.get(_url(BUILTIN)).json()[0]
-    patch = client.patch(_url(BUILTIN, shipped["id"]), json={"name": "Other"})
+    patch = client.patch(_url(BUILTIN, shipped["id"]), json={"name": "Other"}, headers=press())
     assert patch.status_code == 403
     assert client.delete(_url(BUILTIN, shipped["id"])).status_code == 403
     # Nor can a saved one take its name.
-    assert client.post(_url(BUILTIN), json={"name": "wide", "params": {}}).status_code == 409
+    assert (
+        client.post(_url(BUILTIN), json={"name": "wide", "params": {}}, headers=press()).status_code
+        == 409
+    )
 
 
 @pytest.mark.requires_git
@@ -390,7 +432,7 @@ def test_a_duplicate_takes_the_saved_presets_along(client: TestClient) -> None:
     ]
     # Copies, not the same presets: editing one leaves the other alone.
     assert listed[1]["id"] != saved["id"]
-    client.patch(_url(slug, listed[1]["id"]), json={"name": "Renamed"})
+    client.patch(_url(slug, listed[1]["id"]), json={"name": "Renamed"}, headers=press())
     assert client.get(_url(BUILTIN)).json()[1]["name"] == "Mine"
 
 
@@ -430,7 +472,9 @@ def test_an_upload_a_saved_preset_names_is_kept_by_the_sweep(
 
 
 def _duplicate(client: TestClient, model_id: str, preset_id: str, name: str) -> Any:
-    return client.post(f"{_url(model_id, preset_id)}/duplicate", json={"name": name})
+    return client.post(
+        f"{_url(model_id, preset_id)}/duplicate", json={"name": name}, headers=press()
+    )
 
 
 @pytest.mark.requires_git
@@ -444,7 +488,9 @@ def test_a_shipped_preset_is_duplicated_to_an_editable_one(client: TestClient) -
     assert copy["params"] == shipped["params"]
     assert copy["id"] != shipped["id"]
     # The copy is the one to change; the shipped one stays as it ships.
-    renamed = client.patch(_url(BUILTIN, copy["id"]), json={"params": {"width": 12}})
+    renamed = client.patch(
+        _url(BUILTIN, copy["id"]), json={"params": {"width": 12}}, headers=press()
+    )
     assert renamed.status_code == 200
     assert client.get(_url(BUILTIN)).json()[0]["params"] == {"width": 40}
 
@@ -587,7 +633,10 @@ def test_a_template_preset_edit_replaces_a_legacy_file_too(
 def test_a_template_preset_cannot_take_a_saved_one_s_name(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    assert client.post(_url(model), json={"name": "Mum", "params": {}}).status_code == 201
+    assert (
+        client.post(_url(model), json={"name": "Mum", "params": {}}, headers=press()).status_code
+        == 201
+    )
     response = _patch_presets(client, model, [{"name": "mum", "params": {}}])
     assert response.status_code == 409, response.text
     assert response.json()["name"] == "mum"
@@ -726,7 +775,9 @@ def test_a_template_preset_with_null_details_still_loads(
         ("Bare", "", []),
         ("Plain", "Plain.", ["a"]),
     ]
-    null_description = client.post(_url(model), json={"name": "X", "description": None})
+    null_description = client.post(
+        _url(model), json={"name": "X", "description": None}, headers=press()
+    )
     assert null_description.status_code == 422
 
 
@@ -739,6 +790,7 @@ def test_a_saved_preset_carries_a_description_and_tags(client: TestClient, model
             "description": "  For **bags**.  ",
             "tags": [" big ", "Big", "", "kids  size", "big"],
         },
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     saved = response.json()
@@ -757,11 +809,11 @@ def test_a_saved_preset_carries_a_description_and_tags(client: TestClient, model
 def test_a_saved_preset_s_details_are_edited_and_cleared(client: TestClient, model: str) -> None:
     saved = _save(client, model, "Big", {"width": 25})
     url = _url(model, saved["id"])
-    edited = client.patch(url, json={"description": "Wide", "tags": ["a", "b"]})
+    edited = client.patch(url, json={"description": "Wide", "tags": ["a", "b"]}, headers=press())
     assert edited.status_code == 200, edited.text
     assert (edited.json()["description"], edited.json()["tags"]) == ("Wide", ["a", "b"])
     # A field left out stays as it was.
-    renamed = client.patch(url, json={"name": "Bigger"}).json()
+    renamed = client.patch(url, json={"name": "Bigger"}, headers=press()).json()
     assert (renamed["name"], renamed["description"], renamed["tags"]) == (
         "Bigger",
         "Wide",
@@ -769,13 +821,15 @@ def test_a_saved_preset_s_details_are_edited_and_cleared(client: TestClient, mod
     )
     assert renamed["params"] == {"width": 25}
     # An empty one clears it.
-    cleared = client.patch(url, json={"description": "", "tags": []}).json()
+    cleared = client.patch(url, json={"description": "", "tags": []}, headers=press()).json()
     assert (cleared["description"], cleared["tags"]) == ("", [])
 
 
 def test_a_saved_preset_s_details_are_bounded(client: TestClient, model: str) -> None:
     def refused(body: dict[str, Any]) -> bool:
-        status: int = client.post(_url(model), json={"name": "X", **body}).status_code
+        status: int = client.post(
+            _url(model), json={"name": "X", **body}, headers=press()
+        ).status_code
         return status == 422
 
     assert refused({"description": "d" * (MAX_PRESET_DESCRIPTION + 1)})
@@ -789,9 +843,11 @@ def test_a_saved_preset_s_details_are_bounded(client: TestClient, model: str) ->
     repeated = [f"t{n % MAX_PRESET_TAGS}" for n in range(MAX_PRESET_TAGS * 2)]
     assert not refused({"tags": repeated, "description": "d" * MAX_PRESET_DESCRIPTION})
     saved = client.get(_url(model)).json()[0]
-    too_long = client.patch(_url(model, saved["id"]), json={"tags": ["t" * (MAX_PRESET_TAG + 1)]})
+    too_long = client.patch(
+        _url(model, saved["id"]), json={"tags": ["t" * (MAX_PRESET_TAG + 1)]}, headers=press()
+    )
     assert too_long.status_code == 422
-    comma = client.patch(_url(model, saved["id"]), json={"tags": ["a,b"]})
+    comma = client.patch(_url(model, saved["id"]), json={"tags": ["a,b"]}, headers=press())
     assert comma.status_code == 422
 
 
@@ -814,6 +870,7 @@ def test_a_template_duplicate_copies_its_saved_presets_details(client: TestClien
     client.post(
         _url(BUILTIN),
         json={"name": "Mine", "params": {}, "description": "Mine", "tags": ["x"]},
+        headers=press(),
     )
     created = client.post(
         f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
@@ -854,7 +911,9 @@ def test_a_template_preset_file_value_is_checked_as_a_saved_one(
     bogus = [{"name": "X", "params": {"overlay": "f" * 32}}]
     assert _patch_presets(client, model, bogus).status_code == 422
     assert (
-        client.post(_url(model), json={"name": "X", "params": {"overlay": "f" * 32}}).status_code
+        client.post(
+            _url(model), json={"name": "X", "params": {"overlay": "f" * 32}}, headers=press()
+        ).status_code
         == 422
     )
     empty = [{"name": "X", "params": {"overlay": ""}}]
@@ -886,7 +945,7 @@ def test_a_template_write_does_not_hold_up_a_save_on_another(
 
 def test_a_preset_saves_inputs_and_reads_them_back(client: TestClient, model: str) -> None:
     body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
-    created = client.post(f"/api/v1/models/{model}/presets", json=body)
+    created = client.post(f"/api/v1/models/{model}/presets", json=body, headers=press())
     assert created.status_code == 201
     preset = created.json()
     assert preset["params"] == {"width": 12}
@@ -897,32 +956,43 @@ def test_a_preset_saves_inputs_and_reads_them_back(client: TestClient, model: st
 
 def test_a_params_only_save_reads_as_version_zero_inputs(client: TestClient, model: str) -> None:
     created = client.post(
-        f"/api/v1/models/{model}/presets", json={"name": "Wide", "params": {"width": 20}}
+        f"/api/v1/models/{model}/presets",
+        json={"name": "Wide", "params": {"width": 20}},
+        headers=press(),
     ).json()
     assert created["inputs"] == {"params": {"width": 20}, "v": 0}
 
 
 def test_a_params_only_update_keeps_the_ui_state(client: TestClient, model: str) -> None:
     body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
-    preset = client.post(f"/api/v1/models/{model}/presets", json=body).json()
+    preset = client.post(f"/api/v1/models/{model}/presets", json=body, headers=press()).json()
     updated = client.patch(
-        f"/api/v1/models/{model}/presets/{preset['id']}", json={"params": {"width": 14}}
+        f"/api/v1/models/{model}/presets/{preset['id']}",
+        json={"params": {"width": 14}},
+        headers=press(),
     ).json()
     assert updated["inputs"] == {"params": {"width": 14}, "ui": {"tab": "lid"}, "v": 0}
 
 
 def test_preset_inputs_are_checked_as_a_render_is(client: TestClient, model: str) -> None:
     bad = {"name": "Bad", "inputs": {"params": {"nope": 1}}}
-    assert client.post(f"/api/v1/models/{model}/presets", json=bad).status_code == 422
+    assert (
+        client.post(f"/api/v1/models/{model}/presets", json=bad, headers=press()).status_code == 422
+    )
     clash = {"name": "Clash", "params": {"width": 1}, "inputs": {"params": {"width": 2}}}
-    assert client.post(f"/api/v1/models/{model}/presets", json=clash).status_code == 422
+    assert (
+        client.post(f"/api/v1/models/{model}/presets", json=clash, headers=press()).status_code
+        == 422
+    )
 
 
 def test_a_patch_whose_inputs_name_an_unknown_parameter_is_refused(
     client: TestClient, model: str
 ) -> None:
     saved = _save(client, model, "Mine", {"width": 20})
-    bad = client.patch(_url(model, saved["id"]), json={"inputs": {"params": {"nope": 1}}})
+    bad = client.patch(
+        _url(model, saved["id"]), json={"inputs": {"params": {"nope": 1}}}, headers=press()
+    )
     assert bad.status_code == 422, bad.text
     assert client.get(_url(model)).json()[0]["inputs"] == {"params": {"width": 20}, "v": 0}
 
@@ -962,7 +1032,7 @@ def _stored(conninfo: str, preset_id: str) -> tuple[Any, Any]:
 
 def _lid(client: TestClient, model_id: str) -> Any:
     body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
-    created = client.post(_url(model_id), json=body)
+    created = client.post(_url(model_id), json=body, headers=press())
     assert created.status_code == 201, created.text
     return created.json()
 
@@ -979,7 +1049,7 @@ def test_a_preset_whose_params_an_older_release_changed_reads_them_in_its_inputs
     )
     listed = {p["id"]: p for p in client.get(_url(model)).json()}
     assert listed[lid["id"]]["inputs"] == {"params": {"width": 30}, "ui": {"tab": "lid"}, "v": 0}
-    renamed = client.patch(_url(model, lid["id"]), json={"name": "Lid 2"}).json()
+    renamed = client.patch(_url(model, lid["id"]), json={"name": "Lid 2"}, headers=press()).json()
     assert renamed["params"] == {"width": 30}
     assert renamed["inputs"] == {"params": {"width": 30}, "ui": {"tab": "lid"}, "v": 0}
     assert _stored(pg_conninfo, lid["id"])[0] == {"width": 30}
@@ -991,7 +1061,7 @@ def test_a_preset_whose_params_an_older_release_changed_reads_them_in_its_inputs
 def test_an_update_with_inputs_replaces_them(client: TestClient, model: str) -> None:
     lid = _lid(client, model)
     body = {"inputs": {"params": {"width": 9}, "ui": {"tab": "base"}}}
-    updated = client.patch(_url(model, lid["id"]), json=body)
+    updated = client.patch(_url(model, lid["id"]), json=body, headers=press())
     assert updated.status_code == 200, updated.text
     assert updated.json()["params"] == {"width": 9}
     assert updated.json()["inputs"] == {"params": {"width": 9}, "ui": {"tab": "base"}, "v": 0}
@@ -1000,8 +1070,10 @@ def test_an_update_with_inputs_replaces_them(client: TestClient, model: str) -> 
 def test_a_params_only_update_is_checked_as_inputs(client: TestClient, model: str) -> None:
     """Merged into the stored inputs, the values go through the same checks and cap."""
     body = {"name": "Big", "inputs": {"params": {"width": 1}, "ui": {"blob": "x" * 40000}}}
-    big = client.post(_url(model), json=body).json()
-    refused = client.patch(_url(model, big["id"]), json={"params": {"label": "y" * 30000}})
+    big = client.post(_url(model), json=body, headers=press()).json()
+    refused = client.patch(
+        _url(model, big["id"]), json={"params": {"label": "y" * 30000}}, headers=press()
+    )
     assert refused.status_code == 422, refused.text
     assert "at most 65536" in refused.json()["detail"]
 
@@ -1036,7 +1108,7 @@ def test_the_migration_backfills_inputs_from_params(
 @pytest.mark.requires_git
 def test_a_duplicated_template_takes_its_presets_inputs_along(client: TestClient) -> None:
     body = {"name": "Mine", "inputs": {"params": {"label": "Bo"}, "ui": {"tab": "text"}}}
-    assert client.post(_url(BUILTIN), json=body).status_code == 201
+    assert client.post(_url(BUILTIN), json=body, headers=press()).status_code == 201
     created = client.post(
         f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"}, headers=press()
     )
@@ -1122,7 +1194,9 @@ def test_an_inputs_only_update_without_params_keeps_the_params(
     client: TestClient, model: str, pg_conninfo: str
 ) -> None:
     lid = _lid(client, model)
-    updated = client.patch(_url(model, lid["id"]), json={"inputs": {"ui": {"tab": "base"}}})
+    updated = client.patch(
+        _url(model, lid["id"]), json={"inputs": {"ui": {"tab": "base"}}}, headers=press()
+    )
     assert updated.status_code == 200, updated.text
     assert updated.json()["params"] == {"width": 12}
     assert updated.json()["inputs"] == {"params": {"width": 12}, "ui": {"tab": "base"}, "v": 0}

@@ -578,7 +578,7 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
     const retain: HookCallback = async (input): Promise<HookJSONOutput> => {
       if (input.hook_event_name !== 'Stop') return {}
       const sessionId = input.session_id
-      // Measured on Claude Code 2.1.283 (test/run.test.ts): when Stop fires, the
+      // Measured on Claude Code 2.1.283 and 2.1.287 (test/run.test.ts): when Stop fires, the
       // transcript file does not hold the turn's final assistant message yet.
       // The SDK hands it over as `last_assistant_message` ("Text content of the
       // last assistant message before stopping. Avoids the need to read and

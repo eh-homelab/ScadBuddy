@@ -184,6 +184,40 @@ async def test_a_delete_in_a_work_folder_of_another_inbox_is_refused(pool: Pool)
     await backend.aclose()
 
 
+@respx.mock
+async def test_a_file_moved_out_while_the_folders_load_is_not_deleted(
+    pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1272: the folder check is the last read before the DELETE; the slow part
+    (the recorded folders) comes first, so a move during it is seen."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, 'kit', 'work', 42)",
+            (HERE, INBOX),
+        )
+    folder = {"id": 42}
+    respx.get(f"{API}/library/files/79").mock(
+        side_effect=lambda _: httpx.Response(
+            200, json=shaped("FileResponse", id=79, filename="p", folder_id=folder["id"])
+        )
+    )
+    delete = respx.delete(f"{API}/library/files/79")
+    backend = BambuddyContentBackend(target(), pool)
+    load = backend._work_folders
+
+    def load_then_move(inbox: Any) -> set[int]:
+        work = load(inbox)
+        folder["id"] = 99  # the user moves the file in Bambuddy meanwhile
+        return work
+
+    monkeypatch.setattr(backend, "_work_folders", load_then_move)
+    with pytest.raises(RefusedDeleteError):
+        await backend.remove("79")
+    assert not delete.called
+    await backend.aclose()
+
+
 OTHER = "https://other-bambuddy.test"
 THERE = instance_key(OTHER)
 

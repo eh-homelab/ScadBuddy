@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | None:
     """The re-render's output that is this output: the job's only one, else the one
     built from the same Parts. A Part's key is its slug, revision, file and params, so
-    the same inputs at the same revision give the same keys."""
+    the same inputs at the same revision give the same keys. Two outputs of one job with
+    the same Parts are not told apart: a saved output records neither its index nor its
+    pipeline name (#1007 item 2)."""
     if len(job.outputs) == 1:
         return job.outputs[0]
     if record is None:
@@ -151,6 +153,12 @@ def _attach(
     except JobNotFoundError:
         outputs.fail_backfill(output_id, job_id, "the re-render is gone; try again")
         return False
+    except ValueError:
+        # The job's row did not validate: not the output's fault, and not permanent (a
+        # row written by another release mid-deploy). Left for the next pass (#1007),
+        # where a ValueError here would otherwise mark the backfill failed.
+        logger.exception("could not read a re-render's job; retrying", extra={"id": output_id})
+        return False
     if job.state in ("pending", "running"):
         return False
     if job.state != "done":
@@ -166,7 +174,7 @@ def _attach(
             output_id, job.id, "the re-render wrote no output with this output's objects"
         )
         return False
-    hold_parts(refs, output_id, chosen.manifest)
+    hold_parts(refs, output_id, chosen.manifest, job.slug)
     try:
         outputs.attach_backfill(output_id, chosen)
     except (OutputNotFoundError, FileNotFoundError):

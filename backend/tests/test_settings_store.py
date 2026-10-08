@@ -516,6 +516,28 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
     assert _fresh_load(settings).printer_rack_algorithms == {}
 
 
+def test_an_older_rack_algorithm_save_arriving_after_a_newer_one_is_refused(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """#1216: saves are ordered by the dialog's version, not by when they arrive. One the
+    dialog gave up on that turns up after the next one is refused, and the newer choice
+    stays; a resend of the same version stores the same choice again (a 503 is safe to
+    retry); and a forget is ordered too, so an older save cannot bring a choice back."""
+    store.set_printer_rack_algorithm(1, "bambuddy", version=2)
+    with pytest.raises(settings_store.RackAlgorithmSupersededError):
+        store.set_printer_rack_algorithm(1, "oldest_first", version=1)
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
+
+    assert store.set_printer_rack_algorithm(1, "bambuddy", version=2) == "bambuddy"
+    # Another printer has its own order.
+    store.set_printer_rack_algorithm(2, "oldest_first", version=1)
+
+    store.set_printer_rack_algorithm(1, None, version=3)
+    with pytest.raises(settings_store.RackAlgorithmSupersededError):
+        store.set_printer_rack_algorithm(1, "oldest_first", version=2)
+    assert _fresh_load(settings).printer_rack_algorithms == {"2": "oldest_first"}
+
+
 def test_a_bounded_settings_read_gives_up_on_a_held_table(settings: Settings) -> None:
     """#1111: a read given a timeout fails within it rather than waiting on Postgres;
     the bound is this read's own, so the next read on the same connection is not
