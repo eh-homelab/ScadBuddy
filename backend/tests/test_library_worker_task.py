@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -14,7 +16,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
-from scadbuddy.workflows.housekeeping import SWEEPS
+from scadbuddy.workflows.housekeeping import PRUNE_SWEEPS, SWEEPS
 from tests.test_print_worker_task import StubWorker
 
 
@@ -221,6 +223,31 @@ async def test_a_long_sweep_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyP
     assert len(beats) >= 3
 
 
+@pytest.mark.parametrize("sweep", PRUNE_SWEEPS)
+async def test_the_prune_sweeps_heartbeat_while_they_run(
+    sweep: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1707: the prune settles in its `finally`, describe after describe; a worker
+    lost meanwhile is noticed within the heartbeat timeout, as for the other sweeps."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+
+    async def slow_prune() -> None:
+        await asyncio.sleep(0.1)
+
+    def slow_claims(*args: object) -> None:
+        time.sleep(0.1)
+
+    monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
+    state = SimpleNamespace(render=SimpleNamespace(prune=slow_prune), paths=SimpleNamespace())
+    state.paths.claims = None
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    beats: list[object] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    await env.run(activities[sweep])
+    assert len(beats) >= 3
+
+
 @pytest.mark.parametrize("name", ["print", "library"])
 async def test_a_worker_that_does_not_stop_is_logged_under_its_name(
     name: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -235,3 +262,90 @@ async def test_a_worker_that_does_not_stop_is_logged_under_its_name(
     with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
         await main._stop_queue_worker(task, name)
     assert f"the {name} worker did not stop in time" in caplog.text
+
+
+def _blocking_work() -> tuple[threading.Event, threading.Event, threading.Event, Any]:
+    """A sweep whose thread runs until ``release``: ``entered`` once it runs, ``done``
+    once it has returned."""
+    entered, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def blocking() -> None:
+        entered.set()
+        release.wait(10)
+        done.set()
+
+    async def work() -> None:
+        await asyncio.to_thread(blocking)
+
+    return entered, release, done, work
+
+
+async def test_a_sweep_cancelled_at_shutdown_ends_after_its_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1708: the lifespan closes the stores a sweep uses once the library worker has
+    stopped. A sweep the stop cancels waits for its thread, so none still runs on
+    them by then."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    entered, release, done, work = _blocking_work()
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        env.worker_shutdown()
+        env.cancel()
+        await asyncio.sleep(0.2)
+        assert not task.done(), "the cancelled sweep waits for its thread"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert done.is_set()
+    finally:
+        release.set()
+
+
+async def test_a_sweep_cancelled_at_shutdown_waits_for_its_thread_only_so_long(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1708: the wait is bounded, so a stuck thread never holds the shutdown."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    monkeypatch.setattr(main, "SWEEP_SHUTDOWN_JOIN", 0.1)
+    entered, release, _, work = _blocking_work()
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        env.worker_shutdown()
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+            env.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+        assert "still running" in caplog.text
+    finally:
+        release.set()
+
+
+async def test_a_sweep_cancelled_while_the_worker_runs_stops_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside a shutdown nothing closes its stores, so the sweep stops at once."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    entered, release, done, work = _blocking_work()
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        env.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert not done.is_set()
+    finally:
+        release.set()
+
+
+def test_the_library_worker_has_time_to_join_its_sweeps() -> None:
+    """#1708: the lifespan waits for the library worker past its graceful shutdown and
+    the sweeps' join, so it never closes the stores under a sweep still joining."""
+    assert (
+        main.LIBRARY_GRACEFUL_SHUTDOWN.total_seconds() + main.SWEEP_SHUTDOWN_JOIN + 5
+    ) <= main.LIBRARY_WORKER_STOP_TIMEOUT

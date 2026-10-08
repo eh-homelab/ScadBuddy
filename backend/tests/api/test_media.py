@@ -1264,3 +1264,17 @@ def test_an_id_that_is_not_a_media_id_is_refused(
     response = client.put(f"/api/v1/models/{model}/{path}", json=body)
 
     assert response.status_code == 422
+
+
+def test_the_thumbnail_cache_takes_the_same_key_to_put_and_get(tmp_path: Path) -> None:
+    """#1773 4: `get` and `put` both take the `_cache_key` the caller made, so the two
+    can never key one thumbnail differently."""
+    source = tmp_path / "image.png"
+    source.write_bytes(b"png")
+    stat = source.stat()
+    key = media_api._cache_key(source, stat, 64)
+    thumbnail = media_api._Thumbnail(b"webp", "image/webp", stat)
+    cache = media_api._ThumbnailCache(size=1)
+    cache.put(key, thumbnail)
+    assert cache.get(key) is thumbnail
+    assert cache.get(media_api._cache_key(source, stat, 128)) is None

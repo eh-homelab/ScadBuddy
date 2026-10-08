@@ -549,8 +549,7 @@ class _ThumbnailCache:
             self._items.move_to_end(key)
         return thumbnail
 
-    def put(self, path: FilePath, side: int, thumbnail: _Thumbnail) -> None:
-        key = _cache_key(path, thumbnail.stat, side)
+    def put(self, key: tuple[object, ...], thumbnail: _Thumbnail) -> None:
         self._items[key] = thumbnail
         self._items.move_to_end(key)
         while len(self._items) > self.size:
@@ -582,7 +581,8 @@ async def _bounded_thumbnail_of(
             return kept
         thumbnail = await asyncio.to_thread(_thumbnail_of, path, content_type, side)
     if thumbnail.media_type == "image/webp":
-        cache.put(path, side, thumbnail)
+        # Keyed by the stat it was read with: the file may have changed since `key`.
+        cache.put(_cache_key(path, thumbnail.stat, side), thumbnail)
     return thumbnail
 
 

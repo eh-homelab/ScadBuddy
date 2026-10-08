@@ -605,7 +605,7 @@ class RenderService:
         if self.snapshots is not None:
             # The bambuddy store: the worker has no volume, so it renders the snapshot
             # of the last commit (as `submit`), and may first bring it and its fonts in.
-            revision = await self.snapshots.pin(slug, None)
+            revision = await self.snapshots.pin(slug, None, background=True)
             if revision is None:
                 # Started without one, the worker would look for a live source it has not got.
                 raise SnapshotUnavailableError(
