@@ -113,23 +113,67 @@ module ring_tab_2d() {
     }
 }
 
-// A strip along the line's vertical centre from the text origin to the last glyph
-// (the word's hull, cut to a band `outline` tall). Without it, a space, a gap
-// left by a glyph the font lacks, or two script runs that do not meet splits
-// the base into islands, and every piece but the first falls off the keyring
-// (#920).
-module spine_2d() {
+// The enclosed holes of the word: the inside of an O, or a gap two joined script
+// letters close off.
+module counters_2d() {
+    difference() {
+        fill() name_2d();
+        name_2d();
+    }
+}
+
+// Every glyph drawn down (or up) to the line's vertical centre, inside its own
+// width: a run of glyphs that sits wholly above or below the centre band, such
+// as a trailing "...", "_" or a quote, then still meets it (#1450).
+module drop_to_centre_2d() {
     intersection() {
-        // From the text origin, where the keyring tab's neck ends, not the
-        // first glyph: leading spaces or a leading missing glyph would
-        // otherwise leave the tab on its own island.
-        hull() {
+        minkowski() {
             glyphs_2d();
-            // Not for an empty name: there is no word to join, and the square alone
-            // would leave a stray lump of base.
-            if (name != "") translate([0, -outline / 2]) square([0.01, outline]);
+            translate([0, -2 * text_size]) square([0.01, 2 * text_size]);
         }
-        square([2 * bed_x, outline], center = true);
+        translate([-bed_x, 0]) square([2 * bed_x, 2 * text_size]);
+    }
+    intersection() {
+        minkowski() {
+            glyphs_2d();
+            square([0.01, 2 * text_size]);
+        }
+        translate([-bed_x, -2 * text_size]) square([2 * bed_x, 2 * text_size]);
+    }
+}
+
+// What holds the base together (#920): a band `outline` tall along the line's
+// vertical centre, from the text origin to the last glyph, and every glyph drawn
+// to it. Without it, a space, a gap left by a glyph the font lacks, two script
+// runs that do not meet, or a run off the centre line splits the base into
+// islands, and every piece but the first falls off the keyring. The word's
+// counters are cut back out, so a counter wider than `2 * outline` stays
+// see-through, as it would without the spine (#1450).
+module spine_2d() {
+    difference() {
+        union() {
+            intersection() {
+                square([2 * bed_x, outline], center = true);
+                // From the text origin, where the keyring tab's neck ends, not the
+                // first glyph: leading spaces or a leading missing glyph would
+                // otherwise leave the tab on its own island.
+                hull() {
+                    drop_to_centre_2d();
+                    translate([0, -outline / 2]) square([0.01, outline]);
+                }
+                // Only where there is a glyph (#1453): the glyphs drawn to the centre
+                // and their mirror image span the origin, but a name that renders
+                // nothing (empty, spaces only, or only glyphs the font lacks) leaves
+                // this empty, so the origin's square does not grow into a stray lump
+                // of base.
+                hull() {
+                    drop_to_centre_2d();
+                    mirror([1, 0]) drop_to_centre_2d();
+                }
+            }
+            drop_to_centre_2d();
+        }
+        counters_2d();
     }
 }
 
