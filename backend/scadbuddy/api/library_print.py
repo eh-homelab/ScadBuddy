@@ -1,9 +1,9 @@
 """``/api/v1/print/library/…`` — printing a file already in Bambuddy's library (#313).
 
 The same dialog as an output's (``printing.py``): its choices, filament step and run,
-over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`. Nothing is uploaded, and
-nothing is recorded in ScadBuddy; the images are proxied so the API key never reaches
-the browser.
+over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`. Nothing is uploaded but a
+copy stating a High Flow choice for the slicer (#484), and nothing is recorded in
+ScadBuddy; the images are proxied so the API key never reaches the browser.
 """
 
 from __future__ import annotations

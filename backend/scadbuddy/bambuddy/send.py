@@ -408,22 +408,53 @@ async def _left_unrecorded(
     if not rows:
         return None
     recorded = await uploads.recorded([row.id for row in rows])
+    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], payload)
+    if found is not None:
+        logger.info(
+            "an earlier attempt's upload was never recorded; taking it",
+            extra={"library_file_id": found.id, "folder_id": found.folder_id},
+        )
+    return found
+
+
+async def _same_bytes(
+    client: BambuddyClient, rows: Sequence[LibraryFile | LibraryListRow], payload: bytes
+) -> LibraryFile | None:
+    """The newest of ``rows`` whose ``file_hash`` is the sha256 of ``payload``, or
+    ``None``. A row whose read fails is passed over."""
     digest = hashlib.sha256(payload).hexdigest()
     # Newest first: a retry's own upload is the latest of its name.
     for row in sorted(rows, key=lambda row: row.id, reverse=True):
-        if row.id in recorded:
-            continue
         try:
             found = await client.library_file(row.id)
         except ApiError:
             continue
         if found.file_hash == digest:
-            logger.info(
-                "an earlier attempt's upload was never recorded; taking it",
-                extra={"library_file_id": found.id, "folder_id": found.folder_id},
-            )
             return found
     return None
+
+
+async def ensure_file(
+    client: BambuddyClient, settings: StoredSettings, filename: str, payload: bytes
+) -> int:
+    """The library file id of ``payload`` in the inbox under ``filename``, uploading it
+    unless the inbox has those bytes under that name already.
+
+    For a file ScadBuddy derives from one in the library (#484), which no output
+    records: it is found again by its name, size and hash, as :func:`_left_unrecorded`
+    finds an output's, so printing the same file the same way again uploads nothing.
+    A listing that fails leaves it to the upload."""
+    folder = settings.library_folder_id
+    listed = await _listing(client, folder) or []
+    rows = [
+        row
+        for row in listed
+        if row.file_size == len(payload) and row.filename.casefold() == filename.casefold()
+    ]
+    found = await _same_bytes(client, rows, payload)
+    if found is not None:
+        return found.id
+    return (await client.upload_library_file(filename, payload, folder_id=folder)).id
 
 
 async def _delete_copy(
