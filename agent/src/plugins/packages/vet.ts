@@ -111,6 +111,9 @@ export type Vetting = {
 const NON_COMMAND_MCP_TYPE = 'http'
 
 /** The least a package name must be, approved or not; the stricter rules are allowable. */
+/** ScadBuddy's own plugin (plugins/scadbuddy), which harness/ownPlugin.ts loads. */
+const OWN_PLUGIN_NAME = 'scadbuddy'
+
 export const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 // The hook events a package may use: an allowlist, so an event added to
@@ -392,6 +395,12 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     name = rawName
     if (!PLUGIN_NAME_RE.test(rawName) || rawName.includes('--')) {
       problems.push(`plugin name "${rawName}" is not 2–32 lower-case letters, digits and single hyphens, starting with a letter`)
+    } else if (rawName === OWN_PLUGIN_NAME) {
+      // The repository's plugins/scadbuddy, for Claude Code outside ScadBuddy:
+      // said first, since its other refusals are only the external setup.
+      problems.unshift(
+        `plugin name "${rawName}" is reserved: this is ScadBuddy's own plugin, for Claude Code outside ScadBuddy; the assistant already loads its skills and subagents, with its tools built in`,
+      )
     } else if (RESERVED_PLUGIN_NAMES.has(rawName)) {
       problems.push(`plugin name "${rawName}" is reserved: it may clash with ScadBuddy's own plugin or tools`)
     }
