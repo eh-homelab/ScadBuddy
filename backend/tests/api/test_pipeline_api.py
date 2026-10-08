@@ -104,6 +104,27 @@ def test_an_output_saves_its_bom_record_and_files(
     )
 
 
+def test_an_extra_file_download_is_not_gzipped(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """An extra is served as ``application/octet-stream`` and is often a zip or a 3MF
+    already, so gzipping it spends CPU for nothing (#1855)."""
+    with_pipeline(paths, model, PIPELINE.replace("'a.txt': 'hi'", "'big.bin': 'x' * 5000"))
+    job = _done(client, model, {"params": {}, "v": 1})
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0}, headers=press()
+    )
+    assert created.status_code in (200, 201), created.text
+    body = client.get(
+        f"/api/v1/outputs/{created.json()['id']}/files/big.bin",
+        headers={"Accept-Encoding": "gzip"},
+    )
+    assert body.status_code == 200
+    assert body.headers["content-type"] == "application/octet-stream"
+    assert "content-encoding" not in body.headers
+    assert body.content == b"x" * 5000
+
+
 def test_an_output_whose_files_left_the_store_is_a_409_and_writes_nothing(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
