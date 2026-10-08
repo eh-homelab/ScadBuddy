@@ -58,6 +58,18 @@ describe('extractors', () => {
     ])
   })
 
+  it("records a file tool's revision from its own answer, and nothing for an unchanged write", () => {
+    const written = { status: 'written', slug: 'box', file_path: 'model.scad', revision: C2, previous: C1, diff: '' }
+    expect(touches('edit_file', { slug: 'box', file_path: 'model.scad' }, written)).toEqual([
+      { type: 'revision', id: C2, action: 'created', model: 'box', before: C1, after: C2 },
+    ])
+    expect(touches('write_file', { slug: 'box' }, { status: 'unchanged', slug: 'box', file_path: 'model.scad', revision: C1 })).toEqual([])
+    // Still running past the follow window: no revision to name yet.
+    expect(touches('multi_edit', { slug: 'box' }, { status: 'running', operation_id: 'op', next: '' })).toEqual([
+      { type: 'model', id: 'box', action: 'modified', model: 'box' },
+    ])
+  })
+
   it('never takes the restored revision as the parent of the restore', () => {
     // `commit` is what was restored FROM; the new commit's parent is not in the call.
     expect(touches('restore_version', { slug: 'box', commit: C1 }, { slug: 'box', version: C2 })).toEqual([
