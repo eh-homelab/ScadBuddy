@@ -148,14 +148,14 @@ usage to win over color picks the position by hand.
    `None == None` is not "already holds this color". This saves a purge. It is
    Bambuddy's own preference, kept.
 3. **The algorithm key** (§4): for Least used, `print_seconds` and then
-   `prints`, both ascending.
+   `prints`, both ascending, each with the hotend's open picks counted in (#1079).
 4. **Lowest position**, as the final tiebreak, matching Bambuddy.
 
 ## 4. Algorithms
 
 | Algorithm | Key | Default |
 |---|---|---|
-| Least used | Fewest `print_seconds` on that hotend's serial, then fewest `prints` | Yes |
+| Least used | Fewest `print_seconds` on that hotend's serial, then fewest `prints`, open picks counted (below) | Yes |
 | Oldest first | Earliest `first_seen_at` for the serial | |
 | Newest first | Latest `first_seen_at` | |
 | Let Bambuddy pick | Send no choice; Bambuddy's color-then-lowest rule applies | |
@@ -299,10 +299,20 @@ keeps its `first_seen_at` and its print history, and the write updates
   saved for it and its use is never counted. An owner who prints mostly from
   the library sees "least used" fall through to color and lowest position.
   Tracked in #1073.
-- Known limit: ranking reads settled use only. A pick counts once its print
-  settles, so prints queued back to back rank against the same totals and
-  Least used gives them all the same hotend. Counting open picks is tracked in
-  #1079.
+- Open picks (#1079): a pick with no `rack_nozzle_prints` row for its queue
+  item and group (the print row carries `queue_item_id` since
+  `20261008T1351Z_rack_nozzle_pending.sql`) is still queued or printing, and
+  its serial's `Usage.pending` counts it. Least used ranks on
+  `print_seconds + pending × estimate`, then `prints + pending`, where the
+  estimate is the mean settled print over the rack's hotends (0 before any has
+  settled). So prints queued back to back spread over the rack: on an unused
+  rack the count breaks the tie, and with history each open pick costs one
+  average print. A run's plates count each other too: each plate's picks are
+  saved before the next plate is ranked. A cancelled queue item never settles,
+  so a pick stops counting `PENDING_PICK_MAX_AGE` (3 days) after it was made;
+  a print still waiting or running past that stops counting until it settles.
+  The dialog lists each position's open picks as "N queued". Oldest and
+  Newest first ignore them.
 - Until history builds up every count is 0, so color and then position decide. If
   the printer's `wear` ever reports real values, it replaces `print_seconds` as the
   key with no UI change.

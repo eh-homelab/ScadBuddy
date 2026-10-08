@@ -52,6 +52,10 @@ ARCHIVE_TIMEOUT = 15.0
 #: off records nothing: its archives are recorded only by that output's next settle,
 #: which a one-off output may never have. That loss is the price of freeing the thread.
 SETTINGS_READ_TIMEOUT = 10.0
+#: How long an open pick (one whose print has not settled) counts toward Least used
+#: (#1079, spec §4). A cancelled queue item never settles, so its pick ages out here; a
+#: print still waiting or running past it stops counting until it settles.
+PENDING_PICK_MAX_AGE = timedelta(days=3)
 
 #: What each advisory store write or read below logs when it swallows an exception, by
 #: type (#1112). Named so the tests' programming-error guard reads the same strings.
@@ -194,7 +198,8 @@ class RackUsageStore:
             )
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
-        """One :class:`Usage` per non-empty serial; zeros for one with no rows (spec §4)."""
+        """One :class:`Usage` per non-empty serial; zeros for one with no rows (spec §4).
+        ``pending`` counts its open picks younger than ``PENDING_PICK_MAX_AGE`` (#1079)."""
         unique = sorted({serial for serial in serials if serial})
         if not unique:
             return {}
@@ -205,12 +210,18 @@ class RackUsageStore:
             rows = conn.execute(
                 "SELECT s.serial, seen.first_seen_at, count(p.archive_id) AS prints,"
                 " coalesce(sum(p.print_seconds), 0) AS print_seconds,"
-                " coalesce(sum(p.grams), 0) AS grams"
+                " coalesce(sum(p.grams), 0) AS grams,"
+                # Open picks (#1079): no print row for the pick's item and group yet.
+                " (SELECT count(*) FROM rack_nozzle_picks AS k"
+                "  WHERE k.serial = s.serial AND k.picked_at > now() - %s"
+                "  AND NOT EXISTS (SELECT 1 FROM rack_nozzle_prints AS done"
+                "   WHERE done.queue_item_id = k.queue_item_id"
+                "   AND done.group_id = k.group_id)) AS pending"
                 " FROM unnest(%s::text[]) AS s(serial)"
                 " LEFT JOIN rack_nozzle_seen AS seen ON seen.serial = s.serial"
                 " LEFT JOIN rack_nozzle_prints AS p ON p.serial = s.serial"
                 " GROUP BY s.serial, seen.first_seen_at",
-                (unique,),
+                (PENDING_PICK_MAX_AGE, unique),
             ).fetchall()
         return {
             str(row["serial"]): Usage(
@@ -218,6 +229,7 @@ class RackUsageStore:
                 print_seconds=int(row["print_seconds"]),
                 grams=float(row["grams"]),
                 first_seen_at=row["first_seen_at"],
+                pending=int(row["pending"]),
             )
             for row in rows
         }
@@ -301,8 +313,8 @@ class RackUsageStore:
         with self._ready().connection() as conn:
             cursor = conn.execute(
                 "INSERT INTO rack_nozzle_prints"
-                " (archive_id, group_id, serial, settled_at, print_seconds, grams)"
-                " SELECT %s, group_id, serial, %s, %s, %s FROM rack_nozzle_picks"
+                " (archive_id, group_id, serial, settled_at, print_seconds, grams, queue_item_id)"
+                " SELECT %s, group_id, serial, %s, %s, %s, queue_item_id FROM rack_nozzle_picks"
                 " WHERE queue_item_id = %s"
                 " ON CONFLICT (archive_id, group_id) DO NOTHING",
                 (archive_id, settled_at, print_seconds, grams, queue_item_id),

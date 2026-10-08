@@ -181,6 +181,39 @@ def test_an_unused_hotend_ranks_before_a_used_one() -> None:
     assert positions(rank_rack([group()], rack, "least_used", usage, {})) == {0: 3}
 
 
+def test_least_used_spreads_prints_queued_back_to_back_over_an_unused_rack() -> None:
+    """#1079: an open pick counts, so the second print queued before the first settles
+    takes another hotend, not the same one again."""
+    rack = [slot(2), slot(3)]
+    usage = {serial(17): Usage(pending=1), serial(18): Usage()}
+    picks = rank_rack([group()], rack, "least_used", usage, {})
+    assert positions(picks) == {0: 3}
+    assert picks[0].reason == "least used"
+
+
+def test_an_open_pick_counts_as_one_average_print_of_the_rack() -> None:
+    """#1079: with history, each open pick adds the rack's mean settled print time, so a
+    hotend 100 s ahead with a queued print (mean 300 s) ranks behind one that is not."""
+    rack = [slot(2), slot(3)]
+    usage = {
+        serial(17): Usage(prints=2, print_seconds=500, pending=1),
+        serial(18): Usage(prints=2, print_seconds=700),
+    }
+    picks = rank_rack([group()], rack, "least_used", usage, {})
+    assert positions(picks) == {0: 3}
+    [best, runner] = picks[0].candidates
+    assert (best.position, best.pending, runner.pending) == (3, 0, 1)
+
+
+def test_an_open_pick_does_not_change_oldest_or_newest_first() -> None:
+    rack = [slot(2), slot(3)]
+    usage = {
+        serial(17): Usage(first_seen_at=datetime(2026, 8, 1, tzinfo=UTC), pending=3),
+        serial(18): Usage(first_seen_at=datetime(2026, 9, 1, tzinfo=UTC)),
+    }
+    assert positions(rank_rack([group()], rack, "oldest_first", usage, {})) == {0: 2}
+
+
 def test_oldest_and_newest_first_order_on_first_seen_with_the_unseen_last_and_first() -> None:
     rack = [slot(2), slot(3), slot(4)]
     usage = {
