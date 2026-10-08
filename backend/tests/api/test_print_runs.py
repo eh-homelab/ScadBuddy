@@ -359,6 +359,38 @@ def test_a_print_after_a_failed_run_is_the_progress_again(client: TestClient, mo
 
 
 @respx.mock
+def test_the_output_listing_says_which_outputs_failed_before_queueing(
+    client: TestClient, model: str
+) -> None:
+    """#1831: such a run records nothing else on the output, so the History tab could not
+    tell the output had been printed at all. The listing says so until a later run."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    def listed() -> bool:
+        [output] = [
+            entry
+            for entry in client.get(f"/api/v1/models/{model}/outputs").json()
+            if entry["id"] == output_id
+        ]
+        flag: bool = output["failed_before_queueing"]
+        return flag
+
+    assert listed() is False
+    failed = start(client, output_id, {**body(), "filament_plan": {"slots": []}})
+    assert follow_run(client, failed.json()["id"])["status"] == "failed"
+    assert listed() is True
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["failed_before_queueing"] is True
+
+    printed = start(client, output_id, body())
+    assert follow_run(client, printed.json()["id"])["status"] == "succeeded"
+    assert listed() is False
+
+
+@respx.mock
 def test_a_failed_slice_is_the_runs_failure_in_bambuddys_words(
     client: TestClient, model: str
 ) -> None:

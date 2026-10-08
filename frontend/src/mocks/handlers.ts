@@ -2681,6 +2681,7 @@ export const handlers = [
       bom: [],
       files: [],
       record: null,
+      failed_before_queueing: false,
     }
     state.outputs = [output, ...state.outputs]
     await delay(120)
