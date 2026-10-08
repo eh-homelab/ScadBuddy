@@ -303,6 +303,30 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect(await (await m.send(id, browser, 'go on')).done).toMatchObject({ kind: 'result', subtype: 'success' })
     })
 
+    // #1650: the audit's "before" is the raise's own, not a later read that another raise may have moved.
+    it('audits its own before and after when another raise lands right after it', async () => {
+      const id = await spentSession()
+      let raced = false
+      const sql = new Proxy(db.sql, {
+        get(target, prop) {
+          if (prop !== 'unsafe') return Reflect.get(target, prop) as unknown
+          return async (query: string, params?: unknown[]) => {
+            const rows = await target.unsafe(query, params as never)
+            if (!raced && query.trimStart().startsWith('UPDATE ai_sessions r SET budget_usd')) {
+              raced = true
+              await target`UPDATE ai_sessions SET budget_usd = budget_usd + 5 WHERE id = ${id}`
+            }
+            return rows
+          }
+        },
+      })
+      const racing = manager({ sql, paths: await tempPaths(), settings, audit })
+      await racing.raiseBudget(id, browser, 1, { surface: 'http' })
+      expect(raced).toBe(true)
+      const [row] = await auditRows('session_budget_usd')
+      expect(row).toMatchObject({ outcome: 'ok', detail: '$1.00 + $1.00 = $2.00 ($1.02 spent)' })
+    })
+
     it('is owner-only: a session another principal controls is refused until you take it over', async () => {
       const { session } = await m.start(agentA, { origin: 'mcp' })
       const refused = await raise(session.id, { add_usd: 1 })

@@ -2029,16 +2029,16 @@ export class SessionManager {
     }
     // One statement on the lineage's root, so two raises add up and the owner cannot change
     // in between; the owner checked is this session's, which need not be the root's.
-    const [hit] = await this.deps.sql.unsafe<{ id: string }[]>(
+    const [hit] = await this.deps.sql.unsafe<{ id: string; budget_usd: number }[]>(
       `UPDATE ai_sessions r SET budget_usd = round((r.budget_usd + $2)::numeric, 2)::double precision, updated_at = now()
          FROM ai_sessions s
         WHERE s.id = $1 AND s.owner_kind = $3 AND s.owner_id = $4 AND r.id = coalesce(s.budget_root_id, s.id)
           AND round((r.budget_usd + $2)::numeric, 2) <= $5
-       RETURNING s.id`,
+       RETURNING s.id, r.budget_usd`,
       [id, add, principal.kind, principal.id, MAX_SESSION_BUDGET_USD],
     )
     const row = hit ? await this.row(id) : undefined
-    if (!row) {
+    if (!hit || !row) {
       const now = (await this.row(id)) ?? session
       throw sameOwner(principal, now.owner)
         ? new SessionError(
@@ -2048,6 +2048,9 @@ export class SessionManager {
         : new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
     }
     const raised = row
+    // The before and after this raise made, from its own UPDATE: the read above may
+    // already show a later raise (#1650).
+    const after = hit.budget_usd
     await this.deps.audit?.record({
       kind: 'settings',
       action: 'session_budget_usd',
@@ -2056,7 +2059,7 @@ export class SessionManager {
       clientIp: context.clientIp,
       sessionId: id,
       outcome: 'ok',
-      detail: `${usd(raised.budgetUsd - add)} + ${usd(add)} = ${usd(raised.budgetUsd)} (${usd(raised.costUsd)} spent)`,
+      detail: `${usd(after - add)} + ${usd(add)} = ${usd(after)} (${usd(raised.costUsd)} spent)`,
       startedAt,
       finishedAt: new Date(),
     })
