@@ -31,6 +31,14 @@ describe('LibraryPage', () => {
     // Picks are kept across folders: one file here, one in MakerWorld.
     await user.click(screen.getByTestId('library-folder-1'))
     await user.click(await screen.findByRole('checkbox', { name: "Select Clara's Wand.3mf" }))
+    // Picks out of sight can all be dropped at once.
+    await user.click(screen.getByRole('button', { name: 'Clear selection' }))
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    await user.click(screen.getByRole('checkbox', { name: "Select Clara's Wand.3mf" }))
+    await user.click(screen.getByTestId('library-folder-root'))
+    await user.click(
+      within(await screen.findByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }),
+    )
     await user.click(screen.getByRole('button', { name: 'Arrange selected (2)' }))
     const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
     expect(await within(dialog).findByLabelText('Copies of wall — Reagan')).toHaveValue(2)

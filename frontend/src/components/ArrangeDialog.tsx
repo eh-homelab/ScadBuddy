@@ -154,6 +154,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       setAdded([])
       setAdding(null)
       setFiling(null)
+      // A read that failed (a network error, say) is tried again.
+      setRead((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
       return
     }
     running.current?.abort()

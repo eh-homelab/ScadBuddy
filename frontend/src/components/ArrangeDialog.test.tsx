@@ -71,6 +71,25 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     expect(screen.getByRole('button', { name: 'Arrange' })).toBeDisabled()
   })
 
+  it('reads a failed output again when it is opened again', async () => {
+    const flaky = { ...clip, output_id: '7'.repeat(32) }
+    let reads = 0
+    server.use(
+      http.get(`/api/v1/outputs/${flaky.output_id}`, () => {
+        reads += 1
+        return reads === 1 ? problem(503, 'Service Unavailable', 'try again') : HttpResponse.json({ ...first, id: flaky.output_id })
+      }),
+    )
+    const dialog = (open: boolean) => (
+      <ArrangeDialog open={open} sources={fromFiles([flaky])} onClose={vi.fn()} onArranged={vi.fn()} />
+    )
+    const { rerender } = renderPage(dialog(true))
+    expect(await screen.findByText(/try again\./)).toBeVisible()
+    rerender(dialog(false))
+    rerender(dialog(true))
+    expect(await screen.findByLabelText('Copies of wall — Reagan')).toBeVisible()
+  })
+
   it('lists an output once when its library file is added too', async () => {
     renderPage(
       <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([clip])]} onClose={vi.fn()} onArranged={vi.fn()} />,

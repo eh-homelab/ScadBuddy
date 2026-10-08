@@ -120,6 +120,11 @@ export function LibraryPage() {
             >
               Arrange selected ({picked.length})
             </Button>
+            {picked.length > 0 && (
+              <Button size="sm" onClick={() => setPicked([])}>
+                Clear selection
+              </Button>
+            )}
             <span id="library-advanced" className="ml-auto text-[13px] text-ink">
               Advanced
             </span>
