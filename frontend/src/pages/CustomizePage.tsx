@@ -50,7 +50,7 @@ import { saveOutput } from '../lib/saveOutput'
 import { findParamRow } from '../template-ui/elements'
 import type { HostDeps } from '../template-ui/host'
 import { TemplateUi } from '../template-ui/TemplateUi'
-import type { TemplateUiFailure, UiDeclaration } from '../template-ui/types'
+import type { GenerateResult, TemplateUiFailure, UiDeclaration } from '../template-ui/types'
 import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
@@ -472,7 +472,7 @@ export function CustomizePage() {
     return current
   }, [live])
   // The Host's Generate in flight, with the template it is for.
-  const generating = useRef<{ key: string; run: Promise<{ jobId: string; outputId: string }> } | null>(null)
+  const generating = useRef<{ key: string; run: Promise<GenerateResult> } | null>(null)
   const hostDeps: HostDeps = useMemo(() => {
     const key = `${slug}\n${uiVersion ?? ''}`
     return {
@@ -495,7 +495,7 @@ export function CustomizePage() {
       generate: () => {
         if (generating.current?.key === key) return generating.current.run
         setUiGenerate({ generating: true, error: null })
-        const run = (async () => {
+        const run = (async (): Promise<GenerateResult> => {
           await waitFor(() => (live.current.ready ? true : undefined), {
             timeout: 120_000,
             what: 'the preview render of the current inputs',
@@ -511,6 +511,8 @@ export function CustomizePage() {
             () => live.current.output?.id === created.id || !sameJson(savedExtra, live.current.extra),
             'the saved output',
           )
+          // Left behind: said so, so a template does not take it for what is on screen (#1471).
+          if (live.current.output?.id !== created.id) return { jobId: done.id, outputId: created.id, superseded: true }
           return { jobId: done.id, outputId: created.id }
         })()
         generating.current = { key, run }

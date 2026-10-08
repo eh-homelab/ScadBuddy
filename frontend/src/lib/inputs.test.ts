@@ -1,5 +1,31 @@
 import { describe, expect, it } from 'vitest'
-import { getPath, joinInputs, mergePatch, NO_EXTRA, setPath, splitInputs } from './inputs'
+import { getPath, joinInputs, mergePatch, NO_EXTRA, sameJson, setPath, splitInputs } from './inputs'
+
+describe('sameJson (#1471)', () => {
+  it.each([
+    ['reordered keys', { a: 1, b: { c: [1, 2] } }, { b: { c: [1, 2] }, a: 1 }],
+    ['nested objects', { a: { b: { c: null } } }, { a: { b: { c: null } } }],
+    ['scalars', 'x', 'x'],
+    ['both missing', undefined, undefined],
+  ])('equal: %s', (_name, a, b) => {
+    expect(sameJson(a, b)).toBe(true)
+    expect(sameJson(b, a)).toBe(true)
+  })
+  it.each([
+    ['arrays of different lengths', [1, 2], [1, 2, 3]],
+    ['arrays in a different order', [1, 2], [2, 1]],
+    ['a nested difference', { a: { b: 1 } }, { a: { b: 2 } }],
+    ['[] and {}', [], {}],
+    ['null and {}', null, {}],
+    ['undefined and {}', undefined, {}],
+    ['a key present as null and a missing key', { a: 1, b: null }, { a: 1 }],
+    ['different keys, same count', { a: null }, { b: null }],
+    ['1 and "1"', 1, '1'],
+  ])('not equal: %s', (_name, a, b) => {
+    expect(sameJson(a, b)).toBe(false)
+    expect(sameJson(b, a)).toBe(false)
+  })
+})
 
 describe('splitInputs / joinInputs', () => {
   it('splits params from the UI state and joins them back', () => {
