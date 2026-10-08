@@ -14,7 +14,7 @@ import {
   validateRef,
 } from './source.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
-import { type Endpoint, vetPackage } from './vet.js'
+import { capProblems, type Endpoint, vetPackage } from './vet.js'
 
 // Installing a plugin package, and turning its pin back into a directory for a
 // harness run (issue #297, "Installing a plugin"; the SDK "loads plugins by
@@ -212,8 +212,9 @@ export class PackageInstaller {
     const vetting = vetPackage(dest, fallbackName)
     const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
     // A fatal problem refuses the package outright, but the refusal names
-    // every problem: the allowable ones are reasons too.
-    if (fatal.length || !vetting.review) throw new PackageRefusedError([...new Set([...vetting.problems, ...fatal])])
+    // every problem: the allowable ones are reasons too. Fatal first, so the
+    // cap never hides one.
+    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.all]))
     return { tree, review: vetting.review }
   }
 

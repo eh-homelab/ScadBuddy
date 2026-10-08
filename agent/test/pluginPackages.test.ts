@@ -480,10 +480,30 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     const own = await installer.prepare(source).catch((e: unknown) => e)
     expect(own).toBeInstanceOf(PackageRefusedError)
     const problems = (own as PackageRefusedError).problems
-    expect(problems[0]).toMatch(/ScadBuddy's own plugin.*already loads/)
+    expect(problems[0]).toMatch(/MCP server "scadbuddy": \$\{user_config\.scadbuddy_url\}\/mcp is not a valid URL/)
+    expect(problems[1]).toMatch(/ScadBuddy's own plugin.*already loads/)
     expect(problems.join('\n')).toMatch(/userConfig/)
     expect(problems.join('\n')).toMatch(/MCP server "scadbuddy" references a variable/)
-    expect(problems.join('\n')).toMatch(/MCP server "scadbuddy": \$\{user_config\.scadbuddy_url\}\/mcp is not a valid URL/)
+
+    // With nothing fatal, the name alone stays allowable, as any reserved name.
+    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })
+    const allowable = await installer.prepare(source)
+    expect(allowable.review.refused).toEqual([expect.stringMatching(/reserved: this is ScadBuddy's own plugin/)])
+  })
+
+  it('lists a fatal problem before the cap cuts the allowable ones', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({
+      ...GREETER,
+      ...many,
+      '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'not a url' } } }),
+    })
+    const err = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem": not a url is not a valid URL/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
   })
 
   it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {
