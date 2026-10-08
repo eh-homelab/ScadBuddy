@@ -6,6 +6,7 @@ import type {
   PrintOptions,
   PrintRunRequest,
   PrintRunResult,
+  PrintSequence,
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
@@ -33,6 +34,8 @@ interface RunInput {
   projectId: number | null | undefined
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   options: PrintOptions
+  /** #1862 — this print's sequence; `null` leaves it to the template and the process. */
+  printSequence: PrintSequence | null
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
   rackPosition: number | null
   /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
@@ -70,6 +73,7 @@ export function useRunPrint({
   copies,
   projectId,
   options,
+  printSequence,
   rackPosition,
   rackAlgorithm,
   onRan,
@@ -99,7 +103,19 @@ export function useRunPrint({
   useEffect(() => {
     setRunError(null)
     setRefused(false)
-  }, [nozzles, tier, processName, bedType, plan, overrides, printerId, plate, rackPosition, rackAlgorithm])
+  }, [
+    nozzles,
+    tier,
+    processName,
+    bedType,
+    plan,
+    overrides,
+    printerId,
+    plate,
+    printSequence,
+    rackPosition,
+    rackAlgorithm,
+  ])
 
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
@@ -152,6 +168,7 @@ export function useRunPrint({
         all_plates: plate === 'all',
         ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
+        ...(printSequence === null ? {} : { print_sequence: printSequence }),
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,
         // One per press: the same choices printed again are a new print, while
