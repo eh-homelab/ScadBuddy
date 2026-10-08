@@ -156,9 +156,10 @@ def library_worker(
 ) -> Worker:
     """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
     library commands' ``Operation``, the preview backfill). A stop gives a running
-    sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5): a cancelled one
-    only stops waiting, its thread goes on while the lifespan closes the stores it
-    uses. A sweep longer than that (an asset sweep's converge) is still cancelled."""
+    sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5). A sweep longer
+    than that (an asset sweep's converge) is then cancelled, and gets
+    `main.SWEEP_SHUTDOWN_JOIN` more for its thread to return (#1708), so the lifespan
+    does not close the stores under it."""
     return Worker(
         client,
         task_queue=task_queue,
