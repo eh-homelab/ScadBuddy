@@ -154,6 +154,18 @@ def test_an_unknown_api_path_is_a_problem_404_in_the_composed_app(
         assert wrong.headers["allow"] == "GET"
         assert wrong.headers["content-type"] == "application/problem+json"
 
+        # FastAPI's routes add no HEAD for a GET (#1454): it is a wrong method like any other.
+        head = client.head("/api/v1/models")
+        assert head.status_code == 405
+        assert head.headers["allow"] == "GET, POST"
+
+        # A WebSocket route asked over plain HTTP is named as one, not reported missing.
+        for path in ("/api/v1/ws", "/api/v1/lsp"):
+            socket = client.get(path)
+            assert socket.status_code == 426, path
+            assert socket.headers["upgrade"] == "websocket", path
+            assert socket.json()["detail"] == f"GET {path} is a WebSocket endpoint", path
+
         slash = client.get("/api/v1/models/", follow_redirects=False)
         assert slash.status_code == 404
         assert slash.json()["detail"].endswith("did you mean /api/v1/models?")

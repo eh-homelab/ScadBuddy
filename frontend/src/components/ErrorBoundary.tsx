@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { Component, type ReactNode } from 'react'
 
 interface Props {
   children: ReactNode
@@ -25,13 +25,15 @@ export class ErrorBoundary extends Component<Props, State> {
     return { error: error instanceof Error ? error : new Error(String(error)) }
   }
 
-  override componentDidCatch(error: unknown, info: ErrorInfo) {
-    console.error('A component failed to render', error, info.componentStack)
+  // No console.error here: React 19 already reports every caught error (#1446).
+  override componentDidCatch(error: unknown) {
     this.props.onError?.(error instanceof Error ? error : new Error(String(error)))
   }
 
-  override componentDidUpdate(previous: Props) {
-    if (this.state.error && !Object.is(previous.resetKey, this.props.resetKey)) {
+  override componentDidUpdate(previous: Props, previousState: State) {
+    // Only an error already shown before this update: one caught in the very update that
+    // changed resetKey belongs to the new children, and clearing it would hide it (#1456).
+    if (previousState.error && !Object.is(previous.resetKey, this.props.resetKey)) {
       this.setState({ error: null })
     }
   }

@@ -11,7 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
+from starlette.routing import Host
 from starlette.testclient import TestClient
 
 from scadbuddy.api.static import IMMUTABLE, REVALIDATE, SPAStaticFiles
@@ -167,3 +168,73 @@ def test_a_real_api_route_with_the_wrong_method_is_still_a_405(tmp_path: Path) -
     missing = client.get("/api/v1/nope/")
     assert missing.status_code == 404
     assert missing.json()["detail"] == "no API route matches GET /api/v1/nope/"
+
+
+def _api_app(tmp_path: Path) -> FastAPI:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    app = FastAPI()
+    install_problem_handlers(app)
+
+    @app.get("/api/v1/things/{thing}")
+    def _thing(thing: str) -> dict[str, str]:
+        return {"thing": thing}
+
+    return app
+
+
+def test_the_hint_never_names_the_url_the_client_sent(tmp_path: Path) -> None:
+    """#1458: a route that matches the path by no method the probe knows must not be
+    offered back as "did you mean" the very URL that was sent."""
+    app = _api_app(tmp_path)
+
+    @app.api_route("/api/v1/odd", methods=["TRACE"])
+    def _odd() -> None: ...
+
+    app.mount("/", SPAStaticFiles(tmp_path / "dist"), name="frontend")
+    response = TestClient(app).get("/api/v1/odd")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "no API route matches GET /api/v1/odd"
+
+
+def test_the_probe_carries_the_request_scope(tmp_path: Path) -> None:
+    """#1454: a route whose ``matches`` reads more than the path (``Host`` reads the
+    headers) is probed with the request's own scope, so the 404 never becomes a 500."""
+    app = _api_app(tmp_path)
+    app.router.routes.append(Host("other.example", app=FastAPI()))
+    app.mount("/", SPAStaticFiles(tmp_path / "dist"), name="frontend")
+    response = TestClient(app).get("/api/v1/nope")
+    assert response.status_code == 404
+
+
+def test_plain_http_to_a_websocket_route_names_it(tmp_path: Path) -> None:
+    """#1454: ``GET /api/v1/ws`` is not told that no route matches."""
+    app = _api_app(tmp_path)
+
+    @app.websocket("/api/v1/ws")
+    async def _ws(socket: WebSocket) -> None: ...
+
+    app.mount("/", SPAStaticFiles(tmp_path / "dist"), name="frontend")
+    response = TestClient(app).get("/api/v1/ws")
+    assert response.status_code == 426
+    assert response.headers["upgrade"] == "websocket"
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["detail"] == "GET /api/v1/ws is a WebSocket endpoint"
+
+
+def test_the_probe_works_under_a_root_path(tmp_path: Path) -> None:
+    """#1454: behind a ``root_path`` a wrong method is still a 405 and a trailing slash
+    still gets the hint, both named by the path the app routes on."""
+    app = _api_app(tmp_path)
+    app.mount("/", SPAStaticFiles(tmp_path / "dist"), name="frontend")
+    client = TestClient(app, root_path="/prefix")
+    assert client.get("/prefix/api/v1/things/a").json() == {"thing": "a"}
+    wrong = client.post("/prefix/api/v1/things/a")
+    assert wrong.status_code == 405
+    assert wrong.headers["allow"] == "GET"
+    slash = client.get("/prefix/api/v1/things/a/", follow_redirects=False)
+    assert slash.status_code == 404
+    assert slash.json()["detail"] == (
+        "no API route matches GET /api/v1/things/a/; did you mean /api/v1/things/a?"
+    )
