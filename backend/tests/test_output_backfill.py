@@ -495,6 +495,33 @@ async def test_the_reaper_releases_old_holds_of_outputs_with_no_record(
 
 
 @pytest.mark.requires_postgres
+async def test_the_reaper_removes_an_orphan_s_old_directory_too(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1815: an output whose meta.json is gone leaves a directory no read sees; once
+    its holds are released it is removed, past the same grace. One written inside the
+    grace (a save still writing) is kept."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    stale, fresh = "a" * 32, "b" * 32
+    two_hours_ago = time.time() - 7200
+    for output_id in (stale, fresh):
+        directory = store.paths.output_dir(old.slug, output_id)
+        directory.mkdir()
+        (directory / "model.3mf").write_bytes(b"x")
+    os.utime(store.paths.output_dir(old.slug, stale), (two_hours_ago, two_hours_ago))
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        for output_id in (old.id, stale, fresh):
+            hold_parts(refs, output_id, written.manifest, old.slug)
+            _age_holds(refs, output_id, 2)
+        assert reap_orphan_holds(refs, store) == 2
+    assert not store.paths.output_dir(old.slug, stale).exists()
+    assert store.paths.output_dir(old.slug, fresh).is_dir()
+    assert store.get(old.id).id == old.id
+
+
+@pytest.mark.requires_postgres
 async def test_the_reaper_releases_nothing_when_it_finds_no_outputs(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
