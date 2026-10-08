@@ -1,9 +1,12 @@
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
+import type { CredentialSource, PooledCredential } from '../src/harness/fallback.js'
 import { AGENT_ACTOR_HEADER } from '../src/harness/headlessBrowser.js'
+import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SESSION_LIMITS_PATH } from '../src/routes/sessionLimits.js'
 import {
@@ -266,6 +269,50 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(CUT, 10)
     })
 
+    // #1666: a request a failed credential attempt left open is that attempt's, not the cut-off one's.
+    it('does not charge a fallen-back attempt’s open request when the turn is stopped on the next credential', async () => {
+      const pooled = (id: string): PooledCredential => ({
+        id,
+        epoch: 0,
+        label: `credential ${id}`,
+        credential: { kind: 'anthropic_api_key', secret: `sk-ant-${id}-test` },
+      })
+      const two: CredentialSource = {
+        candidates: () => Promise.resolve([pooled('a'), pooled('b')]),
+        reporter: () => () => Promise.resolve(),
+      }
+      let attempts = 0
+      const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
+        const attempt = attempts++
+        const session_id = r.sessionId ?? r.resume ?? 'unknown'
+        const msg = (m: Record<string, unknown>) => ({ ...m, session_id, uuid: `u-${Math.random()}` }) as unknown as SDKMessage
+        const stream = (event: Record<string, unknown>) => msg({ type: 'stream_event', event, parent_tool_use_id: null })
+        return (async function* () {
+          await Promise.resolve()
+          if (attempt > 0) {
+            // The next credential's query is still waiting for the model when the turn is stopped.
+            await new Promise<void>((resolve) => r.signal?.addEventListener('abort', () => resolve(), { once: true }))
+            throw new Error('Claude Code process aborted by user')
+          }
+          yield msg({ type: 'system', subtype: 'init', model: stall.model, mcp_servers: [] })
+          yield stream({ type: 'message_start', message: { model: stall.model, usage: stall.usage } })
+          yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: stall.text } })
+          // The attempt ends on a transient failure with that request never finished: the turn falls back.
+          yield msg({ type: 'assistant', message: { model: '<synthetic>', content: [{ type: 'text', text: 'API Error: 529' }] }, error: 'server_error' })
+          yield msg({ type: 'result', subtype: 'success', is_error: true, api_error_status: 529, terminal_reason: 'api_error', result: 'API Error: 529', total_cost_usd: 0, num_turns: 1 })
+        })()
+      }
+      const fb = manager({ sql: db.sql, paths: await tempPaths(), run, settings, audit, credentials: two })
+      const { session } = await fb.start(browser, { origin: 'chat' })
+      const turn = await fb.send(session.id, browser, 'write a long essay')
+      for (let i = 0; i < 200 && attempts < 2; i++) await new Promise((r) => setTimeout(r, 10))
+      expect(attempts).toBe(2)
+      expect(await fb.interrupt(session.id, browser)).toBe(true)
+      expect(await turn.done).toEqual({ kind: 'interrupted' })
+      expect((await fb.get(session.id, browser)).costUsd).toBe(0)
+      fb.abortAll()
+    })
+
     it('spends the budget: a session whose stopped turns used it takes no more turns', async () => {
       const { session } = await m.start(browser, { origin: 'chat' })
       // 400k input at $3/MTok: $1.20 of the $1 budget.
@@ -301,6 +348,30 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       })
       next = { reply: 'more', costUsd: 1.2 }
       expect(await (await m.send(id, browser, 'go on')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    })
+
+    // #1650: the audit's "before" is the raise's own, not a later read that another raise may have moved.
+    it('audits its own before and after when another raise lands right after it', async () => {
+      const id = await spentSession()
+      let raced = false
+      const sql = new Proxy(db.sql, {
+        get(target, prop) {
+          if (prop !== 'unsafe') return Reflect.get(target, prop) as unknown
+          return async (query: string, params?: unknown[]) => {
+            const rows = await target.unsafe(query, params as never)
+            if (!raced && query.trimStart().startsWith('UPDATE ai_sessions r SET budget_usd')) {
+              raced = true
+              await target`UPDATE ai_sessions SET budget_usd = budget_usd + 5 WHERE id = ${id}`
+            }
+            return rows
+          }
+        },
+      })
+      const racing = manager({ sql, paths: await tempPaths(), settings, audit })
+      await racing.raiseBudget(id, browser, 1, { surface: 'http' })
+      expect(raced).toBe(true)
+      const [row] = await auditRows('session_budget_usd')
+      expect(row).toMatchObject({ outcome: 'ok', detail: '$1.00 + $1.00 = $2.00 ($1.02 spent)' })
     })
 
     it('is owner-only: a session another principal controls is refused until you take it over', async () => {
@@ -499,6 +570,23 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect(marked.costUsd).toBeCloseTo(0.7, 9)
       // The user's own gets its own $1, nothing spent.
       expect(await m.fork(parent, browser, { freshBudget: true })).toMatchObject({ budgetUsd: 1, costUsd: 0 })
+    })
+
+    // #1651: the user's own fork is a new root; a fork of it joins that root, not the original lineage.
+    it('a fork of the user’s fresh-budget fork spends from the fresh budget, not the original one', async () => {
+      const parent = await started()
+      const own = await m.fork(parent, browser, { freshBudget: true })
+      await transcript(own.id)
+      const child = await m.fork(own.id, browser)
+      expect(child).toMatchObject({ budgetUsd: 1, costUsd: 0 })
+      expect(await spend(child.id, browser, 0.7)).toBe(1)
+      expect((await m.get(own.id, browser)).costUsd).toBeCloseTo(0.7, 9)
+      // The original lineage is untouched: still $0.40 of its $1.
+      expect(await m.get(parent, browser)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+      // A raise on the child raises the fresh root, not the original.
+      expect((await raise(child.id, { add_usd: 1 })).status).toBe(200)
+      expect(await m.get(own.id, browser)).toMatchObject({ budgetUsd: 2 })
+      expect(await m.get(parent, browser)).toMatchObject({ budgetUsd: 1 })
     })
 
     it('refuses a spent session’s fork unless it is the user’s, which gets a budget of its own', async () => {
