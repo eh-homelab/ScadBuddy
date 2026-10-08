@@ -91,6 +91,9 @@ router = APIRouter(tags=["jobs"])
 #: A render whose `accepted` Update failed, or whose start Temporal refused, for a
 #: reason a re-send would not change.
 RENDER_UNSTARTABLE_PROBLEM = "https://scadbuddy.dev/problems/render-unstartable"
+#: The `code` of a render's 409 when its revision has no snapshot to render from. The
+#: backfill route answers this one 409 as its own 422 by this code (#1849).
+SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
 PNG_MEDIA_TYPE = "image/png"
@@ -268,7 +271,8 @@ def require_job(render: RenderService, job_id: str) -> Job:
     responses={
         status.HTTP_409_CONFLICT: {
             "description": (
-                "the Bambuddy blob store has no commit of the template to snapshot for the render"
+                "the Bambuddy blob store has no commit of the template to snapshot for the"
+                " render (`code` `snapshot_unavailable`)"
             )
         },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
@@ -409,7 +413,7 @@ def submit_problems() -> Iterator[None]:
         ) from None
     except SnapshotUnavailableError as error:
         # The bambuddy store renders from a snapshot of a commit, and there is none.
-        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), code=SNAPSHOT_UNAVAILABLE) from None
     except SnapshotPendingError as error:
         # The revision's first snapshot is still uploading (#686); it carries on.
         raise ApiError(

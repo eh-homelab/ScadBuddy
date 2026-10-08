@@ -30,6 +30,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.jobs import (
     GLB_MEDIA_TYPE,
     PNG_MEDIA_TYPE,
+    SNAPSHOT_UNAVAILABLE,
     JobStatus,
     RenderRequest,
     ViewSize,
@@ -220,8 +221,6 @@ assert get_args(Goal) == GOALS
 NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
 #: POST /outputs/{id}/backfill's 409: the output records its objects already.
 ALREADY_BACKFILLED = "already_backfilled"
-#: POST /outputs/{id}/backfill's 422 when its revision has no snapshot to render from.
-SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
 #: How long after its re-render finished a still-pending backfill is answered with that
 #: job rather than a new one. The attach runs as the job settles, so this is seconds;
 #: past it, the attach is failing, and answering the same done job forever would leave
@@ -569,9 +568,8 @@ async def backfill_output(
             fonts,
         )
     except ApiError as error:
-        # The only 409 `render_model` answers is `submit_problems`' SnapshotUnavailableError;
-        # a new one on that path would be relabelled here, so check this if one is added.
-        if error.status == status.HTTP_409_CONFLICT:
+        # Matched by its code, not its status: any other 409 passes through (#1849).
+        if error.extensions.get("code") == SNAPSHOT_UNAVAILABLE:
             # No snapshot of that revision and no history to make one from: as permanent
             # as a missing revision, and a 409 here means "already recorded" (#1007).
             raise ApiError(
