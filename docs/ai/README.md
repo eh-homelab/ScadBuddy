@@ -32,8 +32,9 @@ clients reach over `/mcp`, plus an in-app assistant. Both are in use:
 - The agent runs as a sidecar in the ScadBuddy pod ([`README.md`](../../README.md),
   "The agent sidecar"), and the ingress routes `/mcp` and `/api/v1/ai/*` to it on
   ScadBuddy's own origin ([operating.md](operating.md) §1.1).
-- The assistant panel and Settings → Assistant (credentials, **MCP access tokens**
-  (#251), plugins) show wherever the agent answers `GET /api/v1/ai/status`
+- Settings → Assistant's Claude credential section always shows. The assistant panel,
+  **MCP access tokens** (#251) and plugins show once the agent answers
+  `GET /api/v1/ai/status` with `configured`, that is, with a credential saved
   (`useAiAvailability()` in
   [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts));
   the panel talks over the agent's chat socket

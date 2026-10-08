@@ -373,7 +373,9 @@ routes in `registerMcpTokenRoutes()` in
 [`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
 stored in `ai_mcp_tokens` (§7). The Settings section renders only where
 `useAiAvailability()` ([`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts))
-reports AI available, that is, where the ingress routes `/api/v1/ai/*` to the sidecar.
+reports AI available: the ingress routes `/api/v1/ai/*` to the sidecar **and** a Claude
+credential is saved (`GET /api/v1/ai/status` answers `configured`). The credential
+section itself always shows, so it can be saved first.
 
 | Route | Guarded | What it does |
 |---|---|---|
