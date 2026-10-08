@@ -9,6 +9,8 @@ Starlette's middleware already leaves alone a ``206``, a response that carries i
 and images, audio, video and fonts. Zip containers are added here: a 3MF is a zip, so
 gzipping one spends CPU to save nothing. So is ``application/octet-stream``, the type a
 pipeline output's extra files go out as (#1855): those are often a zip or a 3MF already.
+That gives up on the few that would shrink (an ASCII STL or a CSV extra, a media file of
+an unknown type) on purpose: the bytes are unknown, and most are compressed already.
 A GLB is not excluded: the previews carry no
 Draco or meshopt compression, so their float buffers do shrink.
 """
