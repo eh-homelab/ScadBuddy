@@ -4,7 +4,8 @@ import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Job, Output } from '../api/types'
-import { NO_EXTRA } from '../lib/inputs'
+import { bridge } from '../agent/bridge'
+import { NO_EXTRA, type InputsExtra } from '../lib/inputs'
 import { outputs } from '../mocks/fixtures'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
@@ -184,12 +185,18 @@ describe('Generate, traced', () => {
         active.thumbnail = trace.getActiveSpan()?.spanContext().spanId
       })
       const onGenerated = vi.fn()
+      const extra = { demo: { touched: true } }
       const { user } = setup(false, job, undefined, {
         onGenerated,
+        extra,
         capture: async () => new Blob(['png'], { type: 'image/png' }),
       })
       await user.click(screen.getByRole('button', { name: 'Generate' }))
-      await waitFor(() => expect(onGenerated).toHaveBeenCalled())
+      // With the UI state it saved with: a stale or default one would show "Saved …"
+      // against the wrong state (#1471).
+      await waitFor(() =>
+        expect(onGenerated).toHaveBeenCalledWith(expect.objectContaining({ id: outputs[0]!.id }), extra),
+      )
       await waitFor(() => expect(tracing.exporter.getFinishedSpans()).toHaveLength(1))
 
       const [span] = tracing.exporter.getFinishedSpans()
@@ -205,6 +212,62 @@ describe('Generate, traced', () => {
       vi.restoreAllMocks()
       tracing.uninstall()
     }
+  })
+})
+
+describe("the agent's generate (#1471)", () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  function bar(extra: InputsExtra, output: Output | undefined, onGenerated: (o: Output, e: InputsExtra) => void) {
+    return (
+      <ActionBar
+        slug="name-keychain"
+        job={job}
+        rendering={false}
+        output={output}
+        capture={async () => null}
+        captureImage={async () => null}
+        viewSize={() => ({ width: 800, height: 500 })}
+        extra={extra}
+        fit={undefined}
+        onPrinterModel={() => undefined}
+        onGenerated={onGenerated}
+        onSent={() => undefined}
+        onRan={() => undefined}
+      />
+    )
+  }
+
+  it('resolves, and says the output is superseded, when the UI state moves while it saves', async () => {
+    let release!: (output: Output) => void
+    const create = vi.spyOn(api, 'createOutput').mockImplementation(
+      () => new Promise<Output>((resolve) => (release = resolve)),
+    )
+    const before = { demo: { step: 1 } }
+    const onGenerated = vi.fn()
+    const { rerender } = renderPage(bar(before, undefined, onGenerated))
+    const outcome = bridge.call('generate', { timeout_ms: 5000 })
+    await waitFor(() => expect(create).toHaveBeenCalledOnce())
+    rerender(bar({ demo: { step: 2 } }, undefined, onGenerated))
+    release(outputs[0]!)
+    expect(await outcome).toMatchObject({
+      ok: true,
+      result: { output: { id: outputs[0]!.id }, superseded: true, note: expect.stringMatching(/generate again/i) },
+    })
+    expect(onGenerated).toHaveBeenCalledWith(expect.objectContaining({ id: outputs[0]!.id }), before)
+  })
+
+  it('does not call the output it shows superseded', async () => {
+    vi.spyOn(api, 'createOutput').mockResolvedValue(outputs[0]!)
+    const extra = { demo: { step: 1 } }
+    let shown: Output | undefined
+    const view = renderPage(bar(extra, undefined, (created) => (shown = created)))
+    const outcome = bridge.call('generate', { timeout_ms: 5000 })
+    await waitFor(() => expect(shown).toBeDefined())
+    view.rerender(bar(extra, shown, () => undefined))
+    const result = await outcome
+    expect(result).toMatchObject({ ok: true, result: { output: { id: outputs[0]!.id } } })
+    expect(result.ok && result.result).not.toHaveProperty('superseded')
   })
 })
 

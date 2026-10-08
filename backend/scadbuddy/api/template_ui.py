@@ -20,12 +20,14 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.jobs import _resolve_version
 from scadbuddy.api.models import etag_matches, require_model_exists
+from scadbuddy.core.paths import model_path
 from scadbuddy.core.problems import ApiError
-from scadbuddy.render.jobs import source_directory
+from scadbuddy.library.catalogue import UI_DIR
+from scadbuddy.library.history import GitError, ModelHistory
+from scadbuddy.render.jobs import revision_export
 
 router = APIRouter(tags=["models"])
 
-UI_DIR = "ui"
 #: What a template UI may ship. Anything else, HTML included, is not served: a
 #: document from the app's origin would run with the whole app's reach.
 UI_MEDIA_TYPES = {
@@ -129,16 +131,27 @@ async def get_ui_file_at(
 ) -> Response:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, commit)
+    assert requested is not None  # a commit was named
     # The directory only: the UI's files need no library checkout, so a pinned library
     # that is missing (and cannot be fetched offline) does not stop the UI mounting.
     # The page asks for the last commit to `ui/` (#846), which a later commit elsewhere
-    # leaves behind the template's own: its `ui/` is still the live one, not an export.
-    if requested is not None and requested == await asyncio.to_thread(catalogue.ui_version, slug):
-        directory = paths.model_dir(slug)
-    else:
-        directory, _ = await source_directory(slug, requested, paths=paths, history=history)
+    # leaves behind the template's own: while the live `ui/` is that commit's, it is
+    # served from there rather than exported.
+    if await asyncio.to_thread(_live_ui_is, history, slug, requested):
+        file = await asyncio.to_thread(_ui_file, paths.model_dir(slug), path)
+        # Still never immutable: an edit after this answer changes the live file.
+        return await asyncio.to_thread(_serve, file, pinned=False, if_none_match=if_none_match)
+    directory = await revision_export(slug, requested, paths=paths, history=history)
     file = await asyncio.to_thread(_ui_file, directory, path)
-    # The current revision is answered from the live directory, which an uncommitted
-    # edit can change; only an export is immutable.
-    exported = directory != paths.model_dir(slug)
-    return await asyncio.to_thread(_serve, file, pinned=exported, if_none_match=if_none_match)
+    return await asyncio.to_thread(_serve, file, pinned=True, if_none_match=if_none_match)
+
+
+def _live_ui_is(history: ModelHistory, slug: str, commit: str) -> bool:
+    """Whether the live ``ui/`` holds exactly ``commit``'s: the same tree as HEAD's,
+    and nothing uncommitted under it (#1481). Two cheap git calls, no history walk."""
+    ui = f"{model_path(slug)}/{UI_DIR}"
+    try:
+        tree = history.tree(commit, ui)
+        return tree is not None and tree == history.tree("HEAD", ui) and history.clean(ui)
+    except GitError:
+        return False

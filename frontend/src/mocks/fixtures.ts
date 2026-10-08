@@ -291,8 +291,14 @@ export const GALLERY_SLUG = 'creme-coaster'
 /** #425 — templates with their own interface: one that mounts, one that throws. */
 export const UI_DEMO_SLUG = 'ui-demo'
 export const UI_BROKEN_SLUG = 'ui-broken'
-/** The commit `ui-demo`'s record is at: its UI loads pinned, from `/versions/{commit}/ui/`. */
+/** The commit `ui-demo`'s record is at. */
 export const UI_DEMO_VERSION = commit('f0e1d2c3b4a5')
+/**
+ * The last commit to `ui-demo`'s `ui/` (#846), older than its record's: its UI loads
+ * pinned, from `/versions/{commit}/ui/`. Different from the version, so the mocked runs
+ * exercise `ui_version` and not the fallback to `version` (#1469).
+ */
+export const UI_DEMO_UI_VERSION = commit('e1d2c3b4a5f0')
 /** #425 — the bundled maze-puzzle, whose own panel hides the lid colour without a lid. */
 export const MAZE_SLUG = 'builtin:maze-puzzle'
 /** #1737 — the bundled dollhouse-kit, whose designer takes the whole page (slot `page`). */
@@ -408,6 +414,7 @@ const modelsSeed: ModelSummary[] = [
     has_readme: false,
     origin: 'mine',
     version: UI_DEMO_VERSION,
+    ui_version: UI_DEMO_UI_VERSION,
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
   {
@@ -437,6 +444,7 @@ const modelsSeed: ModelSummary[] = [
     has_readme: false,
     origin: 'builtin',
     version: commit('9a8b7c6d5e4f'),
+    ui_version: commit('8b7c6d5e4f9a'),
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
   {
@@ -452,6 +460,7 @@ const modelsSeed: ModelSummary[] = [
     has_readme: false,
     origin: 'builtin',
     version: commit('7d6c5b4a3f2e'),
+    ui_version: commit('6c5b4a3f2e7d'),
     ui: { module: 'ui/index.js', slot: 'page', api: 1 },
   },
 ]
