@@ -373,7 +373,15 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           sessions.set(s.sessionId, s)
           emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title, budgetUsd })
         }
-        emit({ type: 'user.turn', sessionId: s.sessionId, turnId: nextId('turn'), text: msg.text, author: BROWSER_USER })
+        emit({
+          type: 'user.turn',
+          sessionId: s.sessionId,
+          turnId: nextId('turn'),
+          text: msg.text,
+          author: BROWSER_USER,
+          // #1866 — the agent keeps only the previews in the transcript.
+          ...(msg.images?.length ? { images: msg.images.map((image) => image.preview) } : {}),
+        })
         setStatus(s, 'running')
         play(s, isNew ? (/draft/i.test(msg.text) ? questionTurn(s) : firstTurn(s)) : followUp(s, msg.text))
         return

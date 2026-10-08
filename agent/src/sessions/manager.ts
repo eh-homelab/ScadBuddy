@@ -5,6 +5,7 @@ import {
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
   type SDKResultMessage,
+  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
@@ -78,6 +79,7 @@ import {
 import { scrubForLog, SdkEventMapper, ShownCalls } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
+import { previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 
@@ -457,6 +459,8 @@ export type StartOptions = {
   prompt?: string
   /** With `prompt`: see SendOptions.context. */
   context?: string
+  /** With `prompt`: see SendOptions.images. */
+  images?: readonly UserImage[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
 }
@@ -469,6 +473,12 @@ export type SendOptions = {
    * route (routes/chat.ts `renderPageContext`).
    */
   context?: string
+  /**
+   * Images the user sent with the message (#1866, images.ts): the model gets
+   * them as image blocks before the text; the `user.turn` event shows their
+   * previews.
+   */
+  images?: readonly UserImage[]
   /**
    * The sender's tiers (spec §8.1), for the turn's in-process tools: an MCP
    * token's, as `/mcp` authenticated it for this send (tools/sessions.ts).
@@ -954,6 +964,7 @@ export class SessionManager {
     if (!prompt) return { session }
     const turn = await this.send(id, principal, prompt, {
       ...(options.context ? { context: options.context } : {}),
+      ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
     return { session: await this.get(id, principal), turn }
@@ -981,6 +992,7 @@ export class SessionManager {
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
     return this.startTurn(claimed(claim), turnId, prompt, principal, {
       ...(options.context ? { context: options.context } : {}),
+      ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
   }
@@ -1057,7 +1069,7 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string; context?: string; tiers?: readonly Tier[] } = {},
+    options: { keepResumeTurn?: string; context?: string; images?: readonly UserImage[]; tiers?: readonly Tier[] } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
@@ -1070,13 +1082,21 @@ export class SessionManager {
       options.keepResumeTurn === undefined ? {} : { keepResumeTurn: options.keepResumeTurn },
     )
     await this.events.append(id, [
-      event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author }),
+      event({
+        type: 'user.turn',
+        sessionId: id,
+        turnId,
+        text: prompt,
+        author,
+        ...(options.images?.length ? { images: previewsOf(options.images) } : {}),
+      }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
     const controller = new AbortController()
     const local: LocalTurn = { controller, settling: false }
     this.active.set(id, local)
-    const query = options.context ? `${prompt}\n\n${options.context}` : prompt
+    const text = options.context ? `${prompt}\n\n${options.context}` : prompt
+    const query = options.images?.length ? userPrompt(text, options.images) : text
     const done = this.runTurn(session, turnId, query, local, prompt, options.tiers ? { tiers: options.tiers } : {})
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
@@ -1116,7 +1136,7 @@ export class SessionManager {
   private async runTurn(
     session: ClaimedSession,
     turnId: string,
-    prompt: string,
+    prompt: string | AsyncIterable<SDKUserMessage>,
     local: LocalTurn,
     /** The user's words without the page context: what memory is recalled against. */
     userText: string,

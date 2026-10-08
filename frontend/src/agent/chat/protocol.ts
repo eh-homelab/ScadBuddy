@@ -195,6 +195,24 @@ export const PageContextSchema = z.object({
 })
 export type PageContext = z.infer<typeof PageContextSchema>
 
+/**
+ * #1866 — an image the user sends with a message: base64 for the model, and a small
+ * preview the transcript shows (`user.turn`). The agent checks the bytes, the types and
+ * the caps (agent `src/sessions/images.ts`); the composer stays under them (`images.ts`).
+ */
+export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
+export const ImagePreviewSchema = z.object({
+  mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+  data: z.string().min(1),
+})
+export type ImagePreview = z.infer<typeof ImagePreviewSchema>
+export const UserImageSchema = z.object({
+  mediaType: z.enum(IMAGE_MEDIA_TYPES),
+  data: z.string().min(1),
+  preview: ImagePreviewSchema,
+})
+export type UserImage = z.infer<typeof UserImageSchema>
+
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1)
 
@@ -226,6 +244,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     turnId: z.string().min(1),
     text: z.string(),
     author: OwnerSchema,
+    /** #1866 — previews of the images sent with the turn. */
+    images: z.array(ImagePreviewSchema).optional(),
   }),
   z.object({
     v,
@@ -384,6 +404,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1),
     context: PageContextSchema,
+    /** #1866 — images for the model; an agent that predates them drops them. */
+    images: z.array(UserImageSchema).min(1).optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent
