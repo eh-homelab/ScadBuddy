@@ -101,10 +101,8 @@ export type Endpoint = { what: string; url: string }
 export type Vetting = {
   /** Undefined when the package has no usable name. */
   review: PackageReview | undefined
-  /** Everything the rules refuse, fatal or not, capped (`capProblems`). */
+  /** Everything the rules refuse, fatal or not, uncapped; a refusal caps it (`capProblems`). */
   problems: string[]
-  /** The same, uncapped. */
-  all: string[]
   /** The problems no approval can allow (see the header); a subset of `problems`. */
   fatal: string[]
   endpoints: Endpoint[]
@@ -116,7 +114,6 @@ const NON_COMMAND_MCP_TYPE = 'http'
 const OWN_PLUGIN_NAME = 'scadbuddy'
 
 /** The least a package name must be, approved or not; the stricter rules are allowable. */
-
 export const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 // The hook events a package may use: an allowlist, so an event added to
@@ -512,5 +509,5 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
   const fatalSet = new Set(fatal)
   // Uncapped: an admin allows exactly the list the review shows, never "and N more".
   if (review) review.refused = unique.filter((p) => !fatalSet.has(p))
-  return { review, problems: capProblems(unique), all: unique, fatal: [...fatalSet], endpoints }
+  return { review, problems: unique, fatal: [...fatalSet], endpoints }
 }

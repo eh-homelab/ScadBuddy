@@ -214,7 +214,7 @@ export class PackageInstaller {
     // A fatal problem refuses the package outright, but the refusal names
     // every problem: the allowable ones are reasons too. Fatal first, so the
     // cap never hides one.
-    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.all]))
+    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.problems]))
     return { tree, review: vetting.review }
   }
 
@@ -387,14 +387,13 @@ export class PackageInstaller {
     // approved. A pin approved with `allow_refused` skips the allowable ones,
     // including any a later rule adds: the admin allowed this exact content.
     const vetting = vetPackage(dir, pin.name)
-    const problems = [
-      ...(pin.allowRefused ? vetting.fatal : vetting.problems),
-      ...(await this.endpointProblems(vetting.endpoints)),
-    ]
+    // Fatal first, as at install, so the cap never hides one.
+    const problems = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
     if (vetting.review && vetting.review.name !== pin.name) {
       problems.push(`the package names itself "${vetting.review.name}", not "${pin.name}"`)
     }
-    if (problems.length) throw new PackageRefusedError(problems)
+    if (!pin.allowRefused) problems.push(...vetting.problems)
+    if (problems.length) throw new PackageRefusedError(capProblems(problems))
     this.builtins.set(dir, vetting.review?.builtin_tools ?? [])
     return dir
   }
