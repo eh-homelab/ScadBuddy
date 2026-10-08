@@ -2122,7 +2122,8 @@ class Catalogue:
             return self.record(slug)
         # A base check against a revision that never moved would pass a second write
         # over this one unseen, so a failed commit is not logged and kept (review of
-        # #741, `_write_edit`; review of #1069 for this one).
+        # #741, `_write_edit`; review of #1069 for this one). `change` still counts the
+        # files under `_source_files_lock`, so `max_files` holds on this path too.
         assert history is not None  # checked above
         try:
             history.commit(message, slug, prepare=change, rollback=undo)
