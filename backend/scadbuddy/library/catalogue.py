@@ -2062,7 +2062,9 @@ class Catalogue:
         ``expected_version`` is as :meth:`write_source`'s (#813): unless the model is
         still at it, :class:`StaleVersionError` with nothing written, checked under the
         history's write lock. Without a history there is no revision to check, so
-        :class:`GitUnavailableError`.
+        :class:`GitUnavailableError`. Such a write is also only ever kept WITH its
+        revision, as :meth:`_write_edit`'s: when the commit fails, the file is put back
+        under the same lock and the error raised.
         """
         if name == SOURCE_NAME:
             # The route refuses it with a 409 first; this keeps any other caller off
@@ -2070,16 +2072,22 @@ class Catalogue:
             raise ValueError(f"{SOURCE_NAME} is written by write_source, not write_file")
         self._require(slug)
         path = self.paths.model_dir(slug) / name
+        history = self.history
 
-        if expected_version is not None and (self.history is None or not self.history.available):
+        if expected_version is not None and (history is None or not history.available):
             raise GitUnavailableError("model history is unavailable, so no base can be checked")
+        written = False
+        # What a based write replaced, None when the file was new: what `undo` puts back.
+        previous: bytes | None = None
 
         def change() -> None:
+            nonlocal written, previous
             if expected_version is not None:
-                assert self.history is not None  # checked above
-                current = self.history.last_commit(model_path(slug))
+                assert history is not None  # checked above
+                current = history.last_commit(model_path(slug))
                 if current is None or not current.startswith(expected_version):
                     raise StaleVersionError(slug, expected_version, current)
+                previous = path.read_bytes() if path.is_file() else None
             if content is None:
                 if not path.is_file():
                     raise SidecarNotFoundError(name)
@@ -2094,10 +2102,33 @@ class Catalogue:
                         write_atomic(path, content.encode())
                     except FileNotFoundError:
                         raise ModelNotFoundError(slug) from None
+            written = True
             self.paths.model_schema_cache(slug).unlink(missing_ok=True)
 
+        def undo() -> None:
+            nonlocal written
+            if not written:
+                return
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_atomic(path, previous)
+            written = False
+
         verb = "Remove" if content is None else "Edit"
-        self._commit_change(message or f"{verb} {slug}/{name}", change, slug)
+        message = message or f"{verb} {slug}/{name}"
+        if expected_version is None:
+            self._commit_change(message, change, slug)
+            return self.record(slug)
+        # A base check against a revision that never moved would pass a second write
+        # over this one unseen, so a failed commit is not logged and kept (review of
+        # #741, `_write_edit`; review of #1069 for this one).
+        assert history is not None  # checked above
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if written:
+                self.notify_change(slug)
         return self.record(slug)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────
