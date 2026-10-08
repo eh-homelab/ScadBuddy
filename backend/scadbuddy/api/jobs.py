@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.api.deps import (
-    JOB_ID_PATTERN,
+    HEX_ID_PATTERN,
     AssetsDep,
     CatalogueDep,
     ConfigDep,
@@ -119,7 +119,7 @@ class RenderRequest(BaseModel):
     # `Idempotency-Key`: a re-send without one would release the job again (#1053).
     supersedes: str | None = Field(
         default=None,
-        pattern=JOB_ID_PATTERN,
+        pattern=HEX_ID_PATTERN,
         description="The job this render replaces; needs an `Idempotency-Key` header (422 without)",
     )
 

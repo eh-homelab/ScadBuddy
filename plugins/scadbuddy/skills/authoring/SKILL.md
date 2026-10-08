@@ -185,6 +185,14 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
   with `apply_patch` (a unified diff or search/replace edits) with that `version` as
   `base`. Use `update_source` only to rewrite the whole file, and pass `base` there
   too (`docs/ai/authoring.md` section 2).
+- For a small change, the file tools work as Read/Edit/Write do: `read_file`
+  (numbered lines, and the revision to pass as `base`), `edit_file` (`old_string`
+  must match once, or set `replace_all`), `multi_edit` (several, as one revision)
+  and `write_file`, on `model.scad` or a `.scad` beside it. Each write answers its
+  revision and diff, so there is no need to read the file back; ask for
+  `response: "full"` only when the next edit needs the exact text. `glob` lists a
+  model's files and `grep` searches one model or all of them
+  (`agent/src/tools/files.ts`, issue #813).
 - If `apply_patch` answers `conflict`, someone saved since you read it. Read the
   source again and rebuild the patch against `current`; don't force your old text
   over theirs (`docs/ai/authoring.md` section 2).

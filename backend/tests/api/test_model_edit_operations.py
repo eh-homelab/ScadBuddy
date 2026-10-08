@@ -266,6 +266,40 @@ def test_a_stale_base_the_run_finds_after_a_202_carries_current(
     assert op["error"]["extensions"]["current"] == moved.version
 
 
+def test_a_stale_base_a_sibling_write_finds_in_its_run_carries_current(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#813: a sibling file's `base` is checked again under the history's lock, so a
+    revision that lands after the check is the run's 409, and nothing is written."""
+    slug, version = _model(client, "Held File")
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    release = threading.Event()
+    put = model_files.file_put_run
+
+    async def held(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.to_thread(release.wait, 60)
+        return await put(*args, **kwargs)
+
+    monkeypatch.setattr(model_files, "file_put_run", held)
+    try:
+        started = client.put(
+            f"/api/v1/models/{slug}/files/parts.scad",
+            json={"content": "module bar() {}\n", "base": version},
+            headers=press(),
+        )
+        assert started.status_code == 202, started.text
+        moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
+    finally:
+        release.set()
+    op = _follow(client, started.json())
+    assert op["status"] == "failed", op
+    assert op["error"]["status"] == 409
+    assert op["error"]["extensions"]["current"] == moved.version
+    assert not (_state(app).paths.model_dir(slug) / "parts.scad").exists()
+
+
 def test_a_merge_that_conflicts_only_in_the_run_is_a_retryable_409_without_merged(
     client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
