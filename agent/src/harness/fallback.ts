@@ -151,6 +151,13 @@ export type FallbackOptions = {
    * for a turn the caller stopped.
    */
   onRefused?: (failure: FailureEvidence, judged: { probe?: ProbeVerdict['verdict'] }) => void
+  /**
+   * Called as each attempt after the first starts, once the caller has seen
+   * every message of the attempts before it. The caller cannot tell otherwise:
+   * only the first attempt's init message is passed on. The session manager
+   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666).
+   */
+  onAttempt?: () => void
 }
 
 function linked(signal: AbortSignal | undefined): AbortController {
@@ -273,6 +280,7 @@ export async function* runWithFallback(
   let resumed = base.resume !== undefined
 
   for (let i = 0; i < candidates.length; i++) {
+    if (i > 0) options.onAttempt?.()
     const current = candidates[i] as PooledCredential
     const next = candidates[i + 1]
     const controller = linked(base.signal)

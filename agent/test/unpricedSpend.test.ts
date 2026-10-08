@@ -82,6 +82,17 @@ describe('UnpricedSpend', () => {
     expect(s.usd()).toBeCloseTo(0.3 + 0.1, 10)
   })
 
+  // #1666: a fallback attempt's open requests are its own failure's, not the turn's cut-off request.
+  it('forgets the requests an earlier credential attempt left open, and prices the next attempt’s', () => {
+    const s = new UnpricedSpend()
+    s.observe(start('claude-sonnet-4-5', { input_tokens: 1_000_000 }))
+    s.observe(start('claude-haiku-4-5', { input_tokens: 1_000_000 }, 'toolu_1'))
+    s.newAttempt()
+    expect(s.usd()).toBe(0)
+    s.observe(start('claude-sonnet-4-5', { input_tokens: 100_000 }))
+    expect(s.usd()).toBeCloseTo(0.3, 10)
+  })
+
   it('ignores everything but stream events', () => {
     const s = new UnpricedSpend()
     s.observe({ type: 'assistant', message: { usage: { input_tokens: 1_000_000 } } } as unknown as SDKMessage)

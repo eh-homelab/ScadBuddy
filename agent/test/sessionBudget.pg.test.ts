@@ -1,9 +1,12 @@
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
+import type { CredentialSource, PooledCredential } from '../src/harness/fallback.js'
 import { AGENT_ACTOR_HEADER } from '../src/harness/headlessBrowser.js'
+import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SESSION_LIMITS_PATH } from '../src/routes/sessionLimits.js'
 import {
@@ -264,6 +267,50 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       next = { stall, resultCostUsd: 0 }
       await stopMidReply(session.id, 'write a long essay')
       expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(CUT, 10)
+    })
+
+    // #1666: a request a failed credential attempt left open is that attempt's, not the cut-off one's.
+    it('does not charge a fallen-back attempt’s open request when the turn is stopped on the next credential', async () => {
+      const pooled = (id: string): PooledCredential => ({
+        id,
+        epoch: 0,
+        label: `credential ${id}`,
+        credential: { kind: 'anthropic_api_key', secret: `sk-ant-${id}-test` },
+      })
+      const two: CredentialSource = {
+        candidates: () => Promise.resolve([pooled('a'), pooled('b')]),
+        reporter: () => () => Promise.resolve(),
+      }
+      let attempts = 0
+      const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
+        const attempt = attempts++
+        const session_id = r.sessionId ?? r.resume ?? 'unknown'
+        const msg = (m: Record<string, unknown>) => ({ ...m, session_id, uuid: `u-${Math.random()}` }) as unknown as SDKMessage
+        const stream = (event: Record<string, unknown>) => msg({ type: 'stream_event', event, parent_tool_use_id: null })
+        return (async function* () {
+          await Promise.resolve()
+          if (attempt > 0) {
+            // The next credential's query is still waiting for the model when the turn is stopped.
+            await new Promise<void>((resolve) => r.signal?.addEventListener('abort', () => resolve(), { once: true }))
+            throw new Error('Claude Code process aborted by user')
+          }
+          yield msg({ type: 'system', subtype: 'init', model: stall.model, mcp_servers: [] })
+          yield stream({ type: 'message_start', message: { model: stall.model, usage: stall.usage } })
+          yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: stall.text } })
+          // The attempt ends on a transient failure with that request never finished: the turn falls back.
+          yield msg({ type: 'assistant', message: { model: '<synthetic>', content: [{ type: 'text', text: 'API Error: 529' }] }, error: 'server_error' })
+          yield msg({ type: 'result', subtype: 'success', is_error: true, api_error_status: 529, terminal_reason: 'api_error', result: 'API Error: 529', total_cost_usd: 0, num_turns: 1 })
+        })()
+      }
+      const fb = manager({ sql: db.sql, paths: await tempPaths(), run, settings, audit, credentials: two })
+      const { session } = await fb.start(browser, { origin: 'chat' })
+      const turn = await fb.send(session.id, browser, 'write a long essay')
+      for (let i = 0; i < 200 && attempts < 2; i++) await new Promise((r) => setTimeout(r, 10))
+      expect(attempts).toBe(2)
+      expect(await fb.interrupt(session.id, browser)).toBe(true)
+      expect(await turn.done).toEqual({ kind: 'interrupted' })
+      expect((await fb.get(session.id, browser)).costUsd).toBe(0)
+      fb.abortAll()
     })
 
     it('spends the budget: a session whose stopped turns used it takes no more turns', async () => {

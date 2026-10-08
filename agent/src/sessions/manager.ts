@@ -1426,6 +1426,7 @@ export class SessionManager {
           onRefused: (evidence, judged) => {
             refused = { evidence, ...judged }
           },
+          onAttempt: () => unpriced.newAttempt(),
         })
         for await (const message of turn) {
           unpriced.observe(message)
