@@ -210,8 +210,10 @@ export class PackageInstaller {
       throw err
     }
     const vetting = vetPackage(dest, fallbackName)
-    const problems = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
-    if (problems.length || !vetting.review) throw new PackageRefusedError(problems.length ? problems : vetting.problems)
+    const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
+    // A fatal problem refuses the package outright, but the refusal names
+    // every problem: the allowable ones are reasons too.
+    if (fatal.length || !vetting.review) throw new PackageRefusedError([...new Set([...vetting.problems, ...fatal])])
     return { tree, review: vetting.review }
   }
 

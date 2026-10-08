@@ -463,6 +463,29 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     )
   })
 
+  it('refuses ScadBuddy\'s own plugin as already loaded, with every reason', async () => {
+    const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
+    // plugins/scadbuddy, for Claude Code outside ScadBuddy: its placeholder
+    // URL fails the egress check, which must not hide the other reasons.
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.claude-plugin/plugin.json': JSON.stringify({
+        name: 'scadbuddy',
+        userConfig: { scadbuddy_url: { type: 'string', title: 'ScadBuddy URL' } },
+      }),
+      '.mcp.json': JSON.stringify({
+        mcpServers: { scadbuddy: { type: 'http', url: '${user_config.scadbuddy_url}/mcp' } },
+      }),
+    })
+    const own = await installer.prepare(source).catch((e: unknown) => e)
+    expect(own).toBeInstanceOf(PackageRefusedError)
+    const problems = (own as PackageRefusedError).problems
+    expect(problems[0]).toMatch(/ScadBuddy's own plugin.*already loads/)
+    expect(problems.join('\n')).toMatch(/userConfig/)
+    expect(problems.join('\n')).toMatch(/MCP server "scadbuddy" references a variable/)
+    expect(problems.join('\n')).toMatch(/MCP server "scadbuddy": \$\{user_config\.scadbuddy_url\}\/mcp is not a valid URL/)
+  })
+
   it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {
     repos.greeter = gitRepo(GREETER)
     const prepared = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' }))
