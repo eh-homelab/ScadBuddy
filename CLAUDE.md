@@ -187,7 +187,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   300 s one) on the `library` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
   process (it holds the data volume). A new periodic pass is an activity in its
-  `SWEEPS`, never a loop in the API.
+  `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
+  (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
+  default-render previews, on its own hourly Schedule on the same queue; the per-change
+  requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
@@ -250,10 +253,22 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
-  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain).
+  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
+  (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
+  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); `PrintRun`
+  and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
+  unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
+  unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
+  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
-  error mapping (`errors.py`).
+  error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
+  `output_reader.py`'s `OutputReader` (#1060): `LocalOutputs` on the volume,
+  `RemoteOutputs` through the API's hidden `/api/v1/internal/outputs/…` routes
+  (`api/internal.py`). An output's last print is `output_last_prints` in Postgres
+  (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
+  `prelude`, another kind run first on its own queue: `output_delete` (library) names
+  `output_inbox_delete` (bambuddy).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
@@ -307,8 +322,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
   `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
-  variable the backend reads; the one origin allowed to write) and
-  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
+  variable the backend reads; the one origin allowed to write),
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed) and the
+  backend's `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and `_SEARCH_ATTRIBUTES`. No AI
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
@@ -368,6 +384,19 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
     value to its row and to the columns that say where it is sent (for the credential:
     `kind` and `base_url`). Comparable tokens are stored hashed instead.
+  - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
+    database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
+    every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
+    `ai_sessions.mode` is `durable`), and `AgentOperation` (`workflows.ts`, bundled by
+    `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
+    the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
+    `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
+    replays. `pnpm build` also writes `dist/tools.json` (the tool manifest the durable
+    worker declares from; never committed). Temporal tests (`test/*temporal*.test.ts`)
+    skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
+    `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
+    The `@temporalio/*` packages are pinned exactly, all one version.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude

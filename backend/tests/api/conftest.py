@@ -24,6 +24,7 @@ from scadbuddy.render import submit as submit_module
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for, schedule_id_for
+from scadbuddy.workflows.previews import preview_schedule_id_for
 from tests.conftest import TEST_ANSWER_DEADLINE, write_openscad_3mf
 from tests.support.deployment import (
     BUILD_SERVES_MAX_POLL,
@@ -139,7 +140,9 @@ def settings(
     )
     # Before the runs: a Schedule left behind would start more on a queue nobody serves.
     workflow_reaper.delete_schedules(
-        schedule_id_for(f"{queue}-library"), prune_schedule_id_for(f"{queue}-library")
+        schedule_id_for(f"{queue}-library"),
+        prune_schedule_id_for(f"{queue}-library"),
+        preview_schedule_id_for(f"{queue}-library"),
     )
     workflow_reaper.terminate(queue)
     workflow_reaper.terminate(f"{queue}-bambuddy")

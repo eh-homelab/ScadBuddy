@@ -39,6 +39,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
+        previews=None,
         components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
         settings_store=None,
     )
@@ -85,6 +86,7 @@ async def test_the_schedules_are_set_up_once_temporal_answers(
     """Review I2: a create that fails after the connect (a frontend up before its
     history service) is retried, not left to the next restart."""
     calls: list[float] = []
+    previews: list[float | None] = []
 
     async def flaky(client: object, queue: str, interval: float) -> bool:
         calls.append(interval)
@@ -92,11 +94,22 @@ async def test_the_schedules_are_set_up_once_temporal_answers(
             raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
         return False
 
+    async def preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
+        previews.append(render_bound)
+
     monkeypatch.setattr(main, "ensure_schedules", flaky)
+    monkeypatch.setattr(main, "ensure_preview_schedule", preview_schedule)
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     stop = asyncio.Event()
-    await asyncio.wait_for(main._set_up_housekeeping(object(), "library", 600.0, stop), 5)  # type: ignore[arg-type]
+    await asyncio.wait_for(
+        main._set_up_housekeeping(object(), "library", 600.0, 360.0, stop),  # type: ignore[arg-type]
+        5,
+    )
     assert calls == [600.0, 600.0]
+    # The preview backfill's Schedule (#1054) is set up once the housekeeping ones
+    # are: each set-up triggers a run, so a retry must not set it up again (final
+    # review M3).
+    assert previews == [360.0]
 
 
 @pytest.mark.parametrize("paused", [True, False])
@@ -116,13 +129,18 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
         backfilled.append(assets)
         return 0
 
+    async def no_preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
+        pass
+
     monkeypatch.setattr(main, "library_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
     monkeypatch.setattr(main, "ensure_schedules", schedules)
+    monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     state = SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
+        previews=None,
         components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
         settings_store=None,
         store=SimpleNamespace(

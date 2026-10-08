@@ -223,6 +223,86 @@ describe('CustomizePage with a template UI', () => {
     expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe(initial)
   })
 
+  it('keeps a preset the template UI saved selected in the picker (#1484)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'Saved' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Saved'), { timeout: 5000 })
+    await host!.presets.save('From the UI')
+    await host!.presets.save('Another')
+
+    // Saving remounts the picker, so the select is found again each time.
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Another' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('Another'), { timeout: 5000 })
+    const select = preset()
+    // Nothing on screen differs from it, so picking the other one loses nothing.
+    await user.selectOptions(select, 'From the UI')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(select).toHaveDisplayValue('From the UI')
+  })
+
+  it('selects a preset the template UI loaded, so the next pick does not ask (#1457)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'One' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('One'), { timeout: 5000 })
+    const one = await host!.presets.save('One')
+    host?.inputs.set({ params: { name: 'Two' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two'), { timeout: 5000 })
+    await host!.presets.save('Two')
+
+    await host!.presets.load(one.id)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    const select = preset()
+    await user.selectOptions(select, 'Two')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two')
+  })
+
+  it('does not bring back a loaded preset after another pick and a remount (#1768 review)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'One' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('One'), { timeout: 5000 })
+    const one = await host!.presets.save('One')
+    host?.inputs.set({ params: { name: 'Two' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two'), { timeout: 5000 })
+    await host!.presets.save('Two')
+    await host!.presets.load(one.id)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Two')
+
+    // The template UI fails: the picker moves into the generated form's toolbar.
+    host!.openPrint('not-on-screen')
+    await screen.findByRole('textbox', { name: 'Name on the tag' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    expect(preset()).not.toHaveDisplayValue('One')
+    expect(screen.queryByText('Changed from One')).not.toBeInTheDocument()
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

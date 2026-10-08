@@ -519,7 +519,7 @@ async def test_a_preview_waiting_on_its_snapshot_is_tried_again_by_itself() -> N
     scheduler = previews_module.PreviewScheduler(
         mock.MagicMock(), store, runner, timeout=1.0, debounce=0, interval=0
     )
-    with mock.patch.object(scheduler, "_plan", return_value="key"):
+    with mock.patch.object(scheduler, "plan", return_value="key"):
         scheduler.start()
         scheduler.request(SLUG)
         try:
@@ -547,15 +547,15 @@ async def test_a_preview_waiting_on_its_snapshot_backs_off() -> None:
     )
     delays: list[float] = []
     with (
-        mock.patch.object(scheduler, "_plan", return_value="key"),
+        mock.patch.object(scheduler, "plan", return_value="key"),
         mock.patch.object(scheduler, "_schedule", lambda slug, delay: delays.append(delay)),
     ):
         for _ in range(5):
-            assert await scheduler._refresh(SLUG) is True
+            assert await scheduler.refresh(SLUG) is True
         pending = False
-        assert await scheduler._refresh(SLUG) is True
+        assert await scheduler.refresh(SLUG) is True
         pending = True
-        assert await scheduler._refresh(SLUG) is True
+        assert await scheduler.refresh(SLUG) is True
     cap = previews_module.MAX_SNAPSHOT_RETRY_DELAY
     assert delays == [100, 200, 400, cap, cap, 100]
 
@@ -574,8 +574,8 @@ async def test_a_preview_render_starts_a_root_span_its_workflow_joins(
     scheduler = previews_module.PreviewScheduler(
         mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
     )
-    with mock.patch.object(scheduler, "_plan", return_value="key"):
-        assert await scheduler._refresh(SLUG) is True
+    with mock.patch.object(scheduler, "plan", return_value="key"):
+        assert await scheduler._refresh(SLUG, raise_unrun=False) is True
     finished = {s.name: s for s in spans.get_finished_spans()}
     root = finished["render.preview"]
     assert root.parent is None
