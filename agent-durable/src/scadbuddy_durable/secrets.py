@@ -47,7 +47,8 @@ class Envelope:
 
 
 def kek_from_base64(text: str, variable: str = "SCADBUDDY_SECRET_KEY_FILE") -> Kek:
-    trimmed = text.strip()
+    # JS trim() also strips U+FEFF, so a BOM before the key loads in the agent.
+    trimmed = text.strip().strip("\ufeff").strip()
     if not _BASE64.match(trimmed) or len(trimmed) % 4 != 0:
         raise SecretKeyError(
             f"{variable} is not base64; it must hold 32 random bytes, base64-encoded"
@@ -68,11 +69,13 @@ def load_kek(path: str | None, variable: str = "SCADBUDDY_SECRET_KEY_FILE") -> K
     if path is None:
         raise SecretKeyError(f"{variable} is not set")
     try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
     except OSError as err:
         raise SecretKeyError(f"{variable} cannot be read ({err.errno})") from None
-    return kek_from_base64(text, variable)
+    # As Node's readFile(..., 'utf8') does: invalid bytes become U+FFFD, so a raw
+    # key file is refused as "not base64" and none of its bytes reach the message.
+    return kek_from_base64(raw.decode("utf-8", errors="replace"), variable)
 
 
 def sealed_version(sealed: bytes) -> int | None:

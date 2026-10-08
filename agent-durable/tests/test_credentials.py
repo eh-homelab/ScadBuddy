@@ -156,3 +156,17 @@ async def test_an_edited_row_is_skipped_and_the_next_is_used(
     await _insert(agent_db, by["oauth token"], priority=1)
     usable = await usable_credentials(agent_db, kek)
     assert [c.kind for c in usable] == ["claude_oauth_token"]
+
+
+def test_an_unknown_kind_is_refused_not_treated_as_a_gateway(vectors: dict[str, Any]) -> None:
+    kek = kek_from_base64(vectors["kek_b64"])
+    v = next(c for c in vectors["credentials"] if c["kind"] == "gateway")
+    with pytest.raises(SealError, match="unknown credential kind"):
+        open_credential(
+            kek,
+            id=v["id"],
+            priority=v["priority"],
+            kind="future_kind",  # type: ignore[arg-type]
+            base_url=v["base_url"],
+            envelope=_envelope(v),
+        )

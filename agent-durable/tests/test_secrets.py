@@ -94,3 +94,25 @@ def test_unset_and_unreadable_key_files_name_the_variable(tmp_path: Path) -> Non
 def test_the_key_never_appears_in_repr(vectors: dict[str, Any]) -> None:
     kek = kek_from_base64(vectors["kek_b64"])
     assert repr(kek.key) not in repr(kek)
+
+
+def test_a_raw_bytes_key_file_is_refused_by_name_without_its_bytes(tmp_path: Path) -> None:
+    # `openssl rand 32 > key` (no -base64): not UTF-8 at all.
+    raw = bytes([0x01, 0x02, 0x9F]) + b"\xff" * 29
+    f = tmp_path / "k"
+    f.write_bytes(raw)
+    with pytest.raises(SecretKeyError) as raised:
+        load_kek(str(f))
+    message = str(raised.value)
+    assert "SCADBUDDY_SECRET_KEY_FILE" in message
+    assert "0x9f" not in message
+    assert "\\x9f" not in message
+
+
+def test_a_bom_before_the_key_is_ignored_like_the_agent(
+    tmp_path: Path, vectors: dict[str, Any]
+) -> None:
+    # JS String.prototype.trim strips U+FEFF; the agent loads such a file.
+    f = tmp_path / "k"
+    f.write_bytes(b"\xef\xbb\xbf" + vectors["kek_b64"].encode() + b"\n")
+    assert load_kek(str(f)).id == vectors["kek_id"]

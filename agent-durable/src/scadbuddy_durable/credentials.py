@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 import psycopg
 
@@ -60,6 +60,10 @@ def open_credential(
     base_url: str | None,
     envelope: Envelope,
 ) -> Credential:
+    if kind not in get_args(CredentialKind):
+        # Never guess where a secret goes: a kind a later agent migration adds is
+        # unusable here until this port knows it.
+        raise SealError(f"unknown credential kind {kind!r}")
     if sealed_version(envelope.secret_sealed) == SEAL_V1:
         raise SealError(LEGACY_FORMAT_MESSAGE)
     secret = open_secret(kek, envelope, credential_aad(id, kind, base_url))
@@ -73,8 +77,9 @@ def credential_env(c: Credential) -> dict[str, str]:
         return {"ANTHROPIC_API_KEY": c.secret}
     if c.kind == "claude_oauth_token":
         return {"CLAUDE_CODE_OAUTH_TOKEN": c.secret}
-    assert c.base_url is not None
-    return {"ANTHROPIC_BASE_URL": c.base_url, "ANTHROPIC_AUTH_TOKEN": c.secret}
+    if c.kind == "gateway" and c.base_url is not None:
+        return {"ANTHROPIC_BASE_URL": c.base_url, "ANTHROPIC_AUTH_TOKEN": c.secret}
+    raise ValueError(f"no environment for credential kind {c.kind!r}")
 
 
 async def usable_credentials(conn: psycopg.AsyncConnection[Any], kek: Kek) -> list[Credential]:
