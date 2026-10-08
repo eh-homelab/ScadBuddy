@@ -62,7 +62,7 @@ from urllib.parse import urlsplit
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from scadbuddy.api.deps import JOB_ID_PATTERN, AppState, StateDep
+from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
     AnalyzerDecisionEvent,
     BusResync,
@@ -118,7 +118,7 @@ _TOPIC = re.compile(
     "^(?:"
     + "|".join(
         [
-            f"job:{_strip_anchors(JOB_ID_PATTERN)}",
+            f"job:{_strip_anchors(HEX_ID_PATTERN)}",
             f"model:{_strip_anchors(MODEL_ID_PATTERN)}",
             f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
             # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
