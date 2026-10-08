@@ -419,6 +419,13 @@ def test_a_header_that_understates_its_size_does_not_get_past_the_cap(
     assert inflated.total <= MAX_SETTINGS_BYTES + 64 * 1024
 
 
+def test_the_archive_cap_bounds_one_prints_memory_and_fits_real_projects() -> None:
+    """``state_nozzles`` holds the download and its copy at once, so the cap is that
+    print's memory, give or take. The largest real 3MF measured for #484 (a sliced
+    multi-plate archive, 18 MB compressed) inflates to 73 MB."""
+    assert 73_193_348 * 2 < MAX_UNCOMPRESSED_BYTES <= 256 * 1024 * 1024
+
+
 def test_an_archive_over_the_total_cap_is_not_statable(written: Path) -> None:
     payload = _declaring(written.read_bytes(), "3D/3dmodel.model", MAX_UNCOMPRESSED_BYTES + 1)
     assert not nozzles_statable(payload)

@@ -833,9 +833,10 @@ def _state_nozzles(
 
 #: Bambu Studio's full project_settings.config is ~80 KB; more is not one, but a zip bomb.
 MAX_SETTINGS_BYTES = 1024 * 1024
-#: A multi-plate project is tens of MB compressed and some hundreds inflated; a library
-#: file is untrusted (#484), so past this its 3MF is not read at all.
-MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+#: An untrusted library 3MF (#484) past this is not read at all. The largest real one
+#: measured, a sliced multi-plate archive, inflates to 73 MB; a rewrite holds the file
+#: and its copy at once, so this is about the most one print may cost in memory.
+MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 #: A plate's gcode in a 3MF: the file is sliced already.
 _GCODE = re.compile(r"Metadata/plate_\d+\.gcode")
 

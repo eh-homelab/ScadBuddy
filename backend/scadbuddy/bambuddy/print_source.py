@@ -18,6 +18,7 @@ import asyncio
 import io
 import logging
 from collections.abc import Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -49,7 +50,13 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import nozzles_statable, plates_of, state_nozzles
+from scadbuddy.render.bambu3mf import (
+    MAX_UNCOMPRESSED_BYTES,
+    ArchiveTooLargeError,
+    nozzles_statable,
+    plates_of,
+    state_nozzles,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -311,6 +318,9 @@ UNKNOWN_COLOUR = ""
 
 #: The flow the slicer assumes when the file states none (#484).
 STANDARD = VOLUME_TYPE["standard"]
+#: A library file is untrusted; one larger than the archive cap could not be stated
+#: anyway, so it is never held whole (a 3MF's compressed size is below its inflated one).
+MAX_DOWNLOAD_BYTES = MAX_UNCOMPRESSED_BYTES
 
 
 def _copy_name(filename: str, flows: Sequence[str]) -> str:
@@ -366,8 +376,10 @@ class LibrarySource:
     #: The run's settings, whose inbox a copy goes into; a source that only reads has
     #: none.
     settings: StoredSettings | None = None
-    #: The file's bytes, read once when a flow has to be stated.
+    #: The file's bytes, read once when a flow has to be stated, and kept only while
+    #: they can state it.
     _payload: bytes | None = field(default=None, init=False, repr=False, compare=False)
+    _read: bool = field(default=False, init=False, repr=False, compare=False)
 
     @classmethod
     async def load(
@@ -421,10 +433,26 @@ class LibrarySource:
         the file is one Bambuddy will slice from its own settings (#484)."""
         if self.file_type != "3mf" or all(flow == STANDARD for flow in flows or []):
             return False
-        if self._payload is None:
-            chunks = client.download_library_file(self.file_id)
-            self._payload = b"".join([chunk async for chunk in chunks])
-        return nozzles_statable(self._payload)
+        if not self._read:
+            self._read = True
+            payload = await self._download(client)
+            self._payload = payload if payload is not None and nozzles_statable(payload) else None
+        return self._payload is not None
+
+    async def _download(self, client: BambuddyClient) -> bytes | None:
+        """The file's bytes, counted as they stream in; ``None`` past
+        :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept."""
+        data = bytearray()
+        async with aclosing(client.download_library_file(self.file_id)) as chunks:
+            async for chunk in chunks:
+                data += chunk
+                if len(data) > MAX_DOWNLOAD_BYTES:
+                    logger.warning(
+                        "library file too large to state its flow; printing it as it is",
+                        extra={"library_file_id": self.file_id},
+                    )
+                    return None
+        return bytes(data)
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)
@@ -447,9 +475,19 @@ class LibrarySource:
             return PrintFile(self.file_id)
         assert self._payload is not None and nozzle_volume_type is not None
         assert self.settings is not None, "a source that prints needs the run's settings"
-        payload = state_nozzles(
-            self._payload, nozzle_stats=nozzle_stats, nozzle_volume_type=nozzle_volume_type
-        )
+        try:
+            payload = state_nozzles(
+                self._payload, nozzle_stats=nozzle_stats, nozzle_volume_type=nozzle_volume_type
+            )
+        except ArchiveTooLargeError:
+            # nozzles_statable has bounded it already, so this is a defence in depth: the
+            # file prints as it is, and the run's warnings judge it as Standard.
+            logger.warning(
+                "library file inflates past the cap; printing it as it is",
+                extra={"library_file_id": self.file_id},
+            )
+            self._payload = None
+            return PrintFile(self.file_id)
         return PrintFile(
             await ensure_file(
                 client, self.settings, _copy_name(self.filename, nozzle_volume_type), payload
