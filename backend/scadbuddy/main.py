@@ -874,7 +874,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
-    unfollow_backfills: Callable[[], None] | None = None
+    unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -939,7 +939,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop_library.set()
         await _stop_queue_worker(library, "library")
         if unfollow_backfills is not None:
-            unfollow_backfills()
+            await unfollow_backfills()
         for background in (backfill, attach_now):
             if background is not None:
                 background.cancel()

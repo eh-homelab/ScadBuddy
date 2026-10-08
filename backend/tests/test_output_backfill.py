@@ -15,6 +15,9 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
@@ -330,7 +333,57 @@ async def test_a_job_done_event_attaches_its_backfill_promptly(
             bus.publish(JobEvent(kind="job.done", job_id=job.id, slug="demo"))
             await _until(lambda: store.backfill(old.id) is None, timeout=2.0)
         finally:
-            remove()
+            await remove()
+    assert store.manifest(old.id) == written.manifest
+
+
+async def test_removing_the_follower_waits_for_an_attach_in_flight() -> None:
+    """#1759: the lifespan closes the pool after the remover; an attach still running
+    in its thread then would fail on a closed pool."""
+    started, release = threading.Event(), threading.Event()
+    finished: list[str] = []
+
+    def attach(job_id: str) -> int:
+        started.set()
+        release.wait(5)
+        finished.append(job_id)
+        return 0
+
+    bus = InProcessEventBus()
+    remove = follow_backfills(bus, attach)
+    bus.publish(JobEvent(kind="job.done", job_id="j1", slug="demo"))
+    await _until(started.is_set)
+    removing = asyncio.create_task(remove())
+    await asyncio.sleep(0.1)
+    assert not removing.done()
+    release.set()
+    await asyncio.wait_for(removing, 5)
+    assert finished == ["j1"]
+    bus.publish(JobEvent(kind="job.done", job_id="j2", slug="demo"))
+    await asyncio.sleep(0.1)
+    assert finished == ["j1"]  # removed: heard no more
+
+
+@pytest.mark.requires_postgres
+async def test_an_attach_needs_one_connection_of_the_pool(tmp_path: Path, pg_conninfo: str) -> None:
+    """#1757: the claim's lock must not keep a pool connection while the attach takes
+    another, or a pool of one (`SCADBUDDY_DATABASE_POOL_SIZE=1`) never attaches."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    with store_pool(pg_conninfo):  # migrated
+        pass
+    one: ConnectionPool[Connection[DictRow]] = ConnectionPool(
+        pg_conninfo,
+        min_size=1,
+        max_size=1,
+        timeout=2,
+        connection_class=Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    with one:
+        refs = BlobRefs(one)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+        assert _holders(refs, written.manifest[0].part) == [(OUTPUT_HOLDER, old.id)]
     assert store.manifest(old.id) == written.manifest
 
 
@@ -375,7 +428,7 @@ async def test_duplicate_events_and_the_backstop_attach_once(
             backstop = await asyncio.to_thread(attach_backfills, store, refs, slow)
             await _until(lambda: len(results) == 2)
         finally:
-            remove()
+            await remove()
         assert sum(results) + backstop == 1
         assert _holders(refs, written.manifest[0].part) == [(OUTPUT_HOLDER, old.id)]
     assert store.manifest(old.id) == written.manifest
