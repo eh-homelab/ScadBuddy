@@ -58,8 +58,8 @@ token are placeholders, filled in from the plugin's
 - In Claude Code, the tools appear as `mcp__plugin_scadbuddy_scadbuddy__<tool>`
   ([MCP servers in plugins](https://code.claude.com/docs/en/plugins/components)).
 
-The `/mcp` endpoint and its tools are built in issues #251 and #261. Until they
-ship, the skills and agents load, but the server has nothing to connect to.
+The `/mcp` endpoint and its tools are ScadBuddy's agent sidecar (#251, #261). Mint
+the token in ScadBuddy Settings → Assistant → **MCP access tokens**.
 
 ## Inside ScadBuddy
 
