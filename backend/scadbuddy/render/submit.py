@@ -76,9 +76,9 @@ from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
     CommandClosedError,
+    CommandClosingError,
     CommandStillAcceptingError,
     TemporalBusyError,
-    TemporalRefusedError,
     TemporalUnavailableError,
     late_answer,
     start_command,
@@ -404,20 +404,17 @@ class RenderService:
                     # Bounds a pipeline that never yields; `settle_closed` fails its row.
                     execution_timeout=timedelta(seconds=self.config.pipeline_timeout),
                 )
-            except (TemporalBusyError, TemporalRefusedError) as error:
+            except TemporalBusyError as error:
                 # `start_command` classifies its `RPCError` (#1316); the cause says which.
                 cause = error.__cause__
-                if not isinstance(cause, RPCError):
+                if not (isinstance(cause, RPCError) and cause.status in ENDED_RPC):
                     raise
-                if cause.status in ENDED_RPC:
-                    # The start may have reached Temporal: still accepting if the
-                    # execution exists (review #1066 (8) 2).
-                    raise await late_answer(self.client, workflow_id) from cause
+                # The start may have reached Temporal: still accepting if the
+                # execution exists (review #1066 (8) 2).
+                raise await late_answer(self.client, workflow_id) from cause
+            except CommandClosingError:
                 # An Update that reached the execution as it completed is aborted, the
-                # same race as a `CLOSING` rejection (review #1066 (11) 1). A missing
-                # namespace is NOT_FOUND too: configuration, raised at once.
-                if not execution_gone(cause):
-                    raise
+                # same race as a `CLOSING` rejection (review #1066 (11) 1, #1799).
                 answer = RenderAnswer(closing=True)
             except WorkflowUpdateFailedError as error:
                 # Rejected by a closing run, so its id is not in that run's history:

@@ -142,6 +142,13 @@ class CommandClosedError(Exception):
     was recorded, and a failed-only reuse policy lets the same request start again."""
 
 
+class CommandClosingError(CommandClosedError):
+    """The execution closed after its Update was admitted and before it was accepted:
+    Temporal aborts the Update with an execution NOT_FOUND ("workflow update was aborted
+    by closing workflow"), never a refusal (#1799). Sent again, the same request starts
+    the next run or answers from the closed one's record."""
+
+
 class AlreadyClosedError(Exception):
     """The ID's last execution closed and the reuse policy refuses another: the route
     answers from our record."""
@@ -231,6 +238,13 @@ async def start_command[T](
     except TimeoutError as error:
         raise await late_answer(client, id) from error
     except (RPCError, RuntimeError) as error:
+        if (
+            isinstance(error, RPCError)
+            and error.status == RPCStatusCode.NOT_FOUND
+            and not namespace_not_found(error)
+        ):
+            # USE_EXISTING never misses an execution, so it closed under the Update.
+            raise CommandClosingError(id) from error
         if (failure := temporal_failure(error, id)) is None:
             raise
         raise failure from error
