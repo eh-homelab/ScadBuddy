@@ -373,8 +373,7 @@ routes in `registerMcpTokenRoutes()` in
 [`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
 stored in `ai_mcp_tokens` (§7). The Settings section renders only where
 `useAiAvailability()` ([`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts))
-reports AI available, which today is the msw-mocked build: nothing routes
-`/api/v1/ai/*` to the sidecar yet. Until then, the routes below are the interface.
+reports AI available, that is, where the ingress routes `/api/v1/ai/*` to the sidecar.
 
 | Route | Guarded | What it does |
 |---|---|---|

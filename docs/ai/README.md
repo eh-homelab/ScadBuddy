@@ -27,25 +27,24 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 ## What the AI integration is today
 
 The spec's end state (§1) is an agent service in the ScadBuddy pod that external MCP
-clients reach over `/mcp`, plus an in-app assistant. What is merged is the foundation
-for that; **no AI feature is user-visible in a production build yet**:
+clients reach over `/mcp`, plus an in-app assistant. Both are in use:
 
-- The assistant panel, and Settings → "MCP access tokens" (#251), are hidden outside
-  the msw-mocked build. `useAiAvailability()` in
-  [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts)
-  returns `available: true` only when `VITE_MOCK_API === '1'`, and
-  `loadChatTransportFactory()` in
-  [`frontend/src/agent/chat/transport.ts`](../../frontend/src/agent/chat/transport.ts)
-  returns `null` otherwise (both carry a TODO for #255/#261/#266).
-- The agent sidecar is not deployed: README "The agent sidecar" says "Nothing deploys
-  it yet", and there are no ingress routes for `/mcp` or `/api/v1/ai/*` yet
-  ([`README.md`](../../README.md)).
-- `/mcp` and the tool registry are on `main` (#368). Sessions start from the panel's
-  chat socket and the session routes (#527), and from other agents over `/mcp` through
-  the `sessions_*` tools (#300, [agent-sessions.md](agent-sessions.md)).
-  When a session does run, its queries get ScadBuddy's tools in-process, with their
-  tiers and approvals, but no plugin
-  ([security.md](security.md#risk-tiers-and-the-permission-seam)).
+- The agent runs as a sidecar in the ScadBuddy pod ([`README.md`](../../README.md),
+  "The agent sidecar"), and the ingress routes `/mcp` and `/api/v1/ai/*` to it on
+  ScadBuddy's own origin ([operating.md](operating.md) §1.1).
+- The assistant panel and Settings → Assistant (credentials, **MCP access tokens**
+  (#251), plugins) show wherever the agent answers `GET /api/v1/ai/status`
+  (`useAiAvailability()` in
+  [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts));
+  the panel talks over the agent's chat socket
+  ([`frontend/src/agent/chat/transport.ts`](../../frontend/src/agent/chat/transport.ts)).
+- `/mcp` serves the tool registry (#368). Sessions start from the panel's chat socket
+  and the session routes (#527), and from other agents over `/mcp` through the
+  `sessions_*` tools (#300, [agent-sessions.md](agent-sessions.md)). A session's
+  queries get ScadBuddy's tools in-process, with their tiers and approvals
+  ([security.md](security.md#risk-tiers-and-the-permission-seam)), ScadBuddy's own
+  plugin (#896, [claude-plugin.md](claude-plugin.md#inside-scadbuddy)), and the
+  plugin packages an admin approved (#297).
 
 ### Merged pieces
 
