@@ -101,7 +101,7 @@ export type Endpoint = { what: string; url: string }
 export type Vetting = {
   /** Undefined when the package has no usable name. */
   review: PackageReview | undefined
-  /** Everything the rules refuse, fatal or not. */
+  /** Everything the rules refuse, fatal or not, uncapped; a refusal caps it (`capProblems`). */
   problems: string[]
   /** The problems no approval can allow (see the header); a subset of `problems`. */
   fatal: string[]
@@ -110,10 +110,10 @@ export type Vetting = {
 
 const NON_COMMAND_MCP_TYPE = 'http'
 
-/** The least a package name must be, approved or not; the stricter rules are allowable. */
 /** ScadBuddy's own plugin (plugins/scadbuddy), which harness/ownPlugin.ts loads. */
 const OWN_PLUGIN_NAME = 'scadbuddy'
 
+/** The least a package name must be, approved or not; the stricter rules are allowable. */
 export const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 // The hook events a package may use: an allowlist, so an event added to
@@ -146,6 +146,14 @@ const PACKAGE_HOOK_EVENTS = new Set([
   'PostCompact',
 ])
 const MAX_REPORTED_PROBLEMS = 50
+
+/** `problems` without repeats, capped at MAX_REPORTED_PROBLEMS with an "and N more". */
+export function capProblems(problems: readonly string[]): string[] {
+  const unique = [...new Set(problems)]
+  return unique.length > MAX_REPORTED_PROBLEMS
+    ? [...unique.slice(0, MAX_REPORTED_PROBLEMS), `and ${unique.length - MAX_REPORTED_PROBLEMS} more`]
+    : unique
+}
 
 /**
  * The fields of a hook or MCP server config whose key or value holds a `$`,
@@ -498,12 +506,8 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     : undefined
 
   const unique = [...new Set(problems)]
-  const reported =
-    unique.length > MAX_REPORTED_PROBLEMS
-      ? [...unique.slice(0, MAX_REPORTED_PROBLEMS), `and ${unique.length - MAX_REPORTED_PROBLEMS} more`]
-      : unique
   const fatalSet = new Set(fatal)
   // Uncapped: an admin allows exactly the list the review shows, never "and N more".
   if (review) review.refused = unique.filter((p) => !fatalSet.has(p))
-  return { review, problems: reported, fatal: [...fatalSet], endpoints }
+  return { review, problems: unique, fatal: [...fatalSet], endpoints }
 }
