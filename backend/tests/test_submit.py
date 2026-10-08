@@ -67,6 +67,7 @@ from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.commands import (
     CommandClosedError,
+    CommandClosingError,
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalRefusedError,
@@ -439,6 +440,13 @@ def _classified(error: RPCError, id: str) -> NoReturn:
     raise failure from error
 
 
+def _aborted(id: str) -> NoReturn:
+    """Raise as `start_command` does for an Update its closing execution aborted."""
+    raise CommandClosingError(id) from RPCError(
+        "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+    )
+
+
 class _Described:
     """A client whose `describe` finds the execution, or answers NOT_FOUND."""
 
@@ -725,14 +733,7 @@ async def test_an_update_aborted_by_a_closing_execution_starts_again(
     async def answering(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
         if len(calls) == 1:
-            _classified(
-                RPCError(
-                    "workflow update was aborted by closing workflow",
-                    RPCStatusCode.NOT_FOUND,
-                    b"",
-                ),
-                kwargs["id"],
-            )
+            _aborted(kwargs["id"])
         return RenderAnswer(job=job)
 
     monkeypatch.setattr(submit_module, "start_command", answering)
@@ -755,12 +756,7 @@ async def test_an_update_aborted_twice_by_closing_executions_is_still_accepting(
 
     async def aborting(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
-        _classified(
-            RPCError(
-                "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
-            ),
-            kwargs["id"],
-        )
+        _aborted(kwargs["id"])
 
     monkeypatch.setattr(submit_module, "start_command", aborting)
     async with temporal_client() as client:
