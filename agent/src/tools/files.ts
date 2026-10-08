@@ -121,36 +121,145 @@ export function applyEdits(content: string, edits: readonly Edit[]): string {
   return out
 }
 
-/** A glob as a whole-name RegExp: `*`, `**`, `?`, `[…]` and `{a,b}`. */
-export function globToRegExp(glob: string): RegExp {
-  let out = ''
-  let depth = 0
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i]!
-    if (c === '*' && glob[i + 1] === '*') {
-      const slash = glob[i + 2] === '/'
-      out += slash ? '(?:.*/)?' : '.*'
-      i += slash ? 2 : 1
-    } else if (c === '*') {
-      out += '[^/]*'
-    } else if (c === '?') out += '[^/]'
-    else if (c === '{') {
-      depth++
-      out += '(?:'
-    } else if (c === '}' && depth > 0) {
-      depth--
-      out += ')'
-    } else if (c === ',' && depth > 0) out += '|'
-    else if (c === '[') {
-      const end = glob.indexOf(']', i + 1)
-      if (end === -1) out += '\\['
-      else {
-        out += `[${glob.slice(i + 1, end).replace(/^!/, '^').replace(/\\/g, '\\\\')}]`
-        i = end
-      }
-    } else out += c.replace(/[.+^$()|\\]/g, '\\$&')
+type GlobToken =
+  | { t: 'char'; test: (c: string) => boolean }
+  | { t: 'star'; test: (c: string) => boolean }
+  | { t: 'dirs' }
+  | { t: 'group'; alts: GlobToken[][] }
+
+type GlobState =
+  | { kind: 'char' | 'star'; test: (c: string) => boolean; next: number }
+  | { kind: 'split'; next: number[] }
+  | { kind: 'match' }
+
+const ANY = () => true
+const NOT_SLASH = (c: string) => c !== '/'
+
+/** `[…]` from just past its `[`: `!` or `^` first negates, a `]` first is a member. Null when unclosed. */
+function globClass(chars: readonly string[], start: number): { test: (c: string) => boolean; next: number } | null {
+  let i = start
+  const negate = chars[i] === '!' || chars[i] === '^'
+  if (negate) i++
+  const end = chars.indexOf(']', chars[i] === ']' ? i + 1 : i)
+  if (end === -1) return null
+  const members = chars.slice(i, end)
+  const ranges: Array<[number, number]> = []
+  for (let k = 0; k < members.length; k++) {
+    const lo = members[k]!.codePointAt(0)!
+    if (members[k + 1] === '-' && k + 2 < members.length) {
+      ranges.push([lo, members[k + 2]!.codePointAt(0)!])
+      k += 2
+    } else ranges.push([lo, lo])
   }
-  return new RegExp(`^${out}$`)
+  const test = (c: string) => {
+    const code = c.codePointAt(0)!
+    return c !== '/' && ranges.some(([lo, hi]) => code >= lo && code <= hi) !== negate
+  }
+  return { test, next: end + 1 }
+}
+
+function parseGlob(glob: string): GlobToken[] {
+  const chars = [...glob]
+  let i = 0
+  const literal = (c: string): GlobToken => ({ t: 'char', test: (x) => x === c })
+  // Up to the end, or inside a group up to its `,` or `}`; outside one those are literal.
+  const sequence = (inGroup: boolean): GlobToken[] => {
+    const out: GlobToken[] = []
+    while (i < chars.length) {
+      const c = chars[i]!
+      if (inGroup && (c === ',' || c === '}')) break
+      i++
+      if (c === '*' && chars[i] === '*') {
+        i++
+        if (chars[i] === '/') {
+          i++
+          out.push({ t: 'dirs' })
+        } else out.push({ t: 'star', test: ANY })
+      } else if (c === '*') out.push({ t: 'star', test: NOT_SLASH })
+      else if (c === '?') out.push({ t: 'char', test: NOT_SLASH })
+      else if (c === '{') {
+        const alts = [sequence(true)]
+        while (chars[i] === ',') {
+          i++
+          alts.push(sequence(true))
+        }
+        if (chars[i] !== '}') throw new ToolError(`the glob ${JSON.stringify(glob)} has a { with no }`)
+        i++
+        out.push({ t: 'group', alts })
+      } else if (c === '[') {
+        const cls = globClass(chars, i)
+        if (cls === null) out.push(literal(c))
+        else {
+          out.push({ t: 'char', test: cls.test })
+          i = cls.next
+        }
+      } else out.push(literal(c))
+    }
+    return out
+  }
+  return sequence(false)
+}
+
+/**
+ * A glob matched against a whole name: `*` and `?` stop at `/`, `**` crosses it, and `**`
+ * before a `/` is nothing or any directories; `{a,b}` (nested too) alternates, `[…]`/`[!…]`
+ * is a class.
+ * Compiled to a small NFA and matched by simulating it (Thompson's construction), never
+ * by backtracking: the time is linear in the name whatever the pattern. A RegExp built
+ * from the glob ran on the service's own thread, and `**` repeated or `*a*a*a…` could
+ * hold it for good (#1069 review), which grep's worker and timeout never covered.
+ */
+export function globMatcher(glob: string): (name: string) => boolean {
+  const states: GlobState[] = [{ kind: 'match' }]
+  const add = (state: GlobState) => states.push(state) - 1
+  // Built back to front, each token in front of what follows it; a group's alternatives
+  // share what follows the group, so the NFA stays as small as the glob.
+  const sequence = (tokens: readonly GlobToken[], next: number): number => {
+    for (let k = tokens.length - 1; k >= 0; k--) {
+      const token = tokens[k]!
+      if (token.t === 'char' || token.t === 'star') next = add({ kind: token.t, test: token.test, next })
+      else if (token.t === 'dirs') {
+        const slash = add({ kind: 'char', test: (c) => c === '/', next })
+        next = add({ kind: 'split', next: [next, add({ kind: 'star', test: ANY, next: slash })] })
+      } else next = add({ kind: 'split', next: token.alts.map((alt) => sequence(alt, next)) })
+    }
+    return next
+  }
+  const start = sequence(parseGlob(glob), 0)
+  const marks = new Uint32Array(states.length)
+  let step = 0
+  // Every state reachable from `from` without consuming a character, each at most once a step.
+  const reach = (from: number, into: number[]) => {
+    const stack = [from]
+    while (stack.length > 0) {
+      const s = stack.pop()!
+      if (marks[s] === step) continue
+      marks[s] = step
+      const state = states[s]!
+      if (state.kind === 'split') stack.push(...state.next)
+      else {
+        into.push(s)
+        if (state.kind === 'star') stack.push(state.next)
+      }
+    }
+  }
+  return (name) => {
+    step++
+    let current: number[] = []
+    reach(start, current)
+    for (const c of name) {
+      step++
+      const next: number[] = []
+      for (const s of current) {
+        const state = states[s]!
+        if (state.kind === 'char' && state.test(c)) reach(state.next, next)
+        else if (state.kind === 'star' && state.test(c)) reach(s, next)
+      }
+      if (next.length === 0) return false
+      current = next
+    }
+    return current.some((s) => states[s]!.kind === 'match')
+  }
 }
 
 export type MatchOptions = {
@@ -408,7 +517,8 @@ export const fileTools: Tool[] = [
       "Replace text in one of a model's .scad files, as one revision in its history: `old_string` must " +
       'match exactly once (or set `replace_all`). Returns the new revision and its diff (or the whole file ' +
       'with `response: "full"`). model.scad is parse-checked unless `force`. With `base`, refused as a ' +
-      'conflict if the model has moved on since that revision.',
+      'conflict if the model has moved on since that revision. Pass the `base` read_file gave you, so a ' +
+      'repeated call cannot apply the edit twice.',
     input: z.object({
       slug,
       file_path: scadPath,
@@ -437,7 +547,7 @@ export const fileTools: Tool[] = [
     name: 'multi_edit',
     description:
       "Several edit_file replacements in one of a model's .scad files, applied in order, all or nothing, " +
-      'as ONE revision. Each edit sees the text the ones before it left.',
+      'as ONE revision. Each edit sees the text the ones before it left. Pass `base`, as for edit_file.',
     input: z.object({
       slug,
       file_path: scadPath,
@@ -502,8 +612,7 @@ export const fileTools: Tool[] = [
     source: 'file names in a model directory, chosen by its author',
     routes: ['GET /api/v1/models/{slug}/files'],
     handler: async ({ slug, pattern }, { backend }) => {
-      const re = globToRegExp(pattern)
-      const names = (await scadFiles(backend, slug)).filter((name) => re.test(name))
+      const names = (await scadFiles(backend, slug)).filter(globMatcher(pattern))
       return text(names.length ? names.join('\n') : `no file in ${slug} matches ${pattern}`)
     },
   }),
@@ -533,12 +642,12 @@ export const fileTools: Tool[] = [
     routes: ['GET /api/v1/models', 'GET /api/v1/models/{slug}/files', 'GET /api/v1/models/{slug}/files/{path}'],
     handler: async (args, { backend, signal }) => {
       const slugs = args.slug !== undefined ? [args.slug] : (await ok(backend.GET('/api/v1/models'), 'list models')).map((m) => m.slug)
-      const only = args.glob !== undefined ? globToRegExp(args.glob) : null
+      const only = args.glob !== undefined ? globMatcher(args.glob) : null
       const targets = (
         await eachLimited(slugs, GREP_CONCURRENCY, async (s) => {
           if (args.path !== undefined) return [{ slug: s, name: normalize(args.path) }]
           const names = await scadFiles(backend, s)
-          return names.filter((n) => only === null || only.test(n)).map((name) => ({ slug: s, name }))
+          return names.filter((n) => only === null || only(n)).map((name) => ({ slug: s, name }))
         })
       ).flat()
       let bytes = 0

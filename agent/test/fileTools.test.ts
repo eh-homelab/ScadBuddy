@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { applyEdits, globToRegExp, matchFiles, numbered } from '../src/tools/files.js'
+import { applyEdits, globMatcher, matchFiles, numbered } from '../src/tools/files.js'
 import { runTool, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
@@ -132,10 +132,31 @@ describe('helpers', () => {
   })
 
   it('matches globs', () => {
-    expect(globToRegExp('*.scad').test('parts.scad')).toBe(true)
-    expect(globToRegExp('*.scad').test('README.md')).toBe(false)
-    expect(globToRegExp('**/*.{scad,md}').test('README.md')).toBe(true)
-    expect(globToRegExp('p?rts.scad').test('parts.scad')).toBe(true)
+    const m = (glob: string, name: string) => globMatcher(glob)(name)
+    expect(m('*.scad', 'parts.scad')).toBe(true)
+    expect(m('*.scad', 'README.md')).toBe(false)
+    expect(m('**/*.{scad,md}', 'README.md')).toBe(true)
+    expect(m('p?rts.scad', 'parts.scad')).toBe(true)
+    expect(m('{a,b{c,d}}.scad', 'bd.scad')).toBe(true)
+    expect(m('*', 'a/b')).toBe(false)
+    expect(m('**', 'a/b')).toBe(true)
+    expect(m('a/**/b', 'a/b')).toBe(true)
+    expect(m('a/**/b', 'a/x/y/b')).toBe(true)
+    expect(m('[a-c]x', 'bx')).toBe(true)
+    expect(m('[!p]*.scad', 'parts.scad')).toBe(false)
+    // A `]` first in a class is a member; outside a group `,` and `}` are literal.
+    expect(m('[]a]x', ']x')).toBe(true)
+    expect(m('a,b}', 'a,b}')).toBe(true)
+    expect(() => globMatcher('{a,b')).toThrow(ToolError)
+  })
+
+  it('matches in time linear in the name, whatever the glob (#1069 review)', () => {
+    // Each of these held a RegExp built from the glob for good, on the service's own thread.
+    const started = performance.now()
+    expect(globMatcher('**'.repeat(99) + 'x')('model.scad')).toBe(false)
+    expect(globMatcher('*a'.repeat(30) + 'b')(`${'a'.repeat(90)}.scad`)).toBe(false)
+    expect(globMatcher('*a'.repeat(30))('a'.repeat(90))).toBe(true)
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 })
 
