@@ -172,11 +172,11 @@ def high_flow_warnings(
     a hotend of the size and of the flow sliced there (``rack.rank.eligible``), so the
     hotend mounted there now is swapped out and is not warned about (#1238).
 
-    ``laid_out``: the file sliced states the side offered and each side's flow: an
-    output the run lays out, or a library file whose copy states them because a flow
-    other than Standard was chosen (``LibrarySource``, #484). Any other library file
-    prints as its author left it (#313): the slicer may use either side, and it slices
-    as Standard (:func:`_sliced_flows`)."""
+    ``laid_out``: the file sliced states the side offered and each side's flow, as
+    every 3MF the run lays out does, an output's or a library file's alike
+    (``PrintSource.states_nozzles``, #1752). A file nothing can be stated into (sliced
+    already, another slicer's) prints as it is: the slicer may use either side, and it
+    slices as Standard (:func:`_sliced_flows`)."""
     if not nozzles:
         return []
     size = nozzles[0].size
@@ -215,12 +215,10 @@ def _flows(nozzles: Sequence[NozzleChoice]) -> dict[int, FlowType]:
 
 def _sliced_flows(nozzles: Sequence[NozzleChoice], *, laid_out: bool) -> dict[int, FlowType]:
     """The flow each side is sliced for. A file that states the flow chosen for each
-    (:func:`slicer_volume_types`) is sliced so: an output the run lays out, and a
-    library file whose copy states it (``LibrarySource``, #484). Any other library file
-    prints as its author left it (#313): High Flow was not chosen for it, or it cannot
-    be rewritten (a sliced file, an STL), and it states no flow unless they saved it
-    High Flow, which is not read, so it is taken as Standard on both sides, as every
-    slice was before #484."""
+    (:func:`slicer_volume_types`) is sliced so: every 3MF the run lays out, whatever it
+    was obtained from (#1752). A file nothing can be stated into (a sliced file,
+    another slicer's 3MF) states no flow unless it was saved High Flow, which is not
+    read, so it is taken as Standard on both sides, as every slice was before #484."""
     if laid_out:
         return _flows(nozzles)
     return {LEFT: "standard", RIGHT: "standard"}
@@ -246,8 +244,7 @@ def slicer_volume_types(nozzles: Sequence[NozzleChoice]) -> list[str]:
 def rack_volume_type(nozzles: Sequence[NozzleChoice], *, laid_out: bool) -> str:
     """The flow the rack side is sliced for, which Bambuddy re-checks a rack pick
     against at dispatch: the right's, the side the rack swaps onto. ``laid_out`` as
-    for :func:`high_flow_warnings`: a library file that states no flow is taken as
-    Standard."""
+    for :func:`high_flow_warnings`: a file that states no flow is taken as Standard."""
     return VOLUME_TYPE[_sliced_flows(nozzles, laid_out=laid_out)[RACK_SIDE]]
 
 

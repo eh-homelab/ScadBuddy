@@ -1043,17 +1043,25 @@ class _Sends:
         self.recorded.append((subject, [send.queue_item_id for send in sends]))
 
 
+class _SlicedCopies:
+    def __init__(self) -> None:
+        self.sliced: list[tuple[str, int]] = []
+
+    async def record_sliced(self, key: str, library_file_id: int, sliced: Any) -> None:
+        self.sliced.append((key, library_file_id))
+
+
 async def test_a_library_plate_is_recorded_by_subject_without_reading_bambuddy() -> None:
     """#1750 (R1, R2): ``print_record`` records a library file's plate through its source,
     as an output's, and reads nothing back from Bambuddy to do it: there are no Bambuddy
-    settings here at all."""
+    settings here at all. Its slice is recorded against its copy, as an output's (#1752)."""
     unused: Any = None
-    sends = _Sends()
+    sends, uploads = _Sends(), _SlicedCopies()
     real = PrintActivities(
         PrintDeps(
             settings_store=unused,
             outputs=unused,
-            uploads=unused,
+            uploads=cast(Any, uploads),
             prints=unused,
             store=unused,
             observer=unused,
@@ -1074,3 +1082,4 @@ async def test_a_library_plate_is_recorded_by_subject_without_reading_bambuddy()
     )
     assert sends.recorded == [(PrintSubject.library(41), [51])]
     assert sent == [PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9)]
+    assert uploads.sliced == [("library:41", 41)]

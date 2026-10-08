@@ -41,8 +41,9 @@ multi-colour rules, connecting Bambuddy and each feature.
   nozzle flow, the full process list and a per-slot filament preset override. Also lets
   you set copies, a project, and print options.
 - **Library**: print any file already in Bambuddy's library through the same print
-  picker, printed exactly as its author left it — never replated, recolored or
-  uploaded again. Advanced also lists STLs, which print as one plate, and sliced
+  picker, printed as an output is: a copy laid out for the nozzle side, flow and
+  spools chosen, filed in the project's folder; an author's plates and placement are
+  kept. Advanced also lists STLs, which print as one plate, and sliced
   `.gcode.3mf` files, which print from Bambuddy directly.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
