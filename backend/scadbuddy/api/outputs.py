@@ -306,10 +306,11 @@ def _check_copies(total: int) -> None:
 
 
 async def resolve_library_files(
-    uploads: BambuddyUploadStore, body: ArrangeRequest
+    uploads: BambuddyUploadStore, outputs: OutputStore, body: ArrangeRequest
 ) -> ArrangeRequest:
     """``body`` with each library file named by the output it is a copy of (#1864). A
-    file no output records is refused, all of them at once, until #1863 reads one."""
+    file no output records is refused, all of them at once, until #1863 reads one; a
+    file whose output has since been deleted is a 404 naming the file."""
     wanted = list(dict.fromkeys(o.library_file_id for o in body.objects if o.library_file_id))
     if not wanted:
         return body
@@ -323,6 +324,15 @@ async def resolve_library_files(
             code=LIBRARY_FILE_NOT_ARRANGEABLE,
             library_file_ids=plain,
         )
+    for file_id in wanted:
+        try:
+            await asyncio.to_thread(outputs.directory, found[file_id])
+        except OutputNotFoundError:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND,
+                f"library file {file_id} is a copy of output {found[file_id]}, which has"
+                " been deleted",
+            ) from None
     objects = [
         o
         if o.library_file_id is None
@@ -462,7 +472,7 @@ async def arrange_outputs(
     render: RenderDep,
     store: SettingsStoreDep,
 ) -> JobStatus:
-    body = await resolve_library_files(uploads, body)
+    body = await resolve_library_files(uploads, outputs, body)
     stored = await asyncio.to_thread(store.load)
     printer_id = body.printer_id if body.printer_id is not None else stored.printer_id
     # No printer: the plate the preview falls back to (Settings), else the default plate.

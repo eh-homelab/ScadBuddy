@@ -66,8 +66,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   /** Sources added inside the dialog, after the ones it was opened with. */
   const [added, setAdded] = useState<ArrangeSource[]>([])
   const [adding, setAdding] = useState<'files' | 'model' | null>(null)
-  /** The output behind each library file, read by id; null when it could not be read. */
-  const [read, setRead] = useState<Record<string, Output | null>>({})
+  /** The output behind each library file, read by id, or why it could not be read. */
+  const [read, setRead] = useState<Record<string, Output | { error: string }>>({})
   /** Outputs re-rendered here, read back with their objects. */
   const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
@@ -84,6 +84,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const named = new Map(sources.flatMap((s) => (s.kind === 'output' ? [[s.output.id, s.output] as const] : [])))
   const plain: LibraryEntry[] = []
   const reading: LibraryEntry[] = []
+  /** Files ScadBuddy made whose output could not be read, each with why. */
+  const unread: string[] = []
   const behind: Output[] = []
   for (const source of sources) {
     if (source.kind === 'output') {
@@ -94,6 +96,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     const output = id ? (named.get(id) ?? read[id]) : null
     if (output === undefined) reading.push(source.file)
     else if (output === null) plain.push(source.file)
+    else if ('error' in output) unread.push(`${source.file.filename}: ${output.error}`)
     else behind.push(output)
   }
   // An output reached as itself and through its library file is arranged once.
@@ -114,7 +117,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const countOf = (key: string, fallback: number) => counts[key] ?? fallback
 
   // Read the output behind each library file once, whoever added it.
-  const unread = [
+  const toRead = [
     ...new Set(
       sources.flatMap((s) =>
         s.kind === 'library' && s.file.output_id && !named.has(s.file.output_id) && !(s.file.output_id in read)
@@ -124,18 +127,21 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     ),
   ].join(',')
   useEffect(() => {
-    if (!open || !unread) return
+    if (!open || !toRead) return
     let live = true
-    for (const id of unread.split(',')) {
+    for (const id of toRead.split(',')) {
       api
         .getOutput(id)
         .then((output) => live && setRead((known) => ({ ...known, [id]: output })))
-        .catch(() => live && setRead((known) => ({ ...known, [id]: null })))
+        .catch((cause: unknown) => {
+          const error = cause instanceof ApiError ? cause.detail : 'its output could not be read'
+          if (live) setRead((known) => ({ ...known, [id]: { error } }))
+        })
     }
     return () => {
       live = false
     }
-  }, [open, unread])
+  }, [open, toRead])
 
   /** The arrange in flight: closing the dialog (or leaving the page) stops its wait. */
   const running = useRef<AbortController | null>(null)
@@ -237,6 +243,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         {plain.length > 0 && (
           <p role="status" className="text-[12px] text-muted">
             {plainNote(plain)}
+          </p>
+        )}
+        {unread.length > 0 && (
+          <p role="status" className="text-[12px] text-warn">
+            {`Left out, as ScadBuddy could not read what it made them from: ${unread.join('; ')}.`}
           </p>
         )}
         {reading.length > 0 && (

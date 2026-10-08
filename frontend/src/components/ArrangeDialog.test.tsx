@@ -60,6 +60,17 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
   })
 
+  it('says why a file ScadBuddy made is left out when its output cannot be read', async () => {
+    const gone = { ...clip, output_id: '8'.repeat(32) }
+    server.use(
+      http.get(`/api/v1/outputs/${gone.output_id}`, () => problem(404, 'Not Found', 'no such output')),
+    )
+    renderPage(<ArrangeDialog open sources={fromFiles([gone])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    expect(await screen.findByText(/could not read what it made them from: .*: no such output\./)).toBeVisible()
+    expect(screen.queryByText(/not made by ScadBuddy/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Arrange' })).toBeDisabled()
+  })
+
   it('lists an output once when its library file is added too', async () => {
     renderPage(
       <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([clip])]} onClose={vi.fn()} onArranged={vi.fn()} />,

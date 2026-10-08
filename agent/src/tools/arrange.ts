@@ -19,7 +19,9 @@ const arrangeObject = z
       .int()
       .min(1)
       .optional()
-      .describe("A Bambuddy library file ScadBuddy uploaded (`output_id` on the library listing), in place of output_id"),
+      .describe(
+        "A Bambuddy library file's `id`, in place of output_id; the library listing's `output_id` says whether it can be arranged",
+      ),
     part: z
       .string()
       .min(1)
@@ -50,7 +52,8 @@ export const arrangeTools: Tool[] = [
       'Lay objects out again on shared plates, with no re-render, and save the result as a new output. ' +
       'Sources mix freely: outputs of any template (`output_id`), and Bambuddy library files ScadBuddy ' +
       'uploaded (`library_file_id`; the library listing names their `output_id`). Each object is one ' +
-      "`part` of a source's manifest, or the whole source with part omitted. `goal` picks the layout; " +
+      "`part` of a source's manifest, or the whole source with part omitted; objects naming the same thing " +
+      'twice (an output and its library file, say) are placed twice. `goal` picks the layout; ' +
       '`printer_id` packs for that printer\'s plate (omit for the configured one); `filament_plan` is the ' +
       "same spool-per-slot plan print_output takes, slots numbered by `colours` (omit for the first source's " +
       "colours, then any the others add). The result is filed under `slug`, one of the sources' templates " +

@@ -332,6 +332,16 @@ def test_two_templates_and_a_library_file_arrange_together(
     assert [i.count for i in inputs.items] == [1, 2, 2]
 
 
+def test_a_library_file_whose_output_was_deleted_is_a_404_naming_the_file(
+    client: TestClient, app: FastAPI
+) -> None:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(state.uploads.record(UNKNOWN, LibraryCopy(id=78, folder_id=None, target_key="k")))
+    response = client.post("/api/v1/outputs/arrange", json={"objects": [{"library_file_id": 78}]})
+    assert response.status_code == 404, response.text
+    assert "library file 78" in response.json()["detail"]
+
+
 def test_a_library_file_no_output_made_is_not_arrangeable_yet(
     client: TestClient, app: FastAPI, tmp_path: Path
 ) -> None:
