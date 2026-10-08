@@ -23,10 +23,9 @@ jobs:
         with:
           fetch-depth: 1
       - uses: astral-sh/setup-uv@v10.2.0
-      - name: uv lock --check
+      - name: Fetch the pinned commit
         id: lock
-        working-directory: agent-durable
-        run: uv lock --check
+        run: .github/scripts/agent-durable-pin.sh agent-durable
       - name: Open an issue
         if: failure() && steps.lock.outcome == 'failure'
         env:

@@ -620,9 +620,11 @@ jobs:
 
       # The pin still resolves from temporalio/ai-integrations (spec §6.2): a
       # commit only a draft PR references can vanish. Runs on every PR, so a
-      # change to uv.lock is checked where it is made.
-      - name: Check the lock still resolves
-        run: uv lock --check
+      # change to uv.lock is checked where it is made. The test also proves the
+      # check fails on a vanished commit, which `uv lock --check` alone never sees.
+      - name: Check the pin still resolves
+        working-directory: .
+        run: .github/scripts/agent-durable-pin.test.sh
 
       - name: Install
         run: uv sync --frozen

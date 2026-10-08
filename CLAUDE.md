@@ -117,7 +117,7 @@ Durable sessions (`agent-durable/`, Python 3.12, uv; the `agent-durable` CI job,
 
 ```bash
 cd agent-durable
-uv lock --check                   # the ai-integrations#33 pin still resolves
+../.github/scripts/agent-durable-pin.sh .   # the ai-integrations#33 pin still resolves (uv lock --check alone cannot tell)
 uv run --frozen ruff check . && uv run --frozen ruff format --check .
 uv run --frozen mypy
 uv run --frozen pytest            # requires_postgres tests need SCADBUDDY_TEST_DATABASE_URL
@@ -128,7 +128,7 @@ docker build --target agent-durable -t scadbuddy-agent-durable:dev .   # checks 
 (`UPDATE_SECRET_VECTORS=1`) and opened by `agent-durable/tests`: a change to
 `agent/src/secrets.ts`'s format or `credentials.ts`'s AAD needs new vectors, and the port must open them.
 The plugin pin moves only in its own PR, which carries the diff of `python/claude_agent_sdk`
-between the two SHAs; `agent-durable-pin.yml` checks weekly that it still resolves.
+between the two SHAs; `agent-durable-pin.yml` checks weekly that it still resolves (`.github/scripts/agent-durable-pin.sh`).
 
 Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.ts` and
 `agent/src/api/schema.d.ts` are gitignored and never committed. In frontend and agent,
