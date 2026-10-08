@@ -7,7 +7,9 @@ wire at about 3.5 times their gzipped size.
 Starlette's middleware already leaves alone a ``206``, a response that carries its own
 ``Content-Encoding`` (the Bambuddy proxies forward upstream's), ``text/event-stream``,
 and images, audio, video and fonts. Zip containers are added here: a 3MF is a zip, so
-gzipping one spends CPU to save nothing. A GLB is not excluded: the previews carry no
+gzipping one spends CPU to save nothing. So is ``application/octet-stream``, the type a
+pipeline output's extra files go out as (#1855): those are often a zip or a 3MF already.
+A GLB is not excluded: the previews carry no
 Draco or meshopt compression, so their float buffers do shrink.
 """
 
@@ -21,7 +23,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 MINIMUM_SIZE = 1000
 #: zlib's own default. Level 9 takes about twice as long for about 1% less.
 COMPRESS_LEVEL = 6
-EXCLUDED_CONTENT_TYPES = (*DEFAULT_EXCLUDED_CONTENT_TYPES, "model/3mf")
+EXCLUDED_CONTENT_TYPES = (
+    *DEFAULT_EXCLUDED_CONTENT_TYPES,
+    "model/3mf",
+    "application/octet-stream",
+)
 
 
 class Compression:
