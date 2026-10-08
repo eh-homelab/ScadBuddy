@@ -19,8 +19,11 @@ from temporalio.client import (
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
+from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
 from scadbuddy.workflows.housekeeping import (
+    CLAIMS_TIMEOUT,
     HEARTBEAT_TIMEOUT,
+    PRUNE_INTERVAL,
     PRUNE_SWEEPS,
     PRUNE_TIMEOUT,
     SWEEP_TIMEOUT,
@@ -86,21 +89,27 @@ async def test_a_failing_sweep_does_not_stop_the_rest(client: Client) -> None:
     assert failed == [SWEEPS[1]]
 
 
-async def test_the_prune_is_short_and_the_long_sweeps_heartbeat(client: Client) -> None:
+async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> None:
     """Review #1095 2: a worker lost mid-sweep is noticed within the heartbeat
-    timeout, and a lost prune within its own short one, not after `SWEEP_TIMEOUT`."""
+    timeout, not after `SWEEP_TIMEOUT`; the prune's settle too (#1707)."""
     queue = f"library-{uuid.uuid4().hex[:8]}"
     fake = FakeSweeps()
     async with Worker(client, task_queue=queue, workflows=[Housekeeping], activities=fake.all()):  # type: ignore[arg-type]
         await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    # The prune and the claims sweep (review 3c M1) are short, so they share a timeout.
+    expected = {PRUNE_SWEEPS[0]: PRUNE_TIMEOUT, PRUNE_SWEEPS[1]: CLAIMS_TIMEOUT}
     for sweep in SWEEPS:
-        expected = (
-            (PRUNE_TIMEOUT, None) if sweep in PRUNE_SWEEPS else (SWEEP_TIMEOUT, HEARTBEAT_TIMEOUT)
-        )
-        assert fake.timeouts[sweep] == expected
+        assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
+
+
+def test_the_prunes_timeout_covers_its_settle() -> None:
+    """#1707: the prune settles in its `finally`: two passes, each a listing of the
+    open runs and up to `SETTLE_DESCRIBES` describes, each bounded by
+    `DESCRIBE_BOUND`. All of that fits in its timeout, with the deletes besides."""
+    settle = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND)
+    assert PRUNE_TIMEOUT >= settle + timedelta(minutes=1)
+    assert PRUNE_TIMEOUT < timedelta(seconds=PRUNE_INTERVAL) * 4
 
 
 async def test_a_sweep_in_flight_finishes_before_the_worker_stops(client: Client) -> None:
@@ -278,7 +287,7 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     assert isinstance(prune_action, ScheduleActionStartWorkflow)
     assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
     assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
-    assert timedelta(minutes=2) < prune_action.execution_timeout <= timedelta(minutes=10)
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=30)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

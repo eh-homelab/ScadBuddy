@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -14,7 +15,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
-from scadbuddy.workflows.housekeeping import SWEEPS
+from scadbuddy.workflows.housekeeping import PRUNE_SWEEPS, SWEEPS
 from tests.test_print_worker_task import StubWorker
 
 
@@ -218,6 +219,31 @@ async def test_a_long_sweep_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyP
         await asyncio.sleep(0.1)
 
     await env.run(main._heartbeating, slow())
+    assert len(beats) >= 3
+
+
+@pytest.mark.parametrize("sweep", PRUNE_SWEEPS)
+async def test_the_prune_sweeps_heartbeat_while_they_run(
+    sweep: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1707: the prune settles in its `finally`, describe after describe; a worker
+    lost meanwhile is noticed within the heartbeat timeout, as for the other sweeps."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+
+    async def slow_prune() -> None:
+        await asyncio.sleep(0.1)
+
+    def slow_claims(*args: object) -> None:
+        time.sleep(0.1)
+
+    monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
+    state = SimpleNamespace(render=SimpleNamespace(prune=slow_prune), paths=SimpleNamespace())
+    state.paths.claims = None
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    beats: list[object] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    await env.run(activities[sweep])
     assert len(beats) >= 3
 
 

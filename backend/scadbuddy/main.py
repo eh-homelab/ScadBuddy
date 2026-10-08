@@ -335,11 +335,8 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[0])
     async def prune_jobs() -> None:
-        try:
-            await state.render.prune()
-        except Exception:
-            logger.exception("could not prune settled render jobs")
-            raise
+        # Its settle can describe many runs on a slow Temporal (#1707): heartbeat.
+        await _heartbeating(_prune_jobs_logged(state))
 
     @activity.defn(name=SWEEPS[1])
     async def sweep_assets() -> None:
@@ -356,11 +353,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[4])
     async def sweep_claims() -> None:
-        try:
-            await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
-        except Exception:
-            logger.exception("could not sweep operation claims")
-            raise
+        await _heartbeating(_sweep_claims_logged(state))
 
     @activity.defn(name=BACKFILL_SWEEP)
     async def sweep_backfills() -> None:
@@ -382,6 +375,22 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_backfills,
         reap_output_holds,
     ]
+
+
+async def _prune_jobs_logged(state: AppState) -> None:
+    try:
+        await state.render.prune()
+    except Exception:
+        logger.exception("could not prune settled render jobs")
+        raise
+
+
+async def _sweep_claims_logged(state: AppState) -> None:
+    try:
+        await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
+    except Exception:
+        logger.exception("could not sweep operation claims")
+        raise
 
 
 async def _reap_output_holds_logged(state: AppState) -> None:
