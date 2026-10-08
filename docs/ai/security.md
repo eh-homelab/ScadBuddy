@@ -317,7 +317,10 @@ the UI approval". As built:
   ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), both as
   the browser user. `authorize` refuses a principal deciding its own request even with
   an approval grant, so an MCP client cannot approve what it prepared (covered in
-  `agent/test/mcpConfirm.pg.test.ts`).
+  `agent/test/mcpConfirm.pg.test.ts`). The respond route does not need the chat socket:
+  a panel whose socket is down still decides and answers, behind the same origin gate,
+  and its card settles on the route's answer alone; the socket's `approval.resolved` /
+  `question.resolved` frames only confirm it (#1479, `frontend/src/agent/chat/useAgentChat.test.ts`).
 - **Confirm.** `confirm_action` ([`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts))
   takes the `pending_action_id` and the same `arguments` again, because the table has
   only the hash. It answers `pending_approval` while the row is undecided. It runs the

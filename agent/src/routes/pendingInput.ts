@@ -1,6 +1,6 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
-import { ApprovalError } from '../approvals/service.js'
+import { ApprovalError, conflictReason } from '../approvals/service.js'
 import { BACK_REPLIES } from '../harness/attention.js'
 import { ANSWER_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import type { OriginPolicy } from '../http/origins.js'
@@ -26,11 +26,13 @@ import { ready, type RouteModule } from './module.js'
 //
 // POST /api/v1/ai/pending-input/{request_id} is §6.6's `respond`: one route
 // that answers any entry the read lists, dispatching on the id's prefix to its
-// store. The body names the entry's kind, and the route refuses one that does
-// not match the entry, an entry no longer pending, and an unknown id (stale):
+// store. The body names the entry's kind, and the route refuses, in this order,
+// an unknown id (404, stale), an entry no longer pending (409, whatever the body's
+// kind), and a body that does not match the entry (400):
 //
 //   approval  {"kind": "approval", "decision": "approve" | "deny", "input_hash"?: "<64 hex>"}
 //   question  {"kind": "answer", "answers": {"<question>": "…" | ["…", …]}}
+//             (a list only for a multi-select, its picks joined with ", ", so no pick may contain ", ")
 //   attention {"kind": "answer", "choice": "<one of its options>"} or {"kind": "answer", "text": "…"}
 //
 // It is a write from the UI, so it passes guard.ts `uiRequestProblem` and acts
@@ -211,10 +213,16 @@ export async function respond(
   const rowId = match[2]
 
   if (store === 'approval') {
-    if (body.kind !== 'approval') {
-      throw new RespondError(400, `${requestId} is an approval: respond with {"kind": "approval", "decision": …}`)
-    }
     try {
+      // Read first, as a question is: an unknown id is stale whatever the body names
+      // (#1358), and one already decided is a 409 before its kind is checked (#1479).
+      const approval = await sessions.approvals.get(rowId, principal)
+      if (body.kind !== 'approval') {
+        if (approval.decision !== null) {
+          throw new RespondError(409, `${requestId} is no longer waiting for a decision`, conflictReason(approval))
+        }
+        throw new RespondError(400, `${requestId} is an approval: respond with {"kind": "approval", "decision": …}`)
+      }
       const decided = await sessions.approvals.decide(principal, rowId, body.decision === 'approve', {
         ...(body.input_hash === undefined ? {} : { inputHash: body.input_hash }),
         clientIp: where.clientIp,
@@ -228,15 +236,19 @@ export async function respond(
 
   const entry = await sessions.questions.entry(rowId)
   if (!entry) throw stale
-  if (body.kind !== 'answer') {
-    throw new RespondError(400, `${requestId} asks for an answer: respond with {"kind": "answer", …}`)
-  }
   const ended = (now: NonNullable<typeof entry>) => new RespondError(409, `${requestId} is no longer waiting for an answer`, endedReason(now))
   // #815 §2: "I'm back" to a request the tab's return already ended is the service's
   // no-op success, not a conflict: let it through for answer() to take (#1538).
   const backAfterReconnect =
-    entry.kind === 'attention' && entry.outcome === 'reconnected' && BACK_REPLIES.includes(body.choice ?? body.text ?? '')
+    body.kind === 'answer' &&
+    entry.kind === 'attention' &&
+    entry.outcome === 'reconnected' &&
+    BACK_REPLIES.includes(body.choice ?? body.text ?? '')
+  // An entry no longer pending is a 409 whatever kind the body names (#1479).
   if (!entry.pending && !backAfterReconnect) throw ended(entry)
+  if (body.kind !== 'answer') {
+    throw new RespondError(400, `${requestId} asks for an answer: respond with {"kind": "answer", …}`)
+  }
   let answers: string[]
   if (entry.kind === 'attention') {
     if (body.answers !== undefined || (body.choice === undefined) === (body.text === undefined)) {
@@ -257,10 +269,17 @@ export async function respond(
     if (keys.length !== asked.length || !asked.every((q) => Object.hasOwn(given, q))) {
       throw new RespondError(400, `"answers" must answer exactly these questions: ${JSON.stringify(asked)}`)
     }
-    // A multi-select's picks join as the panel's card joins them (FeedItemView).
-    answers = asked.map((q) => {
-      const a = given[q] ?? ''
-      return typeof a === 'string' ? a : a.join(', ')
+    // A multi-select's picks join as the panel's card joins them (FeedItemView), so only
+    // a multi-select takes a list, and no pick may contain the separator (#1357): its
+    // option labels cannot (harness/questions.ts), and a typed pick would read as two.
+    answers = entry.questions.map((q) => {
+      const a = given[q.question] ?? ''
+      if (typeof a === 'string') return a
+      if (!q.multiSelect) throw new RespondError(400, `${JSON.stringify(q.question)} takes one answer: send a string, not a list`)
+      if (a.some((pick) => pick.includes(', '))) {
+        throw new RespondError(400, `a pick must not contain ", ", which joins a multi-select's picks; send the answer as one string`)
+      }
+      return a.join(', ')
     })
     // The socket caps each answer at ANSWER_MAX; joined picks must fit it too.
     if (answers.some((a) => a.length > ANSWER_MAX)) {

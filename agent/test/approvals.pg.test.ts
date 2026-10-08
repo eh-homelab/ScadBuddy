@@ -12,12 +12,14 @@ import {
   SETTING_APPROVAL_EXPIRY_SECONDS,
   summariseInput,
 } from '../src/approvals/service.js'
+import { AuditLog } from '../src/audit/log.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
+import { ChatConnection } from '../src/routes/chat.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager, TurnPrincipal } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
@@ -154,6 +156,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const { session, approval } = await orphan()
     expect(await m.approvals.decide(browser, approval.id, false)).toMatchObject({ decision: 'denied', decidedBy: browser })
     expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turns: 0 })
+  })
+
+  // #1122: like an answer over the socket (questions.pg.test.ts), a decision records where it came from.
+  it('a decision made over the chat socket is audited with the socket client address', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, audit })
+    const { session, approval } = await orphan(browser)
+    const chat = new ChatConnection(m, () => {}, { snapshotMs: 60_000, clientIp: '198.51.100.4' })
+    try {
+      await chat.receive(JSON.stringify({ v: 1, type: 'approval.decision', sessionId: session.id, id: approval.id, approve: false }))
+    } finally {
+      chat.close()
+    }
+    expect((await m.approvals.get(approval.id, browser)).decision).toBe('denied')
+    expect(await db.sql`SELECT action, surface, client_ip FROM ai_audit WHERE kind = 'approval'`).toEqual([
+      { action: 'denied', surface: 'http', client_ip: '198.51.100.4' },
+    ])
   })
 
   it('a decision racing create cannot log approval.resolved before approval.required', async () => {
