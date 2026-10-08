@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
+import { UserImagesSchema } from './images.js'
 import { PROTOCOL_VERSION } from './protocol.js'
 
 // The panel → server half of the assistant panel's wire protocol, version 1,
@@ -41,6 +42,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      * one that is not a string of at most 256 characters is dropped here.
      */
     traceparent: z.string().max(256).optional().catch(undefined),
+    /** #1866: images for the model, each with the preview its `user.turn` shows (images.ts). */
+    images: UserImagesSchema.optional(),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (questions/service.ts).

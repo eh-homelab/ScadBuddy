@@ -25,11 +25,13 @@ from scadbuddy.api.deps import (
     RenderDep,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.jobs import (
     GLB_MEDIA_TYPE,
     PNG_MEDIA_TYPE,
+    SNAPSHOT_UNAVAILABLE,
     JobStatus,
     RenderRequest,
     ViewSize,
@@ -55,9 +57,10 @@ from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
 )
+from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
-from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.outputs import (
     MODEL_NAME,
@@ -117,6 +120,9 @@ class OutputDetail(OutputSummary):
     #: The re-render queued to give it a manifest (#902): pending while ``error`` is
     #: None, failed with why otherwise; None when none was asked for or it attached.
     backfill: BackfillState | None = None
+    #: The output's newest print run failed before it queued anything (#1831): nothing
+    #: else on the output records that run, and ``/progress`` reports its failure.
+    failed_before_queueing: bool = False
 
 
 class OutputPlate(BaseModel):
@@ -159,7 +165,13 @@ class EditTarget(BaseModel):
     arranged_from: list[str] = Field(default_factory=list)
 
 
-def detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
+def detail(
+    store: OutputStore,
+    meta: OutputMeta,
+    library_files: list[LibraryCopy],
+    *,
+    failed_before_queueing: bool = False,
+) -> OutputDetail:
     params = store.params(meta.id)
     return OutputDetail(
         **meta.model_dump(),
@@ -173,15 +185,37 @@ def detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy
         arranged_from=store.arranged_from(meta.id),
         backfill=store.backfill(meta.id),
         library_files=library_files,
+        failed_before_queueing=failed_before_queueing,
     )
 
 
+async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
+    """The outputs whose newest run failed before queueing; none without a database, or
+    with one that does not answer, as ``/progress`` reads them."""
+    if not runs.available:
+        return set()
+    try:
+        return await runs.failed_before_queueing([meta.id for meta in metas])
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; outputs listed without them")
+        return set()
+
+
 async def _details(
-    store: OutputStore, uploads: BambuddyUploadStore, metas: list[OutputMeta]
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    runs: PrintRunStore,
+    metas: list[OutputMeta],
 ) -> list[OutputDetail]:
     copies = await uploads.for_outputs(meta.id for meta in metas)
+    failed = await _failed_before_queueing(runs, metas)
     # The thumbnail check and params read are file IO: off the event loop.
-    return await asyncio.to_thread(lambda: [detail(store, meta, copies[meta.id]) for meta in metas])
+    return await asyncio.to_thread(
+        lambda: [
+            detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
+            for meta in metas
+        ]
+    )
 
 
 @router.post(
@@ -220,8 +254,6 @@ assert get_args(Goal) == GOALS
 NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
 #: POST /outputs/{id}/backfill's 409: the output records its objects already.
 ALREADY_BACKFILLED = "already_backfilled"
-#: POST /outputs/{id}/backfill's 422 when its revision has no snapshot to render from.
-SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
 #: How long after its re-render finished a still-pending backfill is answered with that
 #: job rather than a new one. The attach runs as the job settles, so this is seconds;
 #: past it, the attach is failing, and answering the same done job forever would leave
@@ -569,9 +601,8 @@ async def backfill_output(
             fonts,
         )
     except ApiError as error:
-        # The only 409 `render_model` answers is `submit_problems`' SnapshotUnavailableError;
-        # a new one on that path would be relabelled here, so check this if one is added.
-        if error.status == status.HTTP_409_CONFLICT:
+        # Matched by its code, not its status: any other 409 passes through (#1849).
+        if error.extensions.get("code") == SNAPSHOT_UNAVAILABLE:
             # No snapshot of that revision and no history to make one from: as permanent
             # as a missing revision, and a 409 here means "already recorded" (#1007).
             raise ApiError(
@@ -595,21 +626,25 @@ async def backfill_output(
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
 async def list_outputs(
-    slug: SlugPath, catalogue: CatalogueDep, outputs: OutputsDep, uploads: UploadsDep
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    state: StateDep,
 ) -> list[OutputDetail]:
     """Details, not summaries: the history page shows each output's parameter diff, and
     a summary list would make it fetch every row again one at a time."""
     await asyncio.to_thread(require_model, catalogue, slug)
     metas = await asyncio.to_thread(outputs.list_for, slug)
-    return await _details(outputs, uploads, metas)
+    return await _details(outputs, uploads, state.print_runs.store, metas)
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
 async def get_output(
-    output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep
+    output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep, state: StateDep
 ) -> OutputDetail:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
-    [detail] = await _details(outputs, uploads, [meta])
+    [detail] = await _details(outputs, uploads, state.print_runs.store, [meta])
     return detail
 
 

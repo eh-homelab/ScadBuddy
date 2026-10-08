@@ -29,9 +29,9 @@ import type { CallResult } from './types'
 export const BRIDGE_SOCKET_PATH = '/api/v1/ai/bridge'
 /**
  * The largest `result` frame sent, in UTF-8 bytes (not string length: non-ASCII text takes
- * up to 3 bytes per UTF-16 unit). The agent's sockets take frames up to 256 KiB (agent
- * `src/main.ts`), and a larger one would close this socket; a result over this is answered
- * as a `failed` error instead, so the agent can ask for less.
+ * up to 3 bytes per UTF-16 unit). The agent takes a tab's frames up to 256 KiB (agent
+ * `src/routes/bridge.ts` `BRIDGE_FRAME_MAX`), and a larger one would close this socket; a
+ * result over this is answered as a `failed` error instead, so the agent can ask for less.
  */
 export const MAX_RESULT_BYTES = 200_000
 

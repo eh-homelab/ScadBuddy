@@ -24,6 +24,14 @@ import type { RouteModule } from './module.js'
 
 export const BRIDGE_PATH = '/api/v1/ai/bridge'
 
+/**
+ * The largest frame a tab may send. The sockets share one server (main.ts), whose
+ * `maxPayload` is the chat socket's larger cap for images (#1866, routes/chat.ts
+ * CHAT_FRAME_MAX); a tab's frames stay under this one (frontend link.ts
+ * `MAX_RESULT_BYTES`), and a larger one closes the socket, 1009 Message Too Big.
+ */
+export const BRIDGE_FRAME_MAX = 256 * 1024
+
 export type BridgeRouteDeps = {
   tabs: TabHub
   remoteAddress: RemoteAddress
@@ -59,7 +67,13 @@ export function registerBridgeRoute(app: Hono, deps: BridgeRouteDeps): void {
             () => ws.close(4000, 'the tab connected again'),
           )
         },
-        onMessage: (evt: MessageEvent) => void connection?.receive(evt.data),
+        onMessage: (evt: MessageEvent, ws: WSContext) => {
+          const data: unknown = evt.data
+          const size =
+            typeof data === 'string' ? Buffer.byteLength(data) : ((data as { byteLength?: number } | null)?.byteLength ?? 0)
+          if (size > BRIDGE_FRAME_MAX) return ws.close(1009, 'frame too large')
+          void connection?.receive(evt.data)
+        },
         onClose: () => connection?.close(),
         onError: (evt: Event) => {
           log(`bridge: socket error: ${evt.type}`)

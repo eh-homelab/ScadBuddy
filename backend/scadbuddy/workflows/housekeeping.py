@@ -45,6 +45,9 @@ from temporalio.exceptions import ActivityError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
+with workflow.unsafe.imports_passed_through():
+    from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
+
 logger = logging.getLogger(__name__)
 
 HOUSEKEEPING_WORKFLOW = "Housekeeping"
@@ -88,23 +91,36 @@ SWEEPS = (
 PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4])
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
-#: A long sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
-#: `SWEEP_TIMEOUT`, so the Schedules' overlap SKIP does not hold the next ticks back.
+#: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
+#: its start-to-close timeout, so the Schedules' overlap SKIP does not hold the next
+#: ticks back.
 HEARTBEAT_TIMEOUT = timedelta(minutes=1)
-#: The prune is two deletes; it fits well inside the prune Schedule's interval.
-PRUNE_TIMEOUT = timedelta(minutes=2)
+#: The prune is two deletes, then the render service's settle (#1707): two passes, each
+#: a listing of the open runs and up to `SETTLE_DESCRIBES` describes, each bounded by
+#: `DESCRIBE_BOUND`. All of that on a slow Temporal, plus the deletes.
+PRUNE_TIMEOUT = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND) + timedelta(
+    minutes=2
+)
+#: The claims sweep is one delete.
+CLAIMS_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
+
+
+def sweep_timeout(sweep: str) -> timedelta:
+    """``sweep``'s start-to-close timeout."""
+    if sweep == PRUNE_SWEEPS[0]:
+        return PRUNE_TIMEOUT
+    if sweep == PRUNE_SWEEPS[1]:
+        return CLAIMS_TIMEOUT
+    return SWEEP_TIMEOUT
 
 
 def housekeeping_timeout(sweeps: tuple[str, ...]) -> timedelta:
     """A run's bound: each sweep's activity timeout, plus a margin. A run that can
     never finish (a workflow task that fails on replay retries forever) then ends,
     and the Schedule's overlap SKIP does not hold back every later tick."""
-    return sum(
-        (PRUNE_TIMEOUT if sweep in PRUNE_SWEEPS else SWEEP_TIMEOUT for sweep in sweeps),
-        RUN_MARGIN,
-    )
+    return sum((sweep_timeout(sweep) for sweep in sweeps), RUN_MARGIN)
 
 
 @workflow.defn(name=HOUSEKEEPING_WORKFLOW)
@@ -117,11 +133,10 @@ class Housekeeping:
             if sweep == REAP_SWEEP and not workflow.patched(REAP_PATCH):
                 continue
             try:
-                prune = sweep in PRUNE_SWEEPS
                 await workflow.execute_activity(
                     sweep,
-                    start_to_close_timeout=PRUNE_TIMEOUT if prune else SWEEP_TIMEOUT,
-                    heartbeat_timeout=None if prune else HEARTBEAT_TIMEOUT,
+                    start_to_close_timeout=sweep_timeout(sweep),
+                    heartbeat_timeout=HEARTBEAT_TIMEOUT,
                     # The next tick is the retry, as it was for the loop.
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
@@ -141,9 +156,10 @@ def library_worker(
 ) -> Worker:
     """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
     library commands' ``Operation``, the preview backfill). A stop gives a running
-    sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5): a cancelled one
-    only stops waiting, its thread goes on while the lifespan closes the stores it
-    uses. A sweep longer than that (an asset sweep's converge) is still cancelled."""
+    sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5). A sweep longer
+    than that (an asset sweep's converge) is then cancelled, and gets
+    `main.SWEEP_SHUTDOWN_JOIN` more for its thread to return (#1708), so the lifespan
+    does not close the stores under it."""
     return Worker(
         client,
         task_queue=task_queue,

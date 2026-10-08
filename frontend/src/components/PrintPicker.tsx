@@ -9,6 +9,7 @@ import type {
   PrintOptionsState,
   PrintRunRequest,
   PrintRunResult,
+  PrintSequence,
   RackAlgorithm,
 } from '../api/types'
 import {
@@ -43,6 +44,7 @@ import { PrintVerdict } from './print/PrintVerdict'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
+import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
@@ -191,6 +193,11 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
   /**
+   * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
+   * never remembered (until #1754 decides remembered choices by subject).
+   */
+  const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
+  /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
    * names one hotend for one printer and one nozzle size, so either changing drops it.
@@ -324,6 +331,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     copies,
     projectId,
     options,
+    printSequence,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
     onRan,
@@ -374,6 +382,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
+    setPrintSequence(null)
   }, [currentKey, carry])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
@@ -541,6 +550,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
+    setPrintSequence(null)
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -806,6 +816,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                       onChange={picker.setBedType}
                     />
                   )}
+
+                  <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
 
                   <PrintOptionsDisclosure
                     slug={slug}

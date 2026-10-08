@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { toolLabel } from '../../agent/chat/labels'
 import { Markdown } from '../../agent/chat/Markdown'
+import { dataUrl } from '../../agent/chat/images'
 import { ANSWER_MAX, type Question as AskedQuestion, type DoneAttention, isDone } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
 import { safeHttpUrl } from '../../lib/safeUrl'
@@ -443,6 +444,19 @@ export function FeedItemView({
         <div className="ml-8 rounded-[6px] bg-surface-3 px-2.5 py-1.5 text-[13px]">
           {item.author.kind !== 'browser' && (
             <p className="mb-0.5 text-[11px] text-faint">{item.author.label}</p>
+          )}
+          {item.images && (
+            <ul aria-label="Images sent" className="mb-1 flex flex-wrap gap-1.5">
+              {item.images.map((image, index) => (
+                <li key={index}>
+                  <img
+                    src={dataUrl(image)}
+                    alt={`Image ${index + 1} of ${item.images?.length ?? 0}`}
+                    className="max-h-24 max-w-[8rem] rounded-[4px] border border-line object-contain"
+                  />
+                </li>
+              ))}
+            </ul>
           )}
           <p className="whitespace-pre-wrap">{item.text}</p>
         </div>

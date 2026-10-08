@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -260,13 +260,76 @@ describe('string', () => {
 
   it('refuses an edit past max_length wherever the caret is, keeping the name whole (#920)', async () => {
     const { onChange, user } = setup({ ...param, max_length: 6 }, 'Reagan')
-    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
+    const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Name on the tag' })
     await user.click(input)
     await user.keyboard('{Home}X')
     expect(onChange).not.toHaveBeenCalled()
     expect(input).toHaveValue('Reagan')
+    // The caret stays where the refused character would have gone (#1460).
+    expect(input.selectionStart).toBe(0)
+    expect(input.selectionEnd).toBe(0)
     await user.paste('XY')
     expect(input).toHaveValue('Reagan')
+  })
+
+  it('inserts the part of a paste that fits, with the caret after it (#1449)', async () => {
+    const { onChange, user } = setup({ ...param, max_length: 6 }, 'Rea')
+    const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Name on the tag' })
+    await user.click(input)
+    await user.keyboard('{End}')
+    await user.paste('ganXYZ')
+    expect(onChange).toHaveBeenLastCalledWith('Reagan')
+    expect(input).toHaveValue('Reagan')
+    expect(input.selectionStart).toBe(6)
+  })
+
+  it('cuts a paste in the middle in code points, not UTF-16 units (#1449)', async () => {
+    const { onChange, user } = setup({ ...param, max_length: 4 }, 'Ab')
+    const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Name on the tag' })
+    await user.click(input)
+    input.setSelectionRange(1, 1)
+    await user.paste('🦄🦄🦄')
+    expect(onChange).toHaveBeenLastCalledWith('A🦄🦄b')
+    // After the two emoji that fit: four UTF-16 units past "A".
+    expect(input.selectionStart).toBe(5)
+  })
+
+  it('says why when an edit is refused (#1453)', async () => {
+    const { user } = setup({ ...param, max_length: 6 }, 'Reagan')
+    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
+    expect(screen.getByRole('status')).toHaveTextContent('')
+    await user.click(input)
+    await user.keyboard('X')
+    expect(screen.getByRole('status')).toHaveTextContent('At most 6 characters.')
+    await user.keyboard('{Backspace}')
+    expect(screen.getByRole('status')).toHaveTextContent('')
+  })
+
+  it('names the count and the limit as the field description (#1449)', () => {
+    setup(param, 'Reagan')
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveAccessibleDescription('6/20')
+  })
+
+  it('enforces a max_length of 0 (#1460)', async () => {
+    const { onChange, user } = setup({ ...param, max_length: 0 }, '')
+    const input = screen.getByRole('textbox', { name: 'Name on the tag' })
+    expect(screen.getByText('0/0')).toBeInTheDocument()
+    await user.type(input, 'X')
+    expect(onChange).not.toHaveBeenCalled()
+    expect(input).toHaveValue('')
+  })
+
+  it('lets an IME compose past the limit, then keeps what fits (#1453)', () => {
+    const onChange = vi.fn()
+    render(<Harness param={{ ...param, max_length: 4 }} initial="Ab" onChange={onChange} />)
+    const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Name on the tag' })
+    fireEvent.compositionStart(input)
+    // An intermediate state over the limit is not refused, or the composition aborts.
+    fireEvent.input(input, { target: { value: 'Abにほん' }, isComposing: true })
+    expect(onChange).toHaveBeenLastCalledWith('Abにほん')
+    fireEvent.compositionEnd(input, { data: 'にほん' })
+    expect(onChange).toHaveBeenLastCalledWith('Abにほ')
+    expect(input).toHaveValue('Abにほ')
   })
 
   it('reports each keystroke', async () => {

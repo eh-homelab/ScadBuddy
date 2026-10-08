@@ -8,6 +8,7 @@ import {
   BAMBUDDY_UNAVAILABLE,
   MEDIA_THUMBNAIL_VERSION,
   OPERATION_UNFINISHED,
+  SETTINGS_SHARE_MS,
   TEMPORAL_UNAVAILABLE,
   UNANSWERED,
   api,
@@ -1554,6 +1555,37 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       const after = api.getSettings()
       await Promise.all([before, saved, after])
       expect(reads()).toBe(2)
+    })
+
+    it('never lets a later caller join a read that has hung past SETTINGS_SHARE_MS (#1856)', async () => {
+      let reads = 0
+      let release!: () => void
+      const hung = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      server.use(
+        http.get('/api/v1/settings', async () => {
+          reads += 1
+          const n = reads
+          if (n === 1) await hung
+          return HttpResponse.json({ display_unit: 'mm', n })
+        }),
+      )
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+      try {
+        const stuck = api.getSettings()
+        now.mockReturnValue(1_000 + SETTINGS_SHARE_MS - 1)
+        const joined = api.getSettings()
+        now.mockReturnValue(1_000 + SETTINGS_SHARE_MS)
+        await expect(api.getSettings()).resolves.toMatchObject({ n: 2 })
+        release()
+        await expect(stuck).resolves.toMatchObject({ n: 1 })
+        await expect(joined).resolves.toMatchObject({ n: 1 })
+        expect(reads).toBe(2)
+      } finally {
+        release()
+        now.mockRestore()
+      }
     })
   })
 })

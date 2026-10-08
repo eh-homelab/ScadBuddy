@@ -645,6 +645,29 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     await expectPanelAccepts((await allEvents(a, session.id)).map((e) => e.event))
   }, 60_000)
 
+  // #1661, measured on SDK 0.3.289: when the endpoint ends a stream with an SSE
+  // `error` event after message_start, Claude Code never passes that event on.
+  // It closes the request itself (content_block_stop and message_stop, which
+  // the endpoint never sent) and sends it again without streaming. Neither it
+  // nor the manager (unpricedSpend.ts) charges the cut-off request.
+  it.each([
+    ['answers when it is sent again', 'once' as const, 'success', REPLY_COST_USD],
+    ['fails every time', 'always' as const, 'failed', 0],
+  ])('charges nothing for a request the endpoint cut off with a stream error, which %s (#1661)', async (_label, mode, ended, cost) => {
+    const cutOff: Reply = { ...STALL, streamError: { type: 'overloaded_error', message: 'Overloaded' } }
+    let n = 0
+    script = () => (mode === 'always' || ++n === 1 ? cutOff : { text: 'OK' })
+    const a = await replica()
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const outcome = await (await a.send(session.id, browser, 'write a long essay')).done
+    expect(fake.messageCalls()).toHaveLength(2)
+    expect(outcome).toMatchObject(ended === 'success' ? { kind: 'result', subtype: 'success' } : { kind: 'failed' })
+    const after = await a.get(session.id, browser)
+    expect(after.costUsd).toBeCloseTo(cost, 10)
+    const [row] = await db.sql<{ unpriced_cost_usd: number }[]>`SELECT unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
+    expect(row?.unpriced_cost_usd).toBe(0)
+  }, 60_000)
+
   it('streams tool calls and results, and a late attach replays the same sequence a live watcher saw', async () => {
     script = (r) =>
       conversation(r).includes('tool_result')

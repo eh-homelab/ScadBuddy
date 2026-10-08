@@ -14,13 +14,13 @@ from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM
+from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM, SNAPSHOT_UNAVAILABLE
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
 from scadbuddy.render.job_models import Job, QueueFullError
-from scadbuddy.render.jobs import SnapshotPendingError
+from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
@@ -205,6 +205,15 @@ def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model
     body = response.json()
     assert body["retry_after"] == 7
     assert "queue is full" in body["detail"]
+
+
+def test_no_snapshot_is_a_409_with_its_code(client: TestClient, model: str) -> None:
+    """#1849: the code is what the backfill route's 409-to-422 relabel keys on."""
+    unavailable = mock.AsyncMock(side_effect=SnapshotUnavailableError("no snapshot of x@abc"))
+    with mock.patch.object(RenderService, "submit", unavailable):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 409
+    assert response.json()["code"] == SNAPSHOT_UNAVAILABLE == "snapshot_unavailable"
 
 
 def _unreachable() -> TemporalUnavailableError:

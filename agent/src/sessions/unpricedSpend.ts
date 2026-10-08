@@ -11,6 +11,16 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 // endpoint still bills it. So the manager prices it here, from the stream it
 // already sees (`includePartialMessages`), and charges it to the session.
 //
+// A request the ENDPOINT cuts off is not charged. Measured on SDK 0.3.289
+// (test/sessions.e2e.test.ts, #1661): when a stream ends in an SSE `error`
+// event (e.g. `overloaded_error`) after message_start, Claude Code never
+// passes that event on; it ends the request with a content_block_stop and
+// message_stop of its own, sends it again without streaming, and prices only
+// what that answers. So the request is closed here before the turn can end,
+// and is charged nowhere. Whether Anthropic bills such a request is not
+// established; charging it would mean telling that message_stop from a real
+// one (no message_delta before it).
+//
 // Input and cache tokens are exact (message_start reports them). Output is
 // exact only when a message_delta carried it; otherwise it is estimated from
 // the text streamed so far at 4 characters a token. Thinking whose text is not
@@ -142,6 +152,18 @@ export class UnpricedSpend {
       default:
         return
     }
+  }
+
+  /**
+   * A fallback attempt on another credential starts (harness/fallback.ts
+   * `onAttempt`, #1666). A request the attempt before it left open ended with
+   * that attempt's failure, so it is treated like a request a retry replaced:
+   * not charged. Kept, it would be charged as the cut-off request if the turn
+   * were stopped before the next attempt's message_start, and a message_start
+   * on the same stream would replace it anyway.
+   */
+  newAttempt(): void {
+    this.#open.clear()
   }
 
   /** What the requests still open cost, in USD: 0 when every request finished. */
