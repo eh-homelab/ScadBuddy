@@ -572,6 +572,13 @@ async def source_directory(
     )
     if requested is None or requested == current:
         return paths.model_dir(slug), current
+    return await revision_export(slug, requested, paths=paths, history=history), requested
+
+
+async def revision_export(
+    slug: str, requested: str, *, paths: DataPaths, history: ModelHistory | None
+) -> Path:
+    """The export of ``slug`` at ``requested``, made now if it is not there yet."""
     directory = paths.model_revision_dir(slug, requested)
     if (directory / SOURCE_NAME).is_file():
         # Mark it used, so `prune_revision_exports` evicts by LAST USE rather
@@ -589,7 +596,7 @@ async def source_directory(
                 " export it from"
             )
         await asyncio.to_thread(export_revision, history, slug, requested, directory)
-    return directory, requested
+    return directory
 
 
 async def resolve_source(
