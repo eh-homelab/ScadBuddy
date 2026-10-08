@@ -698,7 +698,7 @@ export const libraries: CatalogueLibrary[] = [
 /** A ref no mock upstream has, so adding at it fails the way a bad tag does. */
 export const MISSING_REF = 'v9.9.9'
 
-const outputsSeed: Output[] = [
+const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
   {
     id: 'a'.repeat(32),
     slug: 'name-keychain',
@@ -835,6 +835,7 @@ export const outputs: Output[] = outputsSeed.map((entry) => ({
   record: null,
   manifest: [],
   arranged_from: [],
+  failed_before_queueing: false,
   ...entry,
 }))
 

@@ -31,7 +31,7 @@ import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
-import { startHeartbeat } from './routes/chat.js'
+import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
@@ -391,9 +391,9 @@ const app = createApp({
   mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
 
-// The chat socket (routes/chat.ts). A frame is one panel message; 256 KiB
-// covers the largest (a 32k-character message plus its page context).
-const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
+// The chat socket (routes/chat.ts). A frame is one panel message; CHAT_FRAME_MAX
+// covers the largest (images, #1866, and a 32k-character message with its page context).
+const wss = new WebSocketServer({ noServer: true, maxPayload: CHAT_FRAME_MAX })
 const stopHeartbeat = startHeartbeat(wss)
 
 traceListener(PORT)

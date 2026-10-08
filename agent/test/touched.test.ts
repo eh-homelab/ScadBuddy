@@ -146,6 +146,11 @@ describe('extractors', () => {
     expect(touches('save_output', { slug: 'box', job_id: 'j1' }, { id: 'o2', slug: 'box' })).toEqual([
       { type: 'output', id: 'o2', action: 'created', model: 'box' },
     ])
+    // #1864: an arrange saves its output under the template it was filed under.
+    expect(touches('arrange', { objects: [] }, { job_id: 'j2', slug: 'lid', output: { id: 'o3', slug: 'lid' } })).toEqual([
+      { type: 'output', id: 'o3', action: 'created', model: 'lid' },
+    ])
+    expect(touches('arrange', { objects: [] }, { job_id: 'j2', slug: 'lid', status: 'running' })).toEqual([])
   })
 
   it('records prints, with what they printed', () => {

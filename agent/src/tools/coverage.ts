@@ -64,16 +64,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
   {
-    operation: 'POST /api/v1/outputs/arrange',
-    reason:
-      "Arrange needs objects, a printer and spools chosen in the History or Print dialog; the agent's print " +
-      'tools do not pick spools yet.',
-  },
-  {
     operation: 'POST /api/v1/outputs/{output_id}/backfill',
     reason:
       'Re-renders an output saved before Arrange so Arrange can use it (#902); the History and Print ' +
-      'dialogs ask the user first. The agent has no Arrange tool (above), so it has nothing to backfill for.',
+      'dialogs ask the user first, so the arrange tool names such outputs and leaves the re-render to the user.',
   },
   {
     operation: 'POST /api/v1/models/{slug}/inputs/migrate',

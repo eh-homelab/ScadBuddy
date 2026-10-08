@@ -200,7 +200,10 @@ export function condense(rows: readonly LoggedEvent[], viewer?: Pick<Owner, 'kin
       continue
     }
     const { v: _v, sessionId: _s, ...rest } = event as typeof event & { sessionId?: string }
-    out.push({ seq, ...(viewer ? principalsSeenBy(viewer, rest) : rest) })
+    // A turn's image previews (#1866) as their count: the bytes are the panel's to show.
+    const row: Record<string, unknown> =
+      rest.type === 'user.turn' && rest.images ? { ...rest, images: rest.images.length } : rest
+    out.push({ seq, ...(viewer ? principalsSeenBy(viewer, row) : row) })
   }
   return out
 }

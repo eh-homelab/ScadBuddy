@@ -5,9 +5,12 @@
 A name in a bold connected script, raised on a base plate cut to the outline of
 the word, with a keyring hole at the left. Two colours, no painting: the base
 and border are one part, the letters are another. A strip along the middle of
-the line joins the base from the keyring tab to the last letter, so a space between
-words, or a character the font has no glyph for (an emoji, say, which renders
-nothing), never splits the keychain into pieces.
+the line joins the base from the keyring tab to the last letter, and every glyph
+is drawn down (or up) to it, so a space between words, a character the font has
+no glyph for (an emoji, say, which renders nothing), or a run of glyphs that sits
+wholly above or below the middle (a trailing `...`, `_` or quote) never splits the
+keychain into pieces. The strip stops at the letters' counters, so the inside of an
+`O` wider than twice the border stays see-through.
 
 Inspired by MakerWorld's "Name Keychain (Font Basic)"; written to the
 Parametric Model Maker customizer conventions, so the same file works unchanged
@@ -19,7 +22,7 @@ on MakerWorld and in ScadBuddy.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `name` | `Reagan` | The word on the keychain, up to 20 characters. Empty leaves just the keyring tab, in one colour. |
+| `name` | `Reagan` | The word on the keychain, up to 20 characters. A name with no glyphs (empty, spaces only, or only characters the font lacks) leaves just the keyring tab, in one colour. |
 | `font` | `Lobster Two:style=Bold` | Typeface. ScadBuddy fills this dropdown from the fonts installed in the container (`// font`). |
 
 ### Size
@@ -90,17 +93,22 @@ Renders `name="Reagan"` with the default parameters in `openscad/openscad:dev`
 and checks the result against the reference keychain that printed on
 2026-09-21 (95.7 × 34.6 × 6.8 mm): two non-empty materials besides `Default`,
 the bounding box within ±1.5 mm in X and Y and exactly 6.8 mm tall, the base
-0–4 mm and the letters 4–6.8 mm, and the letters one connected piece.
+0–4 mm and the letters 4–6.8 mm, the letters one connected piece, and the
+whole keychain one connected piece.
 
-It then renders ten edge cases — a 20-character script name and 20 `W`s in
+It then renders eighteen edge cases — a 20-character script name and 20 `W`s in
 DejaVu Sans Bold at the 40 mm maximum, a tiny name without a hole, the largest
-keyring tab with the thickest base, an empty name, two words, two words four
-spaces apart, a name with an emoji the font lacks, and two names that start
-with a gap (leading spaces, a leading emoji) — and checks each renders
-without OpenSCAD warnings, has two colour parts (one for the empty name) and
-nothing on `Default`, fits the 300 × 320 mm bed, sits on z = 0 and has its top
-at `base_thickness + letter_height` and prints as one connected piece. Output
-lands in `.verify/`, including a preview PNG.
+keyring tab with the thickest base, three names with no glyphs (empty, spaces
+only, a lone emoji), two words, two words four spaces apart, a name with an emoji
+the font lacks, two names that start with a gap (leading spaces, a leading emoji),
+two words and a leading gap without a hole, three names ending in a glyph off the
+middle of the line (`Ann ...`, `Ann _`, `Ann '`) at the thinnest border, and `OOO`
+in DejaVu Sans Bold at 40 mm — and checks each renders without OpenSCAD warnings,
+has two colour parts (one, just the keyring tab, for a name with no glyphs) and
+nothing on `Default`, fits the 300 × 320 mm bed, sits on z = 0 and has its top at
+`base_thickness + letter_height` and prints as one connected piece; `OOO` must
+also keep its three counters and the keyring hole see-through. Output lands in
+`.verify/`, including a preview PNG.
 
 The base image ships DejaVu only, so the script derives a throwaway image with
 the four font packages when `Lobster Two` is missing — without it OpenSCAD

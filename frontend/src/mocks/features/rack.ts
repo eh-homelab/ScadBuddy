@@ -17,9 +17,9 @@ export function reset(): void {
 
 /** The mock H2C's rack side: three eligible 0.4 mm Standard hotends, no serials (§7). */
 const OPTIONS: RackOption[] = [
-  { position: 2, nozzle_type: 'HS01', nozzle_diameter: '0.4', flow: 'standard', material: 'PLA', color: '#FFFFFF', prints: 14, print_seconds: 151200 },
-  { position: 4, nozzle_type: 'HS01', nozzle_diameter: '0.4', flow: 'standard', material: null, color: null, prints: 3, print_seconds: 25200 },
-  { position: 6, nozzle_type: 'HS01', nozzle_diameter: '0.4', flow: 'standard', material: 'PETG', color: '#1E90FF', prints: 9, print_seconds: 86400 },
+  { position: 2, nozzle_type: 'HS01', nozzle_diameter: '0.4', flow: 'standard', material: 'PLA', color: '#FFFFFF', prints: 14, print_seconds: 151200, pending: 0 },
+  { position: 4, nozzle_type: 'HS01', nozzle_diameter: '0.4', flow: 'standard', material: null, color: null, prints: 3, print_seconds: 25200, pending: 0 },
+  { position: 6, nozzle_type: 'HS01', nozzle_diameter: '0.4', flow: 'standard', material: 'PETG', color: '#1E90FF', prints: 9, print_seconds: 86400, pending: 0 },
 ]
 
 /** The check's rack preview (#836): least used unless a position is picked by hand. */

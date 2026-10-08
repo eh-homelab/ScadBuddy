@@ -1,5 +1,6 @@
 import type {
   Attention,
+  ImagePreview,
   Origin,
   Owner,
   Question,
@@ -13,7 +14,8 @@ import type {
 
 /** One entry in a session's transcript and action feed, in arrival order. */
 export type FeedItem =
-  | { kind: 'user'; id: string; text: string; author: Owner }
+  /** `images`: previews of the images sent with the turn (#1866). */
+  | { kind: 'user'; id: string; text: string; author: Owner; images?: ImagePreview[] }
   | { kind: 'assistant'; id: string; text: string; done: boolean }
   | {
       kind: 'tool'
@@ -275,7 +277,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         s.items.some((i) => i.kind === 'user' && i.id === event.turnId)
           ? s
-          : push(s, { kind: 'user', id: event.turnId, text: event.text, author: event.author }),
+          : push(s, {
+              kind: 'user',
+              id: event.turnId,
+              text: event.text,
+              author: event.author,
+              ...(event.images?.length ? { images: event.images } : {}),
+            }),
       )
 
     case 'assistant.text.delta':

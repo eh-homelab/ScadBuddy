@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
-from starlette._utils import get_route_path
 from starlette.exceptions import HTTPException
 from starlette.responses import FileResponse, PlainTextResponse, Response
 from starlette.routing import Match
@@ -62,17 +61,30 @@ def _missing_asset() -> Response:
     return PlainTextResponse("Not Found", 404)
 
 
+def _route_path(scope: Scope) -> str:
+    """The path the app routes on: ``path`` less a ``root_path`` prefix, as Starlette's
+    private ``get_route_path`` computes it (#1454: not imported, no stability promise)."""
+    path: str = scope["path"]
+    root: str = scope.get("root_path", "")
+    if root and path.startswith(root) and path[len(root) :][:1] in ("", "/"):
+        return path[len(root) :]
+    return path
+
+
 def _refuse_api(path: str, scope: Scope, spa: StaticFiles) -> NoReturn:
     """An ``/api/`` request no route took. The mount at ``/`` matches every path, so the
     router hands it a request for a real route with the wrong method too: that one is a
-    405 naming the methods the route takes. ``path`` is normalised (no trailing slash, no
-    ``..``), so a request whose own path is not a route but names one once normalised is
-    a 404 that names the route it meant, whatever the method: never a redirect (nothing
-    here redirects, tests/api/test_no_open_redirect.py), never a claim that the route is
+    405 naming the methods the route takes, and a plain-HTTP request for a WebSocket
+    route is a 426 that says so. ``path`` is normalised (no trailing slash, no ``..``),
+    so a request whose own path is not a route but names one once normalised is a 404
+    that names the route it meant, whatever the method: never a redirect (nothing here
+    redirects, tests/api/test_no_open_redirect.py), never a claim that the route is
     missing, and never a 405 whose ``Allow`` would 404 on that same URL. Everything else
-    is a plain 404."""
-    probe: Scope = {"type": "http", "path": f"/{path}", "root_path": "", "method": scope["method"]}
-    matched = False
+    is a plain 404, which never offers back the URL that was sent (#1458)."""
+    # The request's own scope, so a route whose `matches` reads more than the path
+    # (`Host` reads the headers) is asked what it would answer, never a KeyError (#1454).
+    probe: Scope = {**scope, "path": f"/{path}", "root_path": ""}
+    matched = websocket = False
     allowed: set[str] = set()
     # Any route, not just `Route`: FastAPI keeps an included router as one
     # `_IncludedRouter`, which says PARTIAL but not which methods, so each is asked.
@@ -80,16 +92,23 @@ def _refuse_api(path: str, scope: Scope, spa: StaticFiles) -> NoReturn:
         if getattr(route, "app", None) is spa:
             continue  # this mount itself, which matches every path
         match = route.matches(probe)[0]
+        if route.matches({**probe, "type": "websocket"})[0] is Match.FULL:
+            websocket = True
         if match is not Match.NONE:
             matched = True
         if match is Match.PARTIAL:
             allowed |= {
                 m for m in METHODS if route.matches({**probe, "method": m})[0] is Match.FULL
             }
-    sent = get_route_path(scope)
-    if allowed and sent == f"/{path}":
+    sent = _route_path(scope)
+    exact = sent == f"/{path}"
+    if exact and websocket:
+        raise HTTPException(
+            426, f"{scope['method']} {sent} is a WebSocket endpoint", {"Upgrade": "websocket"}
+        )
+    if exact and allowed:
         raise HTTPException(405, headers={"Allow": ", ".join(sorted(allowed))})
-    hint = f"; did you mean /{path}?" if matched else ""
+    hint = f"; did you mean /{path}?" if (matched or websocket) and not exact else ""
     raise HTTPException(404, f"no API route matches {scope['method']} {sent}{hint}")
 
 

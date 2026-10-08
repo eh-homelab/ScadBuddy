@@ -168,3 +168,17 @@ async def test_delete_outputs_takes_several_at_once(uploads: BambuddyUploadStore
         OTHER: [],
         "c" * 32: [copy(13)],
     }
+
+
+@pytest.mark.requires_postgres
+async def test_a_library_file_resolves_to_the_output_that_uploaded_it(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#1864: Arrange reads a generated library file's objects through its output; a
+    file two outputs record is the later upload's."""
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record(OTHER, copy(12))
+    await uploads.record(OUTPUT, copy(12))
+
+    assert await uploads.outputs_for_files([11, 12, 13]) == {11: OUTPUT, 12: OUTPUT}
+    assert await uploads.outputs_for_files([]) == {}

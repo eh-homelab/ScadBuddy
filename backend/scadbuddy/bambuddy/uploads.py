@@ -140,6 +140,12 @@ class BambuddyUploadStore:
         """Those of ``library_file_ids`` that any output records as a copy (#1145)."""
         return await asyncio.to_thread(self._recorded, list(library_file_ids))
 
+    async def outputs_for_files(self, library_file_ids: Iterable[int]) -> dict[int, str]:
+        """The output each of ``library_file_ids`` is a copy of, for those any output
+        records (#1864): Arrange reads such a file's objects through that output. A file
+        two outputs record is the later upload's."""
+        return await asyncio.to_thread(self._outputs_for_files, list(library_file_ids))
+
     async def forget(self, output_id: str, library_file_id: int) -> None:
         """Drop one copy, and its slices, once the file has actually gone.
 
@@ -300,6 +306,18 @@ class BambuddyUploadStore:
                 (ids,),
             ).fetchall()
         return {row["library_file_id"] for row in rows}
+
+    def _outputs_for_files(self, ids: list[int]) -> dict[int, str]:
+        if not ids:
+            return {}
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT ON (library_file_id) library_file_id, output_id"
+                " FROM output_bambuddy_uploads WHERE library_file_id = ANY(%s)"
+                " ORDER BY library_file_id, created_at DESC, output_id",
+                (ids,),
+            ).fetchall()
+        return {row["library_file_id"]: row["output_id"] for row in rows}
 
     def _forget(self, output_id: str, library_file_id: int) -> None:
         with self._require().connection() as conn:

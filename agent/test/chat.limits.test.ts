@@ -236,6 +236,29 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
+  it('caps the bytes queued as well as the frames, so large image frames cannot pile up (#1866)', async () => {
+    const fake = fakeManager({ holdStart: true })
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
+      log: () => {},
+      limits: { maxQueuedBytes: 2500 },
+    })
+    await connection.open()
+    const frame = JSON.stringify({ v: 1, type: 'user.message', text: 'x'.repeat(1000), context: { route: '/' } })
+    const handled = Array.from({ length: 5 }, () => connection.receive(frame))
+    await settle()
+    // Two frames of about 1 KB fit under 2.5 KB; the rest are busy.
+    expect(fake.started()).toBe(1)
+    expect(errors(out, 'busy')).toBe(3)
+    fake.release()
+    await Promise.all(handled)
+    expect(fake.started()).toBe(2)
+    // Their bytes are given back once handled.
+    await connection.receive(frame)
+    expect(fake.started()).toBe(3)
+    connection.close()
+  })
+
   it('refuses a flood of malformed frames past the queue cap with busy, like valid ones', async () => {
     const fake = fakeManager()
     const out: ServerEvent[] = []

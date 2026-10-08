@@ -16,7 +16,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
+from typing import Any
+
+import psycopg
 
 from scadbuddy.core.events import Event, EventBus, JobEvent
 from scadbuddy.library.outputs import (
@@ -66,12 +69,16 @@ def attach_job_backfills(
     return _attach_all(outputs, refs, read_job, pending)
 
 
-def follow_backfills(events: EventBus, attach: Callable[[str], int]) -> Callable[[], None]:
+def follow_backfills(
+    events: EventBus, attach: Callable[[str], int]
+) -> Callable[[], Coroutine[Any, Any, None]]:
     """Run ``attach(job_id)`` in a thread for every settled job heard, off the
     listener's thread. A failure is logged and left for the backstop. Returns the
-    remover."""
+    remover, which stops hearing events and then waits for every attach in flight: a
+    thread cannot be cancelled, and one left running would outlive the pool (#1759)."""
     loop = asyncio.get_running_loop()
     pending: set[asyncio.Task[None]] = set()
+    stopped = False
 
     async def run(job_id: str) -> None:
         try:
@@ -83,6 +90,8 @@ def follow_backfills(events: EventBus, attach: Callable[[str], int]) -> Callable
             )
 
     def schedule(job_id: str) -> None:
+        if stopped:
+            return  # heard before the remover ran, scheduled after it
         task = loop.create_task(run(job_id))
         pending.add(task)
         task.add_done_callback(pending.discard)
@@ -93,20 +102,42 @@ def follow_backfills(events: EventBus, attach: Callable[[str], int]) -> Callable
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(schedule, event.job_id)
 
-    remove: Callable[[], None] = events.add_listener(on_event)
+    remove_listener = events.add_listener(on_event)
+
+    async def remove() -> None:
+        nonlocal stopped
+        stopped = True
+        remove_listener()
+        while pending:
+            await asyncio.wait(set(pending))
+
     return remove
+
+
+#: Seconds to wait for the claim's own connection: never forever, since the lifespan's
+#: shutdown waits for an attach in flight.
+CLAIM_CONNECT_TIMEOUT = 30
 
 
 @contextlib.contextmanager
 def _claimed(refs: BlobRefs, output_id: str) -> Iterator[bool]:
     """Whether this caller holds the output's attach: a transaction-scoped advisory
-    lock, so another process, thread or the backstop attaching it skips it."""
-    with refs.pool.connection() as conn, conn.transaction():
+    lock, so another process, thread or the backstop attaching it skips it. The lock is
+    taken on a connection of its own, outside the pool: the attach takes the pool's
+    connections while it holds the lock, and a pool of one would otherwise never have
+    one free (#1757)."""
+    conninfo = refs.pool.conninfo
+    if callable(conninfo):
+        conninfo = conninfo()
+    with (
+        psycopg.connect(conninfo, connect_timeout=CLAIM_CONNECT_TIMEOUT) as conn,
+        conn.transaction(),
+    ):
         row = conn.execute(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS mine",
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
             (f"scadbuddy-backfill:{output_id}",),
         ).fetchone()
-        yield bool(row and row["mine"])
+        yield bool(row and row[0])
 
 
 def _attach_all(

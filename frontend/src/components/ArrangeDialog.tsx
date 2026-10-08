@@ -1,25 +1,30 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError } from '../api/client'
-import type { ArrangeRequest, Output } from '../api/types'
+import { api, ApiError } from '../api/client'
+import type { ArrangeRequest, LibraryEntry, Output } from '../api/types'
 import {
   backfillFailures,
   backfillIds,
   backfillNote,
   backfillOutputs,
+  fromFiles,
+  fromOutputs,
   GOAL_LABELS,
   needsBackfill,
   runArrange,
+  sourceKey,
   type ArrangeGoal,
+  type ArrangeSource,
   type Arranged,
 } from '../lib/arrange'
+import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 
 type Props = {
   open: boolean
-  slug: string
-  outputs: Output[]
+  /** #1864 — outputs of any template and library files, in any mix. */
+  sources: ArrangeSource[]
   onClose: () => void
   onArranged: (arranged: Arranged) => void
 }
@@ -31,21 +36,74 @@ function rowsOf(outputs: Output[]) {
   )
 }
 
+/** "A", "A and B", "A, B and C". */
+function listed(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+/** Why these library files are left out, in one sentence (#1863 reads them). */
+function plainNote(files: LibraryEntry[]): string {
+  const one = files.length === 1
+  return `${listed(files.map((f) => f.filename))} ${one ? 'was' : 'were'} not made by ScadBuddy, so ${one ? 'it' : 'they'} cannot be arranged yet.`
+}
+
+/** The templates of `outputs`, first seen first: what the result can be filed under. */
+function templatesOf(outputs: Output[]): string[] {
+  return [...new Set(outputs.map((output) => output.slug))]
+}
+
 /**
  * #314 — objects from several outputs onto shared plates (spec 2026-09-27 §7). Each
- * object of each selected output is a row with its copies; Arrange lays them out for
- * the goal on the configured printer's plate, with no re-render, and saves the result.
- * An output saved before Arrange has no objects: Arrange asks to re-render it first,
- * then arranges with it (#902).
+ * object of each source is a row with its copies; Arrange lays them out for the goal on
+ * the configured printer's plate, with no re-render, and saves the result. #1864 — the
+ * sources mix outputs of any template and library files: a file ScadBuddy uploaded
+ * arranges through the output it is a copy of, any other is shown as not arrangeable
+ * yet. Add files and Add from a model add more before the run. An output saved before
+ * Arrange has no objects: Arrange asks to re-render it first, then arranges with it (#902).
  */
-export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged }: Props) {
+export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Props) {
+  /** Sources added inside the dialog, after the ones it was opened with. */
+  const [added, setAdded] = useState<ArrangeSource[]>([])
+  const [adding, setAdding] = useState<'files' | 'model' | null>(null)
+  /** The output behind each library file, read by id, or why it could not be read. */
+  const [read, setRead] = useState<Record<string, Output | { error: string }>>({})
   /** Outputs re-rendered here, read back with their objects. */
   const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
   const [flagged, setFlagged] = useState<string[]>([])
-  const outputs = given.map((output) => refreshed[output.id] ?? output)
+  const [filing, setFiling] = useState<string | null>(null)
+
+  const keys = new Set<string>()
+  const sources = [...given, ...added].filter((source) => {
+    const key = sourceKey(source)
+    if (keys.has(key)) return false
+    keys.add(key)
+    return true
+  })
+  const named = new Map(sources.flatMap((s) => (s.kind === 'output' ? [[s.output.id, s.output] as const] : [])))
+  const plain: LibraryEntry[] = []
+  const reading: LibraryEntry[] = []
+  /** Files ScadBuddy made whose output could not be read, each with why. */
+  const unread: string[] = []
+  const behind: Output[] = []
+  for (const source of sources) {
+    if (source.kind === 'output') {
+      behind.push(source.output)
+      continue
+    }
+    const id = source.file.output_id
+    const output = id ? (named.get(id) ?? read[id]) : null
+    if (output === undefined) reading.push(source.file)
+    else if (output === null) plain.push(source.file)
+    else if ('error' in output) unread.push(`${source.file.filename}: ${output.error}`)
+    else behind.push(output)
+  }
+  // An output reached as itself and through its library file is arranged once.
+  const outputs = [...new Map(behind.map((o) => [o.id, refreshed[o.id] ?? o])).values()]
   const unusable = outputs.filter((output) => needsBackfill(output) || flagged.includes(output.id))
   const rows = rowsOf(outputs.filter((output) => !unusable.includes(output)))
+  const templates = templatesOf(outputs.filter((output) => !unusable.includes(output)))
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
   const [name, setName] = useState('')
@@ -58,6 +116,33 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
 
   const countOf = (key: string, fallback: number) => counts[key] ?? fallback
 
+  // Read the output behind each library file once, whoever added it.
+  const toRead = [
+    ...new Set(
+      sources.flatMap((s) =>
+        s.kind === 'library' && s.file.output_id && !named.has(s.file.output_id) && !(s.file.output_id in read)
+          ? [s.file.output_id]
+          : [],
+      ),
+    ),
+  ].join(',')
+  useEffect(() => {
+    if (!open || !toRead) return
+    let live = true
+    for (const id of toRead.split(',')) {
+      api
+        .getOutput(id)
+        .then((output) => live && setRead((known) => ({ ...known, [id]: output })))
+        .catch((cause: unknown) => {
+          const error = cause instanceof ApiError ? cause.detail : 'its output could not be read'
+          if (live) setRead((known) => ({ ...known, [id]: { error } }))
+        })
+    }
+    return () => {
+      live = false
+    }
+  }, [open, toRead])
+
   /** The arrange in flight: closing the dialog (or leaving the page) stops its wait. */
   const running = useRef<AbortController | null>(null)
   useEffect(() => {
@@ -66,6 +151,11 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
       setAsking(false)
       setFailures(null)
       setError(null)
+      setAdded([])
+      setAdding(null)
+      setFiling(null)
+      // A read that failed (a network error, say) is tried again.
+      setRead((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
       return
     }
     running.current?.abort()
@@ -108,6 +198,10 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
           before.includes(output) ? [output] : ready.filter((o) => o.id === output.id),
         )
       }
+      // The chosen template, unless every output of it was left out: then the first one's.
+      const kept = templatesOf(usable)
+      const slug = filing && kept.includes(filing) ? filing : kept[0]
+      if (!slug) throw new Error('Nothing to arrange.')
       const body: ArrangeRequest = {
         objects: rowsOf(usable).map(({ output, object, key }) => ({
           output_id: output.id,
@@ -116,6 +210,7 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
         })),
         goal,
         name: name.trim() || null,
+        slug,
       }
       const arranged = await runArrange(slug, body, { onProgress: setProgress, signal: controller.signal })
       // Closed while the output was being saved: it is saved, a normal output in
@@ -147,6 +242,19 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
             {backfillNote(unusable)}
           </p>
         )}
+        {plain.length > 0 && (
+          <p role="status" className="text-[12px] text-muted">
+            {plainNote(plain)}
+          </p>
+        )}
+        {unread.length > 0 && (
+          <p role="status" className="text-[12px] text-warn">
+            {`Left out, as ScadBuddy could not read what it made them from: ${unread.join('; ')}.`}
+          </p>
+        )}
+        {reading.length > 0 && (
+          <p className="text-[12px] text-faint">{`Reading ${listed(reading.map((f) => f.filename))}…`}</p>
+        )}
         <ul className="flex flex-col gap-1.5">
           {rows.map(({ output, object, key }) => {
             const label = `${object.bom_piece ?? object.file} — ${output.name ?? output.id}`
@@ -168,6 +276,55 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
             )
           })}
         </ul>
+        {adding === null && (
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => setAdding('files')} disabled={busy}>
+              Add files
+            </Button>
+            <Button size="sm" onClick={() => setAdding('model')} disabled={busy}>
+              Add from a model
+            </Button>
+          </div>
+        )}
+        {adding === 'files' && (
+          <AddFiles
+            chosen={(file) => keys.has(`library:${file.id}`)}
+            onAdd={(files) => {
+              setAdded((now) => [...now, ...fromFiles(files)])
+              setAdding(null)
+            }}
+            onCancel={() => setAdding(null)}
+          />
+        )}
+        {adding === 'model' && (
+          <AddFromModel
+            chosen={(output) => outputs.some((o) => o.id === output.id)}
+            onAdd={(picked) => {
+              setAdded((now) => [...now, ...fromOutputs(picked)])
+              setAdding(null)
+            }}
+            onCancel={() => setAdding(null)}
+          />
+        )}
+        {templates.length > 1 && (
+          <>
+            <label htmlFor="arrange-filing" className="text-[12px] text-muted">
+              File under
+            </label>
+            <select
+              id="arrange-filing"
+              value={filing && templates.includes(filing) ? filing : templates[0]}
+              onChange={(event) => setFiling(event.target.value)}
+              className="sb-field"
+            >
+              {templates.map((slug) => (
+                <option key={slug} value={slug}>
+                  {slug}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
         <label htmlFor="arrange-goal" className="text-[12px] text-muted">
           Goal
         </label>
@@ -206,7 +363,7 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
         )}
         <Button
           onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}
-          disabled={busy || asking || (rows.length === 0 && unusable.length === 0)}
+          disabled={busy || asking || reading.length > 0 || (rows.length === 0 && unusable.length === 0)}
           aria-busy={busy}
         >
           Arrange

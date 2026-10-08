@@ -35,6 +35,9 @@ class LibraryEntry(BaseModel):
     #: Bytes, and when it was added (UTC): what tells two files of one name apart (#935).
     file_size: int | None = None
     created_at: datetime | None = None
+    #: The output ScadBuddy uploaded this file as (#455), through which Arrange reads its
+    #: objects (#1864); ``None`` for a file ScadBuddy did not make.
+    output_id: str | None = None
 
 
 class LibraryListing(BaseModel):

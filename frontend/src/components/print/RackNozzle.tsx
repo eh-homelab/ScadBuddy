@@ -77,7 +77,7 @@ export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosit
           <option value="">Automatic</option>
           {(rack?.options ?? []).map((option) => (
             <option key={option.position} value={option.position}>
-              {`Position ${option.position} · ${option.nozzle_diameter} ${flowLabel(option.flow)} · ${option.material ?? 'material unknown'} · ${option.prints} ${option.prints === 1 ? 'print' : 'prints'}${option.color ? ` · ${option.color}` : ''}`}
+              {`Position ${option.position} · ${option.nozzle_diameter} ${flowLabel(option.flow)} · ${option.material ?? 'material unknown'} · ${option.prints} ${option.prints === 1 ? 'print' : 'prints'}${option.pending ? ` · ${option.pending} queued` : ''}${option.color ? ` · ${option.color}` : ''}`}
             </option>
           ))}
         </select>

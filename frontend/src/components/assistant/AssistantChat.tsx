@@ -1,9 +1,27 @@
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type FormEvent,
+  type KeyboardEvent,
+} from 'react'
 import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
+import {
+  IMAGE_ACCEPT,
+  IMAGES_DATA_TOTAL_MAX,
+  IMAGES_MAX,
+  composerImages,
+  dataUrl,
+  prepareImage,
+} from '../../agent/chat/images'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
-import { isDone } from '../../agent/chat/protocol'
+import { isDone, type UserImage } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
@@ -45,6 +63,13 @@ interface Props {
 
 export interface OpenRequest {
   sessionId: string
+}
+
+/** #1866 — an image waiting in the composer to go with the next message. */
+interface Attached {
+  key: number
+  name: string
+  image: UserImage
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -128,6 +153,77 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     setDraft(text)
   }, [])
   const getDraft = useCallback(() => draftNow.current, [])
+
+  // #1866 — images pasted, dropped or attached, sent with the next message. Kept in a
+  // ref too, as the draft is, so images prepared at once all count against the caps.
+  const [attached, setAttached] = useState<Attached[]>([])
+  const attachedNow = useRef<Attached[]>([])
+  const writeAttached = useCallback((next: Attached[]) => {
+    attachedNow.current = next
+    setAttached(next)
+  }, [])
+  const [preparing, setPreparing] = useState(0)
+  const preparingNow = useRef(0)
+  const nextKey = useRef(0)
+  const [imageErrors, setImageErrors] = useState<string[]>([])
+  const [dropping, setDropping] = useState(false)
+  const filePicker = useRef<HTMLInputElement>(null)
+  const addImages = async (files: File[]) => {
+    if (files.length === 0) return
+    const room = Math.max(0, IMAGES_MAX - attachedNow.current.length - preparingNow.current)
+    const taken = files.slice(0, room)
+    const errors = files
+      .slice(room)
+      .map((file) => `At most ${IMAGES_MAX} images per message: ${file.name} was not added.`)
+    preparingNow.current += taken.length
+    setPreparing(preparingNow.current)
+    const results = await Promise.allSettled(taken.map((file) => prepareImage(file)))
+    preparingNow.current -= taken.length
+    setPreparing(preparingNow.current)
+    const added: Attached[] = []
+    let total = attachedNow.current.reduce((sum, a) => sum + a.image.data.length, 0)
+    results.forEach((result, index) => {
+      const name = taken[index]?.name ?? 'image'
+      if (result.status === 'rejected') {
+        errors.push(result.reason instanceof Error ? result.reason.message : `${name} could not be added.`)
+      } else if (total + result.value.data.length > IMAGES_DATA_TOTAL_MAX) {
+        errors.push(`${name} was not added: this message's images would be too large together.`)
+      } else {
+        total += result.value.data.length
+        added.push({ key: nextKey.current++, name, image: result.value })
+      }
+    })
+    writeAttached([...attachedNow.current, ...added])
+    setImageErrors(errors)
+  }
+  const removeImage = (key: number) => {
+    writeAttached(attachedNow.current.filter((a) => a.key !== key))
+    setImageErrors([])
+    composer.current?.focus()
+  }
+  // Only while the composer has focus: a paste elsewhere is the page's (a model's media, #722).
+  const onComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    // Copied cells or a web page carry text too: that paste is the text box's.
+    if (event.clipboardData.getData('text/plain')) return
+    const files = composerImages(event.clipboardData)
+    if (files.length === 0) return
+    event.preventDefault()
+    void addImages(files)
+  }
+  const carriesFiles = (event: DragEvent) => Array.from(event.dataTransfer.types ?? []).includes('Files')
+  const onComposerDragOver = (event: DragEvent<HTMLFormElement>) => {
+    if (!owned || !carriesFiles(event)) return
+    event.preventDefault()
+    setDropping(true)
+  }
+  const onComposerDrop = (event: DragEvent<HTMLFormElement>) => {
+    setDropping(false)
+    if (!owned) return
+    const files = composerImages(event.dataTransfer)
+    if (files.length === 0) return
+    event.preventDefault()
+    void addImages(files)
+  }
   const focusComposer = useCallback(() => composer.current?.focus(), [])
   const speakReplies = useSpeakReplies()
   const speech = useSpokenReplies(state.activeId, active?.items, speakReplies)
@@ -183,12 +279,15 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [itemCount, lastText])
 
   const submit = (text: string) => {
-    if (!text.trim() || busy || !owned) return
+    if (!text.trim() || busy || !owned || preparingNow.current > 0) return
     dictation.cancel()
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
-    chat.send(text, pageContext(pathname, { tools, dialogs, page }))
+    const images = attachedNow.current.map((a) => a.image)
+    chat.send(text, pageContext(pathname, { tools, dialogs, page }), images.length ? images : undefined)
     writeDraft('')
+    writeAttached([])
+    setImageErrors([])
   }
 
   const onSubmit = (event: FormEvent) => {
@@ -483,10 +582,39 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       </p>
 
       {/* The user's own voice: the bridge's fill/click never type or send here (#254). */}
-      <form onSubmit={onSubmit} data-agent-user-only="" className="shrink-0 border-t border-line p-2.5">
+      <form
+        onSubmit={onSubmit}
+        onDragOver={onComposerDragOver}
+        onDragLeave={() => setDropping(false)}
+        onDrop={onComposerDrop}
+        data-agent-user-only=""
+        className={`shrink-0 border-t p-2.5 ${dropping ? 'border-accent bg-accent/5' : 'border-line'}`}
+      >
         <label htmlFor="assistant-composer" className="sr-only">
           Message the assistant
         </label>
+        {attached.length > 0 && (
+          <ul aria-label="Images to send" className="mb-1.5 flex flex-wrap gap-1.5">
+            {attached.map((a) => (
+              <li key={a.key} className="relative">
+                <img
+                  src={dataUrl(a.image.preview)}
+                  alt={a.name}
+                  className="h-14 w-14 rounded-[4px] border border-line object-cover"
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove ${a.name}`}
+                  title={`Remove ${a.name}`}
+                  onClick={() => removeImage(a.key)}
+                  className="absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full border border-line bg-surface-2 text-[11px] leading-none hover:bg-surface-3"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <textarea
           id="assistant-composer"
           ref={composer}
@@ -494,12 +622,26 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           value={draft}
           onChange={(event) => writeDraft(event.target.value)}
           onKeyDown={onComposerKey}
+          onPaste={onComposerPaste}
           disabled={!owned}
           placeholder={
             owned ? 'Ask about this page… (Enter to send, Shift+Enter for a new line)' : 'Take over to send messages'
           }
           className="w-full resize-none rounded-[6px] border border-line bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-line-strong disabled:opacity-50"
         />
+        {imageErrors.map((error) => (
+          <p key={error} role="alert" className="mt-1 text-[12px] text-warn">
+            {error}
+          </p>
+        ))}
+        {preparing > 0 && (
+          <p role="status" className="mt-1 text-[11.5px] text-faint">
+            Preparing {preparing === 1 ? 'the image' : `${preparing} images`}…
+          </p>
+        )}
+        {attached.length > 0 && !draft.trim() && (
+          <p className="mt-1 text-[11.5px] text-faint">Add a message to send with the images.</p>
+        )}
         {dictation.error && (
           <p role="alert" className="mt-1 text-[12px] text-warn">
             {dictation.error}
@@ -518,8 +660,31 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             )}
           </div>
           {busy && <span className="text-[11.5px] text-faint">Wait for this turn to finish, or stop it.</span>}
+          <input
+            ref={filePicker}
+            type="file"
+            accept={IMAGE_ACCEPT}
+            multiple
+            hidden
+            aria-label="Attach images"
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? [])
+              // Cleared, so picking the same file again is a change.
+              event.target.value = ''
+              void addImages(files)
+            }}
+          />
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!owned || attached.length >= IMAGES_MAX}
+            title={`Attach images (PNG, JPEG, GIF or WebP; up to ${IMAGES_MAX}). You can also paste or drop them here.`}
+            onClick={() => filePicker.current?.click()}
+          >
+            Image
+          </Button>
           <MicButton dictation={dictation} disabled={!owned} embedded={embedded} describedBy={voiceNoteId} />
-          <Button type="submit" variant="primary" size="sm" disabled={!draft.trim() || busy || !owned}>
+          <Button type="submit" variant="primary" size="sm" disabled={!draft.trim() || busy || !owned || preparing > 0}>
             Send
           </Button>
         </div>

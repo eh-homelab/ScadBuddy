@@ -114,6 +114,33 @@ def test_deleting_the_model_releases_every_output_s_parts(
     assert held(pool) == set()
 
 
+class _FirstReleaseFails(BlobRefs):
+    """`blob_refs` with Postgres gone for the first output the delete releases."""
+
+    failed: str | None = None
+
+    def drop_holder(self, holder_kind: str, holder_id: str) -> None:
+        if self.failed is None:
+            self.failed = holder_id
+            raise psycopg.OperationalError("the server closed the connection")
+        super().drop_holder(holder_kind, holder_id)
+
+
+def test_deleting_the_model_releases_the_other_outputs_when_one_release_fails(
+    client: TestClient, app: FastAPI, pg_conninfo: str, tmp_path: Path
+) -> None:
+    """#1782: one output's failed release costs only that output; the rest are released."""
+    job_id, _ = finished(app, tmp_path)
+    with store_pool(pg_conninfo) as opened:
+        state: AppState = getattr(app.state, STATE_ATTR)
+        refs = _FirstReleaseFails(opened)
+        state.refs = refs
+        saved = {save(client, job_id), save(client, job_id), save(client, job_id)}
+        assert client.delete("/api/v1/models/demo", headers=press()).status_code == 204
+        assert refs.failed in saved
+        assert {holder for _, holder in held(opened)} == {refs.failed}
+
+
 class _HoldFails(BlobRefs):
     """`blob_refs` with Postgres gone while the save holds its Parts."""
 

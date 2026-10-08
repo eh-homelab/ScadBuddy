@@ -234,7 +234,9 @@ async def test_a_live_pin_is_renewed_past_its_ttl(
     removal holds the pool's only open connection, so the pin's first renewal waits
     for a new one: a connect slower than the TTL's slack (0.4 s) let the hold lapse
     and the removal in (#1851)."""
-    api_pool = open_pg_pool(pg_conninfo)
+    # One connection: the API side's single held one is what this models (#1857).
+    api_pool = open_pg_pool(pg_conninfo, size=1)
+    task: asyncio.Task[None] | None = None
     try:
         worker, api = _gate(pg_pool, tmp_path, ttl=0.6), _gate(api_pool, tmp_path)
         removed = asyncio.Event()
@@ -249,6 +251,11 @@ async def test_a_live_pin_is_renewed_past_its_ttl(
             assert not removed.is_set()
         await asyncio.wait_for(task, 10)
     finally:
+        # A failed assertion leaves the removal waiting on this pool's connection:
+        # ended first, so the failure is the assertion's, not the pool's (#1857).
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         api_pool.close()
 
 

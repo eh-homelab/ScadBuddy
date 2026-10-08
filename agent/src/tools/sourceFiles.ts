@@ -4,20 +4,13 @@ import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
+import { codePoints } from './text.js'
 
 /** The backend's MAX_SOURCE_CHARS and MAX_SUBJECT (`SourceFileUpdate.content` and
  * `.message` in backend/scadbuddy/api/model_files.py); test/sourceFiles.test.ts checks
  * both against the OpenAPI spec (PR #752 review). */
 export const MAX_SOURCE_CHARS = 1_000_000
 export const MAX_MESSAGE_CHARS = 200
-
-/** Characters as Pydantic's `max_length` counts them: code points, where a JS string's
- * `length` (and so Zod's `.max`) counts UTF-16 units and an astral character twice. */
-export function codePoints(text: string): number {
-  let count = 0
-  for (const _ of text) count++
-  return count
-}
 
 // Multi-file models (issue #252: "Multi-file models are supported (includes
 // inside the model folder)"): the `.scad` files beside model.scad that it

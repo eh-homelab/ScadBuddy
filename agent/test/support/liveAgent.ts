@@ -4,6 +4,7 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { WebSocket, WebSocketServer } from 'ws'
 import { type AppDeps, createApp } from '../../src/app.js'
 import { originPolicy } from '../../src/http/origins.js'
+import { CHAT_FRAME_MAX } from '../../src/routes/chat.js'
 import type { SessionManager } from '../../src/sessions/manager.js'
 import { MemoryCredentials } from './memoryCredentials.js'
 
@@ -40,7 +41,7 @@ export async function startLiveAgent(sessions: SessionManager, overrides: Partia
     upgradeWebSocket,
     ...overrides,
   })
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
+  const wss = new WebSocketServer({ noServer: true, maxPayload: CHAT_FRAME_MAX })
   const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0, websocket: { server: wss } })
   await new Promise<void>((resolve) => server.once('listening', () => resolve()))
   const { port } = server.address() as AddressInfo

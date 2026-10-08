@@ -129,9 +129,13 @@ function oldestTime(prints: PrintSummary[]): number | null {
   return null
 }
 
-/** An output that went to Bambuddy's queue (#89; the pipeline route went with #312). */
+/**
+ * An output that went to Bambuddy's queue (#89; the pipeline route went with #312), or
+ * whose newest run failed before it queued anything (#1831): that run records nothing
+ * else on the output, and its row shows the failure.
+ */
 function wasSent(output: Output): boolean {
-  return Boolean(output.queue_item_id || (output.plates ?? []).length > 0)
+  return Boolean(output.queue_item_id || (output.plates ?? []).length > 0 || output.failed_before_queueing)
 }
 
 /**
@@ -374,9 +378,16 @@ function WaitingRow({ output }: { output: Output }) {
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
       <span className="text-ink">{output.name ?? output.id.slice(0, 8)}</span>
       {settled ? (
-        <span className="text-[12px] text-muted" title={settled.error_message ?? undefined}>
-          {SETTLED_LABEL[settled.stage] ?? 'No longer in Bambuddy'}
-        </span>
+        settled.route === 'run' ? (
+          // #1831 — the run failed in ScadBuddy, before Bambuddy had anything to show.
+          <span className="text-[12px] text-warn">
+            Print failed{settled.error_message ? `: ${settled.error_message}` : ''}
+          </span>
+        ) : (
+          <span className="text-[12px] text-muted" title={settled.error_message ?? undefined}>
+            {SETTLED_LABEL[settled.stage] ?? 'No longer in Bambuddy'}
+          </span>
+        )
       ) : (
         <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
           <Spinner /> Waiting for Bambuddy

@@ -49,10 +49,13 @@ logger = logging.getLogger(__name__)
 PIN_TIMEOUT = 30.0
 #: How long shutdown lets a store `pin` stopped waiting for finish before cancelling it.
 SHUTDOWN_GRACE = 10.0
-#: How many snapshots are exported and uploaded at once. A pin that stops waiting leaves
-#: its store running, so without a bound the preview pass could have every template
-#: uploading to Bambuddy together (#1436).
+#: How many snapshots are exported and uploaded at once for the renders someone waits
+#: for. A pin that stops waiting leaves its store running, so without a bound the preview
+#: pass could have every template uploading to Bambuddy together (#1436).
 MAX_CONCURRENT_STORES = 2
+#: The same for the background's pins (the preview pass), on their own bound: stalled
+#: ones never hold the slots a render someone waits for needs (#1773).
+MAX_CONCURRENT_BACKGROUND_STORES = 1
 
 #: `pin`'s bounded wait: `asyncio.wait_for`'s shape.
 Wait = Callable[[Awaitable[str], float], Awaitable[str]]
@@ -72,6 +75,7 @@ class SnapshotStore:
         locks: KeyLocks | None = None,
         pin_timeout: float = PIN_TIMEOUT,
         max_stores: int = MAX_CONCURRENT_STORES,
+        max_background_stores: int = MAX_CONCURRENT_BACKGROUND_STORES,
         wait: Wait = asyncio.wait_for,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -83,17 +87,20 @@ class SnapshotStore:
         self.pin_timeout = pin_timeout
         self._wait = wait
         self._clock = clock
-        #: Bounds the exports and uploads running at once, across keys.
+        #: Bounds the exports and uploads running at once, across keys: the requests'
+        #: and the background's, each on its own.
         self._stores = asyncio.Semaphore(max_stores)
+        self._background_stores = asyncio.Semaphore(max_background_stores)
         #: The store running for each snapshot key, and when it started: a pin while
         #: one runs joins it rather than queueing another on the key's lock (#1435).
         self._pins: dict[str, tuple[asyncio.Task[str], float]] = {}
         #: The stores `pin` stopped waiting for, held so they run to the end.
         self._storing: set[asyncio.Task[str]] = set()
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         """The revision a render uses, with its snapshot stored. An unpinned request
-        renders the template's last commit; None when there is no history at all."""
+        renders the template's last commit; None when there is no history at all.
+        A ``background`` pin (the preview pass) stores on the background's bound."""
         if revision is None:
             if self.history is None or not self.history.available:
                 return None
@@ -102,7 +109,7 @@ class SnapshotStore:
                 return None
         # Shielded: a caller that stops waiting (the timeout, or a client gone) leaves
         # the store running, so the retry finds it done or joins it.
-        storing, started = self._store(slug, revision)
+        storing, started = self._store(slug, revision, background=background)
         try:
             await self._wait(asyncio.shield(storing), self.pin_timeout)
         except TimeoutError:
@@ -139,13 +146,15 @@ class SnapshotStore:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
-    def _store(self, slug: str, revision: str) -> tuple[asyncio.Task[str], float]:
+    def _store(
+        self, slug: str, revision: str, *, background: bool
+    ) -> tuple[asyncio.Task[str], float]:
         """The store running for this revision, started now when none is."""
         key = snapshot_key(slug, revision)
         running = self._pins.get(key)
         if running is not None and not running[0].done():
             return running
-        storing = asyncio.create_task(self.ensure(slug, revision))
+        storing = asyncio.create_task(self.ensure(slug, revision, background=background))
         self._pins[key] = (storing, self._clock())
 
         def ended(task: asyncio.Task[str]) -> None:
@@ -168,7 +177,7 @@ class SnapshotStore:
 
         storing.add_done_callback(settled)
 
-    async def ensure(self, slug: str, revision: str) -> str:
+    async def ensure(self, slug: str, revision: str, *, background: bool = False) -> str:
         key = snapshot_key(slug, revision)
         if await self._stored(key):
             return key
@@ -177,7 +186,7 @@ class SnapshotStore:
         async with self.locks.hold(key):
             if await self._stored(key):
                 return key
-            async with self._stores:
+            async with self._background_stores if background else self._stores:
                 await self._export_and_put(slug, revision, key)
         return key
 

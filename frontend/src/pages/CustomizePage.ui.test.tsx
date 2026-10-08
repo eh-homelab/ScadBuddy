@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSummary } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_VERSION } from '../mocks/fixtures'
+import { setMockPresets } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { setUiModuleLoader } from '../template-ui/loadModule'
@@ -301,6 +302,43 @@ describe('CustomizePage with a template UI', () => {
     await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
     expect(preset()).not.toHaveDisplayValue('One')
     expect(screen.queryByText('Changed from One')).not.toBeInTheDocument()
+  })
+
+  it('takes the UI state a template UI seeds after a pick as the preset\'s, and an edit since as a change (#1775)', async () => {
+    let host: Host | undefined
+    // Seeds its tab whenever the inputs lack one, from a task of its own, as an effect would.
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        const tab = document.createElement('button')
+        tab.textContent = 'Colour tab'
+        root.append(tab)
+        const seed = (inputs: Record<string, unknown>) => {
+          if (inputs['tab'] === undefined) setTimeout(() => given.inputs.set({ tab: 'shape' }), 0)
+        }
+        seed(given.inputs.get())
+        given.inputs.subscribe(seed)
+      },
+    }))
+    // Saved before the UI kept any state: picking it puts no tab on screen.
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'd'.repeat(32), name: 'Plain', origin: 'mine', params: { name: 'Plain' }, inputs: { params: { name: 'Plain' } }, description: '', tags: [] },
+    ])
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText('Changed from Plain')).not.toBeInTheDocument()
+
+    // The user changes the tab: that is a change to the preset.
+    const tab = shadow().querySelector('button')!
+    await user.click(tab)
+    host?.inputs.set({ tab: 'colour' })
+    expect(await screen.findByText('Changed from Plain')).toBeInTheDocument()
   })
 
   it('a UI-state-only set starts no new render', async () => {
