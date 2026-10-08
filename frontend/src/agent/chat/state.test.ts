@@ -1,5 +1,5 @@
 import { type ServerEvent, ServerEventSchema } from './protocol'
-import { budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
+import { askedBy, budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
 
 const you = { kind: 'browser', id: 'browser', label: 'You' } as const
 const desktop = { kind: 'bearer', id: 'tok', label: 'Claude Desktop' } as const
@@ -472,5 +472,45 @@ describe('chatReducer', () => {
       expect(reattached.sessions.s1?.budgetSpent).toBe(false)
       expect(reattached.sessions.s1?.budget).toEqual({ costUsd: 0, budgetUsd: 1 })
     })
+  })
+
+  it("says which subagent asked a question, from its call's parent Agent call (#1109)", () => {
+    const questions = [
+      {
+        question: 'Which?',
+        header: 'Pick',
+        multiSelect: false,
+        options: [
+          { label: 'A', description: '' },
+          { label: 'B', description: '' },
+        ],
+      },
+    ]
+    const ask = 'mcp__scadbuddy_questions__ask_user'
+    const state = run(
+      [
+        server({ type: 'tool.call', sessionId: 's1', id: 'agent1', name: 'Agent', input: { description: 'd', prompt: 'p', subagent_type: 'pkg:helper' }, risk: 'read' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 'agent2', name: 'Agent', input: { truncated: true, preview: '{…' }, risk: 'read' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't1', name: ask, input: {}, risk: 'read', parent: 'agent1' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't2', name: ask, input: {}, risk: 'read', parent: 'agent2' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't3', name: 'AskUserQuestion', input: {}, risk: 'read' }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't1', questions }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q2', tool: 't2', questions }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q3', tool: 't3', questions }),
+        // Its call not (yet) in the feed: nothing is claimed.
+        server({ type: 'question.asked', sessionId: 's1', id: 'q4', tool: 't4', questions }),
+      ],
+      started,
+    )
+    const items = state.sessions.s1?.items ?? []
+    const of = (id: string) => {
+      const q = items.find((i) => i.kind === 'question' && i.id === id)
+      return q?.kind === 'question' ? askedBy(items, q) : 'missing'
+    }
+    expect(of('q1')).toBe('pkg:helper')
+    // A subagent whose type the feed does not show (a truncated input) is still a subagent.
+    expect(of('q2')).toBe('')
+    expect(of('q3')).toBeUndefined()
+    expect(of('q4')).toBeUndefined()
   })
 })

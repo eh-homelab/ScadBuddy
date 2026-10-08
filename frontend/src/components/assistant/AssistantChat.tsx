@@ -4,7 +4,7 @@ import { bridge } from '../../agent/bridge'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
 import { isDone } from '../../agent/chat/protocol'
-import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
+import { askedBy, isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
@@ -427,6 +427,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             key={`${item.kind}-${item.id}`}
             item={item}
             advanced={advanced}
+            askedBy={item.kind === 'question' ? askedBy(active.items, item) : undefined}
             onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
             onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
           />

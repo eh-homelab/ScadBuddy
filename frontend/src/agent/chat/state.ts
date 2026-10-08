@@ -22,6 +22,8 @@ export type FeedItem =
       input: Record<string, unknown>
       risk: Risk
       result?: { ok: boolean; summary: string; sources: Source[]; version?: VersionLink }
+      /** A subagent's call (#1108): the session's `Agent` call that spawned it. */
+      parent?: string
     }
   | {
       kind: 'approval'
@@ -296,7 +298,14 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'tool.call':
       return patchSession(state, event.sessionId, (s) =>
-        push(s, { kind: 'tool', id: event.id, name: event.name, input: event.input, risk: event.risk }),
+        push(s, {
+          kind: 'tool',
+          id: event.id,
+          name: event.name,
+          input: event.input,
+          risk: event.risk,
+          ...(event.parent === undefined ? {} : { parent: event.parent }),
+        }),
       )
 
     case 'tool.result':
@@ -549,6 +558,20 @@ function withoutReason<T extends { reason?: string }>(item: T): Omit<T, 'reason'
 /** A turn is live: running, or parked on a human (an approval, or a question, #940). */
 function isLive(status: SessionStatus): boolean {
   return status === 'running' || status === 'waiting_approval' || status === 'waiting_input'
+}
+
+/**
+ * #1109 — who asked a question, from the feed: undefined for the session's own agent
+ * (or a call not in the feed), else a subagent's: its `subagent_type` from the `Agent`
+ * call that spawned it (#1108's `parent`), or '' when the feed does not show it (a
+ * truncated input). Any subagent may ask, a package's too, so the card says so.
+ */
+export function askedBy(items: readonly FeedItem[], question: Extract<FeedItem, { kind: 'question' }>): string | undefined {
+  const call = items.find((i) => i.kind === 'tool' && i.id === question.tool)
+  if (call?.kind !== 'tool' || call.parent === undefined) return undefined
+  const agent = items.find((i) => i.kind === 'tool' && i.id === call.parent)
+  const type = agent?.kind === 'tool' ? agent.input.subagent_type : undefined
+  return typeof type === 'string' ? type : ''
 }
 
 /** A session is busy while a turn runs or waits on a human. */
