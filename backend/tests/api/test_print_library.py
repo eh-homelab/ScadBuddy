@@ -13,6 +13,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.render.bambu3mf import MAX_SETTINGS_BYTES
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
@@ -587,14 +588,35 @@ def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) ->
     assert first.call_count == 1
 
 
+def _settings_bomb() -> bytes:
+    """A 3MF whose settings inflate past the cap from a few KB (#484 review)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr(
+            "Metadata/project_settings.config", b"{" + b" " * (MAX_SETTINGS_BYTES * 8) + b"}"
+        )
+    return buffer.getvalue()
+
+
 @respx.mock
-def test_an_already_sliced_library_file_prints_as_it_is_and_warns(client: TestClient) -> None:
-    """A file with gcode in it cannot state a flow: it is sliced as it stands, taken as
-    Standard on both sides, so each High Flow nozzle mounted is warned of."""
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(library_3mf(sliced=True), id="sliced"),
+        pytest.param(_settings_bomb(), id="settings-past-the-cap"),
+    ],
+)
+def test_an_already_sliced_library_file_prints_as_it_is_and_warns(
+    client: TestClient, content: bytes
+) -> None:
+    """A file with gcode in it cannot state a flow, nor can one whose settings inflate
+    past the cap: it is sliced as it stands, taken as Standard on both sides, so each
+    High Flow nozzle mounted is warned of."""
     configure(client)
     one_color(89)
     upload = flow_copy_routes()
-    library_file(89, content=library_3mf(sliced=True))
+    library_file(89, content=content)
     run_routes()
     both_sides_high_flow()
     sliced = slice_routes()

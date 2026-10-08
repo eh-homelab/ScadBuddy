@@ -16,6 +16,8 @@ import trimesh
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
     CORE_NS,
+    MAX_SETTINGS_BYTES,
+    MAX_UNCOMPRESSED_BYTES,
     MODEL_SETTINGS_NAME,
     PLACEHOLDER_NOZZLE_DIAMETER,
     PLATE_PICK,
@@ -346,6 +348,80 @@ def test_only_an_unsliced_3mf_with_bambus_settings_can_state_its_nozzles(written
         _with_entries(payload, {"Metadata/project_settings.config": b"<config/>"})
     )
     assert not nozzles_statable(b"solid stl\nendsolid\n")
+
+
+def _settings_bomb(size: int) -> bytes:
+    """A 3MF whose ``project_settings.config`` is valid JSON of ``size`` bytes, almost
+    all whitespace, which deflates to a few KB."""
+    body = b'{"nozzle_diameter": ["0.4"]' + b" " * (size - 29) + b"}\n"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
+        out.writestr("3D/3dmodel.model", "<model/>")
+        out.writestr("Metadata/project_settings.config", body)
+    return buffer.getvalue()
+
+
+def _declaring(payload: bytes, name: str, size: int) -> bytes:
+    """``payload`` with ``name``'s uncompressed size declared as ``size`` in both its
+    local header and the central directory: a header that lies."""
+    data = bytearray(payload)
+    encoded = name.encode()
+    # (signature, offset of the uncompressed size, offset of the file name)
+    for signature, size_at, name_at in ((b"PK\x03\x04", 22, 30), (b"PK\x01\x02", 24, 46)):
+        start = data.find(signature)
+        while start != -1:
+            if data[start + name_at : start + name_at + len(encoded)] == encoded:
+                data[start + size_at : start + size_at + 4] = size.to_bytes(4, "little")
+            start = data.find(signature, start + 4)
+    return bytes(data)
+
+
+class _Inflated:
+    """Counts the bytes every zip entry read hands back."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.total = 0
+        read = zipfile.ZipExtFile.read
+
+        def counted(entry: zipfile.ZipExtFile, n: int = -1) -> bytes:
+            data = read(entry, n)
+            self.total += len(data)
+            return data
+
+        monkeypatch.setattr(zipfile.ZipExtFile, "read", counted)
+
+
+def test_settings_that_expand_past_the_cap_are_not_statable_and_not_inflated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A library file is untrusted (MakerWorld downloads land there too): a few KB that
+    inflate to gigabytes must not exhaust the worker. Over the cap is not statable, so
+    the file prints as it is, and nothing past the cap is ever decompressed."""
+    bomb = _settings_bomb(MAX_SETTINGS_BYTES * 64)
+    assert len(bomb) < MAX_SETTINGS_BYTES
+    inflated = _Inflated(monkeypatch)
+
+    assert not nozzles_statable(bomb)
+    assert inflated.total <= 64 * 1024  # the model's few bytes at most, never the settings
+
+
+def test_a_header_that_understates_its_size_does_not_get_past_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared size is checked first, but not trusted: reads are counted, and an
+    entry that inflates past what it declares is refused."""
+    lying = _declaring(
+        _settings_bomb(MAX_SETTINGS_BYTES * 64), "Metadata/project_settings.config", 1024
+    )
+    inflated = _Inflated(monkeypatch)
+
+    assert not nozzles_statable(lying)
+    assert inflated.total <= MAX_SETTINGS_BYTES + 64 * 1024
+
+
+def test_an_archive_over_the_total_cap_is_not_statable(written: Path) -> None:
+    payload = _declaring(written.read_bytes(), "3D/3dmodel.model", MAX_UNCOMPRESSED_BYTES + 1)
+    assert not nozzles_statable(payload)
 
 
 def test_build_item_centres_the_assembly_on_the_plate_at_z0(written: Path) -> None:
