@@ -1,5 +1,5 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { attentionCard, type AttentionSpec, parseAttention } from '../src/harness/attention.js'
@@ -96,8 +96,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks, approvalPollMs: 20 })
     const post = respondTo(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length).toBe(1)
-    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length, { timeout: 10_000 }).toBe(1)
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(2)
     const ids = await ids_(m)
     return { m, session, turn: turn!, ids, post }
   }
@@ -252,6 +252,73 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await m.questions.listPending(browser)).questions.length).toBe(2)
     expect((await post(ids.attention, padded(RESPONSE_MAX))).status).toBe(200)
     await m.interrupt(session.id, browser)
+    await turn.done
+  })
+
+  // #1358: an approval id is read before the body's kind is checked, as a question's is.
+  it('answers 404 for an unknown approval id whatever kind the body names', async () => {
+    const { m, post, session, turn } = await setUp()
+    const unknown = await post('approval:00000000-0000-4000-8000-000000000000', { kind: 'answer', text: 'yes' })
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toMatchObject({ stale: true })
+    expect((await post('approval:not-a-uuid', { kind: 'approval', decision: 'approve' })).status).toBe(404)
+    expect((await post('approval:not-a-uuid', { kind: 'answer', text: 'yes' })).status).toBe(404)
+    await m.interrupt(session.id, browser)
+    await turn.done
+  })
+
+  // #1357: picks are joined with ", ", so only a multi-select takes them, and no pick may contain the separator.
+  it('refuses picks for a single-select question, and a pick that contains the separator', async () => {
+    const { m, ids, post, session, turn } = await setUp()
+    const single = await post(ids.question, { kind: 'answer', answers: { 'Which colour?': ['Red', 'Blue'], 'Which parts?': 'Lid' } })
+    expect(single.status).toBe(400)
+    expect(await detail(single)).toMatch(/"Which colour\?" takes one answer/)
+    const comma = await post(ids.question, { kind: 'answer', answers: { 'Which colour?': 'Red', 'Which parts?': ['Lid, Base'] } })
+    expect(comma.status).toBe(400)
+    expect(await detail(comma)).toMatch(/", "/)
+    expect((await m.questions.listPending(browser)).questions.length).toBe(2)
+    await m.interrupt(session.id, browser)
+    await turn.done
+  })
+
+  // #1479 (finding 4): an entry no longer pending is a 409 whatever kind the body names.
+  it('answers 409, not 400, to a wrong-kind body for a question that already ended', async () => {
+    const { m, ids, post, session, turn } = await setUp()
+    await m.interrupt(session.id, browser)
+    await turn.done
+    const ended = await post(ids.question, { kind: 'approval', decision: 'approve' })
+    expect(ended.status).toBe(409)
+    expect(await ended.json()).toMatchObject({ reason: expect.any(String) })
+    expect((await post(ids.attention, { kind: 'approval', decision: 'deny' })).status).toBe(409)
+    // So is an approval that was already settled (cancelled with the turn here).
+    const settled = await post(ids.approval, { kind: 'answer', text: 'yes' })
+    expect(settled.status).toBe(409)
+    expect(await settled.json()).toMatchObject({ reason: expect.any(String) })
+  })
+
+  // #1412: a question that ends between the route's read and its answer still says how it ended.
+  it('re-reads a question that ended between the read and the answer, and says how it ended', async () => {
+    const { m, ids, post, turn } = await setUp()
+    const rowId = ids.question.slice('question:'.length)
+    const pending = await m.questions.entry(rowId)
+    const answers = { 'Which colour?': 'Red', 'Which parts?': 'Lid' }
+    expect((await post(ids.question, { kind: 'answer', answers })).status).toBe(200)
+
+    // The route's first read still sees it pending; answer() then finds it answered.
+    const entry = vi.spyOn(m.questions, 'entry').mockResolvedValueOnce(pending)
+    const raced = await post(ids.question, { kind: 'answer', answers })
+    expect(raced.status).toBe(409)
+    expect(await raced.json()).toMatchObject({ reason: 'it was already answered' })
+
+    // A re-read that still shows it pending falls through to a plain 409 with no reason.
+    entry.mockResolvedValue(pending)
+    const plain = await post(ids.question, { kind: 'answer', answers })
+    expect(plain.status).toBe(409)
+    expect(await plain.json()).not.toHaveProperty('reason')
+    entry.mockRestore()
+
+    await post(ids.attention, { kind: 'answer', choice: "I'm here" })
+    await post(ids.approval, { kind: 'approval', decision: 'deny' })
     await turn.done
   })
 

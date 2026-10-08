@@ -70,7 +70,15 @@ export type ServerEvent = V &
     /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
     | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
-    | { type: 'user.turn'; sessionId: string; turnId: string; text: string; author: Owner }
+    /** `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones. */
+    | {
+        type: 'user.turn'
+        sessionId: string
+        turnId: string
+        text: string
+        author: Owner
+        images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }[]
+      }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }
     /** `parent`: a subagent's call (#1108), the id of the session's `Agent` call that spawned it. */

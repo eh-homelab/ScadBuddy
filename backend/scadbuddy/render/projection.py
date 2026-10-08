@@ -18,9 +18,8 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
 from temporalio.client import Client, WorkflowExecutionStatus
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RPCError
 
 from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
@@ -35,6 +34,7 @@ from scadbuddy.render.job_models import (
     now,
 )
 from scadbuddy.render.pg_store import TransactionalEvents, migrate
+from scadbuddy.workflows.commands import execution_gone
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +61,6 @@ class LegacyPendingError(Exception):
     def __init__(self, job: Job) -> None:
         super().__init__(f"render job {job.id} of an older build waits on the same key")
         self.job = job
-
-
-def execution_gone(error: RPCError) -> bool:
-    """A NOT_FOUND about the execution, not about the namespace: a mistyped or
-    unregistered namespace answers NOT_FOUND too (review #1066 (7) 2)."""
-    return error.status == RPCStatusCode.NOT_FOUND and not any(
-        detail.Is(NamespaceNotFoundFailure.DESCRIPTOR) for detail in error.grpc_status.details
-    )
 
 
 async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:

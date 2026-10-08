@@ -15,9 +15,11 @@ import httpx
 import pytest
 import respx
 import trimesh
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy.uploads import ProjectTarget
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import MAX_SETTINGS_BYTES, layout_of, write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.test_print_filaments import queue_route, slice_routes
@@ -132,6 +134,23 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
     assert {"Supplies": 0, "Storage": 1}.items() <= {
         row["name"]: row["depth"] for row in plain["folders"]
     }.items()
+
+
+@respx.mock
+def test_a_file_scadbuddy_uploaded_names_its_output(client: TestClient, app: FastAPI) -> None:
+    """#1864: what Arrange reads a generated library file's objects through."""
+    configure(client)
+    listing_routes(recording("library-files-root.json"))
+    first = client.get("/api/v1/print/library").json()["files"][0]["id"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(
+        state.uploads.record("a" * 32, LibraryCopy(id=first, folder_id=None, target_key="k"))
+    )
+
+    files = client.get("/api/v1/print/library").json()["files"]
+
+    assert {row["id"]: row["output_id"] for row in files if row["output_id"]} == {first: "a" * 32}
+    assert len(files) > 1
 
 
 @respx.mock

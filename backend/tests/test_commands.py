@@ -22,6 +22,7 @@ from temporalio.worker import Worker
 from scadbuddy.workflows.commands import (
     AlreadyClosedError,
     CommandClosedError,
+    CommandClosingError,
     CommandStillAcceptingError,
     TemporalUnavailableError,
     TemporalUnreachableError,
@@ -314,12 +315,48 @@ async def test_an_execution_ended_before_its_update_answered_is_a_closed_command
     async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
         pending = asyncio.create_task(echo(client, queue, workflow_id, EchoInput(delay_s=30)))
         # Accepted, not merely sent (#1659): terminated while only admitted, the Update is
-        # aborted with a NOT_FOUND RPCError instead, which `start_command` classifies as a
-        # refusal and render submit reads as a closing execution.
+        # aborted with a NOT_FOUND RPCError instead, `CommandClosingError` (#1799).
         await update_accepted(client, workflow_id, pending)
         await client.get_workflow_handle(workflow_id).terminate("an operator ended it")
         with pytest.raises(CommandClosedError):
             await pending
+
+
+async def test_an_execution_ended_while_its_update_was_only_admitted_is_closing(
+    client: Client, queue: str
+) -> None:
+    """#1799: with no worker the Update is admitted but never accepted, and a terminate
+    aborts it with a NOT_FOUND `RPCError`. That is the execution closing, which every
+    route answers as a closed command (send it again), never Temporal refusing it."""
+    workflow_id = f"echo-{uuid.uuid4().hex}"
+    pending = asyncio.create_task(echo(client, queue, workflow_id))
+    await execution_started(client, workflow_id, pending)
+    await client.get_workflow_handle(workflow_id).terminate("an operator ended it")
+    with pytest.raises(CommandClosingError) as raised:
+        await pending
+    assert isinstance(raised.value, CommandClosedError)
+
+
+async def execution_started(
+    client: Client, workflow_id: str, pending: asyncio.Task[EchoAnswer]
+) -> None:
+    """Wait until ``workflow_id``'s execution exists, its Update admitted with it."""
+    deadline = time.monotonic() + 10
+    while True:
+        if pending.done():
+            await pending
+            raise AssertionError("the command answered with no worker")
+        try:
+            await client.get_workflow_handle(workflow_id).describe()
+            return
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+        if time.monotonic() >= deadline:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise AssertionError("the execution never started")
+        await asyncio.sleep(0.05)
 
 
 async def update_accepted(

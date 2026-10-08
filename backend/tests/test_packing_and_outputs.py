@@ -271,8 +271,10 @@ async def _write_file_named(tmp_path: Path, name: str) -> ApplicationError:
     return raised.value
 
 
-@pytest.mark.parametrize("name", ["../x", ".hidden", "a/b", "/etc/passwd"])
+@pytest.mark.parametrize("name", ["../x", ".hidden", "a/b", "/etc/passwd", "notes.txt\n"])
 async def test_an_output_file_name_that_could_escape_is_refused(tmp_path: Path, name: str) -> None:
+    """A trailing newline too (#1758): `$` matches before one, and the download's
+    `fullmatch` would then 404 a file that was written and listed."""
     error = await _write_file_named(tmp_path, name)
     assert "use letters, digits" in error.message
 

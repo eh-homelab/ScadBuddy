@@ -21,7 +21,8 @@ import os
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from email.utils import parsedate
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path as FilePath
 from typing import IO, TYPE_CHECKING, Annotated, Any, Literal
 
@@ -393,9 +394,21 @@ def _not_modified(request: Headers, etag: str, last_modified: str) -> bool:
     """RFC 9110 §13.2.2: `If-None-Match` when sent, else `If-Modified-Since`."""
     if (if_none_match := request.get("if-none-match")) is not None:
         return _matches(if_none_match, etag)
-    since = parsedate(request.get("if-modified-since") or "")
-    modified = parsedate(last_modified)
+    since = _http_date(request.get("if-modified-since"))
+    modified = _http_date(last_modified)
     return since is not None and modified is not None and since >= modified
+
+
+def _http_date(value: str | None) -> datetime | None:
+    """An HTTP date as an instant, its zone kept (#1852); None when it is not one."""
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    # `-0000` reads as naive: a UTC time, its sender's zone unknown (RFC 5322 §3.3).
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 @router.get(
@@ -536,8 +549,7 @@ class _ThumbnailCache:
             self._items.move_to_end(key)
         return thumbnail
 
-    def put(self, path: FilePath, side: int, thumbnail: _Thumbnail) -> None:
-        key = _cache_key(path, thumbnail.stat, side)
+    def put(self, key: tuple[object, ...], thumbnail: _Thumbnail) -> None:
         self._items[key] = thumbnail
         self._items.move_to_end(key)
         while len(self._items) > self.size:
@@ -569,7 +581,8 @@ async def _bounded_thumbnail_of(
             return kept
         thumbnail = await asyncio.to_thread(_thumbnail_of, path, content_type, side)
     if thumbnail.media_type == "image/webp":
-        cache.put(path, side, thumbnail)
+        # Keyed by the stat it was read with: the file may have changed since `key`.
+        cache.put(_cache_key(path, thumbnail.stat, side), thumbnail)
     return thumbnail
 
 

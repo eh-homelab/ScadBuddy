@@ -13,6 +13,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.workflows.commands import (
+    CommandClosingError,
     TemporalBusyError,
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -111,6 +112,33 @@ async def test_start_command_raises_what_temporal_failure_reads(
     class Failing:
         async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
             raise RPCError("no", code, b"")
+
+    with pytest.raises(expected):
+        await call(Failing())
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            RPCError(
+                "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+            ),
+            CommandClosingError,
+        ),
+        (namespace_not_found_error(), TemporalBusyError),
+    ],
+)
+async def test_start_command_reads_an_execution_not_found_as_closing(
+    error: RPCError, expected: type[Exception]
+) -> None:
+    """#1799: under ``USE_EXISTING`` an execution NOT_FOUND is the execution closing
+    under the Update, never a refusal; a missing namespace stays what
+    `temporal_failure` reads."""
+
+    class Failing:
+        async def execute_update_with_start_workflow(self, *args: Any, **kwargs: Any) -> Any:
+            raise error
 
     with pytest.raises(expected):
         await call(Failing())

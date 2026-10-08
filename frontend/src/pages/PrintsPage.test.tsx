@@ -463,6 +463,48 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
   })
 })
 
+describe('an output whose newest run failed before queueing (#1831)', () => {
+  it('has a row that says the print failed, and why', async () => {
+    const refused: Output = {
+      ...(outputs[0] as Output),
+      id: '4'.repeat(32),
+      name: 'Refused',
+      created_at: '2026-09-28T10:00:00Z',
+      queue_item_id: null,
+      slice_job_id: null,
+      print_route: null,
+      plates: [],
+      failed_before_queueing: true,
+    }
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([refused, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', ({ params }) =>
+        HttpResponse.json(
+          params['id'] === refused.id
+            ? ({
+                route: 'run',
+                stage: 'failed',
+                settled: true,
+                copies: 1,
+                copies_completed: 0,
+                copies_failed: 0,
+                copies_cancelled: 0,
+                copies_in_progress: 0,
+                error_message: 'Slot 2 has no spool chosen.',
+                bambuddy_url: 'https://bambuddy.example/queue',
+              } satisfies PrintProgress)
+            : null,
+        ),
+      ),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    expect(list).toHaveTextContent('Refused')
+    expect(await within(list).findByText('Print failed: Slot 2 has no spool chosen.')).toBeInTheDocument()
+    expect(list).not.toHaveTextContent('Waiting for Bambuddy')
+  })
+})
+
 describe('waiting for Bambuddy, with more pages to load (#310)', () => {
   const luna: Output = {
     ...(outputs[0] as Output),

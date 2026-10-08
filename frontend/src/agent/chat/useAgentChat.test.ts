@@ -313,6 +313,35 @@ describe('useAgentChat', () => {
     })
   })
 
+  // #1479: the agent 409s any reply but "I'm back" to a tab wait the tab's return already
+  // ended; the card closes with that reason, and a late resolve frame still settles it.
+  it('closes an attention card the tab reconnect already ended, with the reason the route gives', async () => {
+    const posted = capture(409, 'question:q1 is no longer waiting for an answer', 'the ScadBuddy tab is connected again', false)
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onFrame(frame({ type: 'session.started', sessionId: 's1', origin: 'chat', owner, title: 't' }))
+      t.h().onFrame(
+        frame({
+          type: 'question.asked',
+          sessionId: 's1',
+          id: 'q1',
+          tool: 't2',
+          questions: [{ question: 'Tab closed', header: '', multiSelect: false, options: [{ label: "I'm here", description: '' }, { label: 'Carry on without me', description: '' }] }],
+          attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: '2026-10-04T10:00:00.000Z' },
+        }),
+      )
+    })
+    const before = result.current.state.sessions.s1?.items.length
+    act(() => result.current.answer('s1', 'q1', ['never mind']))
+    const question = () => result.current.state.sessions.s1?.items.find((i) => i.kind === 'question')
+    await waitFor(() => expect(question()).toMatchObject({ state: 'closed', reason: 'the ScadBuddy tab is connected again' }))
+    expect(posted).toEqual([{ id: 'question:q1', body: { kind: 'answer', text: 'never mind' } }])
+    // The card says it; no separate error row.
+    expect(result.current.state.sessions.s1?.items.length).toBe(before)
+  })
+
   it('says a message sent while disconnected is queued, keeps waiting for its session, and clears that on reconnect', () => {
     let answer: SendResult = 'queued'
     const t = scripted(() => answer)

@@ -13,7 +13,7 @@ import {
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
-import { frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
+import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 
@@ -193,11 +193,12 @@ describe('vetting a package', () => {
     expect(v.problems.join('\n')).toMatch(problem)
   })
 
-  it('lists every refusal in the review, uncapped, though the problem list is capped', () => {
+  it('lists every refusal in the review, uncapped, though a refusal is capped', () => {
     const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
     const v = vetPackage(tree({ ...GREETER, ...many }))
-    expect(v.problems).toHaveLength(51)
-    expect(v.problems.at(-1)).toMatch(/^and \d+ more$/)
+    expect(v.problems).toHaveLength(60)
+    expect(capProblems(v.problems)).toHaveLength(51)
+    expect(capProblems(v.problems).at(-1)).toMatch(/^and \d+ more$/)
     expect(v.review?.refused).toHaveLength(60)
     expect(v.review?.refused?.some((p) => /more$/.test(p))).toBe(false)
   })
@@ -480,10 +481,44 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     const own = await installer.prepare(source).catch((e: unknown) => e)
     expect(own).toBeInstanceOf(PackageRefusedError)
     const problems = (own as PackageRefusedError).problems
-    expect(problems[0]).toMatch(/ScadBuddy's own plugin.*already loads/)
+    expect(problems[0]).toMatch(/MCP server "scadbuddy": \$\{user_config\.scadbuddy_url\}\/mcp is not a valid URL/)
+    expect(problems[1]).toMatch(/ScadBuddy's own plugin.*already loads/)
     expect(problems.join('\n')).toMatch(/userConfig/)
     expect(problems.join('\n')).toMatch(/MCP server "scadbuddy" references a variable/)
-    expect(problems.join('\n')).toMatch(/MCP server "scadbuddy": \$\{user_config\.scadbuddy_url\}\/mcp is not a valid URL/)
+
+    // With nothing fatal, the name alone stays allowable, as any reserved name.
+    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })
+    const allowable = await installer.prepare(source)
+    expect(allowable.review.refused).toEqual([expect.stringMatching(/reserved: this is ScadBuddy's own plugin/)])
+  })
+
+  it('lists a fatal problem before the cap cuts the allowable ones', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({
+      ...GREETER,
+      ...many,
+      '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'not a url' } } }),
+    })
+    const err = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem": not a url is not a valid URL/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
+  })
+
+  it('lists a fatal problem first when a load is refused, too', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({ ...GREETER, ...many })
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    // The MCP server's host now resolves to a refused address: fatal at load.
+    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver({ 'mcp.example': ['169.254.169.254'] }) })
+    const err = await later.materialise(pin).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem".*169\.254\.169\.254/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
   })
 
   it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {

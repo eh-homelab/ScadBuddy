@@ -12,6 +12,8 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import IO, Any
 
@@ -642,6 +644,70 @@ def test_a_replaced_legacy_item_is_sent_again(
     assert response.content == PNG + b"\x00"
 
 
+def _legacy_validators(client: TestClient, model: str, paths: DataPaths) -> tuple[str, str]:
+    (paths.model_dir(model) / "thumbnail.png").write_bytes(PNG)
+    url = f"/api/v1/models/{model}/media/thumbnail"
+    return url, client.get(url).headers["last-modified"]
+
+
+def test_an_if_modified_since_older_than_the_file_is_sent_whole(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    url, modified = _legacy_validators(client, model, paths)
+    older = format_datetime(parsedate_to_datetime(modified) - timedelta(seconds=1), usegmt=True)
+
+    response = client.get(url, headers={"If-Modified-Since": older})
+
+    assert response.status_code == 200
+    assert response.content == PNG
+
+
+def test_if_modified_since_compares_instants_not_wall_clocks(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#1852: the file's own wall-clock time at +0500 is five hours before it."""
+    url, modified = _legacy_validators(client, model, paths)
+    earlier = modified.replace("GMT", "+0500")
+    later = modified.replace("GMT", "-0500")
+
+    assert client.get(url, headers={"If-Modified-Since": earlier}).status_code == 200
+    assert client.get(url, headers={"If-Modified-Since": later}).status_code == 304
+
+
+@pytest.mark.parametrize(
+    "since",
+    ["not a date", "Fri, 99 Jan 2100 00:00:00 GMT", "Fri, 01 Jan 99999999999 00:00:00 GMT", ""],
+)
+def test_an_unreadable_if_modified_since_is_sent_whole(
+    client: TestClient, model: str, paths: DataPaths, since: str
+) -> None:
+    url, _ = _legacy_validators(client, model, paths)
+
+    response = client.get(url, headers={"If-Modified-Since": since})
+
+    assert response.status_code == 200
+    assert response.content == PNG
+
+
+def test_if_none_match_star_answers_304(client: TestClient, model: str) -> None:
+    item = _upload(client, model, PNG).json()["media"][0]
+    url = f"/api/v1/models/{model}/media/{item['id']}"
+
+    assert client.get(url, headers={"If-None-Match": "*"}).status_code == 304
+
+
+def test_if_none_match_with_one_matching_tag_in_a_list_answers_304(
+    client: TestClient, model: str
+) -> None:
+    item = _upload(client, model, PNG).json()["media"][0]
+    url = f"/api/v1/models/{model}/media/{item['id']}"
+    etag = client.get(url).headers["etag"]
+
+    response = client.get(url, headers={"If-None-Match": f'"one", {etag}, "two"'})
+
+    assert response.status_code == 304
+
+
 def test_an_item_answers_304_to_its_etag(client: TestClient, model: str) -> None:
     item = _upload(client, model, PNG).json()["media"][0]
     url = f"/api/v1/models/{model}/media/{item['id']}"
@@ -1198,3 +1264,17 @@ def test_an_id_that_is_not_a_media_id_is_refused(
     response = client.put(f"/api/v1/models/{model}/{path}", json=body)
 
     assert response.status_code == 422
+
+
+def test_the_thumbnail_cache_takes_the_same_key_to_put_and_get(tmp_path: Path) -> None:
+    """#1773 4: `get` and `put` both take the `_cache_key` the caller made, so the two
+    can never key one thumbnail differently."""
+    source = tmp_path / "image.png"
+    source.write_bytes(b"png")
+    stat = source.stat()
+    key = media_api._cache_key(source, stat, 64)
+    thumbnail = media_api._Thumbnail(b"webp", "image/webp", stat)
+    cache = media_api._ThumbnailCache(size=1)
+    cache.put(key, thumbnail)
+    assert cache.get(key) is thumbnail
+    assert cache.get(media_api._cache_key(source, stat, 128)) is None

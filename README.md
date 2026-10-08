@@ -890,7 +890,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   another replica does not reset it); the socket answers an `error` frame with
   code `rate_limited`. Approvals
   and the agent's questions are answered through
-  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815);
+  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815),
+  which works while the panel's socket is down;
   `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
   still work. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at

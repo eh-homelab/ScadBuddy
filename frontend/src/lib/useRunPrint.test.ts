@@ -37,6 +37,7 @@ function input(overrides: Partial<PrintSelection> = {}) {
     copies: null,
     projectId: null,
     options: {},
+    printSequence: null,
     rackPosition: null,
     rackAlgorithm: 'least_used' as const,
     onRan: vi.fn(),

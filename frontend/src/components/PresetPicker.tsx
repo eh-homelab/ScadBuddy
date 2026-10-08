@@ -203,6 +203,15 @@ export function PresetPicker({
     setError(null)
   }
 
+  /**
+   * #1775 — a preset just put on screen, which the template UI may still be answering:
+   * one that seeds its own state when its inputs change (a tab, or state a preset saved
+   * before it had any lacks) would make every pick read as changed. Until the user
+   * presses a key or a pointer, or a value moves off the preset's, the UI state it
+   * writes is taken as the preset's.
+   */
+  const [settling, setSettling] = useState(elsewhere !== null)
+
   // #1457 — a preset the page applied or saved is the selection, as a pick here is.
   const [seenElsewhere, setSeenElsewhere] = useState(elsewhere)
   if (elsewhere !== seenElsewhere) {
@@ -211,8 +220,25 @@ export function PresetPicker({
       setSelection({ preset: elsewhere.preset, applied: elsewhere.values, extra: elsewhere.extra })
       setSkipped(skippedOf(schema, elsewhere.preset))
       setError(null)
+      setSettling(true)
     }
   }
+
+  if (settling) {
+    if (!selection || !sameValues(values, selection.applied)) setSettling(false)
+    else if (!sameJson(extra, selection.extra)) setSelection({ ...selection, extra })
+  }
+
+  useEffect(() => {
+    if (!settling) return
+    const settled = () => setSettling(false)
+    document.addEventListener('pointerdown', settled, true)
+    document.addEventListener('keydown', settled, true)
+    return () => {
+      document.removeEventListener('pointerdown', settled, true)
+      document.removeEventListener('keydown', settled, true)
+    }
+  }, [settling])
 
   // #350 — the prefill selected, so typing replaces it rather than appending to it.
   // After the dialog's own effect, which focuses its panel.
@@ -271,6 +297,7 @@ export function PresetPicker({
     setSelection({ preset, applied: applied.values, extra: applied.extra })
     const storedParams = splitInputs(migrated, preset.params).params
     setSkipped(applied.skipped.map((name) => ({ name, value: storedParams[name] as ParamValue })))
+    setSettling(true)
     onApply(applied.values, applied.extra)
   }
 

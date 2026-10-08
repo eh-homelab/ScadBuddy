@@ -519,7 +519,11 @@ async def test_a_preview_waiting_on_its_snapshot_is_tried_again_by_itself() -> N
     scheduler = previews_module.PreviewScheduler(
         mock.MagicMock(), store, runner, timeout=1.0, debounce=0, interval=0
     )
-    with mock.patch.object(scheduler, "plan", return_value="key"):
+    with (
+        mock.patch.object(scheduler, "plan", return_value="key"),
+        # The backoff's floor (#1773), so the retry comes at once here.
+        mock.patch.object(previews_module, "PIN_TIMEOUT", 0),
+    ):
         scheduler.start()
         scheduler.request(SLUG)
         try:
@@ -557,7 +561,52 @@ async def test_a_preview_waiting_on_its_snapshot_backs_off() -> None:
         pending = True
         assert await scheduler.refresh(SLUG) is True
     cap = previews_module.MAX_SNAPSHOT_RETRY_DELAY
-    assert delays == [100, 200, 400, cap, cap, 100]
+    # Doubling from `PIN_TIMEOUT` (30 s), never below the store's own Retry-After.
+    assert delays == [100, 100, 120, 240, 480, 100]
+    assert max(delays) <= cap
+
+
+async def test_a_preview_backoff_does_not_compound_the_stores_own() -> None:
+    """#1773 2: the store's Retry-After already grows with the time its store has
+    run. Doubling it again reached the cap after a try or two; the wait doubles
+    from `PIN_TIMEOUT` instead, and the store's hint is only a floor."""
+    hints = iter([30, 60, 120, 180, 180])
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        raise SnapshotPendingError("still uploading", retry_after=next(hints))
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    delays: list[float] = []
+    with (
+        mock.patch.object(scheduler, "plan", return_value="key"),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay: delays.append(delay)),
+    ):
+        for _ in range(5):
+            assert await scheduler.refresh(SLUG) is True
+    assert delays == [30, 60, 120, 240, 480]
+
+
+async def test_a_new_source_does_not_inherit_an_older_ones_backoff() -> None:
+    """#1773 3: the tries are counted per source, so an edit that brings a slug back
+    starts from the store's own Retry-After, not from where its last revision was."""
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        raise SnapshotPendingError("still uploading", retry_after=30)
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    delays: list[float] = []
+    keys = iter(["old", "old", "old", "new"])
+    with (
+        mock.patch.object(scheduler, "plan", side_effect=lambda slug: next(keys)),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay: delays.append(delay)),
+    ):
+        for _ in range(4):
+            assert await scheduler.refresh(SLUG) is True
+    assert delays == [30, 60, 120, 30]
 
 
 async def test_a_preview_render_starts_a_root_span_its_workflow_joins(

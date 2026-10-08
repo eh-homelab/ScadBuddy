@@ -117,7 +117,7 @@ export const printOptions = z
   .strict()
   .default({})
 
-const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
+export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
 const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
   id: z.string().min(1),

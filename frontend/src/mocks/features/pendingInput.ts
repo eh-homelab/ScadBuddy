@@ -10,13 +10,16 @@ import { mockAgentSessions } from '../agent'
  * socket, not this read.
  *
  * Its respond route (`POST /api/v1/ai/pending-input/{id}`, `src/agent/respond.ts`)
- * answers what the open scripted agent is parked on, and refuses one it is no longer
- * parked on with a 409 that says how it ended (`reason`), as the agent does; every
+ * answers an entry a test listed here (it leaves the list) and what the open scripted
+ * agent is parked on, and refuses one no longer waiting with a 409 that says how it
+ * ended (`reason`), and a body of the wrong kind with a 400, as the agent does; every
  * request is kept for tests (`respondRequests`).
  */
 
 const state = { approvals: 0, questions: 0, attention: 0, done: 0 }
 let responses: { id: string; body: RespondBody }[] = []
+/** Listed entries already responded to, with how each ended. */
+const ended = new Map<string, string>()
 
 /** Tests: every respond the panel sent, in order. */
 export function respondRequests(): readonly { id: string; body: RespondBody }[] {
@@ -41,6 +44,7 @@ export function reset(): void {
   state.attention = 0
   responses = []
   state.done = 0
+  ended.clear()
 }
 
 const at = (i: number) => new Date(Date.UTC(2026, 9, 1, 9, 0) + i * 1000).toISOString()
@@ -83,11 +87,31 @@ function answer(i: number, attention: boolean, done = false) {
   }
 }
 
+function listed(): ReturnType<typeof approval | typeof answer>[] {
+  return [
+    ...Array.from({ length: state.approvals }, (_, i) => approval(i)),
+    ...Array.from({ length: state.questions }, (_, i) => answer(i, false)),
+    ...Array.from({ length: state.attention }, (_, i) => answer(state.questions + i, true)),
+    ...Array.from({ length: state.done }, (_, i) => answer(state.questions + state.attention + i, true, true)),
+  ]
+}
+
+const outcomeOf = (body: RespondBody) => (body.kind === 'answer' ? 'answered' : body.decision === 'approve' ? 'approved' : 'denied')
+
 export const handlers = [
   http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
     const id = String(params.id)
     const body = (await request.json()) as RespondBody
     responses.push({ id, body })
+    const entry = listed().find((e) => e.id === id)
+    if (entry) {
+      const how = ended.get(id)
+      if (how !== undefined) return HttpResponse.json({ detail: `${id} is no longer waiting`, reason: how }, { status: 409 })
+      if (body.kind !== entry.kind) return HttpResponse.json({ detail: `${id} is not ${body.kind === 'approval' ? 'an approval' : 'a question'}` }, { status: 400 })
+      const outcome = outcomeOf(body)
+      ended.set(id, `it was already ${outcome}`)
+      return HttpResponse.json({ id, kind: body.kind, outcome })
+    }
     const agent = mockAgentSessions()
     if (!agent) return HttpResponse.json({ detail: 'the assistant is not connected' }, { status: 503 })
     const result = agent.respond(id, body)
@@ -97,16 +121,7 @@ export const handlers = [
         { status: result.status },
       )
     }
-    return HttpResponse.json({ id, kind: body.kind, outcome: body.kind === 'answer' ? 'answered' : body.decision === 'approve' ? 'approved' : 'denied' })
+    return HttpResponse.json({ id, kind: body.kind, outcome: outcomeOf(body) })
   }),
-  http.get('/api/v1/ai/pending-input', () =>
-    HttpResponse.json({
-      entries: [
-        ...Array.from({ length: state.approvals }, (_, i) => approval(i)),
-        ...Array.from({ length: state.questions }, (_, i) => answer(i, false)),
-        ...Array.from({ length: state.attention }, (_, i) => answer(state.questions + i, true)),
-        ...Array.from({ length: state.done }, (_, i) => answer(state.questions + state.attention + i, true, true)),
-      ],
-    }),
-  ),
+  http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: listed().filter((e) => !ended.has(e.id)) })),
 ]

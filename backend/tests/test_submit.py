@@ -67,6 +67,7 @@ from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.commands import (
     CommandClosedError,
+    CommandClosingError,
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalRefusedError,
@@ -439,6 +440,13 @@ def _classified(error: RPCError, id: str) -> NoReturn:
     raise failure from error
 
 
+def _aborted(id: str) -> NoReturn:
+    """Raise as `start_command` does for an Update its closing execution aborted."""
+    raise CommandClosingError(id) from RPCError(
+        "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+    )
+
+
 class _Described:
     """A client whose `describe` finds the execution, or answers NOT_FOUND."""
 
@@ -725,14 +733,7 @@ async def test_an_update_aborted_by_a_closing_execution_starts_again(
     async def answering(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
         if len(calls) == 1:
-            _classified(
-                RPCError(
-                    "workflow update was aborted by closing workflow",
-                    RPCStatusCode.NOT_FOUND,
-                    b"",
-                ),
-                kwargs["id"],
-            )
+            _aborted(kwargs["id"])
         return RenderAnswer(job=job)
 
     monkeypatch.setattr(submit_module, "start_command", answering)
@@ -755,12 +756,7 @@ async def test_an_update_aborted_twice_by_closing_executions_is_still_accepting(
 
     async def aborting(*_: object, **kwargs: Any) -> RenderAnswer:
         calls.append(str(kwargs["id"]))
-        _classified(
-            RPCError(
-                "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
-            ),
-            kwargs["id"],
-        )
+        _aborted(kwargs["id"])
 
     monkeypatch.setattr(submit_module, "start_command", aborting)
     async with temporal_client() as client:
@@ -873,9 +869,11 @@ class _Pinning:
 
     def __init__(self) -> None:
         self.pinned: list[tuple[str, str | None]] = []
+        self.background: list[bool] = []
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         self.pinned.append((slug, revision))
+        self.background.append(background)
         return "b" * 40
 
 
@@ -902,6 +900,8 @@ async def test_a_preview_on_the_bambuddy_store_pins_the_last_commit_for_the_work
 
     assert png == PNG + SLUG.encode()
     assert pinning.pinned == [(SLUG, None)]
+    # The preview pass's store stays off the interactive renders' bound (#1773).
+    assert pinning.background == [True]
     assert fake.revisions == ["b" * 40]
 
 
@@ -912,7 +912,7 @@ class _Revisions(_Pinning):
         super().__init__()
         self.revisions = list(revisions)
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         self.pinned.append((slug, revision))
         return self.revisions.pop(0)
 
@@ -963,7 +963,7 @@ async def test_a_preview_joins_only_a_run_of_the_same_revision(
 class _NoCommit(_Pinning):
     """`SnapshotStore.pin` with no history, or a template with no commit yet."""
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         self.pinned.append((slug, revision))
         return None
 

@@ -102,6 +102,7 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "POST /api/v1/models/{slug}/presets/{preset_id}/duplicate",
     "POST /api/v1/models/{slug}/assets",
     "POST /api/v1/models/{slug}/outputs",
+    "POST /api/v1/outputs/arrange",
     "POST /api/v1/models/{slug}/versions/{commit}/restore",
     "POST /api/v1/models/{slug}/upstream/merge",
     "POST /api/v1/models/{slug}/upstream/dismiss",

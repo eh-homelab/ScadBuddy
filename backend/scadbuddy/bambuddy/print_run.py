@@ -174,6 +174,9 @@ class RackOption(BaseModel):
     material: str | None = None
     prints: int = 0
     print_seconds: int = 0
+    #: Prints queued or running on it that have not settled yet (#1079): Least used
+    #: counts each as one more print.
+    pending: int = 0
 
 
 class RackSentPick(BaseModel):
@@ -614,6 +617,7 @@ def _rack_option(candidate: RackCandidate) -> RackOption:
         material=candidate.material,
         prints=candidate.prints,
         print_seconds=candidate.print_seconds,
+        pending=candidate.pending,
     )
 
 

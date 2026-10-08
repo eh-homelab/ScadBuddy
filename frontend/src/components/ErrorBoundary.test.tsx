@@ -70,4 +70,37 @@ describe('ErrorBoundary (#361)', () => {
     )
     expect(screen.getByText('fine')).toBeInTheDocument()
   })
+
+  it('keeps an error caught in the same update that changed resetKey (#1456)', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    state.throws = false
+    // onError drops what made the child throw, as a cache would: a boundary that cleared
+    // this error would mount the child again and hide that it ever failed.
+    const onError = () => {
+      state.throws = false
+    }
+    const { rerender } = render(
+      <ErrorBoundary fallback={fallback} resetKey="/a" onError={onError}>
+        <Flaky />
+      </ErrorBoundary>,
+    )
+    state.throws = true
+    rerender(
+      <ErrorBoundary fallback={fallback} resetKey="/b" onError={onError}>
+        <Flaky />
+      </ErrorBoundary>,
+    )
+    expect(screen.getByRole('button')).toHaveTextContent('failed: boom')
+  })
+
+  it('logs nothing of its own: React already reports the error (#1446)', () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    state.throws = true
+    render(
+      <ErrorBoundary fallback={fallback}>
+        <Flaky />
+      </ErrorBoundary>,
+    )
+    expect(logged).not.toHaveBeenCalledWith('A component failed to render', expect.anything(), expect.anything())
+  })
 })

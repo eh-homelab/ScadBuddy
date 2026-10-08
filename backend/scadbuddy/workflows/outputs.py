@@ -72,7 +72,7 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
         update={"image_revision": deps.revision, "openscad_version": deps.openscad_version}
     )
     for name in req.files:
-        if not re.match(FILE_NAME_PATTERN, name):
+        if not re.fullmatch(FILE_NAME_PATTERN, name):
             raise _refuse(f"output file name {name!r}: use letters, digits, '.', '_' or '-'")
         if name in _RESERVED:
             raise _refuse(f"output file name {name!r} is reserved for the output's own files")

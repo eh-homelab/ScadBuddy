@@ -3,16 +3,15 @@ import { describe, expect, it, vi } from 'vitest'
 import type { RackPickView } from '../../api/types'
 import { RackNozzleLine, RackNozzleStep } from './RackNozzle'
 
+const two = { position: 2, nozzle_diameter: '0.4', flow: 'standard', color: '#00629B', nozzle_type: 'HS01', material: null, prints: 4, print_seconds: 7200, pending: 0 } as const
+const three = { position: 3, nozzle_diameter: '0.4', flow: 'standard', color: '#FF6A13', nozzle_type: 'HS01', material: null, prints: 0, print_seconds: 0, pending: 0 } as const
 const rack: RackPickView = {
   group_id: null,
   position: 3,
   reason: 'already loaded with this color',
   unsafe_material: false,
   glow_unchecked: false,
-  options: [
-    { position: 2, nozzle_diameter: '0.4', flow: 'standard', color: '#00629B', nozzle_type: 'HS01', material: null, prints: 4, print_seconds: 7200 },
-    { position: 3, nozzle_diameter: '0.4', flow: 'standard', color: '#FF6A13', nozzle_type: 'HS01', material: null, prints: 0, print_seconds: 0 },
-  ],
+  options: [two, three],
 }
 
 describe('RackNozzleLine (#836)', () => {
@@ -58,5 +57,12 @@ describe('RackNozzleStep (#836)', () => {
     fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '' } })
     expect(onPosition).toHaveBeenLastCalledWith(null)
     expect(screen.getByRole('option', { name: /Position 2 · 0.4 Standard · material unknown · 4 prints/ })).toBeInTheDocument()
+  })
+
+  it('says how many prints are queued on a position but not settled (#1079)', () => {
+    const queued: RackPickView = { ...rack, options: [{ ...two, pending: 2 }, three] }
+    render(<RackNozzleStep rack={queued} algorithm="least_used" position={null} onAlgorithm={vi.fn()} onPosition={vi.fn()} />)
+    expect(screen.getByRole('option', { name: /Position 2 · .* · 4 prints · 2 queued/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /Position 3/ }).textContent).not.toMatch(/queued/)
   })
 })

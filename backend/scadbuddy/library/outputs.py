@@ -740,13 +740,36 @@ def _live_outputs(root: Path) -> dict[str, set[str]]:
 ORPHAN_HOLD_GRACE = timedelta(hours=1)
 
 
+def _remove_orphan_directory(directory: Path, grace: timedelta) -> None:
+    """Remove a released orphan's directory (#1815): no read sees it (they glob for
+    meta.json), but its bytes stay. Only an output's own directory, still without
+    meta.json, and untouched for ``grace``: a save writes its files before meta.json.
+    Best effort: its holds are already gone, so a failure costs only the bytes."""
+    if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or directory.is_symlink():
+        return
+    try:
+        if (directory / META_NAME).exists():
+            return
+        age = datetime.now(UTC).timestamp() - directory.stat().st_mtime
+        if age < grace.total_seconds():
+            return
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.exception(
+            "could not remove an orphaned output's directory", extra={"path": str(directory)}
+        )
+
+
 def reap_orphan_holds(
     refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
 ) -> int:
     """Release every `output` hold older than ``grace`` whose output has no meta.json
     (#1007): a save that failed between holding its Parts and writing meta.json, or a
     hold taken after a delete's release, leaves holds that nothing else ever drops.
-    Returns how many outputs' holds it released.
+    Returns how many outputs' holds it released. Each released output's directory, if
+    one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815).
 
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
@@ -800,6 +823,7 @@ def reap_orphan_holds(
         )
     for output_id in orphans:
         release_parts(refs, output_id)
+        _remove_orphan_directory(root / slug_of[output_id] / output_id, grace)
     if orphans or unknown:
         # One line to spot an unexpected mass release (#1806 review).
         logger.warning(

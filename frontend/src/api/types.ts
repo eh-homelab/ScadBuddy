@@ -160,6 +160,8 @@ export type RackOption = Schemas['RackOption']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
+/** #907, #1862 — Bambu's print sequence, a per-print process override. */
+export type PrintSequence = NonNullable<Schemas['PrintRunRequest']['print_sequence']>
 export type OutputPlate = Schemas['OutputPlate']
 
 /** #313 — the Library page's listing, and one row of it. */

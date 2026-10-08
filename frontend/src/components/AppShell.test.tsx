@@ -35,3 +35,29 @@ describe('the shell’s own lazy chunks (#1002)', () => {
     expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
   })
 })
+
+function Broken(): never {
+  throw new Error('page boom')
+}
+
+describe('the shell’s page boundary (#361, #1446)', () => {
+  it('keeps the header and nav when a page throws, and navigating clears the fallback', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { user } = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} tabLink={null} />}>
+          <Route path="/" element={<Broken />} />
+          <Route path="/prints" element={<p>prints page</p>} />
+        </Route>
+      </Routes>,
+    )
+    const main = screen.getByRole('main')
+    expect(within(main).getByRole('alert')).toHaveTextContent('This page stopped working')
+    expect(within(main).getByRole('button', { name: 'Reload page' })).toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+
+    await user.click(within(nav).getByRole('link', { name: 'Prints' }))
+    expect(await within(main).findByText('prints page')).toBeInTheDocument()
+    expect(within(main).queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
