@@ -71,11 +71,13 @@ export interface TabLinkOptions {
   url?: string
   WebSocketImpl?: typeof WebSocket
   /**
-   * Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`, of which a random half is
-   * waited, so tabs a restart dropped together do not all come back together (#747).
+   * Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`, then scaled by a random
+   * half to all of it, so tabs an agent restart dropped together do not return in lockstep (#747).
    */
   baseMs?: number
   maxMs?: number
+  /** The jitter's source, in [0, 1); tests fix it. */
+  random?: () => number
 }
 
 export function createTabLink({
@@ -85,6 +87,7 @@ export function createTabLink({
   WebSocketImpl = WebSocket,
   baseMs = 500,
   maxMs = 15_000,
+  random = Math.random,
 }: TabLinkOptions): TabLink {
   let socket: WebSocket | undefined
   let closed = false
@@ -190,8 +193,7 @@ export function createTabLink({
       socket = undefined
       // What was pending may have been answered elsewhere; the next connection says again.
       setState({ connected: false, pending: [], paired: [] })
-      const ceiling = Math.min(maxMs, baseMs * 2 ** attempt)
-      const delay = ceiling / 2 + (Math.random() * ceiling) / 2
+      const delay = Math.min(maxMs, baseMs * 2 ** attempt) * (0.5 + random() / 2)
       attempt += 1
       timer = setTimeout(open, delay)
     }

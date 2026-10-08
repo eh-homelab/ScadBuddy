@@ -175,6 +175,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect(await timedOut.json()).toMatchObject({ reason: 'nobody replied in time (on_timeout: proceed)' })
   })
 
+  // #1538: the service takes "I'm back" to a reconnected tab wait as a no-op (#815 §2); the route must not 409 it first.
+  it("takes an I'm-back reply to an attention request the tab's return already ended, and refuses any other reply", async () => {
+    const { m, ids, post, session, turn } = await setUp()
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    const back = await post(ids.attention, { kind: 'answer', choice: "I'm here" })
+    expect(back.status).toBe(200)
+    expect(await back.json()).toEqual({ id: ids.attention, kind: 'answer', outcome: 'answered' })
+    const other = await post(ids.attention, { kind: 'answer', text: 'never mind' })
+    expect(other.status).toBe(409)
+    expect(await other.json()).toMatchObject({ reason: 'the ScadBuddy tab is connected again' })
+    const [row] = await db.sql`SELECT outcome, answers FROM ai_questions WHERE id = ${ids.attention.slice('question:'.length)}`
+    expect(row).toEqual({ outcome: 'reconnected', answers: null })
+    await m.interrupt(session.id, browser)
+    await turn.done
+  })
+
   it("refuses a response that is not the entry's kind, or does not fit it, and leaves the entry pending", async () => {
     const { m, ids, post, session, turn } = await setUp()
 

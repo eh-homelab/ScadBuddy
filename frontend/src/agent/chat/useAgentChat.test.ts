@@ -203,6 +203,25 @@ describe('useAgentChat', () => {
     }
   })
 
+  // #1538: only the agent's own 404 is stale. A bare one (a proxy, an older replica) says nothing about the entry.
+  it('re-arms the card on a bare 404, and a second decision posts again', async () => {
+    const posted = capture(404, 'Not Found', undefined, false)
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      parked(t.h())
+    })
+    act(() => result.current.decide('s1', 'a1', true))
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'pending' }))
+    expect(result.current.state.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your decision was not taken: Not Found' })
+    const again = capture()
+    act(() => result.current.decide('s1', 'a1', true))
+    await waitFor(() => expect(approval(result.current.state)).toMatchObject({ state: 'approved' }))
+    expect(posted).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve' } }])
+    expect(again).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve' } }])
+  })
+
   it('posts a decision once however often it is clicked, and not for a card no longer pending (#1403)', async () => {
     const posted = capture()
     const t = scripted()

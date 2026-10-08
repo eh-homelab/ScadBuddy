@@ -111,11 +111,12 @@ export type AttentionSpec =
       /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
       timeoutS: number
       /**
-       * Called once the request is recorded and shown (questions/service.ts `gate`).
-       * `signal` aborts once the wait stops waiting for it (its timer, an abort): a
-       * check still running then must not act, or it could end a later wait's request.
+       * Called once the request is recorded and shown (questions/service.ts `gate`),
+       * with its id. `signal` aborts once the wait stops waiting for it (its timer, an
+       * abort): a check still running then must not act, and whatever it does act on
+       * is this request (`id`), never a later wait's.
        */
-      onParked?: (signal: AbortSignal) => Promise<void>
+      onParked?: (signal: AbortSignal, id: string) => Promise<void>
     }
   /** A done summary: posted, never waited on (see above). */
   | { reason: 'done' }
