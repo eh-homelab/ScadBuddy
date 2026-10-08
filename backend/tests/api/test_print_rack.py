@@ -27,7 +27,7 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
-from tests.api.test_print_library import library_file, one_color, run_library
+from tests.api.test_print_library import library_3mf, library_file, one_color, run_library
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -775,14 +775,16 @@ def _library_high_flow(**extra: Any) -> dict[str, Any]:
 
 
 @respx.mock
-def test_a_library_file_with_high_flow_chosen_is_judged_as_standard(client: TestClient) -> None:
-    """A library file is sliced with its own flow, Standard unless its author saved it
-    High Flow, whatever the dialog chose (#313, #484). So the mounted High Flow left is
-    warned of, the preview picks a Standard hotend for the right, and a High Flow position
-    is refused, as Bambuddy's dispatch would refuse it."""
+def test_a_sliced_library_file_with_high_flow_chosen_is_judged_as_standard(
+    client: TestClient,
+) -> None:
+    """A library file that is sliced already cannot state the flow chosen (#484), so it
+    is sliced with its own, Standard unless its author saved it High Flow (#313). So the
+    mounted High Flow left is warned of, the preview picks a Standard hotend for the
+    right, and a High Flow position is refused, as Bambuddy's dispatch would refuse it."""
     configure(client)
     one_color(89)
-    library_file(89)
+    library_file(89, content=library_3mf(sliced=True))
     run_routes()
     _both_sides_high_flow()
 
@@ -799,12 +801,12 @@ def test_a_library_file_with_high_flow_chosen_is_judged_as_standard(client: Test
 
 
 @respx.mock
-def test_a_library_run_with_high_flow_chosen_warns_of_the_high_flow_left(
+def test_a_sliced_library_run_with_high_flow_chosen_warns_of_the_high_flow_left(
     client: TestClient,
 ) -> None:
     configure(client)
     one_color(89)
-    library_file(89)
+    library_file(89, content=library_3mf(sliced=True))
     run_routes()
     _both_sides_high_flow()
     grouped_requirements_route()

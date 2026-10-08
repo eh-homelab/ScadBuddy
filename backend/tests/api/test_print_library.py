@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import zipfile
 from typing import Any
 
 import httpx
@@ -14,7 +17,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
-from tests.api.test_send import BASE, configure
+from tests.api.test_send import BASE, _uploaded_3mf, configure
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 
@@ -23,9 +26,41 @@ pytestmark = pytest.mark.requires_postgres
 API = f"{BASE}/api/v1"
 
 
+#: The project settings ScadBuddy's own 3MF carries, as library file 615's did (#484): no
+#: flow and no nozzle stats, so Bambuddy's slicer falls back to the H2C's Standard.
+STUB_SETTINGS = {
+    "filament_colour": ["#43A047"],
+    "printer_settings_id": "ScadBuddy",
+    "print_settings_id": "ScadBuddy",
+    "filament_settings_id": ["ScadBuddy"],
+    "nozzle_diameter": ["0.4"],
+    "printable_height": "325",
+    "wipe_tower_x": ["145"],
+    "wipe_tower_y": ["5"],
+}
+
+
+def library_3mf(*, sliced: bool = False) -> bytes:
+    """A 3MF as Bambuddy's library holds it: unsliced, or with a plate's gcode in it."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr("Metadata/project_settings.config", json.dumps(STUB_SETTINGS))
+        if sliced:
+            archive.writestr("Metadata/plate_1.gcode", "; sliced\n")
+    return buffer.getvalue()
+
+
 def library_file(
-    file_id: int = 89, *, file_type: str = "3mf", plates: str = "library-plates-single.json"
-) -> None:
+    file_id: int = 89,
+    *,
+    file_type: str = "3mf",
+    plates: str = "library-plates-single.json",
+    content: bytes | None = None,
+) -> respx.Route:
+    """The file, its plates and its bytes (an unsliced 3MF unless ``content`` says
+    otherwise); returns the download's route."""
     respx.get(f"{API}/library/files/{file_id}").mock(
         return_value=httpx.Response(
             200,
@@ -34,6 +69,9 @@ def library_file(
     )
     respx.get(f"{API}/library/files/{file_id}/plates").mock(
         return_value=httpx.Response(200, json={**recording(plates), "file_id": file_id})
+    )
+    return respx.get(f"{API}/library/files/{file_id}/download").mock(
+        return_value=httpx.Response(200, content=library_3mf() if content is None else content)
     )
 
 
@@ -427,3 +465,171 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     assert reprint.status_code == 201, reprint.text
     sent = json.loads(queued_again.calls.last.request.content)
     assert sent["archive_id"] == 90 and sent["printer_id"] == 1
+
+
+# --- #484: the flow chosen for a library file Bambuddy slices -----------------------------
+#
+# Library file 615, a ScadBuddy 3MF, printed with High Flow chosen for both sides of a
+# printer with an HH01 0.4 on each, and paused at the first layer ("the left nozzle is
+# not matched"): its settings stated no flow, so Bambuddy's slicer sliced it Standard.
+
+HIGH_FLOW_04 = {"nozzle_type": "HH01", "nozzle_diameter": "0.4"}
+
+
+def both_sides_high_flow() -> None:
+    """Printer 1 with a 0.4 High Flow mounted on each side, the rack's two mounted
+    hotends saying the same (library file 615's printer)."""
+    status = recording("printer-status-rack.json")
+    status["nozzles"] = [HIGH_FLOW_04, HIGH_FLOW_04]
+    for entry in status["nozzle_rack"]:
+        if entry["id"] in (0, 1):
+            entry.update(HIGH_FLOW_04)
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+
+
+def high_flow_run() -> dict[str, Any]:
+    return {
+        **body(nozzles=[{"size": "0.4", "flow": "high_flow"}], tier="standard"),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+    }
+
+
+def flow_copy_routes(listed: list[dict[str, Any]] | None = None) -> respx.Route:
+    """The inbox (folder 2, from Settings) as listed before the copy is uploaded, and
+    the upload, which Bambuddy answers as file 141 of one filament. Registered before
+    ``run_routes``, as :func:`one_color` is."""
+    respx.get(f"{API}/library/files", params={"folder_id": 2}).mock(
+        return_value=httpx.Response(200, json=listed or [])
+    )
+    one_color(141)
+    return respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(
+            200, json={"id": 141, "filename": "file-89.3mf", "file_type": "3mf"}
+        )
+    )
+
+
+def uploaded_name(route: respx.Route) -> str:
+    content: bytes = route.calls.last.request.content
+    return content.split(b'filename="', 1)[1].split(b'"', 1)[0].decode()
+
+
+def hf_mounted(warnings: list[dict[str, Any]]) -> list[str]:
+    return [warning["message"] for warning in warnings if warning["kind"] == "hf-mounted"]
+
+
+@respx.mock
+def test_a_library_file_bambuddy_slices_is_sliced_for_the_high_flow_chosen(
+    client: TestClient,
+) -> None:
+    """What reaches the slicer is a copy stating the flow chosen for each side, so the
+    slice matches the High Flow nozzles mounted and nothing warns of them. The user's
+    own file is only read."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    both_sides_high_flow()
+    sliced = slice_routes()
+    queue_route()
+
+    check = client.post("/api/v1/print/library/89/check", json=high_flow_run())
+    response = run_library(client, 89, json=high_flow_run())
+
+    assert check.status_code == 200, check.text
+    assert hf_mounted(check.json()["warnings"]) == []
+    assert response.status_code == 200, response.text
+    assert hf_mounted(response.json()["warnings"]) == []
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert "3D/3dmodel.model" in archive.namelist()
+    assert settings["nozzle_volume_type"] == ["High Flow", "High Flow"]
+    assert {key: settings[key] for key in STUB_SETTINGS} == STUB_SETTINGS
+    assert uploaded_name(upload) == "file-89 (High Flow).3mf"
+    assert upload.calls.last.request.url.params["folder_id"] == "2"
+    assert not [
+        call
+        for call in respx.calls
+        if "/library/files/89" in call.request.url.path and call.request.method != "GET"
+    ]
+
+
+@respx.mock
+def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) -> None:
+    """The same bytes under the same name in the inbox are sliced again, not uploaded
+    again, so printing a file twice leaves one copy."""
+    configure(client)
+    one_color(89)
+    first = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    both_sides_high_flow()
+    sliced = slice_routes()
+    queue_route()
+    assert run_library(client, 89, json=high_flow_run()).status_code == 200
+    payload = _uploaded_3mf(first)
+    row = {"id": 141, "filename": uploaded_name(first), "file_type": "3mf"}
+    flow_copy_routes([{**row, "file_size": len(payload)}])
+    respx.get(f"{API}/library/files/141").mock(
+        return_value=httpx.Response(
+            200, json={**row, "file_hash": hashlib.sha256(payload).hexdigest()}
+        )
+    )
+
+    # Two copies, so it is a second run rather than the first one's answer repeated.
+    response = run_library(client, 89, json={**high_flow_run(), "copies": 2})
+
+    assert response.status_code == 200, response.text
+    assert sliced.call_count == 2
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
+    assert first.call_count == 1
+
+
+@respx.mock
+def test_an_already_sliced_library_file_prints_as_it_is_and_warns(client: TestClient) -> None:
+    """A file with gcode in it cannot state a flow: it is sliced as it stands, taken as
+    Standard on both sides, so each High Flow nozzle mounted is warned of."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89, content=library_3mf(sliced=True))
+    run_routes()
+    both_sides_high_flow()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(client, 89, json=high_flow_run())
+
+    assert response.status_code == 200, response.text
+    assert "/library/files/89/slice" in str(sliced.calls.last.request.url)
+    assert not upload.called
+    assert len(hf_mounted(response.json()["warnings"])) == 2
+
+
+@respx.mock
+def test_a_standard_library_print_slices_the_users_own_file(client: TestClient) -> None:
+    """Standard is what the slicer assumes, so there is nothing to state: the file is
+    not even read."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    download = library_file(89)
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={
+            **body(nozzles=[{"size": "0.4"}], tier="standard"),
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert "/library/files/89/slice" in str(sliced.calls.last.request.url)
+    assert not upload.called
+    assert not download.called

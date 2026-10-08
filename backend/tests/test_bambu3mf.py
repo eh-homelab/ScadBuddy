@@ -26,11 +26,13 @@ from scadbuddy.render.bambu3mf import (
     PlateParts,
     cover_names,
     laid_out_plates,
+    nozzles_statable,
     plate_columns,
     plate_origin,
     plate_settings,
     plates_of,
     replate_3mf,
+    state_nozzles,
     write_bambu_3mf,
     write_plates_3mf,
 )
@@ -295,6 +297,55 @@ class TestReplate:
         )
         with pytest.raises(PlateFitError, match="A1 mini"):
             replate_3mf(big.read_bytes(), plate_for("A1 mini"))
+
+
+def _with_entries(payload: bytes, extra: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source, zipfile.ZipFile(buffer, "w") as out:
+        for info in source.infolist():
+            if info.filename not in extra:
+                out.writestr(info.filename, source.read(info.filename))
+        for name, data in extra.items():
+            out.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_stating_the_nozzles_of_a_library_file_changes_nothing_else(written: Path) -> None:
+    """#484: a library file's copy states the flow and nozzle stats as a replated output
+    does, and is otherwise the file: same entries, same placement, same settings."""
+    payload = written.read_bytes()
+    flows, stats = ["High Flow", "High Flow"], ["High Flow#1", "High Flow#0"]
+
+    stated = state_nozzles(payload, nozzle_stats=stats, nozzle_volume_type=flows)
+
+    assert nozzles_statable(payload)
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(stated)) as after,
+    ):
+        assert after.namelist() == before.namelist()
+        for name in before.namelist():
+            if name != "Metadata/project_settings.config":
+                assert after.read(name) == before.read(name), name
+        old = json.loads(before.read("Metadata/project_settings.config"))
+        new = json.loads(after.read("Metadata/project_settings.config"))
+    assert new == {
+        **old,
+        "nozzle_volume_type": flows,
+        "extruder_nozzle_stats": stats,
+        "extruder_nozzle_stats_new": stats,
+    }
+    # The same file stated the same way is the same bytes, so its copy is found again.
+    assert state_nozzles(payload, nozzle_stats=stats, nozzle_volume_type=flows) == stated
+
+
+def test_only_an_unsliced_3mf_with_bambus_settings_can_state_its_nozzles(written: Path) -> None:
+    payload = written.read_bytes()
+    assert not nozzles_statable(_with_entries(payload, {"Metadata/plate_1.gcode": b"; G28\n"}))
+    assert not nozzles_statable(
+        _with_entries(payload, {"Metadata/project_settings.config": b"<config/>"})
+    )
+    assert not nozzles_statable(b"solid stl\nendsolid\n")
 
 
 def test_build_item_centres_the_assembly_on_the_plate_at_z0(written: Path) -> None:

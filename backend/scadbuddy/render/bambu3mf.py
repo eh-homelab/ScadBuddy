@@ -810,18 +810,72 @@ def replate_3mf(
             if nozzle_diameter is not None:
                 settings["nozzle_diameter"] = [nozzle_diameter]
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
-            if nozzle_stats is not None:
-                settings["extruder_nozzle_stats"] = list(nozzle_stats)
-                settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
-            if nozzle_volume_type is not None:
-                settings["nozzle_volume_type"] = list(nozzle_volume_type)
+            _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
             _set_towers(settings, [placement.tower for placement in placements])
             data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
         rewritten.append((name, data))
+    return _zipped(rewritten)
 
+
+def _state_nozzles(
+    settings: dict[str, Any],
+    nozzle_stats: Sequence[str] | None,
+    nozzle_volume_type: Sequence[str] | None,
+) -> None:
+    """Write which extruders have the nozzle and each one's flow into ``settings``
+    (#834, #484); see :func:`replate_3mf`. ``None`` leaves a key as it is."""
+    if nozzle_stats is not None:
+        settings["extruder_nozzle_stats"] = list(nozzle_stats)
+        settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
+    if nozzle_volume_type is not None:
+        settings["nozzle_volume_type"] = list(nozzle_volume_type)
+
+
+#: A plate's gcode in a 3MF: the file is sliced already.
+_GCODE = re.compile(r"Metadata/plate_\d+\.gcode")
+
+
+def nozzles_statable(payload: bytes) -> bool:
+    """Whether :func:`state_nozzles` can rewrite ``payload``: a 3MF whose
+    ``project_settings.config`` is Bambu's JSON, and which holds no gcode, so the slicer
+    will read those settings (#484). A sliced file is printed as it was sliced, and a 3MF
+    from another slicer has no such settings to write into."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            names = archive.namelist()
+            if PROJECT_SETTINGS_NAME not in names or any(map(_GCODE.fullmatch, names)):
+                return False
+            return isinstance(json.loads(archive.read(PROJECT_SETTINGS_NAME)), dict)
+    except (zipfile.BadZipFile, ValueError):
+        return False
+
+
+def state_nozzles(
+    payload: bytes,
+    *,
+    nozzle_stats: Sequence[str] | None = None,
+    nozzle_volume_type: Sequence[str] | None = None,
+) -> bytes:
+    """``payload`` stating the nozzles as :func:`replate_3mf` does, and changed in
+    nothing else: a library file is printed where its author placed it (#313, #484).
+    Only for a file :func:`nozzles_statable` accepts. The same file and nozzles always
+    give the same bytes, so a copy uploaded earlier can be found by its hash."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+    rewritten: list[tuple[str, bytes]] = []
+    for name, data in entries:
+        if name == PROJECT_SETTINGS_NAME:
+            settings = json.loads(data)
+            _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
+            data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
+        rewritten.append((name, data))
+    return _zipped(rewritten)
+
+
+def _zipped(entries: Sequence[tuple[str, bytes]]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        for name, data in rewritten:
+        for name, data in entries:
             info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
             # Same policy as the writer, so a replated file is byte-identical to
             # one written for this plate directly — covers included.

@@ -132,7 +132,9 @@ class PrintActivities:
     ) -> PrintSource:
         if spec.kind == "library":
             assert spec.file_id is not None
-            return await LibrarySource.load(client, spec.file_id, sends=self.d.links)
+            return await LibrarySource.load(
+                client, spec.file_id, sends=self.d.links, settings=settings
+            )
         return await self._output_source(spec, settings)
 
     async def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
