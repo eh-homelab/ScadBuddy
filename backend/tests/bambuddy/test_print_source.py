@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -10,8 +12,10 @@ import psycopg
 import pytest
 import respx
 
+from scadbuddy.bambuddy import print_source
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
+from scadbuddy.bambuddy.models import NozzleChoice
 from scadbuddy.bambuddy.print_links import PrintSend
 from scadbuddy.bambuddy.print_source import (
     UNKNOWN_COLOUR,
@@ -24,6 +28,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.render.bambu3mf import ArchiveTooLargeError
 from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
@@ -199,11 +204,13 @@ class _Sends:
         self.recorded.append((subject, list(sends)))
 
 
-class _Outputs:
+class _Prints:
+    """`OutputPrintStore`: where an output's own last print is kept (#1060)."""
+
     def __init__(self) -> None:
         self.sends: list[dict[str, Any]] = []
 
-    def record_send(self, output_id: str, **fields: Any) -> None:
+    def record(self, output_id: str, **fields: Any) -> None:
         self.sends.append({"output_id": output_id, **fields})
 
 
@@ -223,13 +230,14 @@ SENT = [
 
 async def test_an_output_print_records_its_send_by_subject() -> None:
     # #1750 (R1): both sources write one send record; an output's meta keeps its own too.
-    sends, outputs = _Sends(), _Outputs()
+    sends, prints = _Sends(), _Prints()
     meta: Any = _Meta()
     source = OutputSource(
-        store=outputs,  # type: ignore[arg-type]
+        store=None,  # type: ignore[arg-type]
         uploads=_Uploads(),  # type: ignore[arg-type]
         meta=meta,
         settings=StoredSettings(),
+        prints=prints,  # type: ignore[arg-type]
         sends=sends,  # type: ignore[arg-type]
     )
 
@@ -237,7 +245,7 @@ async def test_an_output_print_records_its_send_by_subject() -> None:
 
     assert source.subject == PrintSubject.output(meta.id)
     assert sends.recorded == [(PrintSubject.output(meta.id), SENT)]
-    assert [send["queue_item_id"] for send in outputs.sends] == [51, 52]
+    assert [send["queue_item_id"] for send in prints.sends] == [51, 52]
     assert sent == [
         PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9),
         PlateSend(plate_id=1, queue_item_id=52, slice_job_id=9),
@@ -272,3 +280,82 @@ async def test_a_send_record_that_fails_does_not_fail_the_queued_plate(
     assert [s.queue_item_id for s in sent] == [51, 52]
     assert "OperationalError" in caplog.text
     assert "connection refused" not in caplog.text
+
+
+# --- #484: a library file's flow copy, and what an untrusted file may cost -------------
+
+HIGH_FLOW = [NozzleChoice(size="0.4", flow="high_flow")]
+
+
+def _unsliced_3mf() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr("Metadata/project_settings.config", '{"nozzle_diameter": ["0.4"]}')
+    return buffer.getvalue()
+
+
+def _library(file_id: int = 41) -> LibrarySource:
+    return LibrarySource(
+        file_id=file_id,
+        colours=["#FF0000"],
+        plates=[1],
+        filename="critter.3mf",
+        file_type="3mf",
+        settings=StoredSettings(library_folder_id=2),
+    )
+
+
+async def _print(source: LibrarySource, bambuddy: BambuddyClient) -> int:
+    printed = await source.file_to_print(
+        bambuddy,
+        printer_id=1,
+        nozzle_size="0.4",
+        plan=None,  # type: ignore[arg-type]
+        project_id=None,
+        nozzle_volume_type=["High Flow", "High Flow"],
+    )
+    return printed.id
+
+
+@respx.mock
+async def test_a_library_file_over_the_download_cap_prints_as_it_is(
+    bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A library file is untrusted: one past the cap is never held whole. It is not
+    statable, so it prints as it is and is warned of as Standard."""
+    payload = _unsliced_3mf()
+    monkeypatch.setattr(print_source, "MAX_DOWNLOAD_BYTES", len(payload) - 1)
+    download = respx.get(f"{API}/library/files/41/download").mock(
+        return_value=httpx.Response(200, content=payload)
+    )
+    source = _library()
+
+    assert not await source.lays_out(bambuddy, HIGH_FLOW)
+    assert await _print(source, bambuddy) == 41
+    assert source._payload is None
+    assert download.call_count == 1  # read once, not again for the print
+
+
+@respx.mock
+async def test_a_rewrite_past_the_cap_falls_back_to_the_file_as_it_is(
+    bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Should the rewrite still find the archive too large, the print goes on with the
+    user's file rather than a 500, and from then on it is judged as Standard."""
+
+    def too_large(*_: object, **__: object) -> bytes:
+        raise ArchiveTooLargeError("the 3MF inflates past the cap")
+
+    monkeypatch.setattr(print_source, "state_nozzles", too_large)
+    respx.get(f"{API}/library/files/41/download").mock(
+        return_value=httpx.Response(200, content=_unsliced_3mf())
+    )
+    upload = respx.post(f"{API}/library/files")
+    source = _library()
+    assert await source.lays_out(bambuddy, HIGH_FLOW)
+
+    assert await _print(source, bambuddy) == 41
+
+    assert not upload.called
+    assert not await source.lays_out(bambuddy, HIGH_FLOW)

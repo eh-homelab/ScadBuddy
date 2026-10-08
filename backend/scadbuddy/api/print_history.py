@@ -69,6 +69,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
     download_filename,
 )
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import OperationAccepted
@@ -380,6 +381,7 @@ class _Defaults:
                     config=self._config,
                     version=requested,
                     fetcher=self._fetcher,
+                    failure_is_fallback=True,
                 )
             except (ApiError, OpenSCADError):
                 continue
@@ -793,6 +795,13 @@ async def get_print(
     )
 
 
+async def _forget(store: SettingsStore, cache: ArchiveCache, archive_id: int) -> None:
+    """Drop this process's reads of an archive an operation changed. Its run forgets
+    them in the worker's own cache, which on ``scadbuddy-print`` is not this one (#1060)."""
+    async with client_for(store.load()) as client:
+        cache.forget(client, archive_id)
+
+
 class PrintAgain(_Response):
     queue_item_id: int
     printer_id: int
@@ -821,6 +830,8 @@ async def reprint(
     response: Response,
     links: PrintLinksDep,
     ops: OperationsDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
     idempotency_key: IdempotencyKey = None,
 ) -> PrintAgain | JSONResponse:
     await _require_print(links, archive_id)
@@ -832,6 +843,7 @@ async def reprint(
         request={"archive_id": archive_id},
         idempotency_key=idempotency_key,
     )
+    await _forget(store, cache, archive_id)
     return operation_answer(result, PrintAgain)
 
 
@@ -862,6 +874,8 @@ async def pull_timelapse(
     response: Response,
     links: PrintLinksDep,
     ops: OperationsDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Response:
     await _require_print(links, archive_id)
@@ -873,6 +887,7 @@ async def pull_timelapse(
         request={"archive_id": archive_id, "filename": body.filename},
         idempotency_key=idempotency_key,
     )
+    await _forget(store, cache, archive_id)
     if isinstance(result, OperationAccepted):
         return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

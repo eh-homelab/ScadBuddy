@@ -500,6 +500,21 @@ export function SettingsPage() {
     }
   }
 
+  // #1041 — a failed load is not "loading": say so, and offer the read again. Settings
+  // is the page someone opens because something is wrong.
+  if (settingsState.error && !settings) {
+    return (
+      <div role="alert" className="mx-auto max-w-lg px-4 py-16">
+        <div className="rounded-[6px] border border-warn/40 bg-warn/8 p-4">
+          <p className="text-[13px] text-warn">Could not load settings: {settingsState.error.message}</p>
+          <Button size="sm" className="mt-3" onClick={settingsState.reload}>
+            Try again
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   if (settingsState.loading || !settings) {
     return (
       <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">

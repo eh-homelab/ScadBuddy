@@ -16,6 +16,7 @@ from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
 from tests.conftest import MODEL_SLUG
+from tests.support.operations import press
 
 ICON_URL = "https://openmoji.org/data/color/svg/1F984.svg"
 UNICORN_SVG = (
@@ -29,7 +30,9 @@ pytestmark = pytest.mark.usefixtures("fake_dns", "model")
 
 
 def _fetch(client: TestClient, url: str, slug: str = MODEL_SLUG) -> httpx.Response:
-    response: httpx.Response = client.post(f"/api/v1/models/{slug}/assets/fetch", json={"url": url})
+    response: httpx.Response = client.post(
+        f"/api/v1/models/{slug}/assets/fetch", json={"url": url}, headers=press()
+    )
     return response
 
 

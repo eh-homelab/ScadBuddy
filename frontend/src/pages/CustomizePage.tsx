@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-r
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
@@ -16,7 +16,7 @@ import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
 import { RawInputs } from '../components/RawInputs'
-import { PresetPicker } from '../components/PresetPicker'
+import { PresetPicker, type SelectedElsewhere } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
@@ -269,6 +269,15 @@ export function CustomizePage() {
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
+  /**
+   * #1457, #1484 — a preset the template UI just loaded or saved, for the picker. A
+   * one-shot message: cleared once the picker has rendered it, so a later remount (the
+   * form taking over from a failed UI) never brings it back over a pick made since.
+   */
+  const [presetElsewhere, setPresetElsewhere] = useState<SelectedElsewhere | null>(null)
+  useEffect(() => {
+    if (presetElsewhere) setPresetElsewhere(null)
+  }, [presetElsewhere])
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -522,10 +531,13 @@ export function CustomizePage() {
       presets: {
         list: () => api.listPresets(slug),
         save: async (name: string) => {
+          const { values: savedValues, extra: savedExtra } = live.current
           const created = await api.createPreset(slug, {
             name,
-            inputs: presetInputs(schemaNow(), live.current.values, live.current.extra),
+            inputs: presetInputs(schemaNow(), savedValues, savedExtra),
           })
+          // The picker shows it selected, as its own Save as preset does.
+          setPresetElsewhere({ preset: created, values: savedValues, extra: savedExtra })
           setPresetsRevision((n) => n + 1) // the picker keeps its own list; remount it
           return created
         },
@@ -534,6 +546,7 @@ export function CustomizePage() {
           if (!preset) throw new Error(`no preset ${id}`)
           const applied = applyPreset(schemaNow(), preset)
           onApplyPreset(applied.values, applied.extra)
+          setPresetElsewhere({ preset, values: applied.values, extra: applied.extra })
         },
       },
       onDescribe: (fn: (() => string) | null) => {
@@ -743,6 +756,25 @@ export function CustomizePage() {
     )
   }
 
+  // #1041 — only a 404 means the model is gone. A 5xx or a gateway timeout (the schema
+  // read runs OpenSCAD) is a failed load, and may well succeed when asked again.
+  if (schemaState.error && !(schemaState.error instanceof ApiError && schemaState.error.status === 404)) {
+    return (
+      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
+        <h1 className="text-[15px] font-medium">Could not load this model</h1>
+        <p className="mt-2 text-[13px] text-muted">{schemaState.error.message}</p>
+        <div className="mt-4 flex items-center justify-center gap-3">
+          <Button size="sm" onClick={schemaState.reload}>
+            Try again
+          </Button>
+          <Link to="/" className="text-[13px] text-accent underline">
+            Back to models
+          </Link>
+        </div>
+      </div>
+    )
+  }
+
   if (schemaState.error || !schema) {
     return (
       <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
@@ -886,6 +918,7 @@ export function CustomizePage() {
       migrate={migratePreset}
       pinned={version !== undefined}
       resetKey={resets}
+      selected={presetElsewhere}
     />
   )
   const templateUi = customUi && (
@@ -1163,6 +1196,7 @@ export function CustomizePage() {
                     migrate={migratePreset}
                     pinned={version !== undefined}
                     resetKey={resets}
+                    selected={presetElsewhere}
                   />
                 </>
               }

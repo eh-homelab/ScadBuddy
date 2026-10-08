@@ -32,7 +32,7 @@ def make_output(client: TestClient, slug: str, name: str = "Elan") -> str:
     ).json()["job_id"]
     wait_for_job(client, job_id)
     created: str = client.post(
-        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id, "name": name}
+        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id, "name": name}, headers=press()
     ).json()["id"]
     return created
 

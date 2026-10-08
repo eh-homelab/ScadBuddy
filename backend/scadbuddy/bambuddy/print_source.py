@@ -6,14 +6,19 @@ shared unchanged.
 - :class:`OutputSource` is today's behavior, moved as is: the output's ``model.3mf``
   is uploaded on demand, replated for the printer (#105) and recolored for the spools
   (#476), and each queued plate is recorded on the output (#83).
-- A library file prints as its author left it (``LibrarySource``, #313).
+- A library file prints as its author left it (``LibrarySource``, #313), but for the
+  flow chosen, which a copy states when the slicer would not otherwise know it (#484).
 
 Both record each queued plate's items by their :class:`PrintSubject` (#1750).
 """
 
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
+from collections.abc import Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -22,11 +27,18 @@ from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
+from scadbuddy.bambuddy.extruders import VOLUME_TYPE, slicer_volume_types
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
-from scadbuddy.bambuddy.models import LibraryFile
+from scadbuddy.bambuddy.models import LibraryFile, NozzleChoice
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.send import copy_to_read, ensure_uploaded, target_for
+from scadbuddy.bambuddy.send import (
+    copy_to_read,
+    ensure_file,
+    ensure_uploaded,
+    read_3mf,
+    target_for,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import (
     BambuddyUploadStore,
@@ -35,9 +47,16 @@ from scadbuddy.bambuddy.uploads import (
     SlicedCopy,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.bambu3mf import (
+    MAX_UNCOMPRESSED_BYTES,
+    ArchiveTooLargeError,
+    nozzles_statable,
+    plates_of,
+    state_nozzles,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +101,10 @@ class PrintSource(Protocol):
         overrides; none for a file ScadBuddy did not render."""
         ...
 
-    @property
-    def lays_out(self) -> bool:
-        """Whether the run lays the file out for the printer (#105), so it states the
-        side the slicer may use (#834) and each side's flow (#484); a library file
-        prints as its author left it."""
+    async def lays_out(self, client: BambuddyClient, nozzles: Sequence[NozzleChoice]) -> bool:
+        """Whether the file sliced states the side the slicer may use (#834) and each
+        side's flow (#484), as chosen in ``nozzles``: an output always does, laid out
+        for the printer (#105); a library file only when it has to (:class:`LibrarySource`)."""
         ...
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
@@ -167,7 +185,7 @@ async def record_sends(
 
 @dataclass
 class OutputSource:
-    store: OutputStore
+    store: OutputFiles
     uploads: BambuddyUploadStore
     meta: OutputMeta
     settings: StoredSettings
@@ -175,6 +193,9 @@ class OutputSource:
     stem: str | None = None
     #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
     print_settings: dict[str, str] = field(default_factory=dict)
+    #: Where :meth:`record` writes the output's last print (#1060); a source that only
+    #: reads (the print dialog's options and checks) has none.
+    prints: OutputPrintStore | None = None
     #: Where each queued plate's items are recorded by subject (#1750).
     sends: PrintLinkStore | None = None
 
@@ -190,12 +211,12 @@ class OutputSource:
     def options_slug(self) -> str | None:
         return self.meta.slug
 
-    @property
-    def lays_out(self) -> bool:
+    async def lays_out(self, client: BambuddyClient, nozzles: Sequence[NozzleChoice]) -> bool:
         return True
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
-        return [plate.index for plate in plates_of(self.store.directory(self.meta.id) / MODEL_NAME)]
+        payload = await read_3mf(self.store, self.meta)
+        return [plate.index for plate in plates_of(io.BytesIO(payload))]
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         copy = await copy_to_read(client, self.store, self.uploads, self.meta, self.settings)
@@ -265,11 +286,12 @@ class OutputSource:
             PlateSend(plate_id=plate_id, queue_item_id=item, slice_job_id=outcome.slice_job_id)
             for item in outcome.queue_item_ids
         ]
+        assert self.prints is not None, "a source that records needs the print store"
         for queue_item_id in outcome.queue_item_ids:
-            self.store.record_send(
+            await asyncio.to_thread(
+                self.prints.record,
                 self.meta.id,
                 queue_item_id=queue_item_id,
-                print_route="slice_queue",
                 slice_job_id=outcome.slice_job_id,
                 project_id=project_id,
                 plates=sent,
@@ -294,6 +316,23 @@ SLICED_TYPE = "gcode.3mf"
 UNKNOWN_COLOUR = ""
 
 
+#: The flow the slicer assumes when the file states none (#484).
+STANDARD = VOLUME_TYPE["standard"]
+#: A library file is untrusted; one larger than the archive cap could not be stated
+#: anyway, so it is never held whole (a 3MF's compressed size is below its inflated one).
+MAX_DOWNLOAD_BYTES = MAX_UNCOMPRESSED_BYTES
+
+
+def _copy_name(filename: str, flows: Sequence[str]) -> str:
+    """The name of a library file's copy stating ``flows`` (the left's first, the
+    slicer's order): ``critter (High Flow).3mf``, or with the sides' flows differing
+    ``critter (High Flow left, Standard right).3mf``."""
+    stem = filename[: -len(".3mf")] if filename.lower().endswith(".3mf") else filename
+    left, right = flows
+    label = left if left == right else f"{left} left, {right} right"
+    return f"{stem} ({label}).3mf"
+
+
 def printable(file_type: str | None) -> bool:
     return (file_type or "").lower() in PRINTABLE_TYPES
 
@@ -308,11 +347,22 @@ def _refusal(file: LibraryFile) -> str:
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class LibrarySource:
     """A file already in Bambuddy's library (#313), printed as its author left it:
-    never uploaded, replated or recolored. Its queued plates are recorded by subject,
-    as an output's are (#1750)."""
+    never replated or recolored, and never changed in place. Its queued plates are
+    recorded by subject, as an output's are (#1750).
+
+    The one thing stated for the print is the flow (#484). Bambuddy's slicer reads each
+    side's flow from the 3MF and assumes Standard where it states none, so a High Flow
+    choice on a file stating none (library file 615, ScadBuddy's own 3MF) was sliced
+    Standard, and the printer paused on its High Flow nozzle. When a flow other than
+    Standard is chosen and Bambuddy will slice the file (:func:`nozzles_statable`: an
+    unsliced 3MF with Bambu's settings), the slicer gets a copy stating the nozzles
+    exactly as an output's upload does (:func:`state_nozzles`), uploaded into the inbox
+    as an output's copy is (:func:`ensure_file`). Standard needs no copy: it is what the
+    slicer assumes. A sliced file, an STL, or a 3MF from another slicer prints as it is,
+    taken as Standard (:func:`~scadbuddy.bambuddy.extruders.high_flow_warnings`)."""
 
     file_id: int
     colours: list[str]
@@ -320,10 +370,25 @@ class LibrarySource:
     options_slug: str | None = None
     #: Where each queued plate's items are recorded by subject (#1750).
     sends: PrintLinkStore | None = None
+    #: The file's name and type, which name its copy and say whether it may need one.
+    filename: str = ""
+    file_type: str = ""
+    #: The run's settings, whose inbox a copy goes into; a source that only reads has
+    #: none.
+    settings: StoredSettings | None = None
+    #: The file's bytes, read once when a flow has to be stated, and kept only while
+    #: they can state it.
+    _payload: bytes | None = field(default=None, init=False, repr=False, compare=False)
+    _read: bool = field(default=False, init=False, repr=False, compare=False)
 
     @classmethod
     async def load(
-        cls, client: BambuddyClient, file_id: int, *, sends: PrintLinkStore | None = None
+        cls,
+        client: BambuddyClient,
+        file_id: int,
+        *,
+        sends: PrintLinkStore | None = None,
+        settings: StoredSettings | None = None,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
         its 404; one the dialog cannot print is a 422 before anything else is read."""
@@ -347,6 +412,9 @@ class LibrarySource:
             colours=colours or [UNKNOWN_COLOUR],
             plates=plates or [1],
             sends=sends,
+            filename=file.filename,
+            file_type=(file.file_type or "").lower(),
+            settings=settings,
         )
 
     @property
@@ -357,9 +425,34 @@ class LibrarySource:
     def print_settings(self) -> dict[str, str]:
         return {}
 
-    @property
-    def lays_out(self) -> bool:
-        return False
+    async def lays_out(self, client: BambuddyClient, nozzles: Sequence[NozzleChoice]) -> bool:
+        return await self._states(client, slicer_volume_types(nozzles))
+
+    async def _states(self, client: BambuddyClient, flows: Sequence[str] | None) -> bool:
+        """Whether the slicer gets a copy stating ``flows``: one is not Standard, and
+        the file is one Bambuddy will slice from its own settings (#484)."""
+        if self.file_type != "3mf" or all(flow == STANDARD for flow in flows or []):
+            return False
+        if not self._read:
+            self._read = True
+            payload = await self._download(client)
+            self._payload = payload if payload is not None and nozzles_statable(payload) else None
+        return self._payload is not None
+
+    async def _download(self, client: BambuddyClient) -> bytes | None:
+        """The file's bytes, counted as they stream in; ``None`` past
+        :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept."""
+        data = bytearray()
+        async with aclosing(client.download_library_file(self.file_id)) as chunks:
+            async for chunk in chunks:
+                data += chunk
+                if len(data) > MAX_DOWNLOAD_BYTES:
+                    logger.warning(
+                        "library file too large to state its flow; printing it as it is",
+                        extra={"library_file_id": self.file_id},
+                    )
+                    return None
+        return bytes(data)
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)
@@ -378,7 +471,28 @@ class LibrarySource:
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
     ) -> PrintFile:
-        return PrintFile(self.file_id)
+        if not await self._states(client, nozzle_volume_type):
+            return PrintFile(self.file_id)
+        assert self._payload is not None and nozzle_volume_type is not None
+        assert self.settings is not None, "a source that prints needs the run's settings"
+        try:
+            payload = state_nozzles(
+                self._payload, nozzle_stats=nozzle_stats, nozzle_volume_type=nozzle_volume_type
+            )
+        except ArchiveTooLargeError:
+            # nozzles_statable has bounded it already, so this is a defence in depth: the
+            # file prints as it is, and the run's warnings judge it as Standard.
+            logger.warning(
+                "library file inflates past the cap; printing it as it is",
+                extra={"library_file_id": self.file_id},
+            )
+            self._payload = None
+            return PrintFile(self.file_id)
+        return PrintFile(
+            await ensure_file(
+                client, self.settings, _copy_name(self.filename, nozzle_volume_type), payload
+            )
+        )
 
     async def record(
         self,

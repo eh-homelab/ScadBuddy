@@ -18,10 +18,16 @@ import {
   timedOutText,
   WAIT_CEILING_S,
 } from '../src/harness/attention.js'
+import { TabHub } from '../src/bridge/hub.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ATTENTION_TOOL, type QuestionGate, type QuestionRequest } from '../src/harness/questions.js'
 import { buildHarnessOptions, type HarnessRun } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { browserTools } from '../src/tools/browser.js'
+import { harnessTools } from '../src/tools/harness.js'
+import { SERVER_NAME } from '../src/tools/projections.js'
+import type { WaitForTab } from '../src/tools/registry.js'
+import { services } from './helpers/mcp.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 
 // #815: request_user_attention, an `answer`-kind entry at the question gate.
@@ -249,6 +255,31 @@ describe.skipIf(cliMissing !== undefined)(`request_user_attention through the qu
     expect(asked).toEqual([])
     expect(result?.subtype).toBe('success')
     expect(lastContent(fake.messageCalls().at(-1)!)).toMatch(/"is_error":true/)
+  }, 60_000)
+
+  // #1260: a browser_* call's tab wait is keyed by the call's own tool_use id, which only
+  // reaches the scadbuddy server if Claude Code puts it in the call's `_meta`.
+  it("hands a browser_* call's tab wait the model's own tool_use id, through the scadbuddy server", async () => {
+    script = (r) => (lastContent(r).includes('tool_result') ? { text: 'No tab.' } : { toolUse: { name: `mcp__${SERVER_NAME}__browser_snapshot`, input: {} } })
+    const waited: (string | undefined)[] = []
+    const tools = harnessTools(services({ browser: new TabHub() }), browserTools)
+    const waitForTab: WaitForTab = ({ toolUseId }) => {
+      waited.push(toolUseId)
+      return Promise.resolve({ back: false, message: 'Carry on without the tab.' })
+    }
+    const { result } = await collect({
+      prompt: 'Look at the page',
+      tierOf: tools.tierOf,
+      mcpServers: tools.mcpServers({ id: 's1', owner: { kind: 'browser', id: 'browser', label: 'You' } }, undefined, { waitForTab }),
+    })
+    expect(result?.subtype).toBe('success')
+    const toolResult = fake
+      .messageCalls()
+      .flatMap((c) => c.body?.messages ?? [])
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .find((b): b is { type: 'tool_result'; tool_use_id: string } => (b as { type?: string }).type === 'tool_result')
+    expect(toolResult?.tool_use_id).toMatch(/^toolu_/)
+    expect(waited).toEqual([toolResult?.tool_use_id])
   }, 60_000)
 
   it('without a gate the tool is not offered', async () => {

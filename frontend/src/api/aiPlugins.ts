@@ -9,7 +9,7 @@
  * Errors come back as `{ detail }`, and a refused package install as
  * `{ detail, problems: string[] }` (422); `readProblem` keeps both on `ApiError.problem`.
  */
-import { ApiError } from './client'
+import { ApiError, command } from './client'
 
 export type RiskTier = 'read' | 'write' | 'outward'
 
@@ -175,14 +175,16 @@ export const aiPlugins = {
   testRemote: (name: string) => request<PluginTest>(`/plugins/${seg(name)}/test`, { method: 'POST' }),
 
   listPackages: () => request<PluginPackage[]>('/plugin-packages'),
+  // The two fetches are the agent's commands (#1055): an Idempotency-Key per press, a
+  // 202 followed at the agent's /api/v1/ai/operations/{id}.
   installPackage: (source: PackageInstall) =>
-    request<PluginPackage>('/plugin-packages', json('POST', { source })),
+    command<PluginPackage>('/ai/plugin-packages', json('POST', { source }), '/ai/operations'),
   approvePackage: (name: string, commit_sha: string, content_hash: string) =>
     request<PluginPackage>(`/plugin-packages/${seg(name)}/approve`, json('POST', { commit_sha, content_hash })),
   setPackageEnabled: (name: string, enabled: boolean) =>
     request<PluginPackage>(`/plugin-packages/${seg(name)}`, json('PATCH', { enabled })),
   repinPackage: (name: string, ref?: string) =>
-    request<PluginPackage>(`/plugin-packages/${seg(name)}/repin`, json('POST', ref ? { ref } : {})),
+    command<PluginPackage>(`/ai/plugin-packages/${seg(name)}/repin`, json('POST', ref ? { ref } : {}), '/ai/operations'),
   discardRepin: (name: string) =>
     request<PluginPackage>(`/plugin-packages/${seg(name)}/pending`, { method: 'DELETE' }),
   deletePackage: (name: string) => request<void>(`/plugin-packages/${seg(name)}`, { method: 'DELETE' }),

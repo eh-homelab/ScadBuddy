@@ -13,6 +13,7 @@ import {
   api,
   mayHaveRun,
   newRequestId,
+  STILL_ACCEPTING,
   printRunPoll,
 } from './client'
 import type { MediaView } from './types'
@@ -44,6 +45,7 @@ describe('media URLs (#274)', () => {
 /** Just enough of an `XMLHttpRequest` to see what `uploadMedia` sends and to answer it. */
 class FakeXhr {
   static last: FakeXhr | undefined
+  static all: FakeXhr[] = []
   method = ''
   url = ''
   body: FormData | undefined
@@ -59,6 +61,7 @@ class FakeXhr {
 
   constructor() {
     FakeXhr.last = this
+    FakeXhr.all.push(this)
   }
   open(method: string, url: string) {
     this.method = method
@@ -90,6 +93,7 @@ describe('uploadMedia (#274)', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     FakeXhr.last = undefined
+    printRunPoll.reattempts = 3
   })
 
   function upload(
@@ -150,6 +154,8 @@ describe('uploadMedia (#274)', () => {
   })
 
   it('rejects with what the status means when the answer is not a problem', async () => {
+    // No re-send (#1054), so the first unanswered attempt is the last.
+    printRunPoll.reattempts = 0
     const { pending, xhr } = upload()
     xhr.status = 502
     xhr.statusText = 'Bad Gateway'
@@ -163,6 +169,7 @@ describe('uploadMedia (#274)', () => {
   })
 
   it('rejects when the connection fails', async () => {
+    printRunPoll.reattempts = 0
     const { pending, xhr } = upload()
     xhr.onerror?.()
     await expect(pending).rejects.toThrow('The upload failed')
@@ -1107,6 +1114,185 @@ describe("a model's lifecycle is commands (#1054)", () => {
   it('deleteModel answers a 204 at once', async () => {
     server.use(http.delete('/api/v1/models/w', () => new HttpResponse(null, { status: 204 })))
     await expect(api.deleteModel('w')).resolves.toBeUndefined()
+  })
+})
+
+describe("a model's edits are commands (#1054)", () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
+  const operation = { id: 'op-8', kind: 'model_source_put', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W' }
+
+  it.each([
+    ['replaceSource', () => api.replaceSource('w', 'cube(2);'), 'put', '/api/v1/models/w/source', model],
+    ['resolveUpstreamMerge', () => api.resolveUpstreamMerge('w', 'cube(2);', 'abc1234'), 'put', '/api/v1/models/w/source', model],
+    ['removeThumbnail', () => api.removeThumbnail('w'), 'delete', '/api/v1/models/w/thumbnail', model],
+    ['setReadme', () => api.setReadme('w', '# W'), 'put', '/api/v1/models/w/readme', model],
+    ['removeReadme', () => api.removeReadme('w'), 'delete', '/api/v1/models/w/readme', model],
+    ['mergeUpstream', () => api.mergeUpstream('w'), 'post', '/api/v1/models/w/upstream/merge', { model, taken: [], kept: [] }],
+    ['dismissUpstream', () => api.dismissUpstream('w'), 'post', '/api/v1/models/w/upstream/dismiss', model],
+    ['detachUpstream', () => api.detachUpstream('w'), 'post', '/api/v1/models/w/upstream/detach', model],
+    ['restoreVersion', () => api.restoreVersion('w', 'abc1234'), 'post', '/api/v1/models/w/versions/abc1234/restore', { id: 'abc1234', current: true }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to its result', async (_name, call, method, path, result) => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-8', () => HttpResponse.json({ ...operation, status: 'succeeded', result })),
+    )
+    await expect(call()).resolves.toEqual(result)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('setThumbnail sends an Idempotency-Key and follows a 202 to the model', async () => {
+    // Stubbed below msw, as uploadModel's: jsdom's Blob cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-8')
+        ? Response.json({ ...operation, status: 'succeeded', result: model })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(api.setThumbnail('w', new Blob(['png']))).resolves.toEqual(model)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('replaceSource sends the base the edit was made against', async () => {
+    let sent: unknown
+    server.use(
+      http.put('/api/v1/models/w/source', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(model)
+      }),
+    )
+    await api.replaceSource('w', 'cube(2);', false, undefined, 'abc1234')
+    expect(sent).toMatchObject({ source: 'cube(2);', base: 'abc1234' })
+  })
+
+  it("keeps a merge conflict's merged text, answered by the route", async () => {
+    server.use(
+      http.post('/api/v1/models/w/upstream/merge', () =>
+        HttpResponse.json({ title: 'Conflict', status: 409, detail: 'conflicts', merged: '<<<<<<< w', merge_base: 'abc1234' }, { status: 409 }),
+      ),
+    )
+    const caught = await api.mergeUpstream('w').catch((e: unknown) => e)
+    expect((caught as ApiError).status).toBe(409)
+    expect((caught as ApiError).problem.merged).toBe('<<<<<<< w')
+  })
+})
+
+describe('uploads, outputs, fonts and presets are commands (#1054)', () => {
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+    vi.unstubAllGlobals()
+    FakeXhr.last = undefined
+  })
+
+  const operation = { id: 'op-7', kind: 'output_create', subject: 'w', status: 'running', created_at: '2026-10-04T00:00:00Z' }
+  const model = { slug: 'w', name: 'W' }
+  const preset = { id: 'p1', name: 'Wide', params: {} }
+
+  it.each([
+    ['patchMedia', () => api.patchMedia('w', 'm1', 'c'), 'patch', '/api/v1/models/w/media/m1', model],
+    ['reorderMedia', () => api.reorderMedia('w', ['m1']), 'put', '/api/v1/models/w/media/order', model],
+    ['setMediaCover', () => api.setMediaCover('w', 'm1'), 'put', '/api/v1/models/w/media/cover', model],
+    ['deleteMedia', () => api.deleteMedia('w', 'm1'), 'delete', '/api/v1/models/w/media/m1', model],
+    ['createOutput', () => api.createOutput('w', 'j1'), 'post', '/api/v1/models/w/outputs', { id: 'o1' }],
+    ['deleteOutput', () => api.deleteOutput('o1'), 'delete', '/api/v1/outputs/o1', {}],
+    ['installFont', () => api.installFont('Pacifico'), 'post', '/api/v1/fonts/install', { family: 'Pacifico', styles: [] }],
+    ['createPreset', () => api.createPreset('w', { name: 'Wide' }), 'post', '/api/v1/models/w/presets', preset],
+    ['updatePreset', () => api.updatePreset('w', 'p1', { name: 'Wider' }), 'patch', '/api/v1/models/w/presets/p1', preset],
+    ['duplicatePreset', () => api.duplicatePreset('w', 'p1', { name: 'Copy' }), 'post', '/api/v1/models/w/presets/p1/duplicate', preset],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to its result', async (_name, call, method, path, result) => {
+    printRunPoll.intervalMs = 1
+    let key: string | null = null
+    server.use(
+      http[method](path, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json(operation, { status: 202 })
+      }),
+      http.get('/api/v1/operations/op-7', () => HttpResponse.json({ ...operation, status: 'succeeded', result })),
+    )
+    await expect(call()).resolves.toEqual(result)
+    expect(key).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it.each([
+    ['putThumbnail', () => api.putThumbnail('o1', new Blob(['png'])), {}],
+    ['uploadAsset', () => api.uploadAsset('w', new File(['<svg/>'], 'a.svg')), { id: 'a1' }],
+  ] as const)('%s sends an Idempotency-Key and follows a 202 to its result', async (_name, call, result) => {
+    // Stubbed below msw, as setThumbnail's: jsdom's Blob cannot cross vitest's Request polyfill.
+    printRunPoll.intervalMs = 1
+    const sent: Headers[] = []
+    const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      sent.push(new Headers(init?.headers))
+      return String(input).endsWith('/operations/op-7')
+        ? Response.json({ ...operation, status: 'succeeded', result })
+        : Response.json(operation, { status: 202 })
+    })
+    try {
+      await expect(call()).resolves.toEqual(result)
+    } finally {
+      fetched.mockRestore()
+    }
+    expect(sent[0]?.get('Idempotency-Key')).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('uploadMedia sends an Idempotency-Key, reports progress and follows a 202', async () => {
+    printRunPoll.intervalMs = 1
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    server.use(
+      http.get('/api/v1/operations/op-7', () => HttpResponse.json({ ...operation, status: 'succeeded', result: model })),
+    )
+    const seen: number[] = []
+    const pending = api.uploadMedia('w', new File([new Uint8Array([1])], 'a.png'), {}, (f) => seen.push(f))
+    const xhr = FakeXhr.last!
+    expect(xhr.headers['Idempotency-Key']).toMatch(/^[0-9a-f]{32}$/)
+    xhr.progress(50, 100)
+    expect(seen).toEqual([0.5])
+    xhr.answer(202, operation)
+    await expect(pending).resolves.toEqual(model)
+  })
+
+  it('uploadMedia sends the same key again after an answer that never arrived', async () => {
+    printRunPoll.intervalMs = 1
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    const pending = api.uploadMedia('w', new File([new Uint8Array([1])], 'a.png'))
+    const first = FakeXhr.last!
+    first.onerror?.()
+    await vi.waitFor(() => expect(FakeXhr.last).not.toBe(first))
+    const again = FakeXhr.last!
+    expect(again.headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key'])
+    again.answer(200, model)
+    await expect(pending).resolves.toEqual(model)
+  })
+
+  it('uploadMedia re-sends a still-accepting upload at most printRunPoll.reattempts times', async () => {
+    // Review 3e final I2: each re-send streams the whole file again, so the 240 s a
+    // small command may keep re-sending for would be many gigabytes.
+    printRunPoll.intervalMs = 1
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    FakeXhr.all = []
+    const stillAccepting = { type: STILL_ACCEPTING, title: 'Service Unavailable', status: 503 }
+    const pending = api.uploadMedia('w', new File([new Uint8Array([1])], 'a.mp4'))
+    const outcome = pending.catch((caught: unknown) => caught)
+    for (let sent = 1; sent <= printRunPoll.reattempts + 1; sent++) {
+      await vi.waitFor(() => expect(FakeXhr.all).toHaveLength(sent))
+      FakeXhr.all[sent - 1]!.answer(503, stillAccepting)
+    }
+    await expect(outcome).resolves.toMatchObject({ problem: { type: STILL_ACCEPTING } })
+    expect(FakeXhr.all).toHaveLength(printRunPoll.reattempts + 1)
+    expect(new Set(FakeXhr.all.map((xhr) => xhr.headers['Idempotency-Key'])).size).toBe(1)
   })
 })
 
