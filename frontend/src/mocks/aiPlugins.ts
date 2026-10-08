@@ -9,7 +9,7 @@
  * Git URLs the mock knows: `https://git.example/greeter.git` (clean; `ref: "v2"`
  * gives a second commit), `https://git.example/shell.git` (installs, but its review
  * lists refusals, so it is approved only with `allow_refused`),
- * `https://git.example/reserved.git` (refused outright), and the marketplace
+ * `https://git.example/reserved.git` (a name that is not a path segment: refused outright), and the marketplace
  * `https://git.example/market.git` with entry `greeter`.
  */
 import { HttpResponse, delay, http } from 'msw'
@@ -39,7 +39,7 @@ export const SHELL_PROBLEMS = [
   'skills/status/SKILL.md: runs a shell command through dynamic context injection (!`...`)',
   'hooks/hooks.json: Stop has a "command" hook',
 ]
-export const RESERVED_PROBLEMS = ['plugin name "scadbuddy" is reserved']
+export const RESERVED_PROBLEMS = ['plugin name "bad name" is not 1–64 letters, digits, ".", "_" and "-", starting with a letter or digit']
 export const SHELL = {
   commit: '5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f',
   hash: 'sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e',

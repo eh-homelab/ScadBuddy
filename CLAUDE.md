@@ -376,7 +376,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `$schema`, `description` and `hooks` besides, so a new loader key is refused too.
     The one way past it is a plugin package approved with `allow_refused` (store.ts,
     column `allow_refused`, bound to that pin's approval): it loads as it is through
-    `allowedPluginPaths`, unchecked. Name rules, paths outside the package, symlinks,
+    `allowedPluginPaths`, unchecked. A name that is not a safe path segment
+    (`SAFE_NAME_RE`; a reserved name is allowable), paths outside the package, symlinks,
     the hash and the egress check stay fatal (`vet.ts` `fatal`).
   - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
     `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a

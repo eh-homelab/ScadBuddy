@@ -655,11 +655,13 @@ unless the admin allows it at approval (below):
   `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
   agent), and `workflows` (JavaScript).
 - **A name** that is not 2–32 lower-case letters, digits and single hyphens, or that is
-  reserved. The name namespaces the skills (`/<name>:<skill>`). This one refuses the
-  install outright.
+  reserved (it may clash with ScadBuddy's own plugin or tools). The name namespaces the
+  skills (`/<name>:<skill>`). A name that is not a safe path segment (`SAFE_NAME_RE`:
+  1–64 letters, digits, `.`, `_` and `-`, starting with a letter or digit) refuses the
+  install outright, because it names the cache directory and the row.
 
 **Allowing what the vetting refuses.** An admin may load a package exactly as it is, for one
-pin. Everything in `review.refused` is allowable: command hooks, hooks modules, stdio MCP
+pin. Everything in `review.refused` is allowable, including a reserved name: command hooks, hooks modules, stdio MCP
 servers, LSP servers, monitors, dynamic context injection, the frontmatter and tool rules,
 the hook-event allowlist and the manifest fields. Such a pin installs and shows its
 refusals in the review. `POST …/approve` then answers 409 unless the body also carries
@@ -683,7 +685,7 @@ are not ScadBuddy's.
 
 Some checks still apply to an allowed pin, at install and at every load:
 
-- the name rules;
+- the name must be a safe path segment (`SAFE_NAME_RE`);
 - a declared file outside the package (`isOutsideProblem()`), which the pinned hash does
   not cover;
 - symlinks and submodules;

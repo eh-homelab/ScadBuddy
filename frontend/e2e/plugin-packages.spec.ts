@@ -36,7 +36,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await section.getByRole('button', { name: 'Fetch and review' }).click()
     const refused = section.getByRole('list', { name: 'Why the package was refused' })
     await expect(refused.getByRole('listitem')).toHaveCount(1)
-    await expect(refused).toContainText('is reserved')
+    await expect(refused).toContainText('is not 1–64')
 
     // One the rules refuse installs, and lists what an approval would allow.
     await section.getByLabel('Repository URL').fill('https://git.example/shell.git')

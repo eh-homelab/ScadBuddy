@@ -202,7 +202,7 @@ describe('vetting a package', () => {
     expect(v.review?.refused?.some((p) => /more$/.test(p))).toBe(false)
   })
 
-  it('lists what an admin may allow in the review, and keeps the name and escaping paths fatal', () => {
+  it('lists what an admin may allow in the review, and keeps unsafe names and escaping paths fatal', () => {
     const hook = { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }
     const allowable = vetPackage(tree({ ...GREETER, ...hook }))
     expect(allowable.fatal).toEqual([])
@@ -210,9 +210,16 @@ describe('vetting a package', () => {
     expect(allowable.problems).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
     expect(vetPackage(tree(GREETER)).review?.refused).toEqual([])
 
-    const reserved = vetPackage(tree({ ...GREETER, ...hook, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) }))
-    expect(reserved.fatal).toEqual(['plugin name "scadbuddy" is reserved'])
-    expect(reserved.review).toBeUndefined()
+    // A reserved or non-kebab name is allowable; one that is not a safe path segment is not.
+    const reserved = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) }))
+    expect(reserved.fatal).toEqual([])
+    expect(reserved.review?.refused).toEqual([expect.stringMatching(/plugin name "scadbuddy" is reserved/)])
+    expect(vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'My_Plugin.v2' }) })).review?.refused).toEqual([
+      expect.stringMatching(/is not 2–32 lower-case/),
+    ])
+    const unsafe = vetPackage(tree({ ...GREETER, ...hook, '.claude-plugin/plugin.json': JSON.stringify({ name: '../up' }) }))
+    expect(unsafe.fatal).toEqual([expect.stringMatching(/plugin name "\.\.\/up" is not 1–64/)])
+    expect(unsafe.review).toBeUndefined()
     const escaping = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', mcpServers: '../x.json' }) }))
     expect(escaping.fatal).toEqual(['../x.json is outside the plugin'])
     expect(escaping.review?.refused).toEqual([])
@@ -422,8 +429,8 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect(err).toBeInstanceOf(PackageRefusedError)
     expect((err as PackageRefusedError).problems).toEqual(['../../outside.json is outside the plugin'])
 
-    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })
-    await expect(installer.prepare(source)).rejects.toThrow(/reserved/)
+    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad name' }) })
+    await expect(installer.prepare(source)).rejects.toThrow(/is not 1–64/)
 
     // An allowed pin still goes through the egress check at every load.
     repos.greeter = gitRepo(GREETER)

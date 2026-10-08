@@ -304,13 +304,15 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
     })
 
     it('answers 422 with every problem for a package no approval can allow, and stores nothing', async () => {
-      repos.bad = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })
+      repos.bad = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad name' }) })
       const res = await app().request(
         '/api/v1/ai/plugin-packages',
         json('POST', { source: { kind: 'git', url: 'https://git.test/bad.git' } }),
       )
       expect(res.status).toBe(422)
-      expect(((await res.json()) as { problems: string[] }).problems).toEqual(['plugin name "scadbuddy" is reserved'])
+      expect(((await res.json()) as { problems: string[] }).problems).toEqual([
+        expect.stringMatching(/^plugin name "bad name" is not 1–64/),
+      ])
       expect(await store.list()).toEqual([])
     })
 

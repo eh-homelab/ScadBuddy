@@ -55,9 +55,13 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 //
 // AN ADMIN MAY ALLOW what these rules refuse, for one package at one pin: the
 // review lists every refusal (`refused`), and approving with `allow_refused`
-// loads the package as it is (store.ts). That is a decision to run the
-// package's code with the Claude credential in its environment. Never
-// allowable (`fatal`): a name that is invalid or reserved, a declared file
+// loads the package as it is (store.ts). The review also lists the Claude Code
+// built-ins its skills and subagents name (`builtin_tools`); no turn offers
+// them yet, and skill shell injection stays off. That is a decision to run the package's code as the agent service itself:
+// with the Claude credential in its environment, and able to read the
+// service's (the database URL, the key file behind every stored secret). A
+// reserved or non-kebab name is allowable too. Never allowable (`fatal`): a
+// name that is not a safe path segment (`SAFE_NAME_RE`), a declared file
 // outside the package (not part of the pinned hash), and, in install.ts,
 // symlinks and submodules, the content hash, and the egress check on every
 // URL the package declares.
@@ -84,6 +88,12 @@ export type PackageReview = {
    * follow-up, which was refused outright, so empty.
    */
   refused?: string[]
+  /**
+   * The Claude Code built-ins its skills and subagents name (`allowed-tools`,
+   * `tools`), for the admin to see. The harness does not offer them yet
+   * (`tools` is the run's own). Absent in an older review.
+   */
+  builtin_tools?: string[]
 }
 
 export type Endpoint = { what: string; url: string }
@@ -99,6 +109,9 @@ export type Vetting = {
 }
 
 const NON_COMMAND_MCP_TYPE = 'http'
+
+/** The least a package name must be, approved or not; the stricter rules are allowable. */
+export const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 // The hook events a package may use: an allowlist, so an event added to
 // Claude Code later is refused until it is read. Left out on purpose, from
@@ -261,7 +274,13 @@ const INJECTION_INLINE = /(^|\s)!`/m
 // Anywhere in the text, as the CLI matches it (2.1.283 and 2.1.287: /```!\s*\n?([\s\S]*?)\n?```/g).
 const INJECTION_BLOCK = /(```|~~~)!/
 
-function checkMarkdown(rel: string, text: string, problems: string[]): void {
+/** The Claude Code built-in a tool list names (`Bash(git *)` → `Bash`); undefined for anything else. */
+export function builtinToolOf(name: string): string | undefined {
+  const base = name.replace(/\(.*\)$/, '')
+  return /^[A-Z][A-Za-z]*$/.test(base) ? base : undefined
+}
+
+function checkMarkdown(rel: string, text: string, problems: string[], builtins: Set<string>): void {
   if (INJECTION_INLINE.test(text) || INJECTION_BLOCK.test(text)) {
     problems.push(`${rel}: runs a shell command through dynamic context injection (!\`...\`)`)
   }
@@ -279,6 +298,10 @@ function checkMarkdown(rel: string, text: string, problems: string[]): void {
   }
   for (const key of ['allowed-tools', 'tools']) {
     const refused = toolNames(fm.get(key) ?? []).filter((t) => !isAllowlistedTool(t))
+    for (const tool of refused) {
+      const builtin = builtinToolOf(tool)
+      if (builtin) builtins.add(builtin)
+    }
     if (refused.length) {
       problems.push(`${rel}: ${key} names tools the harness does not offer or allow: ${refused.join(', ')}`)
     }
@@ -362,12 +385,16 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
   let name: string | undefined
   if (rawName === undefined) {
     fatal.push('the package has no name: add .claude-plugin/plugin.json with a "name"')
-  } else if (!PLUGIN_NAME_RE.test(rawName) || rawName.includes('--')) {
-    fatal.push(`plugin name "${rawName}" is not 2–32 lower-case letters, digits and single hyphens, starting with a letter`)
-  } else if (RESERVED_PLUGIN_NAMES.has(rawName)) {
-    fatal.push(`plugin name "${rawName}" is reserved`)
+  } else if (!SAFE_NAME_RE.test(rawName)) {
+    // The name is a directory of the cache and the row's key: never allowable.
+    fatal.push(`plugin name "${rawName}" is not 1–64 letters, digits, ".", "_" and "-", starting with a letter or digit`)
   } else {
     name = rawName
+    if (!PLUGIN_NAME_RE.test(rawName) || rawName.includes('--')) {
+      problems.push(`plugin name "${rawName}" is not 2–32 lower-case letters, digits and single hyphens, starting with a letter`)
+    } else if (RESERVED_PLUGIN_NAMES.has(rawName)) {
+      problems.push(`plugin name "${rawName}" is reserved: it may clash with ScadBuddy's own plugin or tools`)
+    }
   }
   problems.push(...fatal.filter((f) => !problems.includes(f)))
 
@@ -378,13 +405,16 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
   if (existsSync(path.join(abs, 'workflows'))) problems.push('workflows/ holds JavaScript, which a plugin package may not ship')
 
   const files = listFiles(abs)
+  const builtins = new Set<string>()
   for (const rel of files.filter((f) => f.toLowerCase().endsWith('.md'))) {
-    checkMarkdown(rel, readFileSync(path.join(abs, rel), 'utf8'), problems)
+    checkMarkdown(rel, readFileSync(path.join(abs, rel), 'utf8'), problems, builtins)
   }
   // Inline commands in the manifest: { name: { content: "..." } }.
   if (isRecord(m.commands)) {
     for (const [cmd, def] of Object.entries(m.commands)) {
-      if (isRecord(def) && typeof def.content === 'string') checkMarkdown(`plugin.json commands.${cmd}`, def.content, problems)
+      if (isRecord(def) && typeof def.content === 'string') {
+        checkMarkdown(`plugin.json commands.${cmd}`, def.content, problems, builtins)
+      }
     }
   }
 
@@ -454,6 +484,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         hooks,
         mcp_servers: mcpServers,
         files: files.filter((f) => /\.(md|json)$/i.test(f)),
+        builtin_tools: [...builtins].sort(),
       }
     : undefined
 
