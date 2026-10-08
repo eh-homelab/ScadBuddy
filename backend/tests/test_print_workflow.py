@@ -7,7 +7,7 @@ import asyncio
 import dataclasses
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -43,6 +43,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows import print_activities, printing
@@ -131,7 +132,7 @@ class Fake:
     def _run(self, status: str = "running", **fields: object) -> PrintRun:
         return PrintRun(
             id="run-1",
-            output_id="o" * 32,
+            subject="output:" + "o" * 32,
             status=status,  # type: ignore[arg-type]
             created_at=datetime(2026, 10, 2, tzinfo=UTC),
             **fields,  # type: ignore[arg-type]
@@ -736,7 +737,7 @@ def real_activities(settings: _Settings | None = None) -> PrintActivities:
             settings_store=cast(Any, settings or _Settings()),
             outputs=unused,
             uploads=unused,
-            catalogue=unused,
+            prints=unused,
             store=unused,
             observer=unused,
         )
@@ -755,13 +756,22 @@ async def ended_with_real_finish(
         return await asyncio.wait_for(ended(client, arg), timeout=30)
 
 
+def _returning(source: object) -> Callable[..., Awaitable[object]]:
+    """``_output_source`` is async since outputs are read from the API (#1060)."""
+
+    async def load(*_: object) -> object:
+        return source
+
+    return load
+
+
 async def test_a_queued_print_whose_project_is_not_remembered_still_ends_succeeded(
     client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review #1061 1a: the real `print_finish`; remembering the project's printer is
     best effort, so a run with every plate queued never ends `failed`."""
     real = real_activities()
-    monkeypatch.setattr(real, "_output_source", lambda *_: _ForgetfulSource())
+    monkeypatch.setattr(real, "_output_source", _returning(_ForgetfulSource()))
     fake.project_id = 7
     run = await ended_with_real_finish(client, fake, real, run_input())
     assert run.status == "succeeded" and run.result is not None
@@ -776,7 +786,7 @@ async def test_a_project_remembered_past_its_budget_is_skipped_and_the_run_succe
     which no ``except`` sees, and `print_finish` retries without limit; the remember is
     given up after its budget instead."""
     real = real_activities()
-    monkeypatch.setattr(real, "_output_source", lambda *_: _StalledSource())
+    monkeypatch.setattr(real, "_output_source", _returning(_StalledSource()))
     monkeypatch.setattr(print_activities, "REMEMBER_BUDGET", 0.5)
     fake.project_id = 7
     run = await ended_with_real_finish(client, fake, real, run_input())
@@ -837,7 +847,7 @@ async def test_a_check_no_client_waits_for_any_more_refuses_the_print() -> None:
             settings_store=unused,
             outputs=unused,
             uploads=unused,
-            catalogue=unused,
+            prints=unused,
             store=unused,
             observer=unused,
         )
@@ -1021,3 +1031,46 @@ async def test_a_cancel_while_the_enqueue_is_recorded_as_started_agrees_with_the
     assert fake.enqueue_attempted  # the write finished before the run failed
     assert finished.status == "failed" and not finished.may_have_queued
     assert fake.calls[-1] == f"fail:409:{CANCELLED_UNQUEUED.detail}:unqueued"
+
+
+class _Sends:
+    available = True
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[PrintSubject, list[int]]] = []
+
+    async def record_sends(self, subject: PrintSubject, sends: list[Any]) -> None:
+        self.recorded.append((subject, [send.queue_item_id for send in sends]))
+
+
+async def test_a_library_plate_is_recorded_by_subject_without_reading_bambuddy() -> None:
+    """#1750 (R1, R2): ``print_record`` records a library file's plate through its source,
+    as an output's, and reads nothing back from Bambuddy to do it: there are no Bambuddy
+    settings here at all."""
+    unused: Any = None
+    sends = _Sends()
+    real = PrintActivities(
+        PrintDeps(
+            settings_store=unused,
+            outputs=unused,
+            uploads=unused,
+            prints=unused,
+            store=unused,
+            observer=unused,
+            links=cast(Any, sends),
+        )
+    )
+    outcome = QueueOutcome(
+        slice_job_id=9, sliced_library_file_id=41, queue_item_ids=[51], printer_id=1
+    )
+    sent = await ActivityEnvironment().run(
+        real.record,
+        RecordInput(
+            source=SourceSpec(kind="library", file_id=41),
+            library_file_id=41,
+            plate_id=1,
+            outcome=outcome,
+        ),
+    )
+    assert sends.recorded == [(PrintSubject.library(41), [51])]
+    assert sent == [PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9)]

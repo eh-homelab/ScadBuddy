@@ -335,7 +335,8 @@ class PgNotifyEventBus:
     # -- lifecycle ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect and listen, then start draining the outbox and pruning.
+        """Connect and listen, prune the log once, then start draining the outbox and
+        pruning on a timer.
 
         Returns once the listener's ``LISTEN`` is in place (#1745), so whatever this
         process publishes from then on -- the buffered early events included -- is
@@ -366,6 +367,9 @@ class PgNotifyEventBus:
                 await asyncio.gather(listening, return_exceptions=True)
             await self._pool.close()
             raise
+        # The first pass is ours, not the timer's: run in a task, it would land whenever
+        # the caller next yields, after events the caller has since logged (#1787).
+        await self._prune_logged()
         outbox = _Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
         with self._lock:
             self._outbox = outbox
@@ -536,13 +540,16 @@ class PgNotifyEventBus:
 
     async def _pruner(self) -> None:
         while True:
-            try:
-                await self.prune_log()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("could not prune the event log")
             await asyncio.sleep(self.prune_interval)
+            await self._prune_logged()
+
+    async def _prune_logged(self) -> None:
+        try:
+            await self.prune_log()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("could not prune the event log")
 
     def _received(self, payload: str) -> None:
         try:

@@ -17,6 +17,7 @@ from scadbuddy.bambuddy.print_run import (
     RACK_USAGE_FALLBACK,
     rack_chooser,
 )
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import (
@@ -86,7 +87,7 @@ class Archives:
 
 
 class Links:
-    async def for_output(self, output_id: str) -> list[PrintLink]:
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
         return [
             PrintLink(archive_id=101, matched_by="queue_item", queue_item_id=51),
             PrintLink(archive_id=102, matched_by="queue_item", queue_item_id=51),

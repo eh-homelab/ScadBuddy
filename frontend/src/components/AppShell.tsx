@@ -260,9 +260,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           </header>
 
           {ai.available && (
-            <Suspense fallback={null}>
-              <AgentLink factory={tabLink} />
-            </Suspense>
+            // #1002 — a link whose chunk failed costs only the browser bridge; the
+            // boundary logs it to the console.
+            <ErrorBoundary fallback={() => null}>
+              <Suspense fallback={null}>
+                <AgentLink factory={tabLink} />
+              </Suspense>
+            </ErrorBoundary>
           )}
           <div className="relative flex min-h-0 flex-1">
             <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -285,16 +289,19 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 onKeyDown={onPanelKey}
                 className="absolute inset-y-0 right-0 z-30 w-full max-w-[400px] border-l border-line bg-surface shadow-2xl md:static md:w-[380px] md:max-w-none md:shrink-0 md:shadow-none"
               >
-                <Suspense fallback={<p className="p-3 text-[12.5px] text-muted">Loading the assistant…</p>}>
-                  <AssistantPanel
-                    onClose={closePanel}
-                    focusKey={focusKey}
-                    factory={assistantTransport}
-                    embedded={embedded}
-                    openRequest={openRequest}
-                    onOpenHandled={openHandled}
-                  />
-                </Suspense>
+                {/* #1002 — a panel that fails (mostly its chunk) stays in the panel. */}
+                <ErrorBoundary fallback={() => <PanelFailed />}>
+                  <Suspense fallback={<p className="p-3 text-[12.5px] text-muted">Loading the assistant…</p>}>
+                    <AssistantPanel
+                      onClose={closePanel}
+                      focusKey={focusKey}
+                      factory={assistantTransport}
+                      embedded={embedded}
+                      openRequest={openRequest}
+                      onOpenHandled={openHandled}
+                    />
+                  </Suspense>
+                </ErrorBoundary>
               </aside>
             )}
           </div>
@@ -308,6 +315,17 @@ function PageFailed() {
   return (
     <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]">
       <p className="text-ink">This page stopped working. The details are in the browser console.</p>
+      <Button size="sm" onClick={() => window.location.reload()}>
+        Reload page
+      </Button>
+    </div>
+  )
+}
+
+function PanelFailed() {
+  return (
+    <div role="alert" className="flex flex-col items-start gap-3 p-3 text-[12.5px]">
+      <p className="text-ink">The assistant failed to load. The details are in the browser console.</p>
       <Button size="sm" onClick={() => window.location.reload()}>
         Reload page
       </Button>

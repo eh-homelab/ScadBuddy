@@ -130,7 +130,8 @@ Non-goals
   - `live_output=True` publishes events through Workflow Streams, and `follow_agent`
     reads them. Every subscriber poll is an Update, so the README recommends one
     subscriber in the backend that fans the events out.
-  - It requires Claude Code ≥ 2.1.273. ScadBuddy pins 2.1.283. It needs an API key,
+  - It requires Claude Code ≥ 2.1.273. ScadBuddy's pinned SDK (0.3.287) bundles 2.1.287.
+    It needs an API key,
     Bedrock/Vertex/Foundry, or `CLAUDE_CODE_OAUTH_TOKEN`; an app login cannot
     refresh on resume.
   - Subagents run in the foreground and cannot call durable tools.
@@ -1509,6 +1510,25 @@ Each phase is its own implementation plan and ships alone.
      beyond the print POST's re-send on `command-still-accepting`, move to phase 2. The
      Search Attributes are upserted only with `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES` set,
      until the clusters change registers them.
+   - As built (1b, #1060, plan `2026-10-04-durable-phase-1b-print-deployment.md`):
+     `python -m scadbuddy.worker --queue bambuddy` is the `scadbuddy-print` worker, with no
+     data volume. Everything on `bambuddy` reads outputs through `OutputReader`:
+     `RemoteOutputs` calls the API's hidden `/api/v1/internal/outputs/{id}`,
+     `…/model.3mf` (the stored bytes, not the download laid out for the default printer)
+     and `…/naming` (the project stem and `print_settings`). The 3MF is not read from the
+     blob store: an output's copy lives on the volume, and its job's piece is swept. An
+     output's last print (`record_send`) is `output_last_prints` in Postgres, laid over an
+     older `meta.json`'s. `PrintRun` and `Operation` are pinned to the build; `FollowPrint`
+     is AUTO_UPGRADE, as its own class (`VersionedFollowPrint`) because an unversioned
+     worker refuses a versioning behavior, and the drain skips it. The drain is bounded at
+     1920 s (`REPEAT_WINDOW` and two slice timeouts). The API serves `bambuddy` only with
+     `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or the new
+     `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`, unversioned, and always runs the lost-run
+     reconcile and the `print_watches` hand-off. Output delete's inbox copies are the
+     `bambuddy` kind `output_inbox_delete`, run as `output_delete`'s prelude: `Operation`
+     executes it on that queue before the run (`workflow.patched("op-prelude")`), only for
+     `delete_inbox_copies`. The manifests and the Search Attributes are the plan's clusters
+     section.
 2. **Renders and Bambuddy commands** (§4.5, §4.3 `bambuddy`, §4.4 `FollowPrint`): renders
    join the shape and `reconcile_once` goes; send, projects, reprint, timelapse pull,
    sidebar and analyzer fixes move to `bambuddy`; the print watcher becomes `FollowPrint`.
@@ -1591,8 +1611,80 @@ Each phase is its own implementation plan and ships alone.
      port and path only. A release removes only a claim its own put created and no put
      has written since. The UI's and the agent's calls to these routes go through
      `command()`.
+   - As built so far (3d, #1054, plan `2026-10-03-durable-phase-3d-model-edits.md`): a
+     model's edits are `library` kinds too (`library/model_operations.py`): source save
+     and patch, thumbnail and README set and remove, a sibling `.scad` file's write and
+     removal, restore, and the upstream merge, dismiss and detach. Source, patch body,
+     README, file content and thumbnail go by claim check. A stale `base` is still a
+     409 naming `current`, now from the operation's problem extensions. An upstream
+     merge that would conflict is answered by the route (`Catalogue.merge_plan`, read
+     only) as a 409 with the merged text, and starts no operation, so the merged text
+     never enters a workflow history. An operation's run commits as the request's
+     agent author (`OperationInput.author`, `core/authorship.py` `authored_as`). The
+     agent's `commandAnswer` (`agent/src/tools/command.ts`) returns a followed
+     operation's failure as the route's problem, so `apply_patch` still reads
+     `current`.
+   - As built so far (3e, #1054, plan `2026-10-04-durable-phase-3e-uploads.md`): the
+     remaining volume writes are `library` kinds. A model's media
+     (`model_media_upload`, `_patch`, `_order`, `_cover`, `_delete`); outputs
+     (`output_create`, `output_thumbnail`, `output_delete`); assets (`asset_upload`,
+     `asset_fetch`); `font_install` (subject: the family, lower-cased: a re-send with the
+     same key joins the first download, while separate presses are separate
+     operations); and the preset writes that run
+     openscad (`preset_create`, `preset_duplicate`, `preset_update`). The library check,
+     the dependencies route and a preset delete stay requests: the first two record
+     nothing, and a preset delete is one Postgres statement with no openscad. An output
+     delete with `delete_inbox_copies` deletes the Bambuddy inbox copies in its run,
+     before the files, on `library`, not `bambuddy` as §4.3 has it: acceptable while both
+     workers run in the API process, and #1060 splits it (1b's note). A media upload is claimed by
+     file: it can be 1 GiB, so it is streamed to disk, hashed as it streams, and moved in
+     under that digest (`ClaimStore.hold_file`); a repeat answered from its record leaves
+     no file behind. An output create's job checks (404, 409) are its check; fetching
+     the result from the blob store, and its 404 when the result is gone, are its run,
+     since a fetch from Bambuddy may outlast a check's budget. An asset fetch keeps its
+     busy-budget 503 in the route (`before_start`), and claims its URL like an import:
+     its record, and the answer's `source_url`, hold scheme, host, port and path only.
+   - As built so far (3f, #1054, plan `2026-10-04-durable-phase-3f-previews.md`): the
+     boot's preview pass is `PreviewBackfill` on `library` (`workflows/previews.py`),
+     started by the Schedule `scadbuddy-previews-<queue>` every hour and once at each boot
+     (overlap `SKIP`, the boot trigger `BUFFER_ONE`, a paused Schedule left paused, the
+     whole run bounded at 12 h). Previews off deletes it. A run lists the models due a
+     preview (`previews_due`) and refreshes them one at a time (`preview_refresh`, the
+     scheduler's own `refresh`), pausing 1 s after each render, and continues as new past
+     100. The per-change requests stay in-process with their debounce: a request per edit
+     on Temporal would buy no durability, since the next tick picks up one that was lost.
+     `RenderPreview` is not started as a child: `start_child_workflow` has no
+     `id_conflict_policy`, so a child could not join the run the scheduler already
+     started. The activity starts it as the scheduler does (`USE_EXISTING` on
+     `preview-<slug>-<key>`), and one lock in the process makes the two take turns, with
+     the plan made again under it, so a model is rendered once. The hourly tick also
+     retries a render that could not be run, which used to wait for the next edit or boot.
 4. **Tools as activities** (§6.3): the `ALL_TOOLS` export and the `agent-tools` worker in
    the agent service, plus the plugin package install as a command.
+   - As built (#1055, plan `2026-10-04-durable-phase-4-agent-tools.md`): `pnpm build`
+     writes `agent/dist/tools.json`, `[{name, description, input_schema, tier}]` read
+     through the `/mcp` projection itself (`agent/src/tools/manifest.ts`), so it is
+     exactly what `/mcp` lists; generated, never committed (`pnpm gen:tools <file>`).
+     The agent service runs `AgentWorker` (`agent/src/temporal/worker.ts`) on
+     `agent-tools` when `SCADBUDDY_TEMPORAL_ADDRESS` and the database are set,
+     unversioned (it pins nothing a drain would wait for), stopped with the turns on
+     SIGTERM with a 10 s grace, cancelled after it, and abandoned at 15 s
+     (`shutdownForceTime`). Each tool's activity (`temporal/toolActivities.ts`) takes
+     the one dict `activity_as_tool` passes and returns the result's content blocks; a
+     result that is not `ok` fails non-retryably (`ToolError`). It runs only for a
+     workflow `session-<id>` whose `ai_sessions.mode` is `durable`: §6.1's column is
+     added here (`20261004T1330Z_session_mode.sql`), so phase 5 does not add it, because
+     the activity runs with `gate: 'workflow'` (the workflow's `needs_approval` was the
+     approval) and a classic session's id must not be borrowed past `ai_approvals`. The
+     `sessions_*` decisions a session model may not make refuse it as they refuse the
+     harness. Each call writes the harness's audit row. §6.5's gate holds: in
+     `@temporalio/common` 1.24 a codec receives `ActivitySerializationContext` with the
+     workflow ID (pinned by `test/temporal.worker.test.ts`); the codec itself is phase 5.
+     Install and re-pin are `AgentOperation` kinds (`temporal/workflows.ts`, the backend
+     `Operation`'s steps, a bundle built at `pnpm build`, a replayed recorded history),
+     recorded in `ai_operations` (the agent owns its tables), keyed by `Idempotency-Key`,
+     `done` within 10 s, else 202 followed at `GET /api/v1/ai/operations/{id}`. Approve,
+     enable, discard and delete stay requests (one Postgres statement each).
 5. **Durable session mode** (§6.1, §6.2, §6.4, §6.6): `agent-durable/`, the plugin pin,
    the `SessionStore`, the credential port, the event subscriber, the tool-call gate
    (§6.6), the mode UI and setting. The gate's work, both modes:

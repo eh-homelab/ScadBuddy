@@ -25,6 +25,7 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
 from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
@@ -48,6 +49,7 @@ from tests.api.test_send import (
     upload_route,
 )
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 from tests.test_bambu3mf import add_plate
 
 # A run and the dialog both read or record the output's upload copies (#316), which
@@ -135,15 +137,29 @@ def follow_run(client: TestClient, run_id: str, *, timeout: float = 60.0) -> dic
         time.sleep(0.02)
 
 
+#: How many times `run_print` sends a run again that the route answers still-accepting:
+#: counted, not timed, as this host's clocks step.
+STILL_ACCEPTING_RESENDS = 30
+
+
 def run_print(client: TestClient, output_id: str, *, json: dict[str, Any]) -> httpx.Response:
     """``POST .../run``, followed to its end, answered as the route did before #470.
 
     A refusal made before the 202 comes back as it is. A run that succeeds is its
     ``result`` with a 200, and one that failed is its ``error``, with the status that
     error carries, so a test reads the outcome the same way whichever side of the 202
-    decided it.
+    decided it. A ``command-still-accepting`` 503 is sent again, as the clients do:
+    on a loaded host the last run's execution may outlive the route's wait for it to
+    close (``CLOSING_WAIT``), and the request that follows starts the new run.
     """
-    started: httpx.Response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=json)
+    for resends in range(STILL_ACCEPTING_RESENDS + 1):
+        started: httpx.Response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=json)
+        still_accepting = (
+            started.status_code == 503 and started.json().get("type") == STILL_ACCEPTING_PROBLEM
+        )
+        if not still_accepting or resends == STILL_ACCEPTING_RESENDS:
+            break
+        time.sleep(float(started.headers.get("retry-after", "1")))
     if started.status_code not in (200, 202):
         return started
     run = follow_run(client, started.json()["id"])
@@ -721,7 +737,9 @@ def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
         "job_id"
     ]
     wait_for_job(client, job_id)
-    output_id = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()["id"]
+    output_id = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    ).json()["id"]
     upload = upload_route()
     slice_routes()
     queue_route()

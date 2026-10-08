@@ -6,6 +6,8 @@ import json
 import threading
 import time
 from collections.abc import Iterator
+from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import operations as operations_api
+from scadbuddy.api import upstream as upstream_api
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import catalogue as catalogue_module
@@ -21,8 +26,11 @@ from scadbuddy.library.catalogue import MERGE_ATTEMPTS, Catalogue, ModelMeta, Mo
 from scadbuddy.library.history import GitUnavailableError, ModelHistory
 from scadbuddy.library.upstream import MergePlan, UpstreamStateError
 from scadbuddy.main import create_app
+from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES
+from tests.api.test_model_operations import _workflow_ids
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
@@ -65,7 +73,10 @@ def _duplicate(client: TestClient, model_id: str = BUILTIN, name: str = "My keyc
 
 def _put(client: TestClient, slug: str, source: str, **query: str) -> Any:
     return client.put(
-        f"/api/v1/models/{slug}/source", params=query, json={"source": source, "force": True}
+        f"/api/v1/models/{slug}/source",
+        params=query,
+        json={"source": source, "force": True},
+        headers=press(),
     )
 
 
@@ -143,7 +154,7 @@ def test_a_built_in_update_merges_clean_into_an_edited_duplicate(
     assert _json(client.get(f"/api/v1/models/{MINE}"))["upstream_state"] == "update"
     before = _messages(client, MINE)
 
-    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"))
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()))
 
     assert _source(client) == both
     assert merged["model"]["upstream"] == {
@@ -171,7 +182,7 @@ def test_a_conflict_is_a_409_and_saving_the_resolution_advances_base(
 
     preview = _upstream(client)["preview"]
     assert preview["clean"] is False
-    refused = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"), 409)
+    refused = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()), 409)
 
     assert refused["merge_base"] == builtin_version
     assert refused["conflicts"] == 1
@@ -232,14 +243,14 @@ def test_dismissing_marks_the_update_dismissed_until_the_upstream_moves_again(
     update itself stays previewed and mergeable, and the next upstream move brings
     ``update`` back."""
     _duplicate(client)
-    refused = client.post(f"/api/v1/models/{MINE}/upstream/dismiss")
+    refused = client.post(f"/api/v1/models/{MINE}/upstream/dismiss", headers=press())
     assert refused.status_code == 409, refused.text
     assert refused.json()["state"] == "current"
 
     _restart_with(settings, bundled, SOURCE.replace("width = 40;", "width = 50;"))
     first = _json(client.get(f"/api/v1/models/{BUILTIN}"))["version"]
 
-    dismissed = _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss"))
+    dismissed = _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss", headers=press()))
 
     assert dismissed["upstream"]["dismissed"] == first
     assert dismissed["upstream_state"] == "dismissed"
@@ -256,7 +267,7 @@ def test_dismissing_marks_the_update_dismissed_until_the_upstream_moves_again(
     _restart_with(settings, bundled, SOURCE.replace("width = 40;", "width = 60;"))
     assert _upstream(client)["state"] == "update"
 
-    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"))
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()))
     assert merged["model"]["upstream"]["dismissed"] is None
     assert _source(client) == SOURCE.replace("width = 40;", "width = 60;")
 
@@ -266,9 +277,9 @@ def test_a_dismissed_update_can_still_be_merged(
 ) -> None:
     _duplicate(client)
     _restart_with(settings, bundled, SOURCE.replace("width = 40;", "width = 50;"))
-    _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss"))
+    _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss", headers=press()))
 
-    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"))
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()))
 
     assert merged["model"]["upstream"]["dismissed"] is None
     assert merged["model"]["upstream_state"] == "current"
@@ -277,7 +288,7 @@ def test_a_dismissed_update_can_still_be_merged(
 def test_merging_when_current_is_a_409(client: TestClient) -> None:
     _duplicate(client)
 
-    refused = client.post(f"/api/v1/models/{MINE}/upstream/merge")
+    refused = client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press())
 
     assert refused.status_code == 409, refused.text
     assert refused.json()["state"] == "current"
@@ -289,7 +300,7 @@ def test_a_duplicate_of_mine_takes_its_parents_edits(client: TestClient) -> None
     _json(_put(client, MINE, SOURCE.replace("height = 12;", "height = 20;")))
 
     assert _upstream(client, "variant")["state"] == "update"
-    merged = _json(client.post("/api/v1/models/variant/upstream/merge"))
+    merged = _json(client.post("/api/v1/models/variant/upstream/merge", headers=press()))
 
     assert _source(client, "variant") == SOURCE.replace("height = 12;", "height = 20;")
     assert merged["model"]["upstream"]["id"] == MINE
@@ -313,7 +324,7 @@ def test_other_files_follow_the_upstream_unless_changed_here(
     assert preview["taken"] == ["README.md", "parts.scad"]
     assert preview["kept"] == ["thumbnail.png"]
 
-    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"))
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()))
 
     assert merged["taken"] == ["README.md", "parts.scad"]
     assert merged["kept"] == ["thumbnail.png"]
@@ -328,14 +339,14 @@ def test_other_files_follow_the_upstream_unless_changed_here(
     (bundled / "parts.scad").unlink()
     _restart_with(settings, bundled, SOURCE)
     assert _upstream(client)["preview"]["taken"] == ["parts.scad"]
-    _json(client.post(f"/api/v1/models/{MINE}/upstream/merge"))
+    _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()))
     assert not (directory / "parts.scad").exists()
 
 
 def test_a_deleted_upstream_is_gone_and_can_be_detached(client: TestClient) -> None:
     _duplicate(client)
     _duplicate(client, MINE, "Variant")
-    refused = client.post("/api/v1/models/variant/upstream/detach")
+    refused = client.post("/api/v1/models/variant/upstream/detach", headers=press())
     assert refused.status_code == 409, refused.text
     assert refused.json()["state"] == "current"
 
@@ -357,11 +368,11 @@ def test_a_deleted_upstream_is_gone_and_can_be_detached(client: TestClient) -> N
     assert status["revision"] is None
     assert _listed(client, "variant")["upstream_state"] == "gone"
     for action in ("merge", "dismiss"):
-        response = client.post(f"/api/v1/models/variant/upstream/{action}")
+        response = client.post(f"/api/v1/models/variant/upstream/{action}", headers=press())
         assert response.status_code == 409, response.text
         assert response.json()["state"] == "gone"
 
-    detached = _json(client.post("/api/v1/models/variant/upstream/detach"))
+    detached = _json(client.post("/api/v1/models/variant/upstream/detach", headers=press()))
 
     assert detached["upstream"] is None
     assert detached["upstream_state"] is None
@@ -389,8 +400,14 @@ def test_a_template_without_an_upstream_has_none(client: TestClient, model: str)
         assert response.status_code == 404, response.text
     assert client.get("/api/v1/models/nope/upstream").status_code == 404
     for action in ("merge", "dismiss", "detach"):
-        assert client.post(f"/api/v1/models/{model}/upstream/{action}").status_code == 404
-        assert client.post(f"/api/v1/models/{BUILTIN}/upstream/{action}").status_code == 403
+        assert (
+            client.post(f"/api/v1/models/{model}/upstream/{action}", headers=press()).status_code
+            == 404
+        )
+        assert (
+            client.post(f"/api/v1/models/{BUILTIN}/upstream/{action}", headers=press()).status_code
+            == 403
+        )
 
 
 def test_without_history_there_is_no_upstream_state(paths: DataPaths) -> None:
@@ -575,15 +592,20 @@ def test_a_merge_takes_the_upstreams_new_thumbnail_and_readme(
         client.put(
             f"/api/v1/models/{upstream['slug']}/thumbnail",
             files={"file": ("t.png", new_thumbnail, "image/png")},
+            headers=press(),
         )
     )
-    _json(client.put(f"/api/v1/models/{upstream['slug']}/readme", json={"content": "# P\n"}))
+    _json(
+        client.put(
+            f"/api/v1/models/{upstream['slug']}/readme", json={"content": "# P\n"}, headers=press()
+        )
+    )
 
     status = _upstream(client, child["slug"])
     assert status["state"] == "update"
     assert status["preview"]["taken"] == ["README.md", "thumbnail.png"]
 
-    merged = _json(client.post(f"/api/v1/models/{child['slug']}/upstream/merge"))
+    merged = _json(client.post(f"/api/v1/models/{child['slug']}/upstream/merge", headers=press()))
 
     assert (merged["model"]["thumbnail_source"], merged["model"]["has_readme"]) == ("model", True)
     served = client.get(f"/api/v1/models/{child['slug']}/thumbnail")
@@ -594,7 +616,10 @@ def test_a_merge_takes_the_upstreams_new_thumbnail_and_readme(
     )
     assert client.get(f"/api/v1/models/{child['slug']}/readme").text == "# P\n"
     # Its own details stay editable after the merge.
-    assert client.delete(f"/api/v1/models/{child['slug']}/thumbnail").status_code == 200
+    assert (
+        client.delete(f"/api/v1/models/{child['slug']}/thumbnail", headers=press()).status_code
+        == 200
+    )
     assert paths.model_meta(child["slug"]).is_file()
 
 
@@ -602,7 +627,116 @@ def test_a_merge_takes_the_upstreams_new_thumbnail_and_readme(
 def test_a_built_ins_upstream_actions_and_details_writes_are_all_refused(
     client: TestClient, action: str
 ) -> None:
-    response = client.post(f"/api/v1/models/{BUILTIN}/upstream/{action}")
+    response = client.post(f"/api/v1/models/{BUILTIN}/upstream/{action}", headers=press())
     assert response.status_code == 403, response.text
-    readme = client.put(f"/api/v1/models/{BUILTIN}/readme", json={"content": "# x\n"})
+    readme = client.put(
+        f"/api/v1/models/{BUILTIN}/readme", json={"content": "# x\n"}, headers=press()
+    )
     assert readme.status_code == 403
+
+
+def test_a_conflicting_merge_answers_merged_and_starts_nothing(
+    client: TestClient, app: FastAPI, settings: Settings, bundled: Path
+) -> None:
+    """#1054 (phase 3d) Ruling 1: the route answers the conflict, so `merged`, the whole
+    three-way result, never reaches an operation's history or record."""
+    _duplicate(client)
+    _json(_put(client, MINE, SOURCE.replace('layout = "row";', 'layout = "grid";')))
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "column";'))
+    refused = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()), 409)
+    assert f"<<<<<<< {MINE}\n" in refused["merged"]
+    assert _workflow_ids(app, "model_upstream_merge") == []
+
+
+def test_upstream_actions_are_operations(
+    client: TestClient, app: FastAPI, settings: Settings, bundled: Path
+) -> None:
+    _duplicate(client)
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "column";'))
+    _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss", headers=press()))
+    assert _workflow_ids(app, "model_upstream_dismiss")
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=press()))
+    assert merged["model"]["slug"] == MINE
+    assert _workflow_ids(app, "model_upstream_merge")
+
+
+def test_a_repeated_merge_answers_from_its_record_after_the_upstream_moved(
+    client: TestClient, app: FastAPI, settings: Settings, bundled: Path
+) -> None:
+    """Review 3d I1: the route's conflict pre-check comes after the record, so a re-send
+    of a merge that landed is its answer, not the conflict a later upstream makes."""
+    _duplicate(client)
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "column";'))
+    key = {"Idempotency-Key": "a" * 32}
+    merged = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key))
+    _json(_put(client, MINE, _source(client).replace('layout = "column";', 'layout = "grid";')))
+    _restart_with(settings, bundled, SOURCE.replace('layout = "row";', 'layout = "stack";'))
+    assert _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key)) == merged
+
+
+def test_a_re_sent_merge_whose_first_is_still_running_skips_the_conflict_check(
+    client: TestClient,
+    app: FastAPI,
+    settings: Settings,
+    bundled: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 1130 2: a re-send that arrives before the first merge's record exists
+    follows the running merge rather than answering the conflict a later upstream makes."""
+    _duplicate(client)
+    _json(_put(client, MINE, SOURCE.replace('layout = "row";', 'layout = "grid";')))
+    _restart_with(settings, bundled, SOURCE.replace("hole = 3;", "hole = 4;"))
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    release = threading.Event()
+    merge = upstream_api.merge_run
+
+    def held(*args: Any) -> Any:
+        release.wait(60)
+        return merge(*args)
+
+    monkeypatch.setattr(upstream_api, "merge_run", held)
+    key = {"Idempotency-Key": "b" * 32}
+    try:
+        first = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key), 202)
+        _restart_with(
+            settings,
+            bundled,
+            SOURCE.replace("hole = 3;", "hole = 4;").replace(
+                'layout = "row";', 'layout = "column";'
+            ),
+        )
+
+        async def unrecorded(self: OperationStore, key: str) -> None:
+            return None
+
+        # The window the review names: the first operation's row is not written yet.
+        # The re-send joins the running merge, which is still accepting it.
+        with monkeypatch.context() as window:
+            window.setattr(OperationStore, "find", unrecorded)
+            joined = client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key)
+        assert joined.status_code == 503, joined.text
+        assert joined.json()["type"] == STILL_ACCEPTING_PROBLEM
+        again = _json(client.post(f"/api/v1/models/{MINE}/upstream/merge", headers=key), 202)
+        assert again["id"] == first["id"]
+    finally:
+        release.set()
+    deadline = time.monotonic() + 60
+    op = first
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = _json(client.get(f"/api/v1/operations/{first['id']}"))
+    assert op["status"] != "running", op
+
+
+def test_upstream_state_refusals_record_nothing(client: TestClient, app: FastAPI) -> None:
+    """M1: dismissing with no update, or detaching an upstream that still exists, is
+    refused by the operation's check, so nothing is recorded."""
+    _duplicate(client)
+    dismissed = _json(client.post(f"/api/v1/models/{MINE}/upstream/dismiss", headers=press()), 409)
+    assert dismissed["state"] == "current"
+    detached = _json(client.post(f"/api/v1/models/{MINE}/upstream/detach", headers=press()), 409)
+    assert detached["state"] == "current"
+    assert _workflow_ids(app, "model_upstream_dismiss") == []
+    assert _workflow_ids(app, "model_upstream_detach") == []

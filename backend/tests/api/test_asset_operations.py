@@ -1,0 +1,173 @@
+"""Uploading and fetching an asset as ``library`` operations (#1054)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+import uuid
+from collections.abc import Iterator
+from datetime import timedelta
+from functools import partial
+from typing import Any
+
+import httpx
+import pytest
+import respx
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from scadbuddy.api import operations as operations_api
+from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.workflows.commands import start_command
+from tests.api.test_assets import _svg
+from tests.api.test_model_operations import _state, _workflow_ids
+from tests.conftest import MODEL_SLUG
+from tests.support.operations import press
+
+pytestmark = [pytest.mark.requires_postgres]
+
+
+def _upload(client: TestClient, data: bytes, key: str | None = None) -> Any:
+    return client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets",
+        files={"file": ("a.svg", data, "image/svg+xml")},
+        headers={"Idempotency-Key": key} if key else press(),
+    )
+
+
+def test_a_repeated_asset_upload_stores_one_asset(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    key = uuid.uuid4().hex
+    first = _upload(client, _svg(1), key)
+    assert first.status_code == 201, first.text
+    again = _upload(client, _svg(1), key)
+    assert again.status_code == 201, again.text
+    assert again.json() == first.json()
+    assert len(_workflow_ids(app, "asset_upload")) == 1
+    assert client.get("/api/v1/assets/usage").json()["count"] == 1
+
+
+@pytest.fixture
+def capped_client(settings: Settings, model: str) -> Iterator[TestClient]:
+    capped = settings.model_copy(update={"asset_max_count": 1})
+    with TestClient(create_app(capped)) as test_client:
+        yield test_client
+
+
+def test_the_quota_refusal_keeps_usage_after_a_202(
+    capped_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review focus 2: a 413 that arrives after the 202 still carries `usage`."""
+    assert _upload(capped_client, _svg(1)).status_code == 201
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    store = _state(capped_client.app).assets  # type: ignore[arg-type]
+    put = store.put
+
+    def slowly(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(3)
+        return put(*args, **kwargs)
+
+    monkeypatch.setattr(store, "put", slowly)
+    started = _upload(capped_client, _svg(2))
+    assert started.status_code == 202, started.text
+    op = started.json()
+    deadline = time.monotonic() + 60
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        op = capped_client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "failed", op
+    assert op["error"]["status"] == 413
+    assert op["error"]["extensions"]["usage"]["max_count"] == 1
+
+
+@pytest.mark.usefixtures("fake_dns")
+@respx.mock
+def test_an_asset_fetch_never_records_the_urls_query(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
+    respx.get(url).mock(return_value=httpx.Response(200, content=_svg(3)))
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
+    assert response.status_code == 201, response.text
+    assert "s3cret" not in response.json()["source_url"]
+    pool = _state(app).components.get(OPERATIONS).store._require()
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT * FROM operations WHERE kind = 'asset_fetch'").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["subject"] == "openmoji.org"
+    assert "s3cret" not in json.dumps(rows[0], default=str)
+
+
+@pytest.mark.usefixtures("fake_dns")
+def test_a_fetch_url_refused_on_its_shape_is_refused_before_any_record(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """Its refusal quotes the URL, query and all: made in the route, it is never
+    recorded in an operation's error."""
+    url = "http://openmoji.org/x.svg?token=s3cret"
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
+    assert response.status_code == 422, response.text
+    assert "https" in response.json()["detail"]
+    assert _workflow_ids(app, "asset_fetch") == []
+
+
+def test_a_fetch_refused_on_a_full_budget_leaves_no_url_claim(
+    client: TestClient, app: FastAPI, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 3e final I1: the 503 is the route's own refusal, made before anything
+    started, so the URL's claim (its query may carry a token) is released."""
+    url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
+    monkeypatch.setattr(_state(app).imports, "full", lambda: True)
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
+    assert response.status_code == 503, response.text
+    claim = _state(app).paths.claims / hashlib.sha256(url.encode()).hexdigest()
+    assert not claim.exists()
+    assert _workflow_ids(app, "asset_fetch") == []
+
+
+def test_a_fetch_whose_run_finds_a_full_budget_leaves_no_url_claim(
+    client: TestClient, app: FastAPI, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1194 1.1: the route's check passes, the run's finds the budget full. The
+    operation's recorded 503 is final, so the URL's claim is released."""
+    url = "https://openmoji.org/data/color/svg/1F984.svg?token=s3cret"
+    checks = iter([False])
+    monkeypatch.setattr(_state(app).imports, "full", lambda: next(checks, True))
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": url}, headers=press()
+    )
+    assert response.status_code == 503, response.text
+    assert len(_workflow_ids(app, "asset_fetch")) == 1
+    claim = _state(app).paths.claims / hashlib.sha256(url.encode()).hexdigest()
+    assert not claim.exists()
+
+
+@pytest.mark.usefixtures("fake_dns")
+@respx.mock
+def test_an_asset_fetch_names_the_host_of_a_url_pasted_with_whitespace(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """Review #1194 2.2: the subject and the recorded URL come from the URL as fetched."""
+    url = "https://openmoji.org/data/color/svg/1F984.svg"
+    respx.get(url).mock(return_value=httpx.Response(200, content=_svg(4)))
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": f" {url}  "}, headers=press()
+    )
+    assert response.status_code == 201, response.text
+    pool = _state(app).components.get(OPERATIONS).store._require()
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT * FROM operations WHERE kind = 'asset_fetch'").fetchall()
+    assert rows[0]["subject"] == "openmoji.org"
+    assert rows[0]["request"]["shown"] == url

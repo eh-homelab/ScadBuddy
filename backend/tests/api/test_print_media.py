@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.subject import PrintSubject
 from tests.api.test_send import API, BASE, configure
 
 # The gate reads the links, which live in Postgres (#306).
@@ -30,7 +31,9 @@ def print_links(client: TestClient) -> PrintLinkStore:
 def _linked(client: TestClient) -> None:
     """Archive 35 is a print of one of ScadBuddy's outputs."""
     asyncio.run(
-        print_links(client).record("a" * 32, PrintLink(archive_id=LINKED, matched_by="queue_item"))
+        print_links(client).record(
+            PrintSubject.output("a" * 32), PrintLink(archive_id=LINKED, matched_by="queue_item")
+        )
     )
 
 

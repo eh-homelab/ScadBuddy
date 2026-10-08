@@ -113,19 +113,36 @@ export interface Backfilled {
   failed: { output: OutputRef; error: string; running?: boolean }[]
 }
 
-/** "A could not be re-rendered: why." for each failure, one sentence each. */
-export function backfillFailures(failed: Backfilled['failed']): string {
+/** The most of a server's reason a failure sentence quotes; the rest is cut (#1007). */
+export const MAX_REASON_CHARS = 200
+
+function shortReason(error: string): string {
+  const reason = error.trim().replace(/\.$/, '')
+  return reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…` : reason
+}
+
+/**
+ * "A could not be re-rendered: why." for each failure, one sentence each. `retry` is the
+ * button that tries again where this is shown: Arrange in its dialog, Re-arrange in Print.
+ */
+export function backfillFailures(failed: Backfilled['failed'], retry = 'Arrange'): string {
   return failed
     .map(({ output, error, running }) =>
       running
-        ? `${output.name ?? output.id} is still re-rendering; try Arrange again later.`
-        : `${output.name ?? output.id} could not be re-rendered: ${error.replace(/\.$/, '')}.`,
+        ? `${output.name ?? output.id} is still re-rendering; try ${retry} again later.`
+        : `${output.name ?? output.id} could not be re-rendered: ${shortReason(error)}.`,
     )
     .join(' ')
 }
 
+/** POST /outputs/{id}/backfill's 409 code: the output records its objects already. */
+const ALREADY_BACKFILLED = 'already_backfilled'
+
 const BACKFILL_POLL_MS = 500
-/** How long the dialog waits for one re-render; the server keeps going after it gives up. */
+/**
+ * How long one call waits for all its re-renders together, not for each: they run at
+ * once, under one deadline. The server keeps going after it gives up.
+ */
 export const BACKFILL_WAIT_MS = 5 * 60_000
 
 /** The wait's limit passed with the re-render still going. */
@@ -160,8 +177,11 @@ export async function backfillOutputs(
     try {
       job = await api.backfillOutput(output.id)
     } catch (cause) {
-      // Re-rendered since the list was read (a closed dialog's backfill finished).
-      if (cause instanceof ApiError && cause.status === 409) return await api.getOutput(output.id)
+      // Re-rendered since the list was read (a closed dialog's backfill finished). By its
+      // code, not the status alone: another 409 is no sign the objects are there (#1007).
+      if (cause instanceof ApiError && cause.status === 409 && cause.problem['code'] === ALREADY_BACKFILLED) {
+        return await api.getOutput(output.id)
+      }
       throw cause
     }
     for (;;) {

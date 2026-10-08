@@ -101,10 +101,9 @@ def _refuse(host: str, *, redirected_from: str | None = None) -> AssetFetchRefus
     )
 
 
-async def fetch_file(
-    pasted: str, *, domains: tuple[str, ...] | list[str], limit: int
-) -> FetchedFile:
-    """Fetch ``pasted`` from an allowlisted host, reading at most ``limit`` bytes."""
+def parse_fetch_url(pasted: str) -> httpx.URL:
+    """``pasted`` as an https URL with a host. Its refusals quote the URL whole, so the
+    route makes them before an operation could record them (#1054)."""
     try:
         url = httpx.URL(pasted.strip())
     except httpx.InvalidURL:
@@ -113,6 +112,14 @@ async def fetch_file(
         raise ImportRefusedError(f"only https URLs can be fetched, and {str(url)!r} is not one")
     if not url.host:
         raise ImportRefusedError(f"{pasted!r} names no host")
+    return url
+
+
+async def fetch_file(
+    pasted: str, *, domains: tuple[str, ...] | list[str], limit: int
+) -> FetchedFile:
+    """Fetch ``pasted`` from an allowlisted host, reading at most ``limit`` bytes."""
+    url = parse_fetch_url(pasted)
     if not host_allowed(_ascii_host(url), domains):
         raise _refuse(url.host)
     hop = url

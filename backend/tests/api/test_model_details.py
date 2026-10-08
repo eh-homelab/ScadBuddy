@@ -48,14 +48,16 @@ def _create(client: TestClient) -> dict[str, Any]:
 
 def _put_thumbnail(client: TestClient, png: bytes, slug: str = SLUG) -> httpx.Response:
     response: httpx.Response = client.put(
-        f"/api/v1/models/{slug}/thumbnail", files={"file": ("thumb.png", png, "image/png")}
+        f"/api/v1/models/{slug}/thumbnail",
+        files={"file": ("thumb.png", png, "image/png")},
+        headers=press(),
     )
     return response
 
 
 def _put_readme(client: TestClient, content: str, slug: str = SLUG) -> httpx.Response:
     response: httpx.Response = client.put(
-        f"/api/v1/models/{slug}/readme", json={"content": content}
+        f"/api/v1/models/{slug}/readme", json={"content": content}, headers=press()
     )
     return response
 
@@ -70,7 +72,9 @@ def _generate(client: TestClient, paths: DataPaths, slug: str, cover: bytes | No
     ).json()["job_id"]
     wait_for_job(client, job_id)
     set_plate_image(client, job_id, cover)
-    response = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": job_id})
+    response = client.post(
+        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]
     return output_id
@@ -152,7 +156,7 @@ def test_a_thumbnail_can_be_removed(client: TestClient, paths: DataPaths) -> Non
     _create(client)
     _put_thumbnail(client, PNG_BYTES)
 
-    response = client.delete(f"/api/v1/models/{SLUG}/thumbnail")
+    response = client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press())
 
     assert response.status_code == 200
     assert response.json()["has_thumbnail"] is False
@@ -163,7 +167,7 @@ def test_a_thumbnail_can_be_removed(client: TestClient, paths: DataPaths) -> Non
 
 def test_removing_a_thumbnail_that_is_not_there_is_a_404(client: TestClient) -> None:
     _create(client)
-    response = client.delete(f"/api/v1/models/{SLUG}/thumbnail")
+    response = client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press())
     assert response.status_code == 404
     assert "no thumbnail" in response.json()["detail"]
 
@@ -227,9 +231,9 @@ def test_the_etag_follows_every_change_of_image(client: TestClient, paths: DataP
     seen.append(_etag(client))
     _put_thumbnail(client, OTHER_PNG)  # replaced
     seen.append(_etag(client))
-    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail").status_code == 200
+    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press()).status_code == 200
     seen.append(_etag(client))  # back to the first output's plate image
-    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{first}", headers=press()).status_code == 204
     seen.append(_etag(client))  # the next output's
 
     assert seen[0] == seen[3]  # the same bytes as before, the same tag
@@ -411,7 +415,7 @@ def test_a_thumbnail_of_its_own_wins_over_the_fallback_and_removing_it_restores_
     _put_thumbnail(client, PNG_BYTES)
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == PNG_BYTES
 
-    removed = client.delete(f"/api/v1/models/{SLUG}/thumbnail").json()
+    removed = client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press()).json()
     assert removed["has_thumbnail"] is True
     assert removed["thumbnail_source"] == "output"
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
@@ -557,12 +561,12 @@ def test_the_record_names_the_output_behind_the_fallback(
     assert (record["thumbnail_source"], record["thumbnail_output_id"]) == ("output", first)
     assert _listed(client)[SLUG]["thumbnail_output_id"] == first
 
-    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{first}", headers=press()).status_code == 204
     moved = client.get(f"/api/v1/models/{SLUG}").json()
     assert (moved["thumbnail_source"], moved["thumbnail_output_id"]) == ("output", second)
     assert moved["version"] == record["version"]
 
-    assert client.delete(f"/api/v1/outputs/{second}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{second}", headers=press()).status_code == 204
     gone = _listed(client)[SLUG]
     assert (gone["has_thumbnail"], gone["thumbnail_source"], gone["thumbnail_output_id"]) == (
         False,
@@ -590,9 +594,33 @@ def test_deleting_the_covering_output_falls_back_to_the_next(
     _generate(client, paths, SLUG, COVER_TWO)
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
 
-    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{first}", headers=press()).status_code == 204
 
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_TWO
+
+
+@pytest.mark.requires_postgres
+def test_the_first_output_stays_first_when_the_clock_stepped_back(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """Outputs are ordered by ``created_at``, the wall clock at their save: a clock
+    that stepped back between two saves (this host's did, by 13 s, under load) gave
+    the second an earlier one, and it took the first's place as the model's cover.
+    Here the first is stamped 60 s ahead, which is what that step looks like to the
+    second save."""
+    _create(client)
+    first = _generate(client, paths, SLUG, COVER_ONE)
+    meta_path = paths.output_dir(SLUG, first) / outputs_module.META_NAME
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    ahead = datetime.fromisoformat(meta["created_at"]) + timedelta(seconds=60)
+    meta["created_at"] = ahead.isoformat()
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    second = _generate(client, paths, SLUG, COVER_TWO)
+
+    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
+    listed = [row["id"] for row in client.get(f"/api/v1/models/{SLUG}/outputs").json()]
+    assert listed == [second, first]  # newest first
 
 
 @pytest.mark.requires_postgres
@@ -603,7 +631,7 @@ def test_deleting_the_only_covering_output_leaves_no_thumbnail(
     only = _generate(client, paths, SLUG, COVER_ONE)
     assert _listed(client)[SLUG]["has_thumbnail"] is True
 
-    assert client.delete(f"/api/v1/outputs/{only}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{only}", headers=press()).status_code == 204
 
     assert _listed(client)[SLUG]["has_thumbnail"] is False
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").status_code == 404
@@ -642,7 +670,7 @@ def test_a_readme_can_be_set_read_replaced_and_removed(client: TestClient) -> No
     assert _put_readme(client, "# Widget v2\n").status_code == 200
     assert client.get(f"/api/v1/models/{SLUG}/readme").text == "# Widget v2\n"
 
-    removed = client.delete(f"/api/v1/models/{SLUG}/readme")
+    removed = client.delete(f"/api/v1/models/{SLUG}/readme", headers=press())
     assert removed.status_code == 200
     assert removed.json()["has_readme"] is False
     assert client.get(f"/api/v1/models/{SLUG}/readme").status_code == 404
@@ -663,7 +691,7 @@ def test_the_readme_uploaded_at_creation_is_readable(client: TestClient) -> None
 
 def test_removing_a_readme_that_is_not_there_is_a_404(client: TestClient) -> None:
     _create(client)
-    response = client.delete(f"/api/v1/models/{SLUG}/readme")
+    response = client.delete(f"/api/v1/models/{SLUG}/readme", headers=press())
     assert response.status_code == 404
     assert "no README" in response.json()["detail"]
 
@@ -678,7 +706,9 @@ def test_a_readme_with_a_nul_byte_is_refused(client: TestClient, paths: DataPath
 
 def test_a_readme_body_of_the_wrong_shape_is_refused(client: TestClient) -> None:
     _create(client)
-    response = client.put(f"/api/v1/models/{SLUG}/readme", json={"text": "# Widget\n"})
+    response = client.put(
+        f"/api/v1/models/{SLUG}/readme", json={"text": "# Widget\n"}, headers=press()
+    )
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
 
@@ -735,6 +765,8 @@ def test_every_new_route_answers_404_for_an_unknown_model(
         kwargs["files"] = {"file": ("thumb.png", PNG_BYTES, "image/png")}
     elif method == "PUT":
         kwargs["json"] = {"content": "# Nothing\n"}
+    if method != "GET":
+        kwargs["headers"] = press()
 
     response = client.request(method, f"/api/v1/models/missing/{path}", **kwargs)
 
@@ -1131,8 +1163,11 @@ def test_every_details_change_is_one_revision_in_the_models_history(client: Test
             ),
             f"Update {SLUG} metadata",
         ),
-        (client.delete(f"/api/v1/models/{SLUG}/thumbnail"), f"Remove {SLUG} thumbnail"),
-        (client.delete(f"/api/v1/models/{SLUG}/readme"), f"Remove {SLUG} README"),
+        (
+            client.delete(f"/api/v1/models/{SLUG}/thumbnail", headers=press()),
+            f"Remove {SLUG} thumbnail",
+        ),
+        (client.delete(f"/api/v1/models/{SLUG}/readme", headers=press()), f"Remove {SLUG} README"),
     ]
 
     listed = client.get(f"/api/v1/models/{SLUG}/versions").json()

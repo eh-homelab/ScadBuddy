@@ -1,10 +1,10 @@
 """The prints API (#308, epic #305; print-history plan §2.4).
 
-A print is one Bambuddy archive linked to one of ScadBuddy's outputs
-(``output_bambuddy_prints``, #306), or to a Bambuddy library file ScadBuddy printed
-(``library_bambuddy_prints``, #976), keyed by the archive's id. The list is driven by
-those tables, so an archive printed from anywhere else is never listed: this is
-ScadBuddy's print history, not a copy of Bambuddy's. A library file's print has no
+A print is one Bambuddy archive linked to one of ScadBuddy's outputs (#306), or to a
+Bambuddy library file ScadBuddy printed (#976), keyed by the archive's id. The list is
+driven by those links (``print_links``, keyed by print subject since #1750), so an
+archive printed from anywhere else is never listed: this is ScadBuddy's print history,
+not a copy of Bambuddy's. A library file's print has no
 template, parameters or files of ScadBuddy's: only the archive's. Bambuddy stays the source of
 truth for the print; its reads are kept 30 s (`ArchiveCache`) and nothing else of it
 is stored.
@@ -69,6 +69,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
     download_filename,
 )
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import OperationAccepted
@@ -380,6 +381,7 @@ class _Defaults:
                     config=self._config,
                     version=requested,
                     fetcher=self._fetcher,
+                    failure_is_fallback=True,
                 )
             except (ApiError, OpenSCADError):
                 continue
@@ -793,6 +795,13 @@ async def get_print(
     )
 
 
+async def _forget(store: SettingsStore, cache: ArchiveCache, archive_id: int) -> None:
+    """Drop this process's reads of an archive an operation changed. Its run forgets
+    them in the worker's own cache, which on ``scadbuddy-print`` is not this one (#1060)."""
+    async with client_for(store.load()) as client:
+        cache.forget(client, archive_id)
+
+
 class PrintAgain(_Response):
     queue_item_id: int
     printer_id: int
@@ -821,6 +830,8 @@ async def reprint(
     response: Response,
     links: PrintLinksDep,
     ops: OperationsDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
     idempotency_key: IdempotencyKey = None,
 ) -> PrintAgain | JSONResponse:
     await _require_print(links, archive_id)
@@ -832,6 +843,7 @@ async def reprint(
         request={"archive_id": archive_id},
         idempotency_key=idempotency_key,
     )
+    await _forget(store, cache, archive_id)
     return operation_answer(result, PrintAgain)
 
 
@@ -862,6 +874,8 @@ async def pull_timelapse(
     response: Response,
     links: PrintLinksDep,
     ops: OperationsDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Response:
     await _require_print(links, archive_id)
@@ -873,6 +887,7 @@ async def pull_timelapse(
         request={"archive_id": archive_id, "filename": body.filename},
         idempotency_key=idempotency_key,
     )
+    await _forget(store, cache, archive_id)
     if isinstance(result, OperationAccepted):
         return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

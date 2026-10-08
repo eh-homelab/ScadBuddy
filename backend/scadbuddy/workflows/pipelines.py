@@ -587,6 +587,17 @@ class TemplatePipeline:
             work is not None and work.done() and (work.cancelled() or work.exception() is not None)
         )
 
+    def _raise_if_released(self) -> None:
+        """Raise a release's (or the workflow's) cancellation. A release cancels the
+        render task, and temporalio (1.34) shields a child start or a signal in flight
+        from that cancel just as from the workflow's (`_raise_if_cancelled`): it is
+        dropped, the call's own outcome comes back, and the render would wait on the
+        piece instead of releasing, holding the supersede's Update until it timed out
+        (#1832)."""
+        if self._released is not None:
+            raise asyncio.CancelledError
+        _raise_if_cancelled()
+
     def _released_by(self, error: BaseException) -> bool:
         return self._released is not None and is_cancelled_exception(error)
 
@@ -687,7 +698,10 @@ class TemplatePipeline:
             if not await self._project(state="running"):
                 # Settled before this run began: an older build's API commits the row
                 # before it starts the run, and a release in between cancels the row
-                # with no run to cancel. Nothing to render (#603).
+                # with no run to cancel. Nothing to render (#603). In this build's
+                # own runs the row is never closed first (only this run's `release`
+                # cancels it, and sets `_cancelled`), short of a prune, so the run's
+                # status here is "settled": it cancelled nothing.
                 return
             self._upsert(STATUS.value_set("running"))
             await self._project(steps=steps)
@@ -936,11 +950,11 @@ class TemplatePipeline:
                     try:
                         await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
                     except FailureError as error:
-                        _raise_if_cancelled()
+                        self._raise_if_released()
                         if not _target_gone(error):
                             raise
                         continue  # it closed in between; start it again
-                    _raise_if_cancelled()
+                    self._raise_if_released()
                     try:
                         await workflow.wait_condition(
                             lambda: key in self._outcomes, timeout=_waiter_recheck()
@@ -950,6 +964,9 @@ class TemplatePipeline:
                 finally:
                     self._waiting_on.remove(key)
                 return self._outcomes[key]
+            # A release while the start was in flight was dropped; the piece runs on
+            # (ABANDON), the job does not.
+            self._raise_if_released()
             try:
                 return PieceOutcome(result=await child, piece_key=key)
             except ChildWorkflowError as error:

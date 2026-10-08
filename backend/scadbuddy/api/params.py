@@ -35,6 +35,7 @@ async def schema_of(
     config: Config,
     version: str | None = None,
     fetcher: CheckoutFetcher | None = None,
+    failure_is_fallback: bool = False,
 ) -> tuple[ModelSource, CustomizerSchema]:
     """The source a render of ``slug`` at ``requested`` reads, and its schema.
 
@@ -42,13 +43,18 @@ async def schema_of(
     being rendered, not the one the model is currently at. `resolve_source` also hands
     back which revision that is, so the job can be stamped without asking git again.
     ``version`` is what the client asked for, for the 404's message.
+    ``failure_is_fallback`` is `run_openscad`'s, for a caller that handles an
+    `OpenSCADError` itself.
     """
     try:
         source = await resolve_source(
             slug, requested, paths=paths, history=history, fetcher=fetcher
         )
         schema = await cached_schema(
-            source.scad, source.schema_cache, config=source.configure(config)
+            source.scad,
+            source.schema_cache,
+            config=source.configure(config),
+            failure_is_fallback=failure_is_fallback,
         )
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {version}") from None

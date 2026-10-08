@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 from temporalio import workflow
-from temporalio.client import WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.worker import Worker
 
 from tests.support.temporal import (
@@ -73,6 +74,9 @@ async def test_the_reaper_ends_only_the_queues_running_workflows_on_one_client()
         started = [
             await client.start_workflow(Shout.run, q, id=f"s-{q}", task_queue=q) for q in queues
         ]
+        # The reaper finds them through visibility, which lags a start (#1834): a list
+        # made right after one missed it about half the time, even on an idle host.
+        await _until_listed(client, queues)
 
         with WorkflowReaper(current_address(client), client.namespace) as reaper:
             first = reaper.client
@@ -86,6 +90,21 @@ async def test_the_reaper_ends_only_the_queues_running_workflows_on_one_client()
             WorkflowExecutionStatus.TERMINATED,
             WorkflowExecutionStatus.RUNNING,
         ]
+
+
+async def _until_listed(client: Client, queues: list[str]) -> None:
+    """Wait until visibility lists a running workflow on each of ``queues``."""
+    query = " OR ".join(f"TaskQueue = '{q}'" for q in queues)
+    deadline = time.monotonic() + 10
+    while True:
+        listed = {
+            e.task_queue
+            async for e in client.list_workflows(f"ExecutionStatus = 'Running' AND ({query})")
+        }
+        if listed == set(queues):
+            return
+        assert time.monotonic() < deadline, f"visibility never listed {set(queues) - listed}"
+        await asyncio.sleep(0.05)
 
 
 @pytest.mark.requires_temporal

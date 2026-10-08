@@ -563,6 +563,7 @@ async def check_print(
         )
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
+    laid_out = await source.lays_out(client, request.choices.nozzles)
     rack_view, rack_notes = await rack_preview(
         client,
         request,
@@ -570,12 +571,12 @@ async def check_print(
         printer_id=prepared.printer_id,
         status=prepared.printer_status,
         rack=rack,
-        laid_out=source.lays_out,
+        laid_out=laid_out,
     )
     # A refused manual pick still previews the rack, so the dialog can offer another,
     # and is said once: as the error, not again as a rack-manual-partial warning.
     try:
-        _check_manual_pick(request, prepared.printer_status, laid_out=source.lays_out)
+        _check_manual_pick(request, prepared.printer_status, laid_out=laid_out)
     except RunRefusalError as refused:
         errors = [refused.detail]
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
@@ -595,7 +596,7 @@ async def check_print(
                 prepared.printer_status,
                 request.choices.nozzles,
                 rack_picked=rack_picked,
-                laid_out=source.lays_out,
+                laid_out=laid_out,
             ),
             *rack_notes,
         ],
@@ -742,7 +743,11 @@ async def check_for_library(
 ) -> PrintCheck:
     """:func:`check_print` for a file already in Bambuddy's library."""
     return await check_print(
-        client, await LibrarySource.load(client, file_id), settings, request, rack=rack
+        client,
+        await LibrarySource.load(client, file_id, settings=settings),
+        settings,
+        request,
+        rack=rack,
     )
 
 
@@ -816,7 +821,11 @@ async def prepare_run(
     printer_status = await _read_status(client, printer_id)
     await record_seen(rack, printer_id, printer_status)
     if refuse_manual_pick:
-        _check_manual_pick(request, printer_status, laid_out=source.lays_out)
+        _check_manual_pick(
+            request,
+            printer_status,
+            laid_out=await source.lays_out(client, request.choices.nozzles),
+        )
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,
@@ -1038,7 +1047,9 @@ async def plan_run(
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
-    hardware += high_flow_warnings(printer_status, choices.nozzles, laid_out=source.lays_out)
+    hardware += high_flow_warnings(
+        printer_status, choices.nozzles, laid_out=await source.lays_out(client, choices.nozzles)
+    )
     warnings: list[FilamentWarning] = []
     for _, options, resolved, _ in planned:
         for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:

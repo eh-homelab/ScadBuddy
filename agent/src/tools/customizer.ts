@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { reattach } from './command.js'
+import { command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
@@ -220,12 +220,12 @@ export const customizerTools: Tool[] = [
       if (!save_output) return json(summary)
       let output
       try {
-        output = await ok(
+        output = await command(ctx, `save output of ${job.id}`, (headers) =>
           ctx.backend.POST('/api/v1/models/{slug}/outputs', {
             params: { path: { slug } },
             body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
+            headers,
           }),
-          `save output of ${job.id}`,
         )
       } catch (err) {
         // The render is done; only the save failed. Still the job's summary, so the
@@ -363,14 +363,14 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets'],
-    handler: async ({ slug, name, params, description, tags }, { backend }) =>
+    handler: async ({ slug, name, params, description, tags }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/presets', {
+        await command(ctx, `save preset ${name}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/presets', {
             params: { path: { slug } },
             body: { name, params, description, tags },
+            headers,
           }),
-          `save preset ${name}`,
         ),
       ),
   }),
@@ -389,14 +389,14 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}/presets/{preset_id}'],
-    handler: async ({ slug, preset_id, name, params, description, tags }, { backend }) =>
+    handler: async ({ slug, preset_id, name, params, description, tags }, ctx) =>
       json(
-        await ok(
-          backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
+        await command(ctx, `update preset ${preset_id}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
             params: { path: { slug, preset_id } },
             body: { name: name ?? null, params: params ?? null, description: description ?? null, tags: tags ?? null },
+            headers,
           }),
-          `update preset ${preset_id}`,
         ),
       ),
   }),
@@ -407,14 +407,14 @@ export const customizerTools: Tool[] = [
     input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80) }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets/{preset_id}/duplicate'],
-    handler: async ({ slug, preset_id, name }, { backend }) =>
+    handler: async ({ slug, preset_id, name }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/presets/{preset_id}/duplicate', {
+        await command(ctx, `duplicate preset ${preset_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/presets/{preset_id}/duplicate', {
             params: { path: { slug, preset_id } },
             body: { name },
+            headers,
           }),
-          `duplicate preset ${preset_id}`,
         ),
       ),
   }),
@@ -447,17 +447,17 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/assets'],
-    handler: async ({ slug, filename, content_base64 }, { backend }) => {
+    handler: async ({ slug, filename, content_base64 }, ctx) => {
       const type = filename.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
       const form = fileForm(decodeBase64(content_base64, 'content_base64'), filename, type)
       return json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/assets', {
+        await command(ctx, `upload ${filename}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/assets', {
             params: { path: { slug } },
             body: { file: filename },
             bodySerializer: () => form,
+            headers,
           }),
-          `upload ${filename}`,
         ),
       )
     },
@@ -480,11 +480,10 @@ export const customizerTools: Tool[] = [
     risk: 'outward',
     routes: ['POST /api/v1/models/{slug}/assets/fetch'],
     summarize: ({ slug, url }) => `Fetch ${url} (${new URL(url).host}) into model "${slug}" as a file asset`,
-    handler: async ({ slug, url }, { backend }) =>
+    handler: async ({ slug, url }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/assets/fetch', { params: { path: { slug } }, body: { url } }),
-          `fetch ${url}`,
+        await command(ctx, `fetch ${url}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/assets/fetch', { params: { path: { slug } }, body: { url }, headers }),
         ),
       ),
   }),

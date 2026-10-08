@@ -89,7 +89,7 @@ def test_upload_render_and_persist_against_a_real_openscad(client: TestClient) -
     assert preview.content.startswith(b"glTF")
 
     output = client.post(
-        f"/api/v1/models/{slug}/outputs", json={"job_id": job["id"], "name": "Six"}
+        f"/api/v1/models/{slug}/outputs", json={"job_id": job["id"], "name": "Six"}, headers=press()
     )
     assert output.status_code == 201
     download = client.get(f"/api/v1/outputs/{output.json()['id']}/model.3mf")
@@ -129,11 +129,14 @@ def test_paste_check_and_replace_against_a_real_openscad(client: TestClient) -> 
     schema = client.get("/api/v1/models/pasted/schema").json()
     assert [parameter["name"] for parameter in schema["parameters"]] == ["size"]
 
-    refused = client.put("/api/v1/models/pasted/source", json={"source": "cube(;\n"})
+    refused = client.put(
+        "/api/v1/models/pasted/source", json={"source": "cube(;\n"}, headers=press()
+    )
     assert refused.status_code == 422
     replaced = client.put(
         "/api/v1/models/pasted/source",
         json={"source": "width = 3; // [1:1:9]\ncube(width);\n"},
+        headers=press(),
     )
     assert replaced.status_code == 200, replaced.text
     schema = client.get("/api/v1/models/pasted/schema").json()
@@ -189,6 +192,7 @@ def test_an_uploaded_svg_is_rendered_into_every_part(client: TestClient, data_di
     asset = client.post(
         "/api/v1/models/overlay/assets",
         files={"file": ("triangle.svg", TRIANGLE_SVG, "image/svg+xml")},
+        headers=press(),
     ).json()
     accepted = client.post(
         "/api/v1/models/overlay/render", json={"params": {"overlay": asset["id"]}}
@@ -337,7 +341,9 @@ def test_a_template_that_asks_for_two_plates_renders_a_two_plate_3mf(
     ]
 
     output = client.post(
-        "/api/v1/models/two-plates/outputs", json={"job_id": job["id"], "name": "Both"}
+        "/api/v1/models/two-plates/outputs",
+        json={"job_id": job["id"], "name": "Both"},
+        headers=press(),
     ).json()
     plates = client.get(f"/api/v1/outputs/{output['id']}/plates").json()
     # #929: each plate is named by the object ScadBuddy's writer puts on it.

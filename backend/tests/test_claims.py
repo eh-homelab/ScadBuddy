@@ -154,3 +154,28 @@ def test_release_keeps_a_claim_another_request_put_since(tmp_path: Path) -> None
     claims.release(b)
     assert claims.get(a.name) == b"a"
     assert [path.name for path in tmp_path.iterdir()] == [a.name]
+
+
+def test_hold_file_moves_a_streamed_file_in_and_a_second_renews_it(tmp_path: Path) -> None:
+    """A media upload is streamed to disk, never read into memory (#1054): its file
+    is moved in under the digest computed while streaming."""
+    claims = ClaimStore(tmp_path / "claims")
+    digest = hashlib.sha256(b"video").hexdigest()
+    first = tmp_path / "upload-1"
+    first.write_bytes(b"video")
+    held = claims.hold_file(first, digest)
+    assert held.name == digest and held.created
+    assert not first.exists()
+    assert claims.get(digest) == b"video"
+    past = time.time() - timedelta(days=2).total_seconds()
+    os.utime(tmp_path / "claims" / digest, (past, past))
+    second = tmp_path / "upload-2"
+    second.write_bytes(b"video")
+    again = claims.hold_file(second, digest)
+    assert again.name == digest and not again.created
+    assert not second.exists()
+    assert claims.sweep(timedelta(days=1)) == 0
+    # The first put's release keeps the claim the second renewed.
+    claims.release(held)
+    assert claims.get(digest) == b"video"
+    assert sorted(p.name for p in (tmp_path / "claims").iterdir()) == [digest]

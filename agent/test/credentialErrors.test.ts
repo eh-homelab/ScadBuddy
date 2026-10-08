@@ -17,7 +17,7 @@ import {
 import { type FakeAnthropic, startFakeAnthropic } from './support/fakeAnthropic.js'
 
 describe('classifyFailure (#1093)', () => {
-  // What Claude Code 2.1.283 reports for each response, measured against the
+  // What Claude Code 2.1.283 and 2.1.287 report for each response, measured against the
   // fake endpoint (test/fallback.e2e.test.ts covers the same end to end).
   const cases: [string, FailureEvidence, FailureClass][] = [
     ['401 retried', { status: 401, category: 'authentication_failed' }, 'permanent'],
