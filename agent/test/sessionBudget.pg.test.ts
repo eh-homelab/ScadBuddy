@@ -501,6 +501,23 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect(await m.fork(parent, browser, { freshBudget: true })).toMatchObject({ budgetUsd: 1, costUsd: 0 })
     })
 
+    // #1651: the user's own fork is a new root; a fork of it joins that root, not the original lineage.
+    it('a fork of the user’s fresh-budget fork spends from the fresh budget, not the original one', async () => {
+      const parent = await started()
+      const own = await m.fork(parent, browser, { freshBudget: true })
+      await transcript(own.id)
+      const child = await m.fork(own.id, browser)
+      expect(child).toMatchObject({ budgetUsd: 1, costUsd: 0 })
+      expect(await spend(child.id, browser, 0.7)).toBe(1)
+      expect((await m.get(own.id, browser)).costUsd).toBeCloseTo(0.7, 9)
+      // The original lineage is untouched: still $0.40 of its $1.
+      expect(await m.get(parent, browser)).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
+      // A raise on the child raises the fresh root, not the original.
+      expect((await raise(child.id, { add_usd: 1 })).status).toBe(200)
+      expect(await m.get(own.id, browser)).toMatchObject({ budgetUsd: 2 })
+      expect(await m.get(parent, browser)).toMatchObject({ budgetUsd: 1 })
+    })
+
     it('refuses a spent session’s fork unless it is the user’s, which gets a budget of its own', async () => {
       const id = await spentSession()
       await transcript(id)
