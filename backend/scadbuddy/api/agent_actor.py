@@ -51,7 +51,8 @@ The marker is not authentication. A request without it is exactly as trusted as 
 ``@playwright/mcp`` 0.0.82 (``agent/test/headlessBrowser.server.test.ts``): the header
 reaches every request the page makes to the backend and none to another origin, and a
 page ``fetch`` that sets the same header itself arrives with the session's value, not
-its own.
+its own. The pin moved to 0.0.83 without re-running that test against it; re-date this
+once it has.
 """
 
 from __future__ import annotations

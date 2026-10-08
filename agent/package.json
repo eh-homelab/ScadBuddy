@@ -34,7 +34,7 @@
     "@opentelemetry/resources": "2.11.0",
     "@opentelemetry/sdk-node": "0.222.0",
     "@opentelemetry/sdk-trace": "2.11.0",
-    "@playwright/mcp": "0.0.82",
+    "@playwright/mcp": "0.0.83",
     "@temporalio/activity": "1.24.0",
     "@temporalio/client": "1.24.0",
     "@temporalio/common": "1.24.0",

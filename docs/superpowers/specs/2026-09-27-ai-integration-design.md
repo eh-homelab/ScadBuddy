@@ -179,7 +179,9 @@ dependency of `agent/`.
 
 **Playwright plugin and `@playwright/mcp`** (#349; the `@playwright/mcp` items were read
 from the **0.0.82** npm tarball's `README.md`, the `latest` dist-tag on 2026-09-27,
-which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
+which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp. The pin
+moved to 0.0.83 by Dependabot without re-reading the tarball or re-running the tests
+below against it; re-date this section once that happens):
 
 - The official plugin is only an MCP server. [`.mcp.json`][pw-plugin-mcp] is
   `{"playwright": {"command": "npx", "args": ["@playwright/mcp@latest"]}}`, and
