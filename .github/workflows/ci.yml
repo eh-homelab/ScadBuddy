@@ -100,6 +100,7 @@ jobs:
       backend: ${{ steps.detect.outputs.backend }}
       frontend: ${{ steps.detect.outputs.frontend }}
       agent: ${{ steps.detect.outputs.agent }}
+      agent_durable: ${{ steps.detect.outputs.agent_durable }}
       e2e: ${{ steps.detect.outputs.e2e }}
       models: ${{ steps.detect.outputs.models }}
       image: ${{ steps.detect.outputs.image }}
@@ -126,6 +127,8 @@ jobs:
           if [ -f frontend/package.json ]; then frontend=true; fi
           agent=false
           if [ -f agent/package.json ]; then agent=true; fi
+          agent_durable=false
+          if [ -f agent-durable/pyproject.toml ]; then agent_durable=true; fi
           e2e=false
           if [ -d frontend/e2e ]; then e2e=true; fi
           models=false
@@ -158,6 +161,7 @@ jobs:
             echo "backend=$backend"
             echo "frontend=$frontend"
             echo "agent=$agent"
+            echo "agent_durable=$agent_durable"
             echo "e2e=$e2e"
             echo "models=$models"
             echo "image=$image"
@@ -581,6 +585,96 @@ jobs:
   # this image and nowhere else. Splitting "build" from "test" would mean
   # shuttling a ~1.5 GB image between jobs as an artifact (there is no registry
   # to push a PR image to), which costs far more than it saves.
+  agent-durable:
+    name: Agent-durable lint, test, image
+    needs: layout
+    if: ${{ needs.layout.outputs.agent_durable == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: agent-durable
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: agent-durable/uv.lock
+
+      # The pin still resolves from temporalio/ai-integrations (spec §6.2): a
+      # commit only a draft PR references can vanish. Runs on every PR, so a
+      # change to uv.lock is checked where it is made.
+      - name: Check the lock still resolves
+        run: uv lock --check
+
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Lint
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+
+      - name: Typecheck
+        run: uv run --frozen mypy
+
+      # Opens agent/test/fixtures/secret-vectors.json, which the agent job
+      # regenerates and compares: a format change in agent/src/secrets.ts or
+      # credentials.ts fails one job or the other.
+      - name: Tests
+        env:
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+        run: uv run --frozen pytest -v
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the agent-durable image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: agent-durable
+          load: true
+          tags: scadbuddy-agent-durable:ci
+          cache-from: type=gha,scope=agent-durable
+          cache-to: type=gha,scope=agent-durable,mode=min
+
+      - name: Start it and check /healthz
+        working-directory: .
+        run: |
+          set -euo pipefail
+          docker run -d --name scadbuddy-agent-durable-ci --read-only \
+            --tmpfs /tmp --tmpfs /srv/agent:uid=10001,gid=10001 \
+            -p 18082:8082 scadbuddy-agent-durable:ci
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18082/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          body="$(curl --fail --silent --show-error http://127.0.0.1:18082/healthz)"
+          echo "$body"
+          jq -e '.status == "ok"' <<<"$body" >/dev/null
+
+      - name: Tear down
+        if: always()
+        working-directory: .
+        run: docker rm -f scadbuddy-agent-durable-ci || true
+
   image:
     name: Image build, backend checks, container smoke, real-backend e2e
     needs: layout
@@ -1457,7 +1551,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, freshness]
+    needs: [layout, lint, frontend, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -1484,6 +1578,7 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
+          AGENT_DURABLE_RESULT: ${{ needs.agent-durable.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
           BACKEND_PYTEST_RESULT: ${{ needs.backend-pytest.result }}
           BACKEND_PYTEST_SPLIT_RESULT: ${{ needs.backend-pytest-split.result }}
@@ -1520,6 +1615,8 @@ jobs:
           if [ -f frontend/package.json ]; then has_frontend=true; fi
           has_agent=false
           if [ -f agent/package.json ]; then has_agent=true; fi
+          has_agent_durable=false
+          if [ -f agent-durable/pyproject.toml ]; then has_agent_durable=true; fi
           has_models=false
           if [ -d models ]; then has_models=true; fi
           has_image=false
@@ -1539,6 +1636,7 @@ jobs:
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
+          assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$has_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$has_image"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$has_image"
