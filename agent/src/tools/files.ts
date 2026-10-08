@@ -201,7 +201,8 @@ export function matchFiles(
   { timeoutMs = GREP_TIMEOUT_MS, signal }: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(`(() => {${MATCHER}})()`, { eval: true, workerData: { files, o } })
+    // execArgv: not the service's own flags, whose `--import` would start telemetry in every search's thread.
+    const worker = new Worker(`(() => {${MATCHER}})()`, { eval: true, workerData: { files, o }, execArgv: [] })
     const stop = (error: Error) => {
       clearTimeout(timer)
       signal?.removeEventListener('abort', aborted)
@@ -356,7 +357,7 @@ export const fileTools: Tool[] = [
       "Read a file in a model's directory (model.scad, a .scad beside it, README.md, model.json), as " +
       '`cat -n` prints it: numbered lines, up to 2000 from `offset`. Ends with the revision it was read ' +
       'at: pass it as `base` to edit_file, multi_edit or write_file. `version` reads model.scad at an ' +
-      'earlier revision (list_versions).',
+      'earlier revision (list_versions), which is not a base for a write.',
     input: z.object({
       slug,
       file_path: filePath,
@@ -391,7 +392,12 @@ export const fileTools: Tool[] = [
           : page.to < page.from
             ? `offset is past the end: the file has ${page.total} lines`
             : `lines ${page.from}-${page.to} of ${page.total}${page.to < page.total ? `; continue with offset ${page.to + 1}` : ''}`
-      const at = revision ? `read at revision ${revision}` : 'the model has no revision history'
+      const at =
+        version !== undefined
+          ? `read at earlier revision ${version}, which is not a base for a write: read without version for that`
+          : revision
+            ? `read at revision ${revision}`
+            : 'the model has no revision history'
       return text(`${page.text}${page.text ? '\n' : ''}[${slug}/${path}: ${where}; ${at}]`)
     },
   }),
@@ -542,7 +548,7 @@ export const fileTools: Tool[] = [
           if (cut) return null
           try {
             const content = await readFile(backend, s, name)
-            bytes += content.length
+            bytes += Buffer.byteLength(content)
             if (bytes > MAX_GREP_BYTES) {
               cut = true
               return null
