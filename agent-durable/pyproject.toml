@@ -1,0 +1,57 @@
+[project]
+name = "scadbuddy-durable"
+version = "0.1.0"
+description = "ScadBuddy's durable agent sessions on Temporal (spec 2026-10-01 §6)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # ai-integrations#33, by full SHA in Temporal's own repository, never the
+    # contributor's fork (spec §6.2). A bump is its own reviewed PR carrying the
+    # diff of python/claude_agent_sdk between the two SHAs. Moves to PyPI once
+    # the package is published.
+    "temporalio-claude-agent-sdk @ git+https://github.com/temporalio/ai-integrations@b1cf3848b15ad5cd1f009bd19524e3f751140439#subdirectory=python/claude_agent_sdk",
+    # Exact: its bundled Claude Code (2.1.292) is what check_cli_version asserts.
+    "claude-agent-sdk==0.2.164",
+    "temporalio>=1.33.0,<1.35",
+    "cryptography>=44",
+    "psycopg>=3.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scadbuddy_durable"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[dependency-groups]
+dev = [
+    # The wheel with its own libpq, for tests without one on the system. The
+    # image uses plain psycopg against apt's libpq5, as the backend does.
+    "psycopg[binary]>=3.2",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
+]
