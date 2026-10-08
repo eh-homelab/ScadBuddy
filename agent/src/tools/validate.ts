@@ -1,6 +1,6 @@
 import type { components } from '../api/schema.js'
 import { OPENSCAD_COLOUR_NAMES } from './colours.js'
-import { codePoints } from './sourceFiles.js'
+import { codePoints } from './text.js'
 
 // Checking a parameter set against a model's customizer schema
 // (`backend/scadbuddy/render/schema.py` builds the schema; `// color` and
