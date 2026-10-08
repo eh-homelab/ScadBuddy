@@ -576,6 +576,19 @@ package-style subagent that asks for `Bash` and does not get it). The code is in
 [`agent/src/plugins/packages/`](../../agent/src/plugins/packages/), and
 [operating.md](operating.md#9-plugin-packages-297) describes the flow.
 
+**A subagent's question says who asked (#1109).** Every gated session has
+`mcp__scadbuddy_questions__ask_user` (#1102), so any subagent, an enabled package's
+too, can put a question card in the panel. That adds no capability: only the user
+answers, a question runs nothing, and a package skill could already make the session's
+agent ask, or put text in the chat. But a card looks more official than chat text, so
+a subagent's card says "Asked by the subagent `<type>`, not the assistant itself". The
+panel reads it from the feed: the question's `tool.call` carries its `Agent` call as
+`parent` (#1108), and that call's input names the `subagent_type` (just "a subagent"
+when the input was cut to a preview). We chose labelling over refusing `ask_user` to
+package agents, which would also take questions away from ScadBuddy's own subagents.
+The code is `askedBy()` in
+[`frontend/src/agent/chat/state.ts`](../../frontend/src/agent/chat/state.ts).
+
 **Approval (spec §8.2).** Installing is an outward settings write. An install or re-pin
 only fetches, vets and stores the pin with its review. Nothing loads until the admin
 approves that exact `commit_sha` and `content_hash` through

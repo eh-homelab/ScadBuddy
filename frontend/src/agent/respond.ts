@@ -10,6 +10,7 @@ import type { Question } from './chat/protocol'
 
 export const respondPath = (requestId: string) => `/api/v1/ai/pending-input/${encodeURIComponent(requestId)}`
 
+/** A copy of the route's `RespondBody`; agent `test/respondBody.panel.test.ts` parses every body built here with it (#1386). */
 export type RespondBody =
   | { kind: 'approval'; decision: 'approve' | 'deny' }
   | { kind: 'answer'; answers: Record<string, string> }

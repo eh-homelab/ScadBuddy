@@ -100,6 +100,20 @@ export async function frontendTabLink(): Promise<{
   return { AgentBridge: bridge.AgentBridge, createTabLink: link.createTabLink }
 }
 
+/** The panel's respond bodies (frontend/src/agent/respond.ts, #815), to parse them with the route's own schema (#1386). */
+export async function frontendRespondBodies(): Promise<{
+  decisionBody: (approve: boolean) => unknown
+  answerBody: (
+    questions: readonly { question: string; options: readonly { label: string }[] }[],
+    answers: readonly string[],
+    attention: boolean,
+  ) => unknown
+}> {
+  return (await import(path.resolve(here, '../../../frontend/src/agent/respond.ts'))) as Awaited<
+    ReturnType<typeof frontendRespondBodies>
+  >
+}
+
 /** Throws, naming the event, when the panel would drop it. */
 export async function expectPanelAccepts(events: readonly unknown[]): Promise<void> {
   const parse = await frontendParseServerEvent()

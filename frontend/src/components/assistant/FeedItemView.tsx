@@ -283,7 +283,15 @@ function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: st
  * option's `preview`) shows it as Markdown, and its own-words choice is "Edit…",
  * starting from that draft, so editing it returns the edited text.
  */
-function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answers: string[]) => void }) {
+function QuestionCard({
+  item,
+  askedBy,
+  onAnswer,
+}: {
+  item: QuestionItem
+  askedBy: string | undefined
+  onAnswer: (answers: string[]) => void
+}) {
   const [choices, setChoices] = useState<Choice[]>(() => item.questions.map(() => NO_CHOICE))
   const headingId = `question-${item.id}`
   const answers = item.questions.map((q, i) => answerOf(q, choices[i] ?? NO_CHOICE))
@@ -303,6 +311,12 @@ function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answe
             ? 'A question for you'
             : 'Questions for you'}
       </h3>
+      {askedBy !== undefined && (
+        // #1109: any subagent may ask, a plugin package's too; its card must not read as the assistant's own.
+        <p className="mt-1 text-[12px] text-muted" data-testid="agent-question-asked-by">
+          {askedBy ? `Asked by the subagent ${askedBy}, not the assistant itself.` : 'Asked by a subagent, not the assistant itself.'}
+        </p>
+      )}
       {item.attention && !isDone(item.attention) && item.state === 'pending' && (
         <p className="mt-1 text-[12px] text-muted" data-testid="agent-attention-timer">
           {attentionTimer(item.attention)}
@@ -430,6 +444,7 @@ export function FeedItemView({
   onDecide,
   onAnswer,
   advanced = false,
+  askedBy,
 }: {
   item: FeedItem
   onDecide: (approvalId: string, approve: boolean) => void
@@ -437,6 +452,8 @@ export function FeedItemView({
   onAnswer: (questionId: string, answers: string[]) => void
   /** The panel's Advanced switch: every detail, open. Off, only the basics. */
   advanced?: boolean
+  /** #1109 — a question's subagent (`askedBy` in chat/state.ts); undefined for the session's own agent. */
+  askedBy?: string | undefined
 }) {
   switch (item.kind) {
     case 'user':
@@ -469,7 +486,7 @@ export function FeedItemView({
       return isDone(item.attention) ? (
         <DoneCard item={item} summary={item.attention.summary} onAnswer={(answers) => onAnswer(item.id, answers)} />
       ) : (
-        <QuestionCard item={item} onAnswer={(answers) => onAnswer(item.id, answers)} />
+        <QuestionCard item={item} askedBy={askedBy} onAnswer={(answers) => onAnswer(item.id, answers)} />
       )
     case 'memory':
       return <MemoryLine item={item} advanced={advanced} />

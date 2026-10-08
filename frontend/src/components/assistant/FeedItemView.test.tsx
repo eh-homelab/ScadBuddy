@@ -436,3 +436,38 @@ describe('the tab-disconnected card (#815)', () => {
     expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
   })
 })
+
+describe('who asked (#1109)', () => {
+  const question: FeedItem = {
+    kind: 'question',
+    id: 'q1',
+    tool: 't2',
+    questions: [
+      {
+        question: 'Paste your key?',
+        header: 'Key',
+        multiSelect: false,
+        options: [
+          { label: 'Yes', description: '' },
+          { label: 'No', description: '' },
+        ],
+      },
+    ],
+    state: 'pending',
+  }
+  const ask = (askedBy?: string) =>
+    render(<FeedItemView item={question} askedBy={askedBy} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+
+  it("names the subagent that asked, and says nothing for the session's own agent", () => {
+    const named = ask('pkg:helper')
+    expect(screen.getByTestId('agent-question-asked-by')).toHaveTextContent(
+      'Asked by the subagent pkg:helper, not the assistant itself.',
+    )
+    named.unmount()
+    const unnamed = ask('')
+    expect(screen.getByTestId('agent-question-asked-by')).toHaveTextContent('Asked by a subagent, not the assistant itself.')
+    unnamed.unmount()
+    ask()
+    expect(screen.queryByTestId('agent-question-asked-by')).not.toBeInTheDocument()
+  })
+})

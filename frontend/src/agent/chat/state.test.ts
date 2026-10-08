@@ -1,5 +1,5 @@
 import { type ServerEvent, ServerEventSchema } from './protocol'
-import { budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
+import { askedBy, budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
 
 const you = { kind: 'browser', id: 'browser', label: 'You' } as const
 const desktop = { kind: 'bearer', id: 'tok', label: 'Claude Desktop' } as const
@@ -113,6 +113,31 @@ describe('chatReducer', () => {
     expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
     // The route's own 2xx resolves the card without the socket.
     expect(run([{ type: 'responded', sessionId: 's1', id: 'a1', outcome: 'denied', by: you }], sent).sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
+    // A decision whose answer was lost (#1359): the resolve frame drops the stale error,
+    // and an error added after it gets an id of its own.
+    const lostDecision = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'unreachable' },
+        server({ type: 'error', sessionId: 's1', message: 'something else' }),
+        server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: true, by: you }),
+        server({ type: 'error', sessionId: 's1', message: 'and another' }),
+      ],
+      sent,
+    )
+    const items = lostDecision.sessions.s1?.items ?? []
+    expect(items.map((i) => (i.kind === 'error' ? i.message : i.kind))).toEqual(['approval', 'something else', 'and another'])
+    expect(new Set(items.map((i) => i.id)).size).toBe(items.length)
+    expect(items[0]).toMatchObject({ state: 'approved' })
+    // A second click that the route refuses as no longer pending ends the card; the first error goes.
+    const twice = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'unreachable' },
+        { type: 'decided', sessionId: 's1', approvalId: 'a1' },
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x', closed: 'it was already approved' },
+      ],
+      sent,
+    )
+    expect(twice.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'approval', state: 'closed' })])
     // A failure that lands after the server resolved it changes nothing on the card.
     expect(run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x' }], resolved).sessions.s1?.items[0]).toMatchObject({ state: 'approved' })
   })
@@ -172,6 +197,29 @@ describe('chatReducer', () => {
     const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: stale' }], sent)
     expect(failed.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
     expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your answer was not taken: stale' })
+
+    // The POST landed but its answer was lost (#1359): the card is live again with the
+    // error, and the resolve frame that follows ends the card and takes the error with it.
+    const lost = run(
+      [
+        server({ type: 'tool.call', sessionId: 's1', id: 't9', name: 'x', input: {}, risk: 'read' }),
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: The assistant could not be reached; try again.' },
+        server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you }),
+      ],
+      sent,
+    )
+    expect(lost.sessions.s1?.items.map((i) => i.kind)).toEqual(['question', 'tool'])
+    expect(lost.sessions.s1?.items[0]).toMatchObject({ state: 'answered' })
+    // A retry the route took clears it as well.
+    const retried = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'unreachable' },
+        { type: 'answered', sessionId: 's1', questionId: 'q1' },
+        { type: 'responded', sessionId: 's1', id: 'q1', outcome: 'answered', answers: ['Approve'], by: you },
+      ],
+      sent,
+    )
+    expect(retried.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
 
     // Refused by the agent over the socket (a panel loaded before #815): the same.
     const refused = run(
@@ -424,5 +472,45 @@ describe('chatReducer', () => {
       expect(reattached.sessions.s1?.budgetSpent).toBe(false)
       expect(reattached.sessions.s1?.budget).toEqual({ costUsd: 0, budgetUsd: 1 })
     })
+  })
+
+  it("says which subagent asked a question, from its call's parent Agent call (#1109)", () => {
+    const questions = [
+      {
+        question: 'Which?',
+        header: 'Pick',
+        multiSelect: false,
+        options: [
+          { label: 'A', description: '' },
+          { label: 'B', description: '' },
+        ],
+      },
+    ]
+    const ask = 'mcp__scadbuddy_questions__ask_user'
+    const state = run(
+      [
+        server({ type: 'tool.call', sessionId: 's1', id: 'agent1', name: 'Agent', input: { description: 'd', prompt: 'p', subagent_type: 'pkg:helper' }, risk: 'read' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 'agent2', name: 'Agent', input: { truncated: true, preview: '{…' }, risk: 'read' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't1', name: ask, input: {}, risk: 'read', parent: 'agent1' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't2', name: ask, input: {}, risk: 'read', parent: 'agent2' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't3', name: 'AskUserQuestion', input: {}, risk: 'read' }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't1', questions }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q2', tool: 't2', questions }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q3', tool: 't3', questions }),
+        // Its call not (yet) in the feed: nothing is claimed.
+        server({ type: 'question.asked', sessionId: 's1', id: 'q4', tool: 't4', questions }),
+      ],
+      started,
+    )
+    const items = state.sessions.s1?.items ?? []
+    const of = (id: string) => {
+      const q = items.find((i) => i.kind === 'question' && i.id === id)
+      return q?.kind === 'question' ? askedBy(items, q) : 'missing'
+    }
+    expect(of('q1')).toBe('pkg:helper')
+    // A subagent whose type the feed does not show (a truncated input) is still a subagent.
+    expect(of('q2')).toBe('')
+    expect(of('q3')).toBeUndefined()
+    expect(of('q4')).toBeUndefined()
   })
 })
