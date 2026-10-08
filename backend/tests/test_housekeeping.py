@@ -108,8 +108,8 @@ def test_the_prunes_timeout_covers_its_settle() -> None:
     open runs and up to `SETTLE_DESCRIBES` describes, each bounded by
     `DESCRIBE_BOUND`. All of that fits in its timeout, with the deletes besides."""
     settle = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND)
-    assert PRUNE_TIMEOUT >= settle + timedelta(minutes=1)
-    assert PRUNE_TIMEOUT < timedelta(seconds=PRUNE_INTERVAL) * 4
+    assert settle + timedelta(minutes=1) <= PRUNE_TIMEOUT
+    assert timedelta(seconds=PRUNE_INTERVAL) * 4 > PRUNE_TIMEOUT
 
 
 async def test_a_sweep_in_flight_finishes_before_the_worker_stops(client: Client) -> None:

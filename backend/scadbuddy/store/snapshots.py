@@ -97,9 +97,7 @@ class SnapshotStore:
         #: The stores `pin` stopped waiting for, held so they run to the end.
         self._storing: set[asyncio.Task[str]] = set()
 
-    async def pin(
-        self, slug: str, revision: str | None, *, background: bool = False
-    ) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         """The revision a render uses, with its snapshot stored. An unpinned request
         renders the template's last commit; None when there is no history at all.
         A ``background`` pin (the preview pass) stores on the background's bound."""

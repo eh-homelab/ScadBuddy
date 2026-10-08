@@ -587,7 +587,9 @@ async def test_background_stores_leave_the_interactive_slots_free(
         await api.pin("demo", revs[3])
     await asyncio.wait_for(uploading[revs[3]].wait(), 5)
     # The background bound is lower than the interactive one, and its own.
-    assert snapshots_module.MAX_CONCURRENT_BACKGROUND_STORES < snapshots_module.MAX_CONCURRENT_STORES
+    assert (
+        snapshots_module.MAX_CONCURRENT_BACKGROUND_STORES < snapshots_module.MAX_CONCURRENT_STORES
+    )
     assert sum(uploading[rev].is_set() for rev in revs[:3]) == 1
     gate.set()
     await asyncio.wait_for(asyncio.gather(*api._storing, *background), 5)

@@ -287,9 +287,7 @@ class PreviewScheduler:
             # The source's first snapshot is still uploading and carries on (#686):
             # come back once it should be stored. Nothing else would bring the slug
             # back before its next edit or the next boot.
-            delay = min(
-                max(error.retry_after, PIN_TIMEOUT * 2**tries), MAX_SNAPSHOT_RETRY_DELAY
-            )
+            delay = min(max(error.retry_after, PIN_TIMEOUT * 2**tries), MAX_SNAPSHOT_RETRY_DELAY)
             self._pending_tries[slug] = (key, tries + 1)
             logger.info(
                 "a preview waits for its source snapshot; it is tried again",
