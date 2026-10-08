@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { PairingError } from '../bridge/pairings.js'
-import type { BrowserTarget, HubErrorCode } from '../bridge/hub.js'
+import type { BrowserStatus, BrowserTarget, HubErrorCode } from '../bridge/hub.js'
 import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolContext, ToolError } from './registry.js'
 
 // The browser_* tools (#254, spec §5.2 and §8.5): the user's own open
@@ -124,9 +124,11 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
         if (spec.risk !== 'read') {
           // reconnected() runs on whichever replica saw the tab, so "reconnected"
           // here does not mean this replica has it. Inviting a retry would only
-          // open a wait that cannot end reconnected here (#1393): say so instead.
-          if (waited.why === 'reconnected' && !(await tabs(ctx).status(target(ctx), { signal: ctx.signal })).attached) {
-            throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE.reconnected}`)
+          // open a wait that cannot end reconnected here (#1393): say so instead,
+          // in the hub's own words for why there is none (#1410).
+          if (waited.why === 'reconnected') {
+            const here = await statusHere(ctx)
+            if (here && !here.attached) throw new ToolError(`${here.reason} ${WHY_STILL_GONE.reconnected}`)
           }
           throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
         }
@@ -145,6 +147,21 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
   })
 }
 
+/**
+ * The tab's status here, or undefined when the check itself failed (a pool or
+ * connection error in the pairing lookup, #1410). A failed re-check must not
+ * turn the not-run guidance into an unexpected error: the caller then words it
+ * as if the tab might be here, and the model re-checks with browser_status.
+ */
+async function statusHere(ctx: ToolContext): Promise<BrowserStatus | undefined> {
+  try {
+    return await tabs(ctx).status(target(ctx), { signal: ctx.signal })
+  } catch (err) {
+    if (ctx.signal.aborted) throw err
+    return undefined
+  }
+}
+
 /** #815 §2: a write or outward call that waited for the tab is not re-run when it is back. */
 export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): string {
   const ended =
@@ -157,7 +174,10 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
-  reconnected: 'The tab reconnected, but not to this agent replica, so it cannot be reached from here.',
+  // Neutral (#1410): the tab may have come back on another replica, or dropped again at once.
+  reconnected:
+    'The session\'s tab reconnected, but none is attached here now: it may have come back on another agent ' +
+    'replica, or dropped again.',
   user_back: 'The user said they were back, but no tab is attached here yet.',
 }
 

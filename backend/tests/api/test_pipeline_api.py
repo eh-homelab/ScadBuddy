@@ -87,7 +87,9 @@ def test_an_output_saves_its_bom_record_and_files(
 ) -> None:
     with_pipeline(paths, model)
     job = _done(client, model, {"params": {}, "v": 1})
-    created = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0})
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0}, headers=press()
+    )
     assert created.status_code in (200, 201), created.text
     detail = client.get(f"/api/v1/outputs/{created.json()['id']}").json()
     assert detail["bom"] == [{"piece": "p", "label": "P", "count": 1, "plates": [], "part": None}]
@@ -112,7 +114,9 @@ def test_an_output_whose_files_left_the_store_is_a_409_and_writes_nothing(
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     state.store.blobs.remove(output_key(str(job["id"]), 0))
     before = set((paths.outputs / model).glob("*")) if (paths.outputs / model).is_dir() else set()
-    refused = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0})
+    refused = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0}, headers=press()
+    )
     assert refused.status_code == 409, refused.text
     assert "no longer in the store" in refused.json()["detail"]
     after = set((paths.outputs / model).glob("*")) if (paths.outputs / model).is_dir() else set()
@@ -125,7 +129,7 @@ def test_an_output_index_the_job_does_not_have_is_refused(
     with_pipeline(paths, model)
     job = _done(client, model, {"params": {}, "v": 1})
     response = client.post(
-        f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 3}
+        f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 3}, headers=press()
     )
     assert response.status_code == 422
 
@@ -140,10 +144,10 @@ def test_an_output_records_only_the_inputs_its_pipeline_job_rendered(
     job = _done(client, model, rendered)
     url = f"/api/v1/models/{model}/outputs"
     other = {"params": {}, "v": 1, "house": {"cols": 2}}
-    refused = client.post(url, json={"job_id": job["id"], "inputs": other})
+    refused = client.post(url, json={"job_id": job["id"], "inputs": other}, headers=press())
     assert refused.status_code == 422, refused.text
     assert "inputs are not the ones job" in refused.json()["detail"]
-    accepted = client.post(url, json={"job_id": job["id"], "inputs": rendered})
+    accepted = client.post(url, json={"job_id": job["id"], "inputs": rendered}, headers=press())
     assert accepted.status_code == 201, accepted.text
     assert accepted.json()["inputs"]["house"] == {"cols": 1}
 

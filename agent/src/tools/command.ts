@@ -129,10 +129,26 @@ export async function command<T>(
   what: string,
   send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
 ): Promise<T | OperationRunning> {
+  const answer = await commandAnswer(ctx, what, send)
+  return isRunning(answer) ? answer : ok(Promise.resolve(answer), what)
+}
+
+/**
+ * `command`, answered as the route would have answered it, for a tool that reads a
+ * refusal's fields: the route's own result, or a followed operation's result, or its
+ * failure as the problem the route would have sent (its extensions, such as a stale
+ * base's `current`, at the top level, as in any problem document); past the follow
+ * window, the running operation, as from `command`.
+ */
+export async function commandAnswer<T>(
+  ctx: ToolContext,
+  what: string,
+  send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
+): Promise<FetchResult<T> | OperationRunning> {
   const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
   const gaveUp = ' It may have been done anyway: check before trying again.'
   const first = await answered(ctx, () => send(headers), what, gaveUp)
-  if (first.response.status !== 202) return ok(Promise.resolve(first), what)
+  if (first.response.status !== 202) return first
   let op = first.data as unknown as Operation
   const deadline = performance.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)
   for (let step = 1; op.status === 'running'; step++) {
@@ -153,11 +169,13 @@ export async function command<T>(
     )) as Operation
   }
   if (op.status === 'failed') {
-    // The problem the route would have answered, type and extensions included, through
-    // the same `ok` as a direct answer (review #1063 4).
+    // The problem the route would have answered, type and extensions included (review #1063 4);
+    // its own fields win over an extension of the same name, as in the browser's `command()`.
     const error = op.error
-    const problem = error ? { ...error.extensions, type: error.type, title: error.title, status: error.status, detail: error.detail } : undefined
-    return ok<T>(Promise.resolve({ error: problem, response: new Response(null, { status: error?.status ?? 500 }) }), what)
+    const problem = error
+      ? { ...error.extensions, type: error.type, title: error.title, status: error.status, detail: error.detail }
+      : { status: 500, title: 'Internal Server Error', detail: `${what} failed` }
+    return { error: problem, response: new Response(null, { status: problem.status }) }
   }
-  return op.result as T
+  return { data: op.result as T, response: new Response(null, { status: 200 }) }
 }

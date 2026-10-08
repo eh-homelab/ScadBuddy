@@ -44,7 +44,7 @@ def legacy_inputs(params: Mapping[str, ParamValue]) -> dict[str, Any]:
     return {"params": dict(params), "v": 0}
 
 
-def _nul_at(value: Any, path: str) -> str | None:
+def nul_at(value: Any, path: str) -> str | None:
     """The first key or string under ``value`` holding a NUL, by path: Postgres can store
     neither in text nor in jsonb (#965)."""
     if isinstance(value, str):
@@ -53,12 +53,12 @@ def _nul_at(value: Any, path: str) -> str | None:
         for key, item in value.items():
             if "\x00" in key:
                 return f"{path}.{key!r}"
-            found = _nul_at(item, f"{path}.{key}")
+            found = nul_at(item, f"{path}.{key}")
             if found is not None:
                 return found
     if isinstance(value, list):
         for index, item in enumerate(value):
-            found = _nul_at(item, f"{path}[{index}]")
+            found = nul_at(item, f"{path}[{index}]")
             if found is not None:
                 return found
     return None
@@ -87,7 +87,7 @@ def normalize_inputs(
             raise InputsError(f"parameter {name!r} contains a NUL byte")
         checked[name] = value
     result["params"] = checked
-    nul = _nul_at(result, "inputs")
+    nul = nul_at(result, "inputs")
     if nul is not None:
         raise InputsError(f"{nul} contains a NUL byte")
     version = result.setdefault("v", 0)

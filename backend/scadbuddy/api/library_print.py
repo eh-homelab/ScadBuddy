@@ -1,9 +1,9 @@
 """``/api/v1/print/library/…`` — printing a file already in Bambuddy's library (#313).
 
 The same dialog as an output's (``printing.py``): its choices, filament step and run,
-over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`. Nothing is uploaded, and
-nothing is recorded in ScadBuddy; the images are proxied so the API key never reaches
-the browser.
+over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`. Nothing is uploaded but a
+copy stating a High Flow choice for the slicer (#484), and nothing is recorded in
+ScadBuddy; the images are proxied so the API key never reaches the browser.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.runs import PrintRun
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.print_models import SourceSpec
@@ -178,11 +179,12 @@ async def post_library_run(
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
-    202 and any slice. The run's ``output_id`` is ``library:<file id>``."""
+    202 and any slice. The run's ``subject`` is ``library:<file id>``, and so is its
+    ``output_id``, which older clients read."""
     return await accept_run(
         runs,
         response,
-        subject=f"library:{file_id}",
+        subject=PrintSubject.library(file_id),
         slug=f"library-{file_id}",
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),

@@ -35,7 +35,9 @@ def put_source(client: TestClient, source: str, message: str | None = None) -> h
     body: dict[str, Any] = {"source": source}
     if message is not None:
         body["message"] = message
-    response: httpx.Response = client.put(f"/api/v1/models/{SLUG}/source", json=body)
+    response: httpx.Response = client.put(
+        f"/api/v1/models/{SLUG}/source", json=body, headers=press()
+    )
     return response
 
 
@@ -209,7 +211,7 @@ def test_restore_is_a_new_revision_and_never_a_rewrite(client: TestClient) -> No
     first = upload(client)["version"]
     put_source(client, SECOND)
 
-    response = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore")
+    response = client.post(f"/api/v1/models/{SLUG}/versions/{first}/restore", headers=press())
 
     assert response.status_code == 200
     restored = response.json()
@@ -228,7 +230,7 @@ def test_restore_is_a_new_revision_and_never_a_rewrite(client: TestClient) -> No
 def test_restoring_an_unknown_revision_is_a_404(client: TestClient) -> None:
     upload(client)
 
-    response = client.post(f"/api/v1/models/{SLUG}/versions/{'0' * 40}/restore")
+    response = client.post(f"/api/v1/models/{SLUG}/versions/{'0' * 40}/restore", headers=press())
 
     assert response.status_code == 404
 
@@ -254,7 +256,9 @@ def test_a_messaged_edit_is_parse_guarded_and_names_its_revision(
     upload(client)
 
     refused = client.put(
-        f"/api/v1/models/{SLUG}/source", json={"source": "%%FAIL%%\n", "message": "Broken"}
+        f"/api/v1/models/{SLUG}/source",
+        json={"source": "%%FAIL%%\n", "message": "Broken"},
+        headers=press(),
     )
     assert refused.status_code == 422
     assert [entry["message"] for entry in versions(client)] == [f"Add {SLUG}"]
@@ -263,6 +267,7 @@ def test_a_messaged_edit_is_parse_guarded_and_names_its_revision(
     forced = client.put(
         f"/api/v1/models/{SLUG}/source",
         json={"source": "%%FAIL%%\n", "message": "Saved anyway", "force": True},
+        headers=press(),
     )
     assert forced.status_code == 200, forced.text
 
@@ -328,7 +333,9 @@ def test_an_output_records_the_revision_it_was_rendered_from(client: TestClient)
     assert finished["model_version"] == second
 
     output = client.post(
-        f"/api/v1/models/{SLUG}/outputs", json={"job_id": job["job_id"], "name": "now"}
+        f"/api/v1/models/{SLUG}/outputs",
+        json={"job_id": job["job_id"], "name": "now"},
+        headers=press(),
     )
     assert output.status_code == 201
     assert output.json()["model_version"] == second

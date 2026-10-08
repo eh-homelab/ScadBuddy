@@ -74,6 +74,10 @@ class MemoryUploads:
         yield
 
 
+async def _stored_3mf(store: object, meta: object) -> bytes:
+    return b"3mf"
+
+
 def output(letter: str) -> OutputMeta:
     return OutputMeta(
         id=letter * 32,
@@ -88,7 +92,7 @@ def output(letter: str) -> OutputMeta:
 async def test_filing_and_a_print_at_once_upload_one_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
     meta = output("c")
@@ -124,7 +128,7 @@ async def test_two_outputs_filed_into_one_folder_at_once_get_different_names(
     """Two customizations with the same changed params name the same stem. The folder's
     listing and the upload that takes a name from it are one step per folder, or both
     see ``Demo.3mf`` free and both upload under it (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
     uploads = MemoryUploads()
@@ -157,7 +161,7 @@ async def test_a_folder_listing_that_fails_still_uploads_under_a_plain_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The listing only makes the name unique; it never fails the print (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = ListingFails()
 
@@ -180,7 +184,7 @@ async def test_filing_after_a_print_in_the_models_own_colours_reuses_its_copy(
 ) -> None:
     """A print whose spools were the model's colours records its copy under a coloured
     key; a filing with no spools must reuse it, not upload a duplicate (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
     uploads = MemoryUploads()
@@ -213,7 +217,7 @@ async def test_two_replicas_filing_and_printing_at_once_upload_one_copy(
 ) -> None:
     """The in-process lock is per replica; two replicas on one database share only the
     database, so the advisory lock is what makes them upload one copy (#540 review)."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     # Each replica has its own process lock: none is shared between the two calls.
     monkeypatch.setattr(send, "_copy_lock", lambda key: asyncio.Lock())
@@ -299,7 +303,7 @@ async def test_a_retry_takes_the_upload_its_attempt_left_unrecorded(
     """#1145, #1127: in a project's folder (a name made unique from the stem) and in the
     inbox, the retry finds the file by its bytes and records it rather than uploading it
     twice."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = Hashing()
     uploads = DiesOnce()
@@ -331,7 +335,7 @@ async def test_a_file_of_the_same_name_and_size_with_other_bytes_is_not_taken(
 ) -> None:
     """#1145: only the same bytes are the copy an attempt left; an unrecorded file that
     merely shares the name and size (someone else's upload) is left alone."""
-    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = Hashing()
     await bambuddy.upload_library_file("Demo.3mf", b"abc", folder_id=FOLDER)

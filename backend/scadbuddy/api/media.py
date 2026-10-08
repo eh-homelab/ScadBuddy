@@ -15,33 +15,40 @@ chosen with ``PUT .../media/cover``, since its shipped items keep their place.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import os
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from email.utils import parsedate
 from pathlib import Path as FilePath
-from typing import IO, Annotated, Any
+from typing import IO, TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import APIRouter, Path, Query, Request, status
-from fastapi.responses import FileResponse, Response
+from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
+from starlette.datastructures import Headers
 
-from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, SlugPath
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.core.events import ModelEvent, emit
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    Claimed,
+    IdempotencyKey,
+    operation_answer,
+    recorded,
+    run_operation,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
     Catalogue,
     MediaNotFoundError,
-    MediaOrderError,
-    MediaReadOnlyError,
     ModelNotFoundError,
     ModelRecord,
-    TooManyMediaError,
 )
 from scadbuddy.library.media import (
     LEGACY_ID,
@@ -55,6 +62,11 @@ from scadbuddy.library.media import (
     content_type_of,
     sniff_kind,
 )
+from scadbuddy.operations.claims import ClaimStore, Held
+from scadbuddy.operations.component import OperationCommands, OperationsDep
+
+if TYPE_CHECKING:
+    from _hashlib import HASH
 
 router = APIRouter(tags=["media"])
 
@@ -115,6 +127,8 @@ class _Received:
 
     files: dict[str, FilePath] = field(default_factory=dict)
     sizes: dict[str, int] = field(default_factory=dict)
+    #: Each file part's sha256, computed while it streamed: its claim's name (#1054).
+    hashes: dict[str, HASH] = field(default_factory=dict)
     caption: bytearray = field(default_factory=bytearray)
 
     def discard(self) -> None:
@@ -162,6 +176,7 @@ class _Receiver:
             path = self.directory / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
             self.received.files[name] = path
             self.received.sizes[name] = 0
+            self.received.hashes[name] = hashlib.sha256()
             self._out = path.open("xb")
         self._part = name
 
@@ -170,6 +185,7 @@ class _Receiver:
         if self._out is not None and self._part is not None:
             self._out.write(chunk)
             self.received.sizes[self._part] += len(chunk)
+            self.received.hashes[self._part].update(chunk)
         elif self._part == "caption":
             self.received.caption += chunk
             if len(self.received.caption) > MAX_CAPTION_BYTES:
@@ -287,7 +303,7 @@ def _upload_parts(received: _Received) -> tuple[StagedMedia, str, StagedMedia | 
 # ── routes ────────────────────────────────────────────────────────────────────
 
 
-def _no_model(slug: str) -> ApiError:
+def no_model(slug: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
@@ -309,7 +325,7 @@ READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
 }
 
 
-def _read_only(slug: str, item_id: str) -> ApiError:
+def read_only(slug: str, item_id: str) -> ApiError:
     return ApiError(
         status.HTTP_403_FORBIDDEN,
         f"{item_id!r} is shipped with the built-in template {slug!r} and is read-only; "
@@ -317,14 +333,14 @@ def _read_only(slug: str, item_id: str) -> ApiError:
     )
 
 
-def _require_media_store(catalogue: Catalogue) -> None:
+def require_media_store(catalogue: Catalogue) -> None:
     """503 before anything is read or written, so an upload is refused on its
     headers rather than after a gigabyte of body."""
     if catalogue.media_store is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NO_DATABASE)
 
 
-def _no_item(slug: str, item_id: str) -> ApiError:
+def no_item(slug: str, item_id: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no media item {item_id!r}")
 
 
@@ -334,25 +350,52 @@ def _no_item(slug: str, item_id: str) -> ApiError:
     responses={
         200: {"content": {"image/*": {}, "video/*": {}}},
         206: {"description": "The byte range asked for with `Range`"},
+        304: {"description": "Unchanged since `If-None-Match` or `If-Modified-Since`"},
     },
     summary="One media file",
     description=(
         "Serves one image or video of the template. Honours `Range`, so a video can "
         "seek. An item's id never changes its contents, so it is cached as "
-        "`immutable` -- except `thumbnail`, the legacy item, which is `no-cache`. "
+        "`immutable` -- except `thumbnail`, the legacy item, which is `no-cache` and "
+        "answers 304 to a matching `If-None-Match` or `If-Modified-Since`. "
         "404 for an unknown id and for an entry whose file is missing."
     ),
 )
-def get_media(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep) -> FileResponse:
+def get_media(
+    slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep, request: Request
+) -> Response:
     require_model_exists(catalogue, slug)
     try:
         item, path = catalogue.media_item(slug, item_id)
     except ModelNotFoundError:
-        raise _no_model(slug) from None
+        raise no_model(slug) from None
     except MediaNotFoundError:
-        raise _no_item(slug, item_id) from None
+        raise no_item(slug, item_id) from None
     cache = LEGACY_CACHE_CONTROL if item.id == LEGACY_ID else IMMUTABLE_CACHE_CONTROL
-    return FileResponse(path, media_type=item.content_type, headers={"Cache-Control": cache})
+    headers = {"Cache-Control": cache}
+    # FileResponse sends ETag and Last-Modified but, unlike StaticFiles, never answers a
+    # conditional request with them, so `no-cache` meant a full download every load
+    # (#1042). The validators come from one stat here; the file is stat'ed again when it
+    # is sent, so one replaced in between (a thumbnail PUT) is sent whole, never cut to
+    # the old length.
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        raise no_item(slug, item_id) from None
+    validators = FileResponse(path, stat_result=stat).headers
+    if _not_modified(request.headers, validators["etag"], validators["last-modified"]):
+        headers |= {"ETag": validators["etag"], "Last-Modified": validators["last-modified"]}
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return FileResponse(path, media_type=item.content_type, headers=headers)
+
+
+def _not_modified(request: Headers, etag: str, last_modified: str) -> bool:
+    """RFC 9110 §13.2.2: `If-None-Match` when sent, else `If-Modified-Since`."""
+    if (if_none_match := request.get("if-none-match")) is not None:
+        return _matches(if_none_match, etag)
+    since = parsedate(request.get("if-modified-since") or "")
+    modified = parsedate(last_modified)
+    return since is not None and modified is not None and since >= modified
 
 
 @router.get(
@@ -367,7 +410,7 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
     try:
         path = catalogue.media_poster(slug, item_id)
     except ModelNotFoundError:
-        raise _no_model(slug) from None
+        raise no_model(slug) from None
     except MediaNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} has no poster for {item_id!r}"
@@ -381,6 +424,12 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
 
 #: The longest side of a thumbnail: the gallery strip's tile at 2x, with room to spare.
 THUMBNAIL_SIDE = 192
+#: The longest side of a catalogue card's cover (#1034): a card is at most about 400 CSS
+#: pixels wide, so this is sharp at 2x. The original stays for the lightbox.
+CARD_SIDE = 800
+#: The sizes a client may ask for, by name.
+THUMBNAIL_SIDES: dict[str, int] = {"strip": THUMBNAIL_SIDE, "card": CARD_SIDE}
+ThumbnailSize = Literal["strip", "card"]
 #: The most pixels a thumbnail is decoded from: a 10 MB PNG can declare far more than
 #: a photo has, and every request would decode it again. Larger is served as it is.
 MAX_THUMBNAIL_SOURCE_PIXELS = 50_000_000
@@ -397,28 +446,30 @@ THUMBNAIL_VERSION = 1
 #: gallery strip asks for every item's thumbnail together (#1420).
 MAX_CONCURRENT_THUMBNAILS = 2
 #: How many thumbnails are kept in memory once made, so a source is decoded once
-#: rather than on every request (#1420). A WebP of `THUMBNAIL_SIDE` is some 10 kB.
+#: rather than on every request (#1420). A WebP of `THUMBNAIL_SIDE` is some 10 kB, one
+#: of `CARD_SIDE` some 50 kB.
 THUMBNAIL_CACHE_ITEMS = 512
-#: Square, so an EXIF orientation of 5 to 8, which swaps width and height, fits it
-#: either way round: the image is shrunk before it is turned upright, and the
-#: full-size copy `exif_transpose` would make is never made (#1426).
-_THUMBNAIL_BOX = (THUMBNAIL_SIDE, THUMBNAIL_SIDE)
 
 
-def _shrink(file: IO[bytes]) -> bytes | None:
-    """``file`` shrunk to a WebP no larger than `THUMBNAIL_SIDE`, or None when Pillow
+def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
+    """``file`` shrunk to a WebP no larger than ``side``, or None when Pillow
     cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
     `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
     header, before decoding). ``draft`` lets a JPEG decode at a fraction of its size,
     so a large photo is still cheap enough to shrink. Any error decoding it -- a
     malformed EXIF block raises ``ValueError`` or ``SyntaxError`` -- is a None too,
-    since serving the file as it is is always safe."""
+    since serving the file as it is is always safe.
+
+    The box is square, so an EXIF orientation of 5 to 8, which swaps width and height,
+    fits it either way round: the image is shrunk before it is turned upright, and the
+    full-size copy `exif_transpose` would make is never made (#1426)."""
+    box = (side, side)
     try:
         with Image.open(file, formats=THUMBNAIL_FORMATS) as image:
-            image.draft("RGB", _THUMBNAIL_BOX)
+            image.draft("RGB", box)
             if image.width * image.height > MAX_THUMBNAIL_SOURCE_PIXELS:
                 return None
-            image.thumbnail(_THUMBNAIL_BOX, Image.Resampling.LANCZOS)
+            image.thumbnail(box, Image.Resampling.LANCZOS)
             # Upright, as a browser shows the original: the WebP carries no EXIF.
             with ImageOps.exif_transpose(image) as upright:
                 out = io.BytesIO()
@@ -442,7 +493,7 @@ class _Thumbnail:
     stat: os.stat_result
 
 
-def _thumbnail_of(path: FilePath, content_type: str) -> _Thumbnail:
+def _thumbnail_of(path: FilePath, content_type: str, side: int = THUMBNAIL_SIDE) -> _Thumbnail:
     """``path`` shrunk by `_shrink`, or as it is (typed ``content_type``) when it
     cannot be. The stat and the bytes come from one open handle, so the legacy
     item's ETag describes what is served even if a thumbnail PUT replaces the file
@@ -451,18 +502,19 @@ def _thumbnail_of(path: FilePath, content_type: str) -> _Thumbnail:
     `MAX_CONCURRENT_THUMBNAILS` are held at once."""
     with path.open("rb") as file:
         stat = os.fstat(file.fileno())
-        small = _shrink(file)
+        small = _shrink(file, side)
         if small is not None:
             return _Thumbnail(small, "image/webp", stat)
         file.seek(0)
         return _Thumbnail(file.read(), content_type, stat)
 
 
-def _cache_key(path: FilePath, stat: os.stat_result) -> tuple[object, ...]:
-    """Which file, and which content of it: an item replaced in place (the legacy
-    one) or renamed over (a thumbnail PUT) changes its inode, size or times."""
+def _cache_key(path: FilePath, stat: os.stat_result, side: int) -> tuple[object, ...]:
+    """Which file, which content of it, and how small: an item replaced in place (the
+    legacy one) or renamed over (a thumbnail PUT) changes its inode, size or times."""
     return (
         str(path),
+        side,
         stat.st_dev,
         stat.st_ino,
         stat.st_size,
@@ -484,15 +536,17 @@ class _ThumbnailCache:
             self._items.move_to_end(key)
         return thumbnail
 
-    def put(self, path: FilePath, thumbnail: _Thumbnail) -> None:
-        key = _cache_key(path, thumbnail.stat)
+    def put(self, path: FilePath, side: int, thumbnail: _Thumbnail) -> None:
+        key = _cache_key(path, thumbnail.stat, side)
         self._items[key] = thumbnail
         self._items.move_to_end(key)
         while len(self._items) > self.size:
             self._items.popitem(last=False)
 
 
-async def _bounded_thumbnail_of(request: Request, path: FilePath, content_type: str) -> _Thumbnail:
+async def _bounded_thumbnail_of(
+    request: Request, path: FilePath, content_type: str, side: int
+) -> _Thumbnail:
     """`_thumbnail_of`, at most `MAX_CONCURRENT_THUMBNAILS` at a time, and once per
     content of a file: a WebP made is kept (#1420), while a file served as it is is
     not. A request waiting its turn holds no thread, and finds the WebP a request
@@ -507,22 +561,22 @@ async def _bounded_thumbnail_of(request: Request, path: FilePath, content_type: 
     if cache is None:
         cache = _ThumbnailCache()
         state.thumbnail_cache = cache
-    key = _cache_key(path, await asyncio.to_thread(path.stat))
+    key = _cache_key(path, await asyncio.to_thread(path.stat), side)
     if (kept := cache.get(key)) is not None:
         return kept
     async with decodes:
         if (kept := cache.get(key)) is not None:
             return kept
-        thumbnail = await asyncio.to_thread(_thumbnail_of, path, content_type)
+        thumbnail = await asyncio.to_thread(_thumbnail_of, path, content_type, side)
     if thumbnail.media_type == "image/webp":
-        cache.put(path, thumbnail)
+        cache.put(path, side, thumbnail)
     return thumbnail
 
 
-def _legacy_etag(stat: os.stat_result) -> str:
+def _legacy_etag(stat: os.stat_result, side: int = THUMBNAIL_SIDE) -> str:
     """A validator for the legacy item's thumbnail, which a thumbnail PUT replaces
-    in place: from the source's mtime and size, and `THUMBNAIL_VERSION`."""
-    return f'W/"{stat.st_mtime_ns:x}-{stat.st_size:x}-{THUMBNAIL_VERSION}"'
+    in place: from the source's mtime and size, the side and `THUMBNAIL_VERSION`."""
+    return f'W/"{stat.st_mtime_ns:x}-{stat.st_size:x}-{side}-{THUMBNAIL_VERSION}"'
 
 
 def _matches(if_none_match: str | None, etag: str) -> bool:
@@ -548,9 +602,9 @@ def _thumbnail_source(catalogue: Catalogue, slug: str, item_id: str) -> _Thumbna
     try:
         item, path = catalogue.media_item(slug, item_id)
     except ModelNotFoundError:
-        raise _no_model(slug) from None
+        raise no_model(slug) from None
     except MediaNotFoundError:
-        raise _no_item(slug, item_id) from None
+        raise no_item(slug, item_id) from None
     if item.kind != "video":
         return _ThumbnailSource(path, item.content_type, item.id == LEGACY_ID)
     try:
@@ -575,7 +629,8 @@ def _thumbnail_source(catalogue: Catalogue, slug: str, item_id: str) -> _Thumbna
     summary="A small copy of one item",
     description=(
         f"The image, or a video's poster, shrunk to at most {THUMBNAIL_SIDE} pixels a "
-        "side as WebP, so a strip of thumbnails does not download every original. A "
+        f"side as WebP ({CARD_SIDE} with `size=card`, for a catalogue card's cover), so "
+        "a strip of thumbnails does not download every original. A "
         "file the server cannot decode is served as it is. 404 for an unknown id, a "
         "missing file and a video with no poster. Cached as the item itself is when "
         f"`v` is {THUMBNAIL_VERSION}, the current thumbnail version, and `no-cache` "
@@ -589,7 +644,11 @@ async def get_media_thumbnail(
     catalogue: CatalogueDep,
     request: Request,
     v: Annotated[int | None, Query(description="The thumbnail version asked for")] = None,
+    size: Annotated[
+        ThumbnailSize, Query(description="`strip` for a strip's tile, `card` for a card")
+    ] = "strip",
 ) -> Response:
+    side = THUMBNAIL_SIDES[size]
     source = await asyncio.to_thread(_thumbnail_source, catalogue, slug, item_id)
     if source.legacy or v != THUMBNAIL_VERSION:
         headers = {"Cache-Control": LEGACY_CACHE_CONTROL}
@@ -598,18 +657,18 @@ async def get_media_thumbnail(
     if source.legacy:
         # A cheap check before the decode; the ETag sent is the decoded file's own.
         try:
-            current = _legacy_etag(source.path.stat())
+            current = _legacy_etag(source.path.stat(), side)
         except FileNotFoundError:
-            raise _no_item(slug, item_id) from None
+            raise no_item(slug, item_id) from None
         if _matches(request.headers.get("if-none-match"), current):
             headers["ETag"] = current
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     try:
-        thumbnail = await _bounded_thumbnail_of(request, source.path, source.content_type)
+        thumbnail = await _bounded_thumbnail_of(request, source.path, source.content_type, side)
     except FileNotFoundError:
-        raise _no_item(slug, item_id) from None
+        raise no_item(slug, item_id) from None
     if source.legacy:
-        headers["ETag"] = _legacy_etag(thumbnail.stat)
+        headers["ETag"] = _legacy_etag(thumbnail.stat, side)
     return Response(thumbnail.body, media_type=thumbnail.media_type, headers=headers)
 
 
@@ -623,6 +682,7 @@ async def get_media_thumbnail(
             "description": "Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB"
         },
         415: {"description": f"Not {ACCEPTED}"},
+        **OPERATION_RESPONSES,
     },
     openapi_extra={
         "requestBody": {
@@ -645,58 +705,111 @@ async def get_media_thumbnail(
     ),
 )
 async def upload_media(
-    slug: SlugPath, request: Request, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
+    slug: SlugPath,
+    request: Request,
+    response: Response,
+    catalogue: CatalogueDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
+    require_media_store(catalogue)
     received = await _receive(request, catalogue.paths.cache)
+    claims = ClaimStore(catalogue.paths.claims)
+    held: list[Held] = []
     try:
         upload, caption, poster = _upload_parts(received)
-        # `to_thread`: a git commit, from an `async def` handler.
-        record = await asyncio.to_thread(catalogue.add_media, slug, upload, caption, poster)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except TooManyMediaError:
-        raise ApiError(
-            status.HTTP_409_CONFLICT, f"a template holds at most {MAX_MEDIA_ITEMS} media items"
-        ) from None
+        # By claim, as streamed: a video runs to a gigabyte (#1054).
+        named = {part: received.hashes[part].hexdigest() for part in received.files}
+        body = {
+            "slug": slug,
+            "file": named["file"],
+            "kind": upload.kind,
+            "extension": upload.extension,
+            "poster": None if poster is None else named["poster"],
+            "poster_extension": None if poster is None else poster.extension,
+            "caption": caption,
+        }
+        kind = ops.kinds["model_media_upload"]
+        if (
+            await recorded(
+                ops, kind=kind, subject=slug, request=body, idempotency_key=idempotency_key
+            )
+            is None
+        ):
+            try:
+                held.append(await asyncio.to_thread(claims.hold_file, upload.path, named["file"]))
+                if poster is not None:
+                    held.append(
+                        await asyncio.to_thread(claims.hold_file, poster.path, named["poster"])
+                    )
+            except Exception:
+                # No operation names them yet (review 3e final M6).
+                for each in held:
+                    await asyncio.to_thread(claims.release, each)
+                raise
     finally:
+        # What was not claimed: a part not sent, or all of it for a repeat.
         received.discard()
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+    result = await run_operation(
+        ops,
+        response,
+        kind=kind,
+        subject=slug,
+        request=body,
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, held),
+    )
+    return operation_answer(result, ModelRecord)
 
 
 @router.patch(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE},
+    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Caption a media item",
 )
-def patch_media(
+async def patch_media(
     slug: SlugPath,
     item_id: MediaIdPath,
     body: MediaCaption,
-    catalogue: CatalogueDep,
-    events: EventsDep,
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.set_caption(slug, item_id, body.caption)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaNotFoundError:
-        raise _no_item(slug, item_id) from None
-    except MediaReadOnlyError:
-        raise _read_only(slug, item_id) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        "model_media_patch",
+        {"slug": slug, "item_id": item_id, "caption": body.caption},
+        idempotency_key,
+    )
+
+
+async def _edit(
+    ops: OperationCommands,
+    response: Response,
+    kind: str,
+    request: dict[str, Any],
+    idempotency_key: str | None,
+) -> ModelRecord | JSONResponse:
+    """A media edit as its operation (#1054); the check makes the 404 and the 503, so a
+    re-send gets its recorded answer whatever has changed since (review 3e final M1)."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[kind],
+        subject=request["slug"],
+        request=request,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
 
 
 @router.put(
     "/models/{slug}/media/order",
     response_model=ModelRecord,
-    responses=NO_DATABASE_RESPONSE,
+    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
     summary="Reorder the media",
     description=(
         "Puts the items in the order given, which must name every item exactly once "
@@ -705,25 +818,26 @@ def patch_media(
         "passed over, and its cover is set with `PUT .../media/cover`."
     ),
 )
-def reorder_media(
-    slug: SlugPath, body: MediaOrder, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.reorder(slug, body.ids)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaOrderError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+async def reorder_media(
+    slug: SlugPath,
+    body: MediaOrder,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        "model_media_order",
+        {"slug": slug, "ids": body.ids},
+        idempotency_key,
+    )
 
 
 @router.put(
     "/models/{slug}/media/cover",
     response_model=ModelRecord,
-    responses=NO_DATABASE_RESPONSE,
+    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
     summary="Choose the cover",
     description=(
         "Makes one item the cover. A template of mine's cover is its first item, so "
@@ -734,27 +848,26 @@ def reorder_media(
         "template does not list."
     ),
 )
-def put_media_cover(
-    slug: SlugPath, body: MediaCover, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.set_cover(slug, body.id)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaNotFoundError:
-        raise _no_item(slug, body.id or "") from None
-    except MediaOrderError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+async def put_media_cover(
+    slug: SlugPath,
+    body: MediaCover,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        "model_media_cover",
+        {"slug": slug, "id": body.id},
+        idempotency_key,
+    )
 
 
 @router.delete(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE},
+    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Remove a media item",
     description=(
         "Removes one item and its files, as one revision. An entry whose file is "
@@ -762,18 +875,17 @@ def put_media_cover(
         "what was added to it is."
     ),
 )
-def delete_media(
-    slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
-    require_model_exists(catalogue, slug)
-    _require_media_store(catalogue)
-    try:
-        record = catalogue.remove_media(slug, item_id)
-    except ModelNotFoundError:
-        raise _no_model(slug) from None
-    except MediaNotFoundError:
-        raise _no_item(slug, item_id) from None
-    except MediaReadOnlyError:
-        raise _read_only(slug, item_id) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
-    return record
+async def delete_media(
+    slug: SlugPath,
+    item_id: MediaIdPath,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    return await _edit(
+        ops,
+        response,
+        "model_media_delete",
+        {"slug": slug, "item_id": item_id},
+        idempotency_key,
+    )

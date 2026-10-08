@@ -70,6 +70,7 @@ def test_a_foreign_bodyless_post_is_refused(public: TestClient) -> None:
     response = public.post(
         "/api/v1/models/kept/upstream/detach",
         headers={
+            **press(),
             "Origin": "https://evil.example",
             "Content-Type": "application/x-www-form-urlencoded",
         },

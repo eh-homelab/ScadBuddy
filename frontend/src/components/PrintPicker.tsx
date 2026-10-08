@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api, ApiError, rackAlgorithmSave } from '../api/client'
+import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
   FilamentWarning,
@@ -255,8 +255,10 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     const save = ++algorithmSave.current
     const savedOn = printerId
     if (savedOn === null) return
+    // Taken when chosen, not when sent, so the order is the user's (#1216).
+    const version = nextRackAlgorithmVersion()
     const saving = algorithmSaves.current.then(() =>
-      api.putPrinterRackAlgorithm(savedOn, next, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
+      api.putPrinterRackAlgorithm(savedOn, next, version, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
     )
     algorithmSaves.current = saving.catch(() => undefined)
     void saving.then(
@@ -272,7 +274,10 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
               : { printerId: savedOn, algorithm: next, afterRead: picker.readsStarted.current, save },
           )
       },
-      () => {
+      (error: unknown) => {
+        // A 409 is a newer save already stored (#1216): by definition that one won, so
+        // there is nothing to report.
+        if (error instanceof ApiError && error.status === 409) return
         if (algorithmSave.current === save && algorithmSession.current === session)
           setAlgorithmUnsaved(true)
       },
@@ -280,13 +285,21 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
-  const projectId = project ? project.value : ownProjectId
   /**
    * #768 — the dialog's own list, read here rather than by its picker, which is an
    * Advanced step: Simple mode must still seed the project from the last one printed to.
    * Read on each open, as the picker was, and never when the page passes its project.
    */
   const ownProjects = useProjectList(setOwnProjectId, open && !project)
+  /**
+   * #1045 — while the list has not been read (still loading, or failed) an unset picker
+   * is not a choice of "No project": the run leaves `project_id` out, so the server files
+   * it under the remembered project instead.
+   */
+  const pickedProject = project ? project.value : ownProjectId
+  // A page project without a shared list is read by its own picker, out of sight here.
+  const projectKnown = project ? project.list?.choices !== null : ownProjects.choices !== null
+  const projectId = pickedProject === null && !projectKnown ? undefined : pickedProject
 
   /**
    * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
@@ -337,20 +350,22 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
    */
   const attached = useRef<string | null>(null)
   useEffect(() => {
-    if (!outputId || projectId === null || !progress?.settled) return
+    // A run that left the project to the server says where it went (#1045).
+    const filedUnder = projectId === undefined ? (result?.project_id ?? null) : projectId
+    if (!outputId || filedUnder === null || !progress?.settled) return
     const entries = (progress.copies_detail ?? [])
       .map((copy) => copy.queue_entry_id)
       .filter((id): id is number => typeof id === 'number')
     if (entries.length === 0) return
-    const key = `${outputId}:${projectId}:${entries.join(',')}`
+    const key = `${outputId}:${filedUnder}:${entries.join(',')}`
     if (attached.current === key) return
     attached.current = key
     void api
-      .attachToProject(outputId, { project_id: projectId, queue_item_ids: entries })
+      .attachToProject(outputId, { project_id: filedUnder, queue_item_ids: entries })
       .catch(() => {
         attached.current = null
       })
-  }, [outputId, projectId, progress])
+  }, [outputId, projectId, result, progress])
 
   // One output's options do not survive a change of output — the other half of
   // usePrintChoices' reset on the same `sourceKey` — except to the output a re-arrange
@@ -379,7 +394,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
         })
         const read = ready[0]
         if (!read) {
-          setArrangeError(backfillFailures(failed))
+          setArrangeError(backfillFailures(failed, 'Re-arrange'))
           return
         }
         from = read

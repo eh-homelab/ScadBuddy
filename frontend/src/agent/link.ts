@@ -1,6 +1,7 @@
 import { socketUrl } from '../lib/lsp'
 import { parseAgentFrame, tabFrame, type PairingEntry, type TabFrame } from './linkProtocol'
 import { TAB_ID } from './tabId'
+import type { CallResult } from './types'
 
 /**
  * This tab's socket to the agent service (#254): the transport that lets a server-side
@@ -71,7 +72,7 @@ export interface TabLinkOptions {
   WebSocketImpl?: typeof WebSocket
   /**
    * Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`, then scaled by a random
-   * half to all of it, so tabs an agent restart dropped together do not return in lockstep.
+   * half to all of it, so tabs an agent restart dropped together do not return in lockstep (#747).
    */
   baseMs?: number
   maxMs?: number
@@ -119,16 +120,14 @@ export function createTabLink({
   }
 
   const run = async (id: string, tool: string, args: Record<string, unknown>) => {
-    let outcome: unknown
-    try {
-      outcome = await bridge.call(tool, args)
-    } catch (err) {
-      // bridge.call answers with a typed result, but its catalogue import can still reject
-      // (a stale chunk after a deploy): answer it as failed now rather than leave the
-      // agent waiting out its call timeout (#747).
-      const why = err instanceof Error ? err.message : String(err)
-      outcome = { ok: false, error: { code: 'failed', message: `This tab could not run "${tool}": ${why}` } }
-    }
+    // #747 — a call that throws (a stale catalogue chunk) still gets its answer, or the
+    // agent waits out its timeout for it.
+    const outcome = await bridge.call(tool, args).catch(
+      (error: unknown): CallResult => ({
+        ok: false,
+        error: { code: 'failed', message: `"${tool}" failed in the tab: ${String(error)}` },
+      }),
+    )
     let frame = JSON.stringify(tabFrame({ type: 'result', id, outcome }))
     const bytes = new TextEncoder().encode(frame).byteLength
     if (bytes > MAX_RESULT_BYTES) {

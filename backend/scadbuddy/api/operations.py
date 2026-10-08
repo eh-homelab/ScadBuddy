@@ -16,13 +16,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
@@ -31,6 +34,7 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation, OperationAccepted
+from scadbuddy.render.inputs import nul_at
 from scadbuddy.workflows.commands import (
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
@@ -41,12 +45,15 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     TemporalUnreachableError,
     start_command,
+    temporal_failure,
 )
 from scadbuddy.workflows.operation_models import (
     OPERATION_WORKFLOW,
+    PRELUDE_REQUESTED,
     OperationAnswer,
     OperationAuthor,
     OperationInput,
+    PreludeStep,
 )
 from scadbuddy.workflows.print_models import ACCEPTED_UPDATE
 from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
@@ -166,6 +173,11 @@ def temporal_refused(what: str, detail: str, *, may_have_started: bool | None) -
     )
 
 
+#: The problems after which the operation may still run, so its claims are kept, as
+#: they are after any whose ``MAY_HAVE_STARTED`` is true (a refused start, #1316).
+_MAY_STILL_RUN = frozenset({STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM})
+
+
 #: The client's key for one deliberate press (§4.2 step 1).
 IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)]
 
@@ -263,6 +275,25 @@ async def recorded(
     return await ops.store.find(operation_key(kind.name, subject, _body(request), idempotency_key))
 
 
+async def _running(ops: OperationCommands, workflow_id: str) -> bool:
+    """Whether the operation's workflow is running: not when there is none, or it closed."""
+    try:
+        described = await ops.client.get_workflow_handle(workflow_id).describe()
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return False
+        # Read as a start's failure is (review #1316 (12) 1); this describe starts nothing.
+        failure = temporal_failure(error, workflow_id)
+        if isinstance(failure, TemporalUnavailableError):
+            raise temporal_unavailable(
+                "an operation", _unavailable_detail(failure), may_have_started=None
+            ) from None
+        raise temporal_refused(
+            "to describe an operation", OPERATION_REFUSED_DETAIL, may_have_started=None
+        ) from None
+    return described.status == WorkflowExecutionStatus.RUNNING
+
+
 def _body(request: BaseModel | dict[str, Any]) -> dict[str, Any]:
     return request.model_dump(mode="json") if isinstance(request, BaseModel) else request
 
@@ -276,11 +307,28 @@ async def run_operation(
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
     claimed: Claimed | None = None,
+    before_start: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | OperationAccepted:
     """Run ``kind`` as an operation; its result body, or 202 with the operation.
     A refusal or a recorded failure is raised as the problem the route answers with.
-    ``claimed`` is dropped once the answer is final: not on a 202 or a 503, after which
-    the operation may still run."""
+    ``claimed`` is dropped once the answer is final: not on a 202, on a 503 that says
+    the operation may still run (a recorded 503 is final, review #1194 1.1), or on a
+    refused start that may have reached Temporal.
+    ``before_start`` is a route's own refusal, made only when no record answers and the
+    same request is not still running: a repeat is its first answer whatever has changed
+    since (§4.2). Its refusal, 503 included, releases ``claimed`` too: nothing started
+    (review 3e final I1)."""
+    refused = False
+
+    async def refuse() -> None:
+        nonlocal refused
+        assert before_start is not None
+        try:
+            await before_start()
+        except ApiError:
+            refused = True
+            raise
+
     try:
         result = await _run_operation(
             ops,
@@ -289,9 +337,13 @@ async def run_operation(
             subject=subject,
             request=request,
             idempotency_key=idempotency_key,
+            before_start=refuse if before_start is not None else None,
         )
     except ApiError as error:
-        if claimed is not None and error.status != status.HTTP_503_SERVICE_UNAVAILABLE:
+        may_still_run = (
+            error.type in _MAY_STILL_RUN or error.extensions.get(MAY_HAVE_STARTED) is True
+        )
+        if claimed is not None and (refused or not may_still_run):
             await _release(ops, claimed)
         raise
     if claimed is not None and not (
@@ -299,6 +351,18 @@ async def run_operation(
     ):
         await _release(ops, claimed)
     return result
+
+
+def _prelude(
+    ops: OperationCommands, kind: OperationKind, body: dict[str, Any]
+) -> PreludeStep | None:
+    """The step on another queue this request needs first, if any (#1060)."""
+    if kind.prelude is None or not kind.needs_prelude(body):
+        return None
+    first = ops.kinds[kind.prelude]
+    return PreludeStep(
+        kind=first.name, task_queue=ops.queues[first.queue], run_attempts=first.run_attempts
+    )
 
 
 async def _run_operation(
@@ -309,6 +373,7 @@ async def _run_operation(
     subject: str,
     request: BaseModel | dict[str, Any],
     idempotency_key: str | None,
+    before_start: Callable[[], Awaitable[None]] | None,
 ) -> dict[str, Any] | OperationAccepted:
     if not idempotency_key:
         raise ApiError(
@@ -324,19 +389,31 @@ async def _run_operation(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"This request is {size} bytes; at most {MAX_REQUEST_BYTES} are accepted here.",
         )
+    nul = nul_at(body, "request")
+    if nul is not None:
+        # The record's jsonb holds none: its insert would fail, as a 503 every retry
+        # repeats (#965).
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{nul} contains a NUL byte")
     key = operation_key(kind.name, subject, body, idempotency_key)
     recorded = await ops.store.find(key)
     if recorded is not None:
         return _answer(recorded, response, repeated=True)
+    workflow_id = f"op-{kind.name}-{key}"
+    # A re-send can arrive before the first one's record is written: it follows that
+    # operation, whatever the route's refusal would say now (review 1130 2).
+    if before_start is not None and not await _running(ops, workflow_id):
+        await before_start()
+    prelude = _prelude(ops, kind, body)
     arg = OperationInput(
         kind=kind.name,
         subject=subject,
         key=key,
-        request=body,
+        request=body if prelude is None else {**body, PRELUDE_REQUESTED: prelude.kind},
         run_attempts=kind.run_attempts,
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
         author=_author(),
+        prelude=prelude,
         idempotency_key=idempotency_key,
     )
     try:
@@ -344,7 +421,7 @@ async def _run_operation(
             ops.client,
             OPERATION_WORKFLOW,
             arg,
-            id=f"op-{kind.name}-{key}",
+            id=workflow_id,
             task_queue=ops.queues[kind.queue],
             update=ACCEPTED_UPDATE,
             result_type=OperationAnswer,

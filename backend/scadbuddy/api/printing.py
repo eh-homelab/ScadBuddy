@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.api.deps import (
+    AppState,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
@@ -31,6 +32,7 @@ from scadbuddy.api.deps import (
     RunIdPath,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.operations import (
@@ -53,7 +55,7 @@ from scadbuddy.bambuddy.print_run import (
     check_for_output,
     filament_options_for_output,
 )
-from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
     ProjectAttach,
@@ -63,9 +65,10 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.library.settings_store import ModelPrintChoices, RackAlgorithmSupersededError
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.workflows.commands import (
@@ -154,6 +157,14 @@ class PrinterRackAlgorithmPut(BaseModel):
     """How to pick this printer's rack nozzle (#836); ``null`` forgets it."""
 
     algorithm: RackAlgorithm | None = None
+    #: Orders saves of one printer (#1216): a save with a lower version than the stored
+    #: one is refused with 409, whenever it arrives. The print dialog sends a number that
+    #: only grows. Omitted, the save is unordered.
+    version: int | None = Field(default=None, ge=0, le=2**53 - 1)
+
+
+#: A rack-algorithm save older than the printer's stored one (#1216).
+RACK_ALGORITHM_SUPERSEDED_PROBLEM = "https://scadbuddy.dev/problems/rack-algorithm-superseded"
 
 
 class PrinterRackAlgorithm(BaseModel):
@@ -205,12 +216,19 @@ def put_printer_bed_type(
     response_model=PrinterRackAlgorithm,
     summary="Remember how this printer's rack nozzle is picked",
     responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "A save with a higher `version` is already stored for this printer, so this "
+                "older one changed nothing and the newer choice stays (#1216)."
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "The database did not answer within the save's bound, so it was probably not saved "
-                "(#1129). Whether resending is safe is #1216."
+                "(#1129). Safe to resend with the same version (#1216): a save that did land is "
+                "stored again unchanged, and one a newer save has overtaken answers 409."
             )
-        }
+        },
     },
 )
 def put_printer_rack_algorithm(
@@ -219,7 +237,13 @@ def put_printer_rack_algorithm(
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
     Bambuddy, like the printer's remembered plate."""
     try:
-        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm)
+        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm, body.version)
+    except RackAlgorithmSupersededError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "a newer save of this printer's rack algorithm is stored, so this one was not",
+            type_=RACK_ALGORITHM_SUPERSEDED_PROBLEM,
+        ) from None
     except DATABASE_ERRORS as error:
         # The store gives up on purpose rather than commit after the dialog has (#1129).
         # Only a pool wait or a cancelled statement is known to have saved nothing; any
@@ -232,7 +256,7 @@ def put_printer_rack_algorithm(
         outcome = (
             "nothing was saved"
             if rolled_back
-            else "could not confirm the save; check the setting before resending"
+            else "could not confirm the save; resending it with the same version is safe"
         )
         # Say which failure it was (#1283): a full pool, a statement cut off, or a
         # connection that failed, rather than calling each one a timeout.
@@ -319,7 +343,7 @@ async def post_run(
     return await accept_run(
         runs,
         response,
-        subject=meta.id,
+        subject=PrintSubject.output(meta.id),
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
@@ -340,7 +364,7 @@ async def accept_run(
     runs: PrintCommands,
     response: Response,
     *,
-    subject: str,
+    subject: PrintSubject,
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
@@ -348,20 +372,22 @@ async def accept_run(
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
 
-    ``subject`` is what the run is keyed and recorded under: an output's id, or
-    ``library:<file id>``. Our record is read first: a repeat answers 200 with its run
-    and touches nothing else. Otherwise ``PrintRun`` is started (or attached to) with
-    update-with-start, and its ``accepted`` Update answers with the new row (202), the
-    run it repeats (200) or the refusal, raised as the problem it carries.
+    ``subject`` is what the run prints. It is keyed and announced under its
+    ``run_subject`` (an output's id, or ``library:<file id>``), as before #1750, so a
+    retry across the upgrade still finds its run. Our record is read first: a repeat
+    answers 200 with its run and touches nothing else. Otherwise ``PrintRun`` is started
+    (or attached to) with update-with-start, and its ``accepted`` Update answers with
+    the new row (202), the run it repeats (200) or the refusal, raised as the problem it
+    carries.
     """
-    key = run_key(subject, request)
+    key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
     repeated = await runs.store.find(key, has_request_id=has_request_id)
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
     arg = PrintRunInput(
-        subject=subject,
+        subject=subject.run_subject,
         slug=slug,
         key=key,
         source=source,
@@ -391,16 +417,18 @@ async def accept_run(
             deadline=deadline,
         )
 
+    async def ended(answer: AcceptAnswer) -> bool:
+        """Whether ``answer`` repeats a run our record no longer repeats: it ended (the
+        record is the truth: the workflow's copy of the row may not have caught up
+        with the run's end yet) and `runs.store.find` did not answer it."""
+        if has_request_id or not answer.repeated or answer.run is None:
+            return False
+        stored = await runs.store.get(answer.run.id)
+        return stored is not None and stored.status != "running"
+
     try:
         answer = await start()
-        if not has_request_id and answer.repeated and answer.run is not None:
-            # The record is the truth: the workflow's copy of the row may not have
-            # caught up with the run's end yet.
-            stored = await runs.store.get(answer.run.id)
-            ended = stored is not None and stored.status != "running"
-        else:
-            ended = False
-        if ended:
+        if await ended(answer):
             # Our record no longer repeats this ended run: its window is over and the
             # execution is closing. Let it close, then this request starts its own.
             margin = CONNECT_MARGIN_SECONDS + DESCRIBE_SECONDS
@@ -415,6 +443,11 @@ async def accept_run(
                 # The client sends it again, and that request starts the new run.
                 raise CommandStillAcceptingError(workflow_id)
             answer = await start(timedelta(seconds=left))
+            if await ended(answer):
+                # Still open past the wait (a loaded worker had not closed it): the
+                # start attached to it again. Its old run is no answer to this request;
+                # the client sends it again, and that request starts the new run.
+                raise CommandStillAcceptingError(workflow_id)
     except AlreadyClosedError:
         # The press's execution closed after recording its run (§4.2): that run. With
         # no row, retention pruned it: the run may well have printed (review #1061 2a).
@@ -583,6 +616,24 @@ async def get_choices(
         )
 
 
+async def _failed_before_queueing(state: AppState, output_id: str) -> str | None:
+    """Why the output's newest run failed, when it failed before it queued anything
+    (#1049); else ``None``. A run that may have queued recorded what it queued, so its
+    print's own progress says more. Without a database, or with one that does not
+    answer, there are no runs to read, and the progress is read as it was before."""
+    runs = state.print_runs.store
+    if not runs.available:
+        return None
+    try:
+        latest = await runs.latest_for_output(output_id)
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; progress read without them")
+        return None
+    if latest is None or latest.status != "failed" or latest.may_have_queued:
+        return None
+    return latest.error.detail if latest.error is not None else None
+
+
 @router.get(
     "/outputs/{output_id}/progress",
     response_model=PrintProgress | None,
@@ -596,19 +647,29 @@ async def get_progress(
     store: SettingsStoreDep,
     observer: PrintProgressDep,
     follows: FollowsDep,
+    state: StateDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
     ``null`` means this output has never been printed — that is an answer, not an
     error, and the send bar shows nothing rather than a failure.
 
+    When the output's newest run failed before it queued anything, that failure is the
+    progress (``route: "run"``, #1049): such a run leaves no slice job or queue item to
+    follow, and read as never printed once the dialog that started it was gone.
+
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
+    failed = await _failed_before_queueing(state, meta.id)
+    progress: PrintProgress | None
     async with client_for(store.load()) as client:
-        progress = await progress_for(
-            client, meta, uploads=uploads, links=links if links.available else None
-        )
+        if failed is not None:
+            progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
+        else:
+            progress = await progress_for(
+                client, meta, uploads=uploads, links=links if links.available else None
+            )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

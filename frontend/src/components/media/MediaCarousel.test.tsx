@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -40,6 +40,17 @@ describe('MediaCarousel (#275)', () => {
     expect(screen.queryByRole('button', { name: /slide/i })).not.toBeInTheDocument()
     expect(screen.queryByTestId('carousel-position')).not.toBeInTheDocument()
     expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it("shows a slide's card copy, and the original should it fail (#1034)", () => {
+    const card = { ...images[0]!, card: '/card.webp' }
+    setup({ slides: [card] })
+    const image = screen.getByRole('img', { name: card.alt })
+    expect(image).toHaveAttribute('src', '/card.webp')
+
+    fireEvent.error(image)
+
+    expect(screen.getByRole('img', { name: card.alt })).toHaveAttribute('src', card.src)
   })
 
   it('is a labelled carousel of labelled slides', () => {

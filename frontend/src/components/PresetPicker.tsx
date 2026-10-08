@@ -8,6 +8,7 @@ import {
   isJsonObject,
   joinInputs,
   NO_EXTRA,
+  sameJson,
   splitInputs,
   type InputsExtra,
   type JsonObject,
@@ -50,12 +51,27 @@ interface Props {
    * them no preset's: the selection is cleared, so Update cannot empty the preset.
    */
   resetKey?: number
+  /**
+   * #1457, #1484 — a preset the page put on screen or saved itself (a template UI's
+   * `presets.load` and `presets.save`), with the values and UI state it holds. A new
+   * object each time: the picker shows it as selected, as if picked here, without
+   * applying it again. Read on mount too, so it survives the remount a save causes.
+   */
+  selected?: SelectedElsewhere | null
+}
+
+export interface SelectedElsewhere {
+  preset: ParamPreset
+  values: ParamValues
+  extra: InputsExtra
 }
 
 interface Selection {
   preset: ParamPreset
   /** The values the preset put on screen, so an edit since shows as a change to it. */
   applied: ParamValues
+  /** The UI state it put there, which a pick replaces too (#1484). */
+  extra: InputsExtra
 }
 
 /** A value the selected preset stores for a parameter this template no longer has. */
@@ -66,6 +82,12 @@ interface Skipped {
 
 function describeSkipped(skipped: readonly Skipped[]): string {
   return skipped.map(({ name, value }) => `${name} = ${JSON.stringify(value)}`).join(', ')
+}
+
+/** What ``preset`` stores for parameters ``schema`` no longer has. */
+function skippedOf(schema: CustomizerSchema, preset: ParamPreset): Skipped[] {
+  const stored = splitInputs(preset.inputs, preset.params).params
+  return applyPreset(schema, preset).skipped.map((name) => ({ name, value: stored[name] as ParamValue }))
 }
 
 function message(caught: unknown): string {
@@ -105,14 +127,17 @@ export function PresetPicker({
   migrate,
   pinned = false,
   resetKey,
+  selected: elsewhere = null,
 }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
   const shipped = presets.filter((preset) => preset.origin === 'template')
   const saved = presets.filter((preset) => preset.origin === 'mine')
 
-  const [selection, setSelection] = useState<Selection | null>(null)
-  const [skipped, setSkipped] = useState<Skipped[]>([])
+  const [selection, setSelection] = useState<Selection | null>(() =>
+    elsewhere ? { preset: elsewhere.preset, applied: elsewhere.values, extra: elsewhere.extra } : null,
+  )
+  const [skipped, setSkipped] = useState<Skipped[]>(() => (elsewhere ? skippedOf(schema, elsewhere.preset) : []))
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   /**
@@ -178,6 +203,17 @@ export function PresetPicker({
     setError(null)
   }
 
+  // #1457 — a preset the page applied or saved is the selection, as a pick here is.
+  const [seenElsewhere, setSeenElsewhere] = useState(elsewhere)
+  if (elsewhere !== seenElsewhere) {
+    setSeenElsewhere(elsewhere)
+    if (elsewhere) {
+      setSelection({ preset: elsewhere.preset, applied: elsewhere.values, extra: elsewhere.extra })
+      setSkipped(skippedOf(schema, elsewhere.preset))
+      setError(null)
+    }
+  }
+
   // #350 — the prefill selected, so typing replaces it rather than appending to it.
   // After the dialog's own effect, which focuses its panel.
   useEffect(() => {
@@ -187,11 +223,13 @@ export function PresetPicker({
   }, [naming])
 
   const selected = selection?.preset
-  const modified = selection !== null && !sameValues(values, selection.applied)
+  const modified =
+    selection !== null && (!sameValues(values, selection.applied) || !sameJson(extra, selection.extra))
   const editable = selected?.origin === 'mine'
-  // Edits a pick would lose: values that are neither the selected preset's nor, with
-  // none selected, the defaults.
-  const unsaved = !sameValues(values, selection ? selection.applied : defaultValues(schema))
+  // Edits a pick would lose: values or UI state that are not the selected preset's or,
+  // with none selected, values that are not the defaults. The UI state has no default
+  // to compare with there: a template UI may seed its own (#1484).
+  const unsaved = selection ? modified : !sameValues(values, defaultValues(schema))
 
   /**
    * #359 — a pick replaces every value on screen, so with unsaved edits it asks first.
@@ -230,7 +268,7 @@ export function PresetPicker({
     const migrated = answer instanceof Promise ? await answer : answer
     if (migrated === null || turn !== picking.current) return
     const applied = applyPreset(schema, { ...preset, inputs: migrated })
-    setSelection({ preset, applied: applied.values })
+    setSelection({ preset, applied: applied.values, extra: applied.extra })
     const storedParams = splitInputs(migrated, preset.params).params
     setSkipped(applied.skipped.map((name) => ({ name, value: storedParams[name] as ParamValue })))
     onApply(applied.values, applied.extra)
@@ -320,7 +358,7 @@ export function PresetPicker({
         ...described,
       })
       presetsState.setData([...presets, created])
-      setSelection({ preset: created, applied: values })
+      setSelection({ preset: created, applied: values, extra })
       setSkipped([])
       setNaming(null)
     } catch (caught) {
@@ -345,7 +383,8 @@ export function PresetPicker({
     try {
       const copy = await api.duplicatePreset(slug, selected.id, { name: chosen })
       presetsState.setData([...presets, copy])
-      setSelection({ preset: copy, applied: applyPreset(schema, copy).values })
+      const applied = applyPreset(schema, copy)
+      setSelection({ preset: copy, applied: applied.values, extra: applied.extra })
       setNaming(null)
     } catch (caught) {
       if (gone(caught)) lost(selected.id)
@@ -403,7 +442,7 @@ export function PresetPicker({
         inputs: presetInputs(schema, values, extra),
       })
       presetsState.setData(presets.map((preset) => (preset.id === updated.id ? updated : preset)))
-      setSelection({ preset: updated, applied: values })
+      setSelection({ preset: updated, applied: values, extra })
       setSkipped([])
     } catch (caught) {
       if (gone(caught)) lost(selected.id)
