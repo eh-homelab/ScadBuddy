@@ -154,6 +154,23 @@ def test_a_file_scadbuddy_uploaded_names_its_output(client: TestClient, app: Fas
 
 
 @respx.mock
+def test_a_library_print_s_copy_names_no_output(client: TestClient, app: FastAPI) -> None:
+    """A library print records its copy under its subject, ``library:<file id>``
+    (`send.upload_copy`), which is no output: Arrange must not read it as one."""
+    configure(client)
+    listing_routes(recording("library-files-root.json"))
+    first = client.get("/api/v1/print/library").json()["files"][0]["id"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(
+        state.uploads.record("library:46", LibraryCopy(id=first, folder_id=None, target_key="k"))
+    )
+
+    files = client.get("/api/v1/print/library").json()["files"]
+
+    assert [row["output_id"] for row in files if row["id"] == first] == [None]
+
+
+@respx.mock
 def test_an_stl_is_listed_under_advanced_with_print(client: TestClient) -> None:
     configure(client)
     listing_routes(recording("library-files-folder.json"))
