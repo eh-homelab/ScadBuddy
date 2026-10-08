@@ -303,6 +303,7 @@ describe('extractors', () => {
     ])
     // apply_patch's conflict answer is JSON too, but nothing was written.
     expect(failed('apply_patch', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
+    expect(failed('edit_file', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
     expect(failed('set_print_options', { scope: 'global' }, {})).toEqual([])
   })
 

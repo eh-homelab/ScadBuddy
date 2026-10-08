@@ -1436,7 +1436,7 @@ def stale_edit(slug: str, base: str, current: str | None) -> ApiError:
     )
 
 
-def _require_base(slug: str, base: str, current: str | None) -> None:
+def require_base(slug: str, base: str, current: str | None) -> None:
     """A cheap early refusal, before the parse check; `write_source` checks again under
     the history's write lock."""
     if current is None:
@@ -1569,7 +1569,7 @@ async def patch_source_run(slug: str, body: SourcePatch, state: AppState) -> Mod
     source as it stands, then saved as `PUT /source` saves."""
     catalogue = state.catalogue
     current = await asyncio.to_thread(catalogue.version, slug)
-    _require_base(slug, body.base, current)
+    require_base(slug, body.base, current)
     try:
         source = await asyncio.to_thread(state.paths.model_source(slug).read_text, encoding="utf-8")
     except FileNotFoundError:

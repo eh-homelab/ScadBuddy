@@ -139,7 +139,7 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         if request["base"] is not None:
             # The early stale refusal; `write_source` makes it again under the lock.
             current = await asyncio.to_thread(state.catalogue.version, slug)
-            models_api._require_base(slug, request["base"], current)
+            models_api.require_base(slug, request["base"], current)
         return {}
 
     async def source_put_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -160,7 +160,7 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         slug = request["slug"]
         models_api.require_model_exists(state.catalogue, slug)
         current = await asyncio.to_thread(state.catalogue.version, slug)
-        models_api._require_base(slug, request["base"], current)
+        models_api.require_base(slug, request["base"], current)
         return {}
 
     async def source_patch_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -193,7 +193,7 @@ def model_kinds(state: AppState) -> list[OperationKind]:
         if request.get("base") is not None:
             # The early stale refusal; `write_file` makes it again under the lock.
             current = await asyncio.to_thread(state.catalogue.version, slug)
-            models_api._require_base(slug, request["base"], current)
+            models_api.require_base(slug, request["base"], current)
         return {}
 
     async def file_delete_check(request: dict[str, Any]) -> dict[str, Any]:
