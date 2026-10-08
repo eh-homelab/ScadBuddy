@@ -893,6 +893,22 @@ they are stored:
 Full payloads stay only in the SDK transcript (`ai_session_entries`), which is never
 sent to watchers.
 
+## Images in the chat (#1866)
+
+The panel's `user.message` may carry up to four images
+([`agent/src/sessions/images.ts`](../../agent/src/sessions/images.ts)): PNG, JPEG, GIF
+or WebP, at most 5 MiB of base64 each and 8 MiB together, each with a preview of at
+most 64 KiB (PNG, JPEG or WebP). A frame is refused as `invalid` when an image's bytes
+do not start with its type's signature, and the refusal never quotes them. The model
+gets the full images as `image` blocks in the turn's user message; Claude Code
+re-encodes them and keeps a copy under its own temp directory in the agent's state, as
+it does for any pasted image. The `user.turn` event keeps only the previews, and an MCP
+transcript (`sessions_get`) only their count. Nothing logs or traces the bytes.
+
+The chat socket takes frames up to 9 MiB (`CHAT_FRAME_MAX`) and holds at most 18 MiB of
+unhandled frames per connection (`MAX_QUEUED_BYTES`), past which a frame is `busy`; the
+tab socket keeps its 256 KiB cap (`BRIDGE_FRAME_MAX`).
+
 ## Audit log (#258)
 
 Spec §8.3 ("the audit log records the client IP"), §8.6 ("audit log"; credentials

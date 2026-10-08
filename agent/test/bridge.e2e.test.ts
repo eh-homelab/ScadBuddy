@@ -12,6 +12,7 @@ import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { BRIDGE_FRAME_MAX, BRIDGE_PATH } from '../src/routes/bridge.js'
 import { firstText, services } from './helpers/mcp.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { type FrontendBridge, type FrontendTabLink, frontendClientMessages, frontendTabLink } from './support/frontendProtocol.js'
@@ -234,6 +235,18 @@ describe.skipIf(skip !== undefined)(`the browser bridge over its real socket${sk
     await openTab()
     expect(firstText(await client.callTool({ name: 'browser_get_params', arguments: {} }))).toEqual({ width: 20 })
     await client.close()
+  }, 30_000)
+
+  it('keeps its 256 KiB frame cap, though the chat socket takes image frames (#1866)', async () => {
+    await start()
+    const socket = new WebSocket(`${agent!.url.replace(/^http/, 'ws')}${BRIDGE_PATH}`, { headers: { origin: agent!.origin } })
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    const closed = new Promise<number>((resolve) => socket.once('close', (code) => resolve(code)))
+    socket.send(JSON.stringify({ type: 'hello', padding: 'x'.repeat(BRIDGE_FRAME_MAX) }))
+    expect(await closed).toBe(1009)
   }, 30_000)
 
   it.skipIf(cliMissing !== undefined)(

@@ -86,11 +86,26 @@ const DRAIN_POLL_MS = 20
 /** Frames one connection may have waiting to be handled; past this a frame is refused with `busy`. */
 export const MAX_QUEUED_FRAMES = 32
 
+/**
+ * The largest frame the socket takes (main.ts `maxPayload`): a message's images
+ * (#1866, images.ts IMAGES_DATA_TOTAL_MAX of base64, and their previews) plus a
+ * 32k-character message and its page context.
+ */
+export const CHAT_FRAME_MAX = 9 * 1024 * 1024
+
+/**
+ * Bytes of frames one connection may have waiting to be handled; past this a
+ * frame is refused with `busy`, so image frames cannot hold MAX_QUEUED_FRAMES
+ * times CHAT_FRAME_MAX in memory.
+ */
+export const MAX_QUEUED_BYTES = 2 * CHAT_FRAME_MAX
+
 export type ChatLimits = {
   highWater: number
   bufferMax: number
   drainStallMs: number
   maxQueued: number
+  maxQueuedBytes: number
 }
 
 export type ChatConnectionOptions = {
@@ -175,6 +190,7 @@ export class ChatConnection {
   private readonly follows = new Map<string, AbortController>()
   private queue: Promise<void> = Promise.resolve()
   private queued = 0
+  private queuedBytes = 0
   private closed = false
   private readonly snapshotMs: number
   private snapshotTimer: NodeJS.Timeout | undefined
@@ -205,6 +221,7 @@ export class ChatConnection {
       bufferMax: SEND_BUFFER_MAX,
       drainStallMs: DRAIN_STALL_MS,
       maxQueued: MAX_QUEUED_FRAMES,
+      maxQueuedBytes: MAX_QUEUED_BYTES,
       ...options.limits,
     }
   }
@@ -282,7 +299,8 @@ export class ChatConnection {
     // The cap is checked before the frame is parsed, so a flood of frames is
     // refused with `busy` whether or not they parse: a malformed frame costs the
     // process a parse and a reply, and that is the work the cap bounds.
-    if (this.queued >= this.limits.maxQueued) {
+    const bytes = typeof raw === 'string' ? raw.length : 0
+    if (this.queued >= this.limits.maxQueued || this.queuedBytes + bytes > this.limits.maxQueuedBytes) {
       this.emit(
         event({
           type: 'error',
@@ -311,7 +329,7 @@ export class ChatConnection {
     // New sessions are rate-limited per owner by the manager (sessions/manager.ts
     // MAX_NEW_SESSIONS), not per connection, so reconnecting does not reset it;
     // a refusal comes back as an `error` frame with code `rate_limited`.
-    return this.enqueue(() => this.handle(message))
+    return this.enqueue(() => this.handle(message), { bytes })
   }
 
   close(): void {
@@ -326,9 +344,13 @@ export class ChatConnection {
     return [...this.follows.keys()]
   }
 
-  /** Runs `task` after everything queued before it. `counted` tasks (frames) take a `maxQueued` slot. */
-  private enqueue(task: () => Promise<void>, { counted = true } = {}): Promise<void> {
+  /**
+   * Runs `task` after everything queued before it. `counted` tasks (frames) take
+   * a `maxQueued` slot, and `bytes` of `maxQueuedBytes` until they are handled.
+   */
+  private enqueue(task: () => Promise<void>, { counted = true, bytes = 0 } = {}): Promise<void> {
     if (counted) this.queued += 1
+    this.queuedBytes += bytes
     const run = this.queue.then(async () => {
       try {
         if (this.closed) return
@@ -337,6 +359,7 @@ export class ChatConnection {
         this.emit(errorEvent(err, undefined, this.log))
       } finally {
         if (counted) this.queued -= 1
+        this.queuedBytes -= bytes
       }
     })
     this.queue = run
@@ -349,12 +372,13 @@ export class ChatConnection {
       switch (message.type) {
         case 'user.message': {
           const context = renderPageContext(message.context)
+          const images = message.images ? { images: message.images } : {}
           // The turn is the browser's child when the frame names its span,
           // else a root (spec 2026-10-01 §4); a malformed one is ignored.
           const parent = contextFrom(message.traceparent)
           if (!message.sessionId) {
             const { session } = await otelContext.with(parent, () =>
-              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context }),
+              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images }),
             )
             this.pairTab(session.id)
             // From the start: session.started is what the panel adopts its new chat by.
@@ -370,7 +394,7 @@ export class ChatConnection {
           }
           // Before the turn starts, so its first browser_* call already finds this tab.
           this.pairTab(id)
-          await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context }))
+          await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context, ...images }))
           return
         }
         case 'session.attach':
