@@ -33,7 +33,6 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     ChecksDep,
     ConfigDep,
-    EventsDep,
     FetcherDep,
     HistoryDep,
     ImportPermits,
@@ -1341,16 +1340,15 @@ def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> File
         "otherwise, writing nothing), and the duplicate's `base` becomes it in the same "
         "commit, `Merge <upstream id> into <slug>` unless `message` names it."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def put_source(
     slug: SlugPath,
     body: SourceUpdate,
-    catalogue: CatalogueDep,
+    response: Response,
+    ops: OperationsDep,
     paths: PathsDep,
-    config: ConfigDep,
-    checks: ChecksDep,
-    events: EventsDep,
-    fetcher: FetcherDep,
+    catalogue: CatalogueDep,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
     merge_base: Annotated[
         str | None,
@@ -1359,12 +1357,12 @@ async def put_source(
             description="The upstream revision this resolves a merge of: the 409's `merge_base`",
         ),
     ] = None,
-) -> ModelRecord:
-    # `require_model_exists`, not `require_model`: building a record costs a
-    # `git log` for the model's revision, and this handler is `async def`. The
-    # record `write_source` returns carries the new revision anyway.
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    # Here, before the claim: the run refuses it too, but only after recording it.
+    _refuse_binary(body.source)
     if merge_base is not None and has_conflict_markers(body.source):
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1375,22 +1373,53 @@ async def put_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "`base` and `merge_base` cannot be combined: a merge is checked against its upstream",
         )
-    if body.base is not None:
-        _require_base(slug, body.base, await asyncio.to_thread(catalogue.version, slug))
+    # By claim: a source may be 1M characters, past a workflow payload's limit (#1054).
+    claims = ClaimStore(paths.claims)
+    source = await asyncio.to_thread(claims.hold, body.source.encode())
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_source_put"],
+        subject=slug,
+        request={
+            "slug": slug,
+            "source": source.name,
+            "message": body.message,
+            # Either spelling forces, as on `POST /models`.
+            "force": force or body.force,
+            "merge_base": merge_base,
+            "base": body.base,
+        },
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [source]),
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def save_source_run(
+    slug: str,
+    source: str,
+    *,
+    message: str | None,
+    force: bool,
+    merge_base: str | None,
+    expected_version: str | None,
+    state: AppState,
+) -> ModelRecord:
+    """The ``model_source_put`` operation's run (#1054)."""
     return await _save_source(
         slug,
-        body.source,
-        message=body.message,
-        # Either spelling forces, as on `POST /models`.
-        force=force or body.force,
+        source,
+        message=message,
+        force=force,
         merge_base=merge_base,
-        expected_version=body.base,
-        catalogue=catalogue,
-        paths=paths,
-        config=config,
-        checks=checks,
-        events=events,
-        fetcher=fetcher,
+        expected_version=expected_version,
+        catalogue=state.catalogue,
+        paths=state.paths,
+        config=state.config,
+        checks=state.checks,
+        events=state.events,
+        fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
     )
 
 
@@ -1504,24 +1533,45 @@ def announce_source_change(events: EventBus, slug: str) -> None:
         "the history's write lock. A hunk or edit that does not apply is a 422 naming it, "
         "with nothing written (#252)."
     ),
-    responses={409: {"description": "The model is no longer at `base`; `current` names it"}},
+    responses={
+        **OPERATION_RESPONSES,
+        409: {"description": "The model is no longer at `base`; `current` names it"},
+    },
 )
 async def patch_source(
     slug: SlugPath,
     body: SourcePatch,
-    catalogue: CatalogueDep,
+    response: Response,
+    ops: OperationsDep,
     paths: PathsDep,
-    config: ConfigDep,
-    checks: ChecksDep,
-    events: EventsDep,
-    fetcher: FetcherDep,
-) -> ModelRecord:
+    catalogue: CatalogueDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    # The whole body by claim: up to MAX_EDITS edits of a source's size each (#1054).
+    claims = ClaimStore(paths.claims)
+    claimed = await asyncio.to_thread(claims.hold, body.model_dump_json().encode())
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_source_patch"],
+        subject=slug,
+        request={"slug": slug, "base": body.base, "body": claimed.name},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [claimed]),
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def patch_source_run(slug: str, body: SourcePatch, state: AppState) -> ModelRecord:
+    """The ``model_source_patch`` operation's run (#1054): the patch applied to the
+    source as it stands, then saved as `PUT /source` saves."""
+    catalogue = state.catalogue
     current = await asyncio.to_thread(catalogue.version, slug)
     _require_base(slug, body.base, current)
     try:
-        source = await asyncio.to_thread(paths.model_source(slug).read_text, encoding="utf-8")
+        source = await asyncio.to_thread(state.paths.model_source(slug).read_text, encoding="utf-8")
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except UnicodeDecodeError:
@@ -1541,7 +1591,7 @@ async def patch_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT, f"the patch does not apply: {error}"
         ) from None
     _require_within_cap(patched, "the patched source")
-    return await _save_source(
+    return await save_source_run(
         slug,
         patched,
         message=body.message,
@@ -1549,12 +1599,7 @@ async def patch_source(
         merge_base=None,
         # The full id the base matched, so the check under the lock is exact.
         expected_version=current,
-        catalogue=catalogue,
-        paths=paths,
-        config=config,
-        checks=checks,
-        events=events,
-        fetcher=fetcher,
+        state=state,
     )
 
 
@@ -1659,25 +1704,46 @@ def get_thumbnail(
         "Sets or replaces the catalogue thumbnail with an uploaded PNG, as one revision "
         "in the model's history."
     ),
+    responses=OPERATION_RESPONSES,
 )
 async def put_thumbnail(
     slug: SlugPath,
-    catalogue: CatalogueDep,
-    events: EventsDep,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
     file: Annotated[
         UploadFile, File(description=f"The thumbnail, a PNG of at most {MAX_THUMBNAIL_SIZE}")
     ],
-) -> ModelRecord:
+    catalogue: CatalogueDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     png = _require_png(await file.read())
+    # By claim: up to MAX_THUMBNAIL_SIZE, past a workflow payload's limit (#1054).
+    claims = ClaimStore(paths.claims)
+    claimed = await asyncio.to_thread(claims.hold, png)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_thumbnail_put"],
+        subject=slug,
+        request={"slug": slug, "png": claimed.name},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [claimed]),
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def thumbnail_put_run(slug: str, png: bytes, state: AppState) -> ModelRecord:
+    """The ``model_thumbnail_put`` operation's run (#1054)."""
     try:
         # `to_thread`: a git commit, from an `async def` handler. See `_create`.
-        record = await asyncio.to_thread(catalogue.write_thumbnail, slug, png)
+        record = await asyncio.to_thread(state.catalogue.write_thumbnail, slug, png)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    emit(state.events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
 
@@ -1692,19 +1758,48 @@ async def put_thumbnail(
         "other to its default-render preview (`preview`) once that has rendered in the "
         "background."
     ),
+    responses=OPERATION_RESPONSES,
 )
-def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
+async def delete_thumbnail(
+    slug: SlugPath,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_thumbnail_delete"],
+        subject=slug,
+        request={"slug": slug},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+def thumbnail_delete_check(slug: str, state: AppState) -> None:
+    """The ``model_thumbnail_delete`` operation's check (#1054): the model has a
+    thumbnail of its own to remove."""
     try:
-        record = catalogue.delete_thumbnail(slug)
+        own = state.catalogue.has_own_thumbnail(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    if not own:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail of its own to remove")
+
+
+async def thumbnail_delete_run(slug: str, state: AppState) -> ModelRecord:
+    """The ``model_thumbnail_delete`` operation's run (#1054)."""
+    try:
+        record = await asyncio.to_thread(state.catalogue.delete_thumbnail, slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except SidecarNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail of its own to remove"
         ) from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    emit(state.events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
 
@@ -1733,10 +1828,17 @@ def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> Response:
     response_model=ModelRecord,
     summary="Set a model's README",
     description="Sets or replaces the README, as one revision in the model's history.",
+    responses=OPERATION_RESPONSES,
 )
 async def put_readme(
-    slug: SlugPath, body: ReadmeUpdate, catalogue: CatalogueDep, events: EventsDep
-) -> ModelRecord:
+    slug: SlugPath,
+    body: ReadmeUpdate,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
+    catalogue: CatalogueDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if "\x00" in body.content:
@@ -1745,11 +1847,28 @@ async def put_readme(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the README contains a NUL byte, so it is binary, not text",
         )
+    # By claim: a README may be as long as a source (#1054).
+    claims = ClaimStore(paths.claims)
+    claimed = await asyncio.to_thread(claims.hold, body.content.encode())
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_readme_put"],
+        subject=slug,
+        request={"slug": slug, "content": claimed.name},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [claimed]),
+    )
+    return operation_answer(result, ModelRecord)
+
+
+async def readme_put_run(slug: str, content: str, state: AppState) -> ModelRecord:
+    """The ``model_readme_put`` operation's run (#1054)."""
     try:
-        record = await asyncio.to_thread(catalogue.write_readme, slug, body.content)
+        record = await asyncio.to_thread(state.catalogue.write_readme, slug, content)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    emit(state.events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
 
@@ -1758,17 +1877,42 @@ async def put_readme(
     response_model=ModelRecord,
     summary="Remove a model's README",
     description="Removes the README, as one revision in the model's history.",
+    responses=OPERATION_RESPONSES,
 )
-def delete_readme(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
+async def delete_readme(
+    slug: SlugPath,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
     require_mine(slug)
-    require_model_exists(catalogue, slug)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["model_readme_delete"],
+        subject=slug,
+        request={"slug": slug},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ModelRecord)
+
+
+def readme_delete_check(slug: str, state: AppState) -> None:
+    """The ``model_readme_delete`` operation's check (#1054): there is a README to remove."""
+    require_model_exists(state.catalogue, slug)
+    if not state.catalogue.readme_path(slug).is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README to remove")
+
+
+async def readme_delete_run(slug: str, state: AppState) -> ModelRecord:
+    """The ``model_readme_delete`` operation's run (#1054)."""
     try:
-        record = catalogue.delete_readme(slug)
+        record = await asyncio.to_thread(state.catalogue.delete_readme, slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except SidecarNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README to remove") from None
-    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    emit(state.events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
 

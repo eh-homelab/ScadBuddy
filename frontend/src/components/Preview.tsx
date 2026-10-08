@@ -319,6 +319,7 @@ export function Preview({
           <div className="flex shrink-0 items-center gap-2">
             {(rendering || loading) && (
               <span
+                data-testid="preview-rendering"
                 data-overlay="chip"
                 className={`flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 text-muted backdrop-blur-sm ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-[12px]'}`}
               >

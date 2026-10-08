@@ -1614,6 +1614,29 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(ran).toHaveLength(1))
     expect(await ran[0]).toHaveProperty('project_id', null)
   })
+
+  it('leaves project_id out of a run while the list is unknown (#1045)', async () => {
+    // The server then files it under the remembered project, not "No project".
+    server.use(
+      http.get(
+        '/api/v1/print/projects',
+        () => new HttpResponse('upstream request timeout', { status: 504 }),
+      ),
+    )
+    const ran = watchBodies('POST', /\/print\/outputs\/[^/]+\/run$/)
+    const { user } = render()
+    await generate(user)
+
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    const print = await within(dialog).findByTestId('run-print')
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+
+    await waitFor(() => expect(ran).toHaveLength(1))
+    expect(await ran[0]).not.toHaveProperty('project_id')
+  })
 })
 
 describe('template inputs (spec 2026-09-27 §4.3)', () => {
@@ -1726,5 +1749,36 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('x'),
     )
+  })
+
+  it('says a model that failed to load could not be loaded, not that it is gone (#1041)', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        fail
+          ? HttpResponse.json({ title: 'Gateway Timeout', status: 504, detail: 'injected 504' }, { status: 504 })
+          : undefined,
+      ),
+    )
+    const { user } = render()
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByRole('heading', { name: 'Could not load this model' })).toBeInTheDocument()
+    expect(alert).toHaveTextContent('injected 504')
+    expect(screen.queryByText('That model is not here')).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await firstRender()
+  })
+
+  it('says a model that is not there is not there (#1041)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ title: 'Not Found', status: 404, detail: 'no model named x' }, { status: 404 }),
+      ),
+    )
+    render()
+    expect(await screen.findByRole('heading', { name: 'That model is not here' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 })

@@ -112,7 +112,7 @@ export function ProjectPicker({
   onCreating,
 }: Props) {
   const own = useProjectList(onLoaded, list === undefined)
-  const { choices, loading, error: listError, rereadFor, add } = list ?? own
+  const { choices, loading, error: listError, retry, rereadFor, add } = list ?? own
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -344,6 +344,15 @@ export function ProjectPicker({
       {error && (
         <p role="alert" className="mt-2 basis-full text-[13px] text-warn">
           {error}
+          {/* #1045 — nothing else reads a failed list again, short of a page reload. */}
+          {createError === null && (
+            <>
+              {' '}
+              <Button size="sm" onClick={retry} disabled={loading}>
+                Retry
+              </Button>
+            </>
+          )}
         </p>
       )}
     </div>

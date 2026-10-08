@@ -1698,6 +1698,17 @@ export const handlers = [
       source: string
       force?: boolean
       message?: string | null
+      base?: string | null
+    }
+    // #1054 — `_require_base`: an edit made against a revision the model has moved past.
+    if (body.base && model.version && !model.version.startsWith(body.base)) {
+      return problem(
+        409,
+        'Conflict',
+        `'${slug}' has moved on: it is at ${model.version.slice(0, 7)}, and this edit was ` +
+          `made against ${body.base.slice(0, 7)}. Read the source again and rebuild the edit`,
+        { base: body.base, current: model.version },
+      )
     }
     // #157 — `merge_base` saves the resolution of a conflicted upstream merge.
     const mergeBase = new URL(request.url).searchParams.get('merge_base')
@@ -2699,7 +2710,7 @@ export const handlers = [
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
     if ((output.manifest ?? []).length > 0) {
-      return problem(409, 'Conflict', `output ${output.id} already records its objects`)
+      return problem(409, 'Conflict', `output ${output.id} already records its objects`, { code: 'already_backfilled' })
     }
     if ((output.arranged_from ?? []).length > 0) {
       return problem(
@@ -3094,6 +3105,7 @@ export const handlers = [
     const now = new Date().toISOString()
     const run: PrintRun = {
       id: `run-${nextNumber()}`,
+      subject: `output:${output.id}`,
       output_id: output.id,
       status: 'succeeded',
       created_at: now,

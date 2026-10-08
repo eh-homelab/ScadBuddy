@@ -387,4 +387,23 @@ describe('SettingsPage, live (#269)', () => {
     expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
     expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
   })
+
+  it('says a failed load failed, and loads again on Try again (#1041)', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/settings', () =>
+        fail
+          ? HttpResponse.json({ title: 'Internal Server Error', status: 500, detail: 'injected 500' }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load settings: injected 500')
+    expect(screen.queryByText('Loading settings')).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await seeded()
+  })
 })

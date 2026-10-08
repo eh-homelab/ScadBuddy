@@ -16,7 +16,7 @@ import pytest
 
 from scadbuddy.library import libraries
 from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
-from tests.conftest import PgPool
+from tests.conftest import PgPool, open_pg_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -227,19 +227,29 @@ async def test_a_crashed_pinners_hold_expires(pg_pool: PgPool, tmp_path: Path) -
     await asyncio.wait_for(_enter_removal(api), 10)
 
 
-async def test_a_live_pin_is_renewed_past_its_ttl(pg_pool: PgPool, tmp_path: Path) -> None:
-    worker, api = _gate(pg_pool, tmp_path, ttl=0.6), _gate(pg_pool, tmp_path)
-    removed = asyncio.Event()
+async def test_a_live_pin_is_renewed_past_its_ttl(
+    pg_pool: PgPool, pg_conninfo: str, tmp_path: Path
+) -> None:
+    """Each side on its own pool, as the worker and the API are. On one, the waiting
+    removal holds the pool's only open connection, so the pin's first renewal waits
+    for a new one: a connect slower than the TTL's slack (0.4 s) let the hold lapse
+    and the removal in (#1851)."""
+    api_pool = open_pg_pool(pg_conninfo)
+    try:
+        worker, api = _gate(pg_pool, tmp_path, ttl=0.6), _gate(api_pool, tmp_path)
+        removed = asyncio.Event()
 
-    async def remove() -> None:
-        async with api.removing():
-            removed.set()
+        async def remove() -> None:
+            async with api.removing():
+                removed.set()
 
-    async with worker.pinning():
-        task = asyncio.create_task(remove())
-        await asyncio.sleep(1.5)
-        assert not removed.is_set()
-    await asyncio.wait_for(task, 10)
+        async with worker.pinning():
+            task = asyncio.create_task(remove())
+            await asyncio.sleep(1.5)
+            assert not removed.is_set()
+        await asyncio.wait_for(task, 10)
+    finally:
+        api_pool.close()
 
 
 async def _enter_removal(gate: CheckoutGate) -> None:

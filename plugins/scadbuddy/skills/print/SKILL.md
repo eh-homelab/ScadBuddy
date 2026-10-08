@@ -146,8 +146,12 @@ print again until they have, since another print would be a second one.
   §4.3, §4.5). An output's flow (Standard or High Flow) is sliced as chosen
   for each side (#484), so choosing the mounted nozzle's flow for its side
   avoids `hf-mounted`. When both sides could print their chosen flows and
-  those differ, the print goes to the High Flow side. A library file prints
-  with the flow its author saved, taken as Standard whatever is chosen.
+  those differ, the print goes to the High Flow side. A library file that
+  Bambuddy slices (an unsliced 3MF) is sliced as chosen too: with High Flow
+  chosen, the slicer gets a copy of it, uploaded to the library folder, that
+  states each side's flow; the file itself is never changed. A sliced file,
+  an STL or a 3MF from another slicer prints as it is, taken as Standard
+  whatever is chosen (#484).
   Tell the user about the ones you can predict before they approve.
 
 Which AMS tray and extruder each spool feeds, and which rack nozzle is used,

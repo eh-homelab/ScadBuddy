@@ -71,7 +71,8 @@ export function SourceBadge({
           type="button"
           onClick={onReset}
           disabled={resetting}
-          className="text-[11px] text-accent underline-offset-2 hover:underline disabled:opacity-50"
+          // #1035 — 24 px tall: a one-tap control that discards a stored setting.
+          className="inline-flex min-h-6 items-center text-[11px] text-accent underline-offset-2 hover:underline disabled:opacity-50"
           aria-label={`Reset ${name} to the deployment value`}
           {...USER_ONLY}
         >

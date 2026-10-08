@@ -33,13 +33,22 @@ import { TabHub } from './bridge/hub.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { startHeartbeat } from './routes/chat.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
-import { SessionManager } from './sessions/manager.js'
+import { resolveTabWaits, SessionManager } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { AgentWorker } from './temporal/worker.js'
+import { Runtime } from '@temporalio/worker'
+import { Client, Connection } from '@temporalio/client'
+import { fileURLToPath } from 'node:url'
+import { AgentCommands } from './operations/run.js'
+import { OperationStore } from './operations/store.js'
+import { packageKinds } from './plugins/packages/operations.js'
+import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 
@@ -274,7 +283,7 @@ const sessions =
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
 // #815 §2: a session whose tab is connected again stops waiting for it.
-if (sessions) tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
+if (sessions) resolveTabWaits(tabs, sessions)
 // The `sessions_*` tools (#300) act on the same manager, over /mcp and in-process.
 if (sessions) toolServices.sessions = sessions
 // The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
@@ -295,6 +304,46 @@ const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('audit retention sweep failed:', (err as Error).message),
 })
+
+// The agent-tools worker (spec 2026-10-01 §4.3, §6.3, #1055): every tool as an
+// activity for durable sessions' workflows, and the agent's commands (plugin package
+// install and re-pin, AgentOperation). It needs the database (a call runs as its
+// session's owner; commands are recorded in ai_operations) and
+// SCADBUDDY_TEMPORAL_ADDRESS. Its SIGTERM is ours: stop() below stops it alongside the
+// turns, so the SDK's own signal handling is turned off.
+const temporal = config.temporalAddress && database ? { address: config.temporalAddress, sql: database.sql } : undefined
+if (config.temporalAddress && !database) console.error('agent-tools worker: not started, it needs SCADBUDDY_DATABASE_URL')
+if (temporal) Runtime.install({ shutdownSignals: [] })
+const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
+const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
+const temporalWorker =
+  temporal && operationStore
+    ? AgentWorker.start({
+        address: temporal.address,
+        namespace: config.temporalNamespace,
+        activities: {
+          ...toolActivities(ALL_TOOLS, { services: toolServices, sessions: new PgSessionOwners(temporal.sql), audit }),
+          ...operationActivities(commandKinds, operationStore),
+        },
+        // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
+        workflows: {
+          workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
+        },
+      })
+    : undefined
+// Routes start commands through a lazy client: a Temporal that is down answers 503.
+const commands =
+  temporal && operationStore
+    ? new AgentCommands({
+        client: new Client({
+          connection: Connection.lazy({ address: temporal.address }),
+          namespace: config.temporalNamespace,
+        }),
+        store: operationStore,
+        kinds: commandKinds,
+        searchAttributes: config.temporalSearchAttributes,
+      })
+    : undefined
 
 const app = createApp({
   database,
@@ -317,6 +366,8 @@ const app = createApp({
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,
+  ...(temporalWorker ? { temporal: () => temporalWorker.state() } : {}),
+  commands,
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -368,7 +419,13 @@ async function stop(): Promise<void> {
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted
   // turns' pending approvals stay pending (approvals/service.ts).
-  await sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
+  // The agent-tools worker at the same time: it stops polling, its running
+  // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
+  // and at 15 s it stops regardless: inside the turns' 17 s budget.
+  await Promise.all([
+    temporalWorker?.stop(),
+    sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
+  ])
   stopSessionWake?.()
   stopHeartbeat()
   tabs.close()

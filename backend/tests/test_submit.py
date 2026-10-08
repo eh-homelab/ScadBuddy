@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -24,6 +25,7 @@ from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
+    WorkflowHandle,
     WorkflowUpdateFailedError,
 )
 from temporalio.exceptions import ApplicationError, TimeoutType
@@ -48,7 +50,7 @@ from scadbuddy.render.job_models import (
     now,
     render_key,
 )
-from scadbuddy.render.jobs import SnapshotUnavailableError
+from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, SnapshotUnavailableError
 from scadbuddy.render.projection import (
     CLOSED_ERROR,
     LEGACY_UNSTARTED_ERROR,
@@ -102,6 +104,8 @@ from tests.test_workflows import FakeActivities, _worker
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
 SLUG = "demo"
+#: How long a submit that should return at once may take before the test calls it hung.
+SUBMIT_HANG_BOUND = 120
 
 
 class ProjectingActivities(FakeActivities):
@@ -380,35 +384,52 @@ async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The last release waits in the workflow for the cancelled job's projection. Held
-    there, the submit still answers with the new job inside its bound, below Envoy's 15 s
-    route timeout (review #1066 (8) 1). `rpc_timeout` bounds each poll, not the Update
-    (the SDK polls again), so a long one stands in for a server that keeps answering
-    polls with no outcome."""
-    monkeypatch.setattr(submit_module, "RPC_TIMEOUT", timedelta(seconds=60))
+    """A release whose Update never answers -- a server that keeps answering polls
+    with no outcome -- does not hold the submit: past `RELEASE_BOUND` it answers with
+    the new job while the release still waits (review #1066 (8) 1), not only when the
+    whole submit's deadline runs out, which is made too long to count here. Without
+    the bound it would wait for good: no clock in the assertions, so a loaded host
+    cannot fail it."""
     monkeypatch.setattr(submit_module, "RELEASE_BOUND", 1.0, raising=False)
+    monkeypatch.setattr(submit_module, "SUBMIT_DEADLINE", 3600.0)
+    waiting, abandoned = asyncio.Event(), asyncio.Event()
+    execute_update = WorkflowHandle.execute_update
+
+    async def unanswered(self: WorkflowHandle[Any, Any], update: Any, *args: Any, **kw: Any) -> Any:
+        if update != RELEASE_UPDATE:
+            return await execute_update(self, update, *args, **kw)
+        waiting.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
+        raise AssertionError("unreachable")
+
+    # Only the release goes through `execute_update`: a submit's own start and join are
+    # update-with-start (`_accepted`), which this does not touch.
+    monkeypatch.setattr(WorkflowHandle, "execute_update", unanswered)
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        gate, held = asyncio.Event(), asyncio.Event()
-        acts = ProjectingActivities(deps, block_main=gate, block_cancelled=held)
+        gate = asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate)
         async with _worker(client, queue, acts):
             old = await service.submit(SLUG, {"width": _w()})
-            began = time.monotonic()
-            async with asyncio.timeout(30):
+            # Only a hang stops here, however slow the host.
+            async with asyncio.timeout(SUBMIT_HANG_BOUND):
                 new = await service.submit(
                     SLUG, {"width": _w()}, supersedes=old.id, request_id=uuid.uuid4().hex
                 )
-            took = time.monotonic() - began
-            held.set()
+            gave_up = abandoned.is_set()
             gate.set()
             await _settled(projection, old.id)
             await _settled(projection, new.id)
         await service.aclose()
 
     assert new.id != old.id
-    print("TOOK", took)
-    assert took < 5
+    # It answered once it gave up on the release, still waiting on its Update.
+    assert waiting.is_set() and gave_up
 
 
 def _classified(error: RPCError, id: str) -> NoReturn:
@@ -580,7 +601,10 @@ async def test_an_accept_that_keeps_failing_is_answered_unstartable_within_the_d
 
 
 async def test_a_refused_submit_supersedes_nothing(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    spans: InMemorySpanExporter,
 ) -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -599,9 +623,12 @@ async def test_a_refused_submit_supersedes_nothing(
         await service.aclose()
 
     # No render has finished yet: the initial estimate (#603).
-    assert refused.value.depth == 1 and refused.value.retry_after == 10
+    assert refused.value.depth == 1
+    assert refused.value.retry_after == math.ceil(INITIAL_RENDER_ESTIMATE)
     assert waiting.state == "pending" and waiting.claims == 1
     assert _sample(service.metrics, "scadbuddy_render_jobs_rejected_total", RENDER) == 1
+    # #1245: a full queue is the client's answer (429), not a failed span.
+    _assert_refused_span(spans, "QueueFullError")
 
 
 async def test_a_supersede_never_needs_a_slot_held_by_the_job_it_replaces(
@@ -1690,8 +1717,19 @@ async def test_a_release_to_a_missing_namespace_is_not_taken_for_a_closed_run(
 # ── inputs Temporal can never take (final review I2) ────────────────────────────
 
 
+def _assert_refused_span(spans: InMemorySpanExporter, refusal: str) -> None:
+    refused = [
+        s
+        for s in spans.get_finished_spans()
+        if s.name == "render.submit"
+        and (s.attributes or {}).get("scadbuddy.failure_class") == refusal
+    ]
+    assert refused
+    assert {s.status.status_code for s in refused} == {trace.StatusCode.UNSET}
+
+
 async def test_a_submit_too_large_for_a_workflow_input_is_a_413_and_no_row(
-    make_service: ServiceFactory, projection: JobProjection
+    make_service: ServiceFactory, projection: JobProjection, spans: InMemorySpanExporter
 ) -> None:
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
@@ -1701,6 +1739,7 @@ async def test_a_submit_too_large_for_a_workflow_input_is_a_413_and_no_row(
 
     assert refused.value.status == 413
     assert await asyncio.to_thread(projection.list_jobs) == []
+    _assert_refused_span(spans, "http-413")
 
 
 async def test_settled_jobs_past_their_ttl_are_pruned(
@@ -2137,7 +2176,7 @@ async def test_retry_after_is_how_long_renders_take_now(
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: None)
-        assert await service.retry_after() == 10
+        assert await service.retry_after() == math.ceil(INITIAL_RENDER_ESTIMATE)
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 42.2)
         assert await service.retry_after() == 43
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 0.2)

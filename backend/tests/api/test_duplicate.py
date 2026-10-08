@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -14,6 +15,8 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import Client, ScheduleActionExecutionStartWorkflow
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
@@ -26,8 +29,13 @@ from scadbuddy.library.catalogue import (
 from scadbuddy.library.history import GitTimeoutError, ModelHistory, RevisionNotFoundError
 from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
+from tests.support.temporal import WorkflowReaper
+
+#: How long `_a_sweep_run_from_now` waits before calling the Schedule broken.
+SWEEP_RUN_BOUND = 300
 
 pytestmark = pytest.mark.requires_git
 
@@ -99,7 +107,9 @@ def test_a_duplicate_of_a_built_in_is_mine_and_points_at_it(client: TestClient) 
     ]
     # Editable, where the built-in is not.
     edited = client.put(
-        "/api/v1/models/my-keychain/source", json={"source": "width = 20;\n", "force": True}
+        "/api/v1/models/my-keychain/source",
+        json={"source": "width = 20;\n", "force": True},
+        headers=press(),
     )
     assert edited.status_code == 200, edited.text
     assert client.get(f"/api/v1/models/{BUILTIN}/source").text == SOURCE
@@ -107,7 +117,11 @@ def test_a_duplicate_of_a_built_in_is_mine_and_points_at_it(client: TestClient) 
 
 def test_a_duplicate_of_a_duplicate_tracks_its_immediate_parent(client: TestClient) -> None:
     _duplicate(client, BUILTIN, "My keychain")
-    client.put("/api/v1/models/my-keychain/source", json={"source": "cube(1);\n", "force": True})
+    client.put(
+        "/api/v1/models/my-keychain/source",
+        json={"source": "cube(1);\n", "force": True},
+        headers=press(),
+    )
     parent_version = client.get("/api/v1/models/my-keychain").json()["version"]
 
     record = _duplicate(client, "my-keychain", "Another keychain")
@@ -499,16 +513,55 @@ def test_the_staging_max_age_is_the_setting(settings: Settings, paths: DataPaths
     assert newer.is_dir()
 
 
+async def _a_sweep_run_from_now(client: Client, schedule_id: str) -> None:
+    """Wait for a run of the housekeeping Schedule that starts after this call, and
+    for it to finish: the event the sweep is, however long a loaded host takes to
+    reach it. The bound only keeps a broken Schedule from hanging the test."""
+    before: set[str] | None = None
+    async with asyncio.timeout(SWEEP_RUN_BOUND):
+        while True:
+            try:
+                info = (await client.get_schedule_handle(schedule_id).describe()).info
+            except RPCError as error:
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    raise
+                before = before if before is not None else set()  # not yet created
+            else:
+                # `recent_actions` keeps only the latest few; with overlaps skipped the
+                # Schedule starts at most one run per tick, far slower than these polls,
+                # so a new run cannot rotate out between two of them unseen.
+                started = [result.action for result in info.recent_actions]
+                started += info.running_actions
+                runs = {
+                    run.workflow_id: run.first_execution_run_id
+                    for run in started
+                    if isinstance(run, ScheduleActionExecutionStartWorkflow)
+                }
+                if before is None:
+                    before = set(runs)
+                elif new := [id for id in runs if id not in before]:
+                    handle = client.get_workflow_handle(new[0], run_id=runs[new[0]])
+                    await handle.result()
+                    return
+            await asyncio.sleep(0.1)
+
+
 def test_the_periodic_sweep_clears_old_duplicate_staging(
-    settings: Settings, paths: DataPaths
+    settings: Settings, paths: DataPaths, workflow_reaper: WorkflowReaper
 ) -> None:
-    """Without waiting for the next boot or duplicate (#397)."""
+    """Without waiting for the next boot or duplicate (#397): the next run of the
+    housekeeping Schedule clears it."""
     periodic = settings.model_copy(update={"asset_sweep_interval": 0.05})
     with TestClient(create_app(periodic)):
         staged = _stage(paths, "late", DUPLICATE_STAGING_MAX_AGE + 60)
-        deadline = time.monotonic() + 10
-        while staged.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
+        assert workflow_reaper.client is not None
+        schedule_id = schedule_id_for(periodic.temporal_task_queue_library)
+        workflow_reaper.run(
+            _a_sweep_run_from_now(workflow_reaper.client, schedule_id),
+            # The inner bound is what fires: the reaper's own default (60 s) would not
+            # cancel the poll, and is shorter than a loaded host's sweep run.
+            timeout=SWEEP_RUN_BOUND + 10,
+        )
         assert not staged.exists()
 
 
@@ -590,7 +643,9 @@ def _generate_with_cover(client: TestClient, paths: DataPaths, model_id: str, co
     job_id = client.post(f"/api/v1/models/{model_id}/render", json={"params": {}}).json()["job_id"]
     assert wait_for_job(client, job_id)["status"] == "done"
     set_plate_image(client, job_id, cover)
-    saved = client.post(f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id})
+    saved = client.post(
+        f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id}, headers=press()
+    )
     assert saved.status_code == 201, saved.text
     output_id: str = saved.json()["id"]
     return output_id
@@ -607,9 +662,13 @@ def test_a_duplicate_takes_the_thumbnail_and_readme_as_its_own_and_can_edit_them
     assert client.get(f"/api/v1/models/{slug}/thumbnail").content == THUMBNAIL
 
     replaced = client.put(
-        f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
+        f"/api/v1/models/{slug}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
     )
-    readme = client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Mine\n"})
+    readme = client.put(
+        f"/api/v1/models/{slug}/readme", json={"content": "# Mine\n"}, headers=press()
+    )
     patched = client.patch(f"/api/v1/models/{slug}", json={"name": "Keyring"}, headers=press())
 
     assert (replaced.status_code, readme.status_code, patched.status_code) == (200, 200, 200)

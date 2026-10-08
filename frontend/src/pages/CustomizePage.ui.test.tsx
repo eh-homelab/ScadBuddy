@@ -223,6 +223,86 @@ describe('CustomizePage with a template UI', () => {
     expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe(initial)
   })
 
+  it('keeps a preset the template UI saved selected in the picker (#1484)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'Saved' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Saved'), { timeout: 5000 })
+    await host!.presets.save('From the UI')
+    await host!.presets.save('Another')
+
+    // Saving remounts the picker, so the select is found again each time.
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Another' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('Another'), { timeout: 5000 })
+    const select = preset()
+    // Nothing on screen differs from it, so picking the other one loses nothing.
+    await user.selectOptions(select, 'From the UI')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(select).toHaveDisplayValue('From the UI')
+  })
+
+  it('selects a preset the template UI loaded, so the next pick does not ask (#1457)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'One' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('One'), { timeout: 5000 })
+    const one = await host!.presets.save('One')
+    host?.inputs.set({ params: { name: 'Two' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two'), { timeout: 5000 })
+    await host!.presets.save('Two')
+
+    await host!.presets.load(one.id)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    const select = preset()
+    await user.selectOptions(select, 'Two')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two')
+  })
+
+  it('does not bring back a loaded preset after another pick and a remount (#1768 review)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'One' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('One'), { timeout: 5000 })
+    const one = await host!.presets.save('One')
+    host?.inputs.set({ params: { name: 'Two' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two'), { timeout: 5000 })
+    await host!.presets.save('Two')
+    await host!.presets.load(one.id)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Two')
+
+    // The template UI fails: the picker moves into the generated form's toolbar.
+    host!.openPrint('not-on-screen')
+    await screen.findByRole('textbox', { name: 'Name on the tag' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    expect(preset()).not.toHaveDisplayValue('One')
+    expect(screen.queryByText('Changed from One')).not.toBeInTheDocument()
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({
@@ -464,6 +544,40 @@ describe('the page slot', () => {
   })
   afterEach(() => {
     Reflect.deleteProperty(document, 'fullscreenEnabled')
+  })
+
+  it('shows a reopened output\'s inputs read-only when they cannot be migrated (#917)', async () => {
+    const outputId = 'c'.repeat(32)
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    server.use(
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: UI_DEMO_SLUG,
+          name: 'Old',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPage(<CustomizePage />, { route: `/m/${UI_DEMO_SLUG}?from=${outputId}`, path: '/m/:slug' })
+    expect(
+      await screen.findByText(/could not be brought up to this template version: defines no migrate/, undefined, {
+        timeout: 5000,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    expect(within(screen.getByTestId('workspace')).getByRole('alert')).toHaveTextContent('defines no migrate')
+    // The template's page still mounts, on the current (default) values.
+    await waitFor(() => expect(shadowText()).toMatch(/^custom /))
   })
 
   it('covers the frame in full screen where the Fullscreen API is refused, with no flyout button', async () => {

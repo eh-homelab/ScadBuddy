@@ -12,6 +12,9 @@ describe('loadConfig', () => {
       allowedOrigins: undefined,
       trustedProxies: undefined,
       browserAllowedOrigins: undefined,
+      temporalAddress: undefined,
+      temporalNamespace: 'scadbuddy',
+      temporalSearchAttributes: false,
     })
   })
 
@@ -26,6 +29,9 @@ describe('loadConfig', () => {
         SCADBUDDY_ALLOWED_ORIGINS: 'https://scadbuddy.internal.example, https://scadbuddy.lan',
         SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.42.0.0/16, fd00::/8',
         SCADBUDDY_BROWSER_ALLOWED_ORIGINS: 'https://docs.example, http://printer.lan:8080',
+        SCADBUDDY_TEMPORAL_ADDRESS: 'temporal-frontend:7233',
+        SCADBUDDY_TEMPORAL_NAMESPACE: 'scadbuddy-dev',
+        SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'true',
       }),
     ).toEqual({
       databaseUrl: 'postgresql://u:p@db:5432/scadbuddy',
@@ -36,7 +42,20 @@ describe('loadConfig', () => {
       allowedOrigins: 'https://scadbuddy.internal.example, https://scadbuddy.lan',
       trustedProxies: '10.42.0.0/16, fd00::/8',
       browserAllowedOrigins: 'https://docs.example, http://printer.lan:8080',
+      temporalAddress: 'temporal-frontend:7233',
+      temporalNamespace: 'scadbuddy-dev',
+      temporalSearchAttributes: true,
     })
+  })
+
+  it('reads the Temporal switch as the backend does, and refuses whitespace inside a Temporal value', () => {
+    expect(loadConfig({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: '1' }).temporalSearchAttributes).toBe(true)
+    expect(loadConfig({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'false' }).temporalSearchAttributes).toBe(false)
+    expect(() => loadConfig({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'yes please' })).toThrow(ConfigError)
+    expect(() => loadConfig({ SCADBUDDY_TEMPORAL_ADDRESS: 'temporal frontend:7233' })).toThrow(
+      /SCADBUDDY_TEMPORAL_ADDRESS/,
+    )
+    expect(() => loadConfig({ SCADBUDDY_TEMPORAL_NAMESPACE: 'a b' })).toThrow(/SCADBUDDY_TEMPORAL_NAMESPACE/)
   })
 
   it.each([

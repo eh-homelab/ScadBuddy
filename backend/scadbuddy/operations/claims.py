@@ -82,9 +82,36 @@ class ClaimStore:
             raise
         return Held(name, written.st_ino, written.st_mtime_ns, created=True)
 
+    def hold_file(self, path: Path, digest: str) -> Held:
+        """``hold`` for bytes already written to ``path`` on this volume, whose sha256
+        is ``digest``: a media upload is streamed, never read into memory. ``path`` is
+        moved in, and is gone afterwards whether or not the claim was held already."""
+        target = self._path(digest)
+        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            written = path.stat()
+            try:
+                os.link(path, target)
+            except FileExistsError:
+                os.replace(path, target)
+                return Held(digest, written.st_ino, written.st_mtime_ns, created=False)
+            path.unlink()
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return Held(digest, written.st_ino, written.st_mtime_ns, created=True)
+
     def get(self, name: str) -> bytes:
         try:
             return self._path(name).read_bytes()
+        except FileNotFoundError:
+            raise LookupError(f"claim {name} is gone") from None
+
+    def link(self, name: str, target: Path) -> None:
+        """Link the claim ``name`` at ``target`` on this volume, for a run that moves
+        the bytes on (a media upload into ``media/``) while the claim stays."""
+        try:
+            os.link(self._path(name), target)
         except FileNotFoundError:
             raise LookupError(f"claim {name} is gone") from None
 

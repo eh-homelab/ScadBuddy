@@ -641,7 +641,9 @@ def test_the_editor_check_sees_the_models_libraries(
     set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
-    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+    saved = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"}, headers=press()
+    )
 
     assert checked.status_code == 200, checked.text
     assert saved.status_code == 200, saved.text
@@ -799,7 +801,9 @@ def test_the_editor_check_and_save_fetch_a_checkout_that_is_gone(
     assert checked.status_code == 200, checked.text
     assert (checkout / "BOSL2").is_dir()
     shutil.rmtree(checkout)
-    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+    saved = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"}, headers=press()
+    )
     assert saved.status_code == 200, saved.text
     assert (checkout / "BOSL2").is_dir()
 
@@ -816,16 +820,16 @@ def test_a_preset_save_fetches_a_checkout_that_is_gone(
     presets = f"/api/v1/models/{SLUG}/presets"
 
     shutil.rmtree(checkout)
-    created = lib_client.post(presets, json={"name": "Small", "params": {}})
+    created = lib_client.post(presets, json={"name": "Small", "params": {}}, headers=press())
     assert created.status_code == 201, created.text
     assert (checkout / "BOSL2").is_dir()
     preset = f"{presets}/{created.json()['id']}"
     shutil.rmtree(checkout)
-    updated = lib_client.patch(preset, json={"params": {}})
+    updated = lib_client.patch(preset, json={"params": {}}, headers=press())
     assert updated.status_code == 200, updated.text
     assert (checkout / "BOSL2").is_dir()
     shutil.rmtree(checkout)
-    duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"})
+    duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"}, headers=press())
     assert duplicated.status_code == 201, duplicated.text
     assert (checkout / "BOSL2").is_dir()
 
@@ -842,7 +846,9 @@ def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
     _unreachable(url)
 
     checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
-    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+    saved = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"}, headers=press()
+    )
 
     assert checked.status_code == 409
     assert checked.headers["content-type"] == "application/problem+json"
@@ -881,11 +887,15 @@ def test_restoring_a_revision_restores_its_pins_and_no_others(
     create_model(lib_client, "gadget")
     pin(lib_client, "BOSL2", "gadget", ref="v2")
     written_against = pin(lib_client, "BOSL2")["version"]
-    edited = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "cube(1);\n"})
+    edited = lib_client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "cube(1);\n"}, headers=press()
+    )
     assert edited.status_code == 200, edited.text
     pin(lib_client, "BOSL2", ref="v2")
 
-    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{written_against}/restore")
+    restored = lib_client.post(
+        f"/api/v1/models/{SLUG}/versions/{written_against}/restore", headers=press()
+    )
 
     assert restored.status_code == 200, restored.text
     assert sorted(change["path"] for change in restored.json()["files"]) == [
@@ -1446,7 +1456,9 @@ def test_the_sweep_keeps_every_checkout_any_revision_pins(
         [commits["v1"], commits["v2"], other["x1"], "d" * 40]
     )
     # Restoring the old revision needs nothing fetched: its checkout was kept.
-    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{old_revision}/restore")
+    restored = lib_client.post(
+        f"/api/v1/models/{SLUG}/versions/{old_revision}/restore", headers=press()
+    )
     assert restored.status_code == 200, restored.text
 
 
@@ -2030,7 +2042,9 @@ def test_a_pin_on_a_model_with_a_thumbnail_answers_its_record(lib_client: TestCl
     create_model(lib_client)
     png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
     put = lib_client.put(
-        f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", png, "image/png")}
+        f"/api/v1/models/{SLUG}/thumbnail",
+        files={"file": ("t.png", png, "image/png")},
+        headers=press(),
     )
     assert put.status_code == 200, put.text
     pinned = pin(lib_client, "BOSL2")

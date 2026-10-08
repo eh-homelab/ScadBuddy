@@ -148,6 +148,9 @@ PROJECTION_COLUMNS = (
 
 #: How many of the latest finished renders `recent_render_seconds` reads.
 RECENT_RENDERS = 20
+#: The shortest render `recent_render_seconds` counts: piece-cache hits finish in well
+#: under a second and say nothing about how long a full queue takes to drain.
+MIN_COUNTED_RENDER_SECONDS = 1.0
 #: The event a settled job announces; `core.events.JobKind` has no ``job.cancelled``.
 _FINISHED_KINDS: dict[str, JobKind] = {
     "done": "job.done",
@@ -531,14 +534,15 @@ class JobProjection:
     def recent_render_seconds(self) -> float | None:
         """The median time the latest `RECENT_RENDERS` finished renders took, from their
         start to their end, or None before one has: what a full queue's `Retry-After`
-        says (#603)."""
+        says (#603). Renders under `MIN_COUNTED_RENDER_SECONDS` are left out."""
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY seconds) AS median"
                 " FROM (SELECT extract(epoch FROM finished_at - started_at) AS seconds"
                 "  FROM render_jobs WHERE state = 'done' AND started_at IS NOT NULL"
+                "  AND finished_at - started_at >= make_interval(secs => %s)"
                 "  ORDER BY finished_at DESC LIMIT %s) AS latest",
-                (RECENT_RENDERS,),
+                (MIN_COUNTED_RENDER_SECONDS, RECENT_RENDERS),
             ).fetchone()
         median = row["median"] if row is not None else None
         return float(median) if median is not None else None

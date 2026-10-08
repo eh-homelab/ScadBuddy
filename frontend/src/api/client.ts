@@ -153,6 +153,9 @@ export class ApiError extends Error {
   }
 }
 
+
+/** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
+let settingsInFlight: Promise<Settings> | undefined
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -386,10 +389,21 @@ export const printRunPoll = {
  * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, 5 s, #1129):
  * once a save reaches the store it commits or fails within twice that bound, one for
  * the pool wait and one for the write (#1264). Time before it reaches
- * the store is not bounded, so a save held up there can still land after the next one;
- * ordering saves explicitly is #1216.
+ * the store is not bounded, so a save held up there can still land after the next one:
+ * each save's version orders them (#1216), and the server refuses the older one.
  */
 export const rackAlgorithmSave = { timeoutMs: 25_000 }
+
+let lastRackAlgorithmVersion = 0
+/**
+ * #1216 — the version a rack-algorithm save is sent with: the clock, but never less than
+ * one above the last, so it grows across saves, dialogs and page loads in this browser.
+ * A count that started again at 1 on each load would be refused for good after a reload.
+ */
+export function nextRackAlgorithmVersion(): number {
+  lastRackAlgorithmVersion = Math.max(Date.now(), lastRackAlgorithmVersion + 1)
+  return lastRackAlgorithmVersion
+}
 
 /**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
@@ -440,6 +454,8 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run.
+ * A still-accepting answer is re-sent for up to `acceptingMs`, unless `bounded`: then it
+ * counts toward `reattempts` like any other, for a body too large to send that often.
  * With `finish`, `signal` aborting between re-sends sends once more, at once, instead of
  * giving up: the request may already hold a claim, and that answer names it (review #1066
  * 1.1). Still unanswered then, it gives up. `within` wraps each attempt.
@@ -447,8 +463,7 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 async function reattach<T>(
   attempt: () => Promise<T>,
   signal?: AbortSignal,
-  finish = false,
-  within?: Within,
+  { bounded = false, finish = false, within }: { bounded?: boolean; finish?: boolean; within?: Within } = {},
 ): Promise<T> {
   // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
   const began = performance.now()
@@ -464,7 +479,11 @@ async function reattach<T>(
         continue
       }
       const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
-      if (accepting ? performance.now() - began >= printRunPoll.acceptingMs : tries++ >= printRunPoll.reattempts) {
+      if (
+        accepting && !bounded
+          ? performance.now() - began >= printRunPoll.acceptingMs
+          : tries++ >= printRunPoll.reattempts
+      ) {
         throw caught
       }
       // The server's Retry-After paces a re-send it answered (review #1061 4a).
@@ -486,10 +505,28 @@ async function reattach<T>(
  * body, or 202 with an operation still running, followed here through
  * `GET /operations/{id}` to that body, or to the problem the route would have answered.
  */
-async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function command<T>(
+  path: string,
+  init: RequestInit = {},
+  /** Where the operation is followed: the backend's, or the agent's own (`/ai/operations`, #1055). */
+  operations = '/operations',
+): Promise<T> {
   const signal = init.signal ?? undefined
   const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
+  return followOperation<T>(first, signal, operations)
+}
+
+/**
+ * A command's first answer to its end: the route's own body, or a 202's operation
+ * followed through `GET /operations/{id}` to its result, or to the problem the route
+ * would have answered.
+ */
+async function followOperation<T>(
+  first: { status: number; body: T | OperationAccepted },
+  signal?: AbortSignal,
+  operations = '/operations',
+): Promise<T> {
   if (first.status !== 202) return first.body as T
   let op: Operation = first.body as OperationAccepted
   const began = performance.now()
@@ -504,7 +541,7 @@ async function command<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     await wait(printRunPoll.intervalMs, signal)
     const id = op.id
-    op = await reattach(() => request<Operation>(`/operations/${seg(id)}`, { signal }), signal)
+    op = await reattach(() => request<Operation>(`${operations}/${seg(id)}`, { signal }), signal)
   }
   if (op.status === 'failed') {
     const error = op.error
@@ -537,8 +574,7 @@ async function followPrintRun(
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
-    false,
-    within,
+    { within },
   )
   const began = performance.now()
   while (run.status === 'running') {
@@ -598,7 +634,7 @@ export const api = {
   setThumbnail: (slug: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
-    return request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+    return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
   },
 
   /**
@@ -606,7 +642,7 @@ export const api = {
    * a generated model falls back to its first output's plate image.
    */
   removeThumbnail: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
 
   /** The README's Markdown, or null when the model has none. */
   getReadme: async (slug: string): Promise<string | null> => {
@@ -619,32 +655,32 @@ export const api = {
   },
 
   setReadme: (slug: string, content: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/readme`, {
+    command<ModelSummary>(`/models/${seg(slug)}/readme`, {
       method: 'PUT',
       body: JSON.stringify({ content }),
     }),
 
   removeReadme: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
 
   /** The template's shipped presets, then the ones saved on it. */
   listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
 
   createPreset: (slug: string, body: ParamPresetCreate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
 
   updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   /** Copies any preset, shipped or saved, to a new saved one with the same values. */
   duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -664,12 +700,14 @@ export const api = {
 
   /**
    * Replaces the source as one revision in the model's history, named by `message`
-   * when given. Parse-checked server-side unless `force`.
+   * when given. Parse-checked server-side unless `force`. With `base`, the version the
+   * edit was made against, a model that has moved past it is a 409 whose `current`
+   * names where it is now, and nothing is written (#1054).
    */
-  replaceSource: (slug: string, source: string, force = false, message?: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/source`, {
+  replaceSource: (slug: string, source: string, force = false, message?: string, base?: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/source`, {
       method: 'PUT',
-      body: JSON.stringify({ source, force, message: message ?? null }),
+      body: JSON.stringify({ source, force, message: message ?? null, base: base ?? null }),
     }),
 
   /**
@@ -709,20 +747,20 @@ export const api = {
 
   /** A conflicted merge answers 409 with `merged` and `merge_base` and writes nothing. */
   mergeUpstream: (slug: string) =>
-    request<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
+    command<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
 
   dismissUpstream: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
 
   detachUpstream: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
 
   /**
    * Saves the resolution of a conflicted upstream merge: the same write as
    * `replaceSource`, which also advances the duplicate's `base` to `mergeBase`.
    */
   resolveUpstreamMerge: (slug: string, source: string, mergeBase: string, force = false) =>
-    request<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
       method: 'PUT',
       body: JSON.stringify({ source, force, message: null }),
     }),
@@ -761,11 +799,12 @@ export const api = {
    * #624 — a small copy of an image or of a video's poster, for a strip of
    * thumbnails; undefined for a video with no poster, which has none. It is
    * cached as `immutable`, so the URL carries the thumbnail version (#1424).
+   * `card` asks for a larger copy, sized for a catalogue card's cover (#1034).
    */
-  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>) =>
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>, size?: 'card') =>
     item.kind === 'video' && !item.poster
       ? undefined
-      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}`,
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}${size ? `&size=${size}` : ''}`,
 
   /**
    * #274 — adds an image or video as the template's last item. XHR rather than
@@ -777,50 +816,58 @@ export const api = {
     file: File,
     options: { caption?: string; poster?: File } = {},
     onProgress?: (fraction: number) => void,
-  ) =>
-    new Promise<ModelSummary>((resolve, reject) => {
-      const body = new FormData()
-      body.append('file', file)
-      if (options.caption) body.append('caption', options.caption)
-      if (options.poster) body.append('poster', options.poster)
-      const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-      xhr.setRequestHeader('Accept', 'application/json')
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-      })
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText) as ModelSummary)
-          return
+  ): Promise<ModelSummary> => {
+    // A command (#1054): one key for this upload, kept on a re-send after an answer
+    // that never arrived, so the server adds the item once.
+    const key = newRequestId()
+    const send = () =>
+      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>((resolve, reject) => {
+        const body = new FormData()
+        body.append('file', file)
+        if (options.caption) body.append('caption', options.caption)
+        if (options.poster) body.append('poster', options.poster)
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
+        xhr.setRequestHeader('Accept', 'application/json')
+        xhr.setRequestHeader('Idempotency-Key', key)
+        xhr.upload.addEventListener('progress', (event) => {
+          if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+        })
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | OperationAccepted })
+            return
+          }
+          reject(new ApiError(xhrProblem(xhr)))
         }
-        reject(new ApiError(xhrProblem(xhr)))
-      }
-      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-      // have landed, and `mayHaveRun` says so.
-      xhr.onerror = () =>
-        reject(
-          new ApiError({
-            type: UNANSWERED,
-            title: 'The upload failed',
-            status: 0,
-            detail: 'The upload failed',
-          }),
-        )
-      xhr.onabort = () =>
-        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-      xhr.send(body)
-    }),
+        // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+        // have landed, and `mayHaveRun` says so.
+        xhr.onerror = () =>
+          reject(
+            new ApiError({
+              type: UNANSWERED,
+              title: 'The upload failed',
+              status: 0,
+              detail: 'The upload failed',
+            }),
+          )
+        xhr.onabort = () =>
+          reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+        xhr.send(body)
+      })
+    // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
+    return reattach(send, undefined, { bounded: true }).then((first) => followOperation<ModelSummary>(first))
+  },
 
   patchMedia: (slug: string, id: string, caption: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify({ caption }),
     }),
 
   /** `ids` names every item once, in the new order; the first is the cover. */
   reorderMedia: (slug: string, ids: string[]) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/order`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/order`, {
       method: 'PUT',
       body: JSON.stringify({ ids }),
     }),
@@ -831,13 +878,13 @@ export const api = {
    * it ships.
    */
   setMediaCover: (slug: string, id: string | null) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
       method: 'PUT',
       body: JSON.stringify({ id }),
     }),
 
   deleteMedia: (slug: string, id: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
@@ -846,7 +893,7 @@ export const api = {
   uploadAsset: (slug: string, file: File) => {
     const body = new FormData()
     body.append('file', file)
-    return request<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
+    return command<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
   },
 
   getAsset: (slug: string, id: string) =>
@@ -897,7 +944,7 @@ export const api = {
     ),
 
   restoreVersion: (slug: string, version: string) =>
-    request<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
+    command<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
       method: 'POST',
     }),
 
@@ -936,7 +983,7 @@ export const api = {
           }),
         }),
       signal,
-      true,
+      { finish: true },
     )
   },
 
@@ -961,7 +1008,7 @@ export const api = {
 
   /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
   createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
-    request<Output>(`/models/${seg(slug)}/outputs`, {
+    command<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
       body: JSON.stringify({
         job_id: jobId,
@@ -991,7 +1038,7 @@ export const api = {
 
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
-    request<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
+    command<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
       method: 'DELETE',
     }),
 
@@ -1029,7 +1076,7 @@ export const api = {
   putThumbnail: (outputId: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
-    return request<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
+    return command<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
   },
 
   /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
@@ -1046,11 +1093,19 @@ export const api = {
       body: JSON.stringify({ bed_type: bedType }),
     }),
 
-  /** #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). */
-  putPrinterRackAlgorithm: (printerId: number, algorithm: RackAlgorithm | null, signal?: AbortSignal) =>
+  /**
+   * #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). A save
+   * with a lower `version` than the stored one is refused with 409 (#1216).
+   */
+  putPrinterRackAlgorithm: (
+    printerId: number,
+    algorithm: RackAlgorithm | null,
+    version: number = nextRackAlgorithmVersion(),
+    signal?: AbortSignal,
+  ) =>
     request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
       method: 'PUT',
-      body: JSON.stringify({ algorithm }),
+      body: JSON.stringify({ algorithm, version }),
       signal,
     }),
 
@@ -1265,7 +1320,7 @@ export const api = {
 
   /** Downloads the family onto the data volume so the renderer can resolve it. */
   installFont: (family: string) =>
-    request<InstalledFamily>('/fonts/install', {
+    command<InstalledFamily>('/fonts/install', {
       method: 'POST',
       body: JSON.stringify({ family }),
     }),
@@ -1338,10 +1393,26 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  getSettings: () => request<Settings>('/settings'),
+  /**
+   * #1039 — callers that ask at once share one request: the shell's unit and link
+   * loaders and the page all read it on the same load. Nothing is kept once it
+   * answers, so a later call always reads afresh, and a save stops later callers
+   * joining a read that started before it. Each caller gets its own copy.
+   */
+  getSettings: (): Promise<Settings> => {
+    if (!settingsInFlight) {
+      const read = request<Settings>('/settings').finally(() => {
+        if (settingsInFlight === read) settingsInFlight = undefined
+      })
+      settingsInFlight = read
+    }
+    return settingsInFlight.then((settings) => structuredClone(settings))
+  },
 
-  putSettings: (body: SettingsUpdate) =>
-    request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  putSettings: (body: SettingsUpdate) => {
+    settingsInFlight = undefined
+    return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
+  },
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 

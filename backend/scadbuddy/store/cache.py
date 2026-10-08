@@ -236,6 +236,8 @@ class CachedBlobStore:
             except FileNotFoundError:
                 total -= size  # gone already
                 continue
+            # #1271: the marker goes first, so a removal cut short is never a hit.
+            clear_marker(self.local.root / key)
             self.local.remove(key)
             total -= size
             removed.append(key)
