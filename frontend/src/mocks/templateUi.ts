@@ -1,3 +1,5 @@
+import dollhouseUi from './ui/dollhouse-kit/index.js?raw'
+import dollhousePieces from './ui/dollhouse-kit/pieces.js?raw'
 import mazeUi from './ui/maze-puzzle.js?raw'
 
 /** Template UI modules the msw API serves (spec 2026-09-27 §4). */
@@ -27,4 +29,6 @@ export function mount(root, host) {
   // A copy of models/maze-puzzle/ui/index.js (ui/copies.test.ts keeps it byte-identical):
   // the bundle, and so the mocks, may not import from models/.
   'builtin:maze-puzzle': { 'index.js': mazeUi },
+  // Copies of models/dollhouse-kit/ui/ (#1737), kept byte-identical the same way.
+  'builtin:dollhouse-kit': { 'index.js': dollhouseUi, 'pieces.js': dollhousePieces },
 }
