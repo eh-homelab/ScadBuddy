@@ -17,6 +17,8 @@ interface Props {
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
+  /** `wide`: up to the window's width, for an image (#1891). */
+  size?: 'md' | 'wide'
 }
 
 /** Whether `panel` is the topmost open dialog: a dialog opened from inside another comes later. */
@@ -49,7 +51,7 @@ function besideNow(companion: HTMLElement | null): companion is HTMLElement {
  * `autoFocus` one keeps it), falling back to the panel; Tab and Shift+Tab stay inside;
  * and on closing, focus goes back to whatever had it before the dialog opened.
  */
-export function Dialog({ open, title, description, onClose, children, footer }: Props) {
+export function Dialog({ open, title, description, onClose, children, footer, size = 'md' }: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
   const descriptionId = useId()
   const companion = useContext(ModalCompanionContext)
@@ -164,7 +166,7 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
         onKeyDown={trapTab}
-        className="flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col rounded-lg border border-line bg-surface shadow-2xl outline-none"
+        className={`flex max-h-[calc(100vh-2rem)] w-full ${size === 'wide' ? 'max-w-[1600px]' : 'max-w-lg'} flex-col rounded-lg border border-line bg-surface shadow-2xl outline-none`}
       >
         <header className="shrink-0 border-b border-line px-5 py-3.5">
           <h2 className="text-[15px] font-semibold">{title}</h2>
