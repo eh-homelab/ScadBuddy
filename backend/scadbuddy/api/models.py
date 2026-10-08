@@ -1266,14 +1266,16 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
         # Their Parts go with them, or no sweep ever removes them (blob_refs, spec §7).
-        # Best effort, like the records above: the model is gone either way.
-        try:
-            for output_id in output_ids:
+        # Best effort, like the records above: the model is gone either way. Each output
+        # on its own, so one failed release does not leave the rest held (#1782).
+        for output_id in output_ids:
+            try:
                 await asyncio.to_thread(release_parts, state.refs, output_id)
-        except psycopg.Error:
-            logger.exception(
-                "could not release a deleted model's output Parts", extra={"slug": slug}
-            )
+            except psycopg.Error:
+                logger.exception(
+                    "could not release a deleted model's output Parts",
+                    extra={"slug": slug, "id": output_id},
+                )
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 
