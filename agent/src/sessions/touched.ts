@@ -256,6 +256,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     ]
   },
   save_output: (input, result) => output(result, str(input.slug)),
+  // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
+  arrange: (_input, result) => output(field(result, 'output'), str(field(result, 'slug'))),
   delete_output: (input) => {
     const id = str(input.output_id)
     return id ? [{ type: 'output', id, action: 'deleted' }] : []

@@ -16,6 +16,7 @@ import { choicesView } from '../choices'
 import * as fixtures from '../fixtures'
 import {
   mockLibraryChoices,
+  mockLibraryOutput,
   mockSettings,
   nextNumber,
   problem,
@@ -117,7 +118,7 @@ export const handlers = [
       folder_id: folderId,
       all,
       folders: libraryFolders,
-      files,
+      files: files.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
       hidden: here.length - files.length,
     } satisfies LibraryListing)
   }),

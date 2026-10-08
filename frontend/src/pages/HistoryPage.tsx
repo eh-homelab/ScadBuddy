@@ -11,6 +11,7 @@ import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
+import { fromOutputs } from '../lib/arrange'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
@@ -163,8 +164,7 @@ export function HistoryPage() {
       />
       <ArrangeDialog
         open={arranging}
-        slug={slug}
-        outputs={(outputsState.data ?? []).filter((o) => picked.includes(o.id))}
+        sources={fromOutputs((outputsState.data ?? []).filter((o) => picked.includes(o.id)))}
         onClose={() => setArranging(false)}
         onArranged={(arranged) => {
           setSkipped(arranged.skipped ?? null)

@@ -842,6 +842,75 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   })
 })
 
+describe('arrange (#1864)', () => {
+  const A = 'a'.repeat(32)
+  const B = 'b'.repeat(32)
+  const ARRANGED = 'c'.repeat(32)
+  const JOB = 'd'.repeat(32)
+  const job = (status: string) => ({ id: JOB, slug: 'lid', created_at: '', status, plates: [{}, {}] })
+
+  it('arranges outputs and library files, waits for the job and saves it under its template', async () => {
+    let arranged: unknown
+    let saved: { slug?: string; body?: unknown } = {}
+    let reads = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/arrange`, async ({ request }) => {
+        arranged = await request.json()
+        return HttpResponse.json(job('pending'), { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/${JOB}`, () => HttpResponse.json(job(++reads > 1 ? 'done' : 'running'))),
+      http.post(`${BACKEND}/api/v1/models/:slug/outputs`, async ({ params, request }) => {
+        saved = { slug: params['slug'] as string, body: await request.json() }
+        return HttpResponse.json({ id: ARRANGED, slug: 'lid' }, { status: 201 })
+      }),
+    )
+    const objects = [{ output_id: A, part: 'p1', count: 2 }, { output_id: B }, { library_file_id: 77 }]
+    const plan = { slots: [{ slot_id: 1, spool_id: 9 }], force_colour_match: false }
+    const result = await runTool(
+      tool('arrange'),
+      { objects, goal: 'fewest_swaps', slug: 'lid', filament_plan: plan, name: 'mix' },
+      ctx({ pollIntervalMs: 1 }),
+    )
+    expect(result.isError).toBeFalsy()
+    expect(arranged).toMatchObject({ objects, goal: 'fewest_swaps', slug: 'lid', filament_plan: plan, name: 'mix' })
+    expect(saved).toEqual({ slug: 'lid', body: { job_id: JOB, name: 'mix' } })
+    expect(firstText(result)).toMatchObject({ job_id: JOB, slug: 'lid', plates: 2, output: { id: ARRANGED } })
+  })
+
+  it('names the outputs a re-render must come first for, and the files it cannot read yet', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/arrange`, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/needs-backfill', title: 'Conflict', status: 409, detail: 'x', code: 'needs_backfill', output_ids: [A] },
+          { status: 409 },
+        ),
+      ),
+    )
+    const stale = await runTool(tool('arrange'), { objects: [{ output_id: A }] }, ctx())
+    expect(stale.isError).toBe(true)
+    expect(JSON.stringify(stale.content)).toContain(A)
+    expect(JSON.stringify(stale.content)).toMatch(/History/)
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/arrange`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable', status: 422, detail: 'x', code: 'library_file_not_arrangeable', library_file_ids: [88] },
+          { status: 422 },
+        ),
+      ),
+    )
+    const plain = await runTool(tool('arrange'), { objects: [{ library_file_id: 88 }] }, ctx())
+    expect(plain.isError).toBe(true)
+    expect(JSON.stringify(plain.content)).toMatch(/88.*not made by ScadBuddy/)
+  })
+
+  it('refuses an object naming no source, or both, before any request', async () => {
+    for (const object of [{}, { output_id: A, library_file_id: 7 }]) {
+      const result = await runTool(tool('arrange'), { objects: [object] }, ctx())
+      expect(result.isError).toBe(true)
+    }
+  })
+})
+
 describe('get_printer_camera (#796)', () => {
   it("returns the printer's current frame as an image, marked untrusted", async () => {
     server.use(
