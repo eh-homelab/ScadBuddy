@@ -461,6 +461,12 @@ export async function loadPackagesForRun(
   const problems: string[] = []
   const releases: (() => void)[] = []
   for (const pin of await store.enabledPins()) {
+    // A package stored under a built-in's name before builtins.ts (a reserved name
+    // was allowable) would shadow the built-in: never loaded, only removable.
+    if (builtInNamed(pin.name)) {
+      problems.push(`plugin package ${pin.name} was not loaded: "${pin.name}" is built in; remove the installed package`)
+      continue
+    }
     try {
       const { dir, release, builtinTools: wanted } = await installer.acquire(pin)
       if (pin.allowRefused) {

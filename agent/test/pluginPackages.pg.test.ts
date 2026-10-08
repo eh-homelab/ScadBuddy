@@ -301,6 +301,32 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       }
     })
 
+    it('never loads a package stored under a built-in\'s name, and lets DELETE remove it', async () => {
+      // Stored before builtins.ts, when a reserved name was allowable.
+      const installed = await install()
+      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.setEnabled('greeter', true)
+      await db.sql`UPDATE ai_plugin_packages SET name = 'playwright' WHERE name = 'greeter'`
+      const loaded = await loadPackagesForRun(store, installer)
+      expect(loaded.paths).toEqual([])
+      expect(loaded.problems).toEqual([expect.stringMatching(/playwright was not loaded: "playwright" is built in/)])
+
+      const a = createApp({ ...appDeps(), settings: new SettingsStore(db.sql) })
+      const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
+        name: string
+        built_in?: boolean
+      }[]
+      expect(listed.map((p) => [p.name, p.built_in ?? false])).toEqual([
+        ['scadbuddy', true],
+        ['playwright', true],
+        ['playwright', false],
+      ])
+      const del = () => a.request('/api/v1/ai/plugin-packages/playwright', { method: 'DELETE', headers: UI })
+      expect((await del()).status).toBe(204)
+      expect(await store.list()).toEqual([])
+      expect((await del()).status).toBe(409) // the built-in stays
+    })
+
     it('answers an install of a built-in plugin with 409 built_in, not a refusal', async () => {
       repos.greeter!.remove()
       repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })

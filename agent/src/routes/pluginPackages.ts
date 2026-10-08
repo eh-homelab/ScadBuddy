@@ -44,7 +44,9 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 // The built-in plugins (builtins.ts: ScadBuddy's own and the headless browser's)
 // are listed first, with `built_in: true`. PATCH turns one on or off (its
 // setting); approve, re-pin and DELETE answer 409, since it ships with the agent,
-// and an install that names one answers 409 with `built_in: true`.
+// and an install that names one answers 409 with `built_in: true`. A package
+// stored under a built-in's name before then is never loaded (install.ts
+// `loadPackagesForRun`) and DELETE removes it.
 //
 // The two fetches are commands (spec 2026-10-01 §4.2, #1055): AgentOperation runs them
 // on `agent-tools` (plugins/packages/operations.ts), keyed by the client's
@@ -258,8 +260,9 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const name = c.req.param('name')
-    const refused = isBuiltIn(c, 'removed')
-    if (refused) return refused
+    // An installed package under a built-in's name (stored before builtins.ts) is
+    // removed; the built-in itself never is.
+    if (builtInNamed(name) && !(await repo.get(name))) return isBuiltIn(c, 'removed')!
     if (!(await repo.delete(name))) return c.json({ detail: `no plugin package named "${name}"` }, 404)
     await deps.installer?.evict(name).catch(() => undefined)
     return c.body(null, 204)
