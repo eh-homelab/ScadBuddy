@@ -557,6 +557,43 @@ async def test_stores_of_different_revisions_run_a_few_at_a_time(
     assert all(content.index.get(snapshot_key("demo", rev)) is not None for rev in revs)
 
 
+async def test_background_stores_leave_the_interactive_slots_free(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1773 1: the preview pass's stores are bounded on their own. Stalled ones
+    used to hold every slot, so a render someone waits for got 503s for as long as
+    their uploads took."""
+    api_paths = DataPaths(tmp_path / "api")
+    revs = ["c1" * 20, "c2" * 20, "c3" * 20, "c4" * 20]
+    for rev in revs:
+        _export(api_paths, rev)
+    put = content.put
+    gate = asyncio.Event()
+    uploading: dict[str, asyncio.Event] = {rev: asyncio.Event() for rev in revs}
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        uploading[next(r for r in revs if str(kwargs["name"]) == f"src-{r[:12]}.zip")].set()
+        await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up)
+    for rev in revs[:3]:
+        with pytest.raises(SnapshotPendingError):
+            await api.pin("demo", rev, background=True)
+    background = [asyncio.ensure_future(uploading[rev].wait()) for rev in revs[:3]]
+    await asyncio.wait_for(asyncio.wait(background, return_when="FIRST_COMPLETED"), 5)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", revs[3])
+    await asyncio.wait_for(uploading[revs[3]].wait(), 5)
+    # The background bound is lower than the interactive one, and its own.
+    assert snapshots_module.MAX_CONCURRENT_BACKGROUND_STORES < snapshots_module.MAX_CONCURRENT_STORES
+    assert sum(uploading[rev].is_set() for rev in revs[:3]) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing, *background), 5)
+    assert all(content.index.get(snapshot_key("demo", rev)) is not None for rev in revs)
+
+
 async def test_a_caller_gone_mid_pin_leaves_the_store_running(
     tmp_path: Path, content: ContentStore
 ) -> None:

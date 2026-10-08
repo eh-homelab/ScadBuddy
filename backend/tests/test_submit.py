@@ -869,9 +869,11 @@ class _Pinning:
 
     def __init__(self) -> None:
         self.pinned: list[tuple[str, str | None]] = []
+        self.background: list[bool] = []
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         self.pinned.append((slug, revision))
+        self.background.append(background)
         return "b" * 40
 
 
@@ -898,6 +900,8 @@ async def test_a_preview_on_the_bambuddy_store_pins_the_last_commit_for_the_work
 
     assert png == PNG + SLUG.encode()
     assert pinning.pinned == [(SLUG, None)]
+    # The preview pass's store stays off the interactive renders' bound (#1773).
+    assert pinning.background == [True]
     assert fake.revisions == ["b" * 40]
 
 
@@ -908,7 +912,7 @@ class _Revisions(_Pinning):
         super().__init__()
         self.revisions = list(revisions)
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         self.pinned.append((slug, revision))
         return self.revisions.pop(0)
 
@@ -959,7 +963,7 @@ async def test_a_preview_joins_only_a_run_of_the_same_revision(
 class _NoCommit(_Pinning):
     """`SnapshotStore.pin` with no history, or a template with no commit yet."""
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         self.pinned.append((slug, revision))
         return None
 

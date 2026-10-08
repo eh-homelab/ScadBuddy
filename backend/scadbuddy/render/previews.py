@@ -46,6 +46,7 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.split import split_by_material
+from scadbuddy.store.snapshots import PIN_TIMEOUT
 from scadbuddy.workflows.previews import PAUSE
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,8 @@ DEFAULT_DEBOUNCE = 2.0
 DEFAULT_INTERVAL = PAUSE.total_seconds()
 #: The longest a preview waits before trying its source's snapshot again. Each try
 #: holds the scheduler's one worker for up to `PIN_TIMEOUT`, so the wait doubles from
-#: the store's own Retry-After up to this (#1435).
+#: `PIN_TIMEOUT` up to this (#1435), and is never shorter than the store's own
+#: Retry-After. Not doubled from that: it already grows with the store's time (#1773).
 MAX_SNAPSHOT_RETRY_DELAY = 600.0
 #: A preview renders the schema, the model and its plate image, each bounded by
 #: `render_timeout`; this bounds the three together.
@@ -172,8 +174,9 @@ class PreviewScheduler:
         self._busy = False
         #: Held by every refresh, the backfill's too: one preview at a time.
         self._lock = asyncio.Lock()
-        #: Model id -> its tries in a row that found the snapshot still storing.
-        self._pending_tries: dict[str, int] = {}
+        #: Model id -> the source key and its tries in a row that found the snapshot
+        #: still storing; a new source starts again from none (#1773).
+        self._pending_tries: dict[str, tuple[str, int]] = {}
 
     def start(self) -> None:
         # Made here, on the loop that will run the worker, not in `__init__`.
@@ -269,9 +272,10 @@ class PreviewScheduler:
 
     async def _refresh(self, slug: str, *, raise_unrun: bool) -> bool:
         key = await asyncio.to_thread(self.plan, slug)
-        tries = self._pending_tries.pop(slug, 0)
+        pending = self._pending_tries.pop(slug, None)
         if key is None:
             return False
+        tries = pending[1] if pending is not None and pending[0] == key else 0
         try:
             # A root span: Temporal's StartWorkflow is a CLIENT span, which the default
             # sampler drops when nothing is above it, and the workflow goes with it.
@@ -283,8 +287,10 @@ class PreviewScheduler:
             # The source's first snapshot is still uploading and carries on (#686):
             # come back once it should be stored. Nothing else would bring the slug
             # back before its next edit or the next boot.
-            delay = min(error.retry_after * 2**tries, MAX_SNAPSHOT_RETRY_DELAY)
-            self._pending_tries[slug] = tries + 1
+            delay = min(
+                max(error.retry_after, PIN_TIMEOUT * 2**tries), MAX_SNAPSHOT_RETRY_DELAY
+            )
+            self._pending_tries[slug] = (key, tries + 1)
             logger.info(
                 "a preview waits for its source snapshot; it is tried again",
                 extra={"slug": slug, "retry_after": delay},
