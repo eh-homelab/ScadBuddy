@@ -21,7 +21,8 @@ import os
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from email.utils import parsedate
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path as FilePath
 from typing import IO, TYPE_CHECKING, Annotated, Any, Literal
 
@@ -393,9 +394,21 @@ def _not_modified(request: Headers, etag: str, last_modified: str) -> bool:
     """RFC 9110 §13.2.2: `If-None-Match` when sent, else `If-Modified-Since`."""
     if (if_none_match := request.get("if-none-match")) is not None:
         return _matches(if_none_match, etag)
-    since = parsedate(request.get("if-modified-since") or "")
-    modified = parsedate(last_modified)
+    since = _http_date(request.get("if-modified-since"))
+    modified = _http_date(last_modified)
     return since is not None and modified is not None and since >= modified
+
+
+def _http_date(value: str | None) -> datetime | None:
+    """An HTTP date as an instant, its zone kept (#1852); None when it is not one."""
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    # `-0000` reads as naive: a UTC time, its sender's zone unknown (RFC 5322 §3.3).
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 @router.get(
