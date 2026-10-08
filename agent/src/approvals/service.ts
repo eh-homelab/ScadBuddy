@@ -337,7 +337,7 @@ function record(row: Row): ApprovalRecord {
 }
 
 /** How an approval that can no longer be decided ended, as a clause, from its row's own reason (#1400). */
-function conflictReason(now: ApprovalRecord | undefined): string {
+export function conflictReason(now: ApprovalRecord | undefined): string {
   if (now?.decision === 'cancelled') return now.reason ?? 'it was cancelled'
   if (now?.decision === 'approved' && now.revokedAt !== null) {
     return `it was approved, then withdrawn${now.reason ? ` (${now.reason})` : ''}`
@@ -902,11 +902,15 @@ export class ApprovalService {
   }
 
   /** The panel's `approval.decision` client message; the seam #266's socket calls. */
-  async decision(principal: Owner, message: ApprovalDecisionMessage): Promise<ApprovalRecord> {
+  async decision(
+    principal: Owner,
+    message: ApprovalDecisionMessage,
+    where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
+  ): Promise<ApprovalRecord> {
     if (message.v !== PROTOCOL_VERSION || message.type !== 'approval.decision') {
       throw new ApprovalError('invalid', 'not an approval.decision message')
     }
-    return this.decide(principal, message.id, message.approve, { sessionId: message.sessionId })
+    return this.decide(principal, message.id, message.approve, { sessionId: message.sessionId, ...where })
   }
 
   private async expire(id: string): Promise<ApprovalRecord | undefined> {

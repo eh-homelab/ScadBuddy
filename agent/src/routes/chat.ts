@@ -381,7 +381,7 @@ export class ChatConnection {
           this.follow(message.sessionId, 0)
           return
         case 'approval.decision':
-          await this.sessions.approvals.decision(this.principal, message)
+          await this.sessions.approvals.decision(this.principal, message, { clientIp: this.clientIp })
           return
         case 'question.answer':
           await this.sessions.questions.answer(this.principal, message, { clientIp: this.clientIp })
