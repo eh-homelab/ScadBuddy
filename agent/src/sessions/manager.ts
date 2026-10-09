@@ -76,7 +76,8 @@ import {
   type ServerEvent,
   type SessionStatus,
 } from './protocol.js'
-import { scrubForLog, SdkEventMapper, ShownCalls } from './sdkEvents.js'
+import { SessionBlobs, type StoredBlob } from './blobs.js'
+import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
 import { previewsOf, userPrompt, type UserImage } from './images.js'
@@ -518,6 +519,8 @@ export type SessionManagerDeps = {
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
+  /** Each registry call's title for the panel (#782, tools/harness.ts `titleOf`). */
+  titleOf?: TitleResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
   mcpServers?: (
     session: SessionRecord,
@@ -787,11 +790,14 @@ export class SessionManager {
   private draining = false
   /** What sessions touched (#931), read by `resources`. */
   private readonly touched: SessionResources
+  /** The images tool results carried (#782), read by `blob`. */
+  private readonly blobs: SessionBlobs
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
     this.touched = new SessionResources(deps.sql)
+    this.blobs = new SessionBlobs(deps.sql)
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -838,6 +844,18 @@ export class SessionManager {
   async resources(id: string, principal: Owner): Promise<TouchedRecord[]> {
     await this.get(id, principal)
     return this.touched.list(id)
+  }
+
+  /**
+   * One of the images the session's tool results carried (#782, blobs.ts), by
+   * its name; not_found for a session the principal may not see, a name that is
+   * not a blob's, or one that is not this session's.
+   */
+  async blob(id: string, name: string, principal: Owner): Promise<StoredBlob> {
+    await this.get(id, principal)
+    const blob = await this.blobs.get(id, name)
+    if (!blob) throw new SessionError('not_found', `no image ${name} in session ${id}`)
+    return blob
   }
 
   /** Newest first. */
@@ -1156,7 +1174,7 @@ export class SessionManager {
     const asksUser = session.owner.kind === 'browser'
     const shownTierOf: TierResolver = (name, input) =>
       asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
-    const mapper = new SdkEventMapper(id, shownTierOf)
+    const mapper = new SdkEventMapper(id, shownTierOf, this.deps.titleOf)
     const shownCalls = new ShownCalls()
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
     // whatever started it (the browser's traceparent from the chat frame, an
@@ -1225,7 +1243,19 @@ export class SessionManager {
       }
       const show = async (message: SDKMessage) => {
         await pluginCheck?.(message)
-        const events = mapper.map(message)
+        let events = mapper.map(message)
+        // A result's images are stored before the event that names them is
+        // logged (#782), so no watcher sees a name it cannot load. If they cannot
+        // be, the event goes without them: the call is still shown.
+        const images = mapper.takeImages()
+        if (images.length) {
+          try {
+            await this.blobs.put(id, images)
+          } catch (err) {
+            this.deps.stderr?.(`session ${id}: could not store a tool result's images: ${err instanceof Error ? err.message : String(err)}\n`)
+            events = events.map((e) => (e.type === 'tool.result' && e.images ? withoutImages(e) : e))
+          }
+        }
         const logged = log(events)
         shownCalls.logging(events, logged)
         await logged
@@ -2001,6 +2031,8 @@ export class SessionManager {
         }
       }
     }
+    // The images those results name (#782), before the events that name them.
+    await this.blobs.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',
@@ -2192,4 +2224,10 @@ export class SessionManager {
     timer.unref()
     return () => clearInterval(timer)
   }
+}
+
+/** A tool.result without its images, for when they could not be stored (#782). */
+function withoutImages(e: Extract<ServerEvent, { type: 'tool.result' }>): ServerEvent {
+  const { images: _images, ...rest } = e
+  return rest
 }
