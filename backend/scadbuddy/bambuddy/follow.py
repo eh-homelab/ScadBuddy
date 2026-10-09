@@ -138,19 +138,20 @@ class Follower:
 
     async def follow(
         self,
-        output_id: str,
+        run_subject: str,
         active: datetime,
         heartbeat: Callable[[datetime], None] = lambda _: None,
         *,
         read_now: bool = False,
     ) -> Ended:
-        """Read ``output_id``'s print until it ends; ``active`` is when it last moved.
+        """Read ``run_subject``'s print until it ends; ``active`` is when it last moved.
         It waits first, unless ``read_now`` (a poke: a new print, read at once); either
-        way the waits after that back off from `min_interval`. ``output_id`` is the run
-        subject: ``library:<file id>`` follows a library file's print (#1073)."""
-        subject = PrintSubject.from_run_subject(output_id)
+        way the waits after that back off from `min_interval`. ``run_subject`` is an output's
+        id, or ``library:<file id>`` for a library file's print (#1073)."""
+        subject = PrintSubject.from_run_subject(run_subject)
         if subject.kind == "library":
             return await self._follow_library(subject, active, heartbeat, read_now=read_now)
+        output_id = subject.id
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
         while True:
