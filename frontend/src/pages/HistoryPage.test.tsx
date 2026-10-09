@@ -2,13 +2,14 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import { bbox, keychainSchema, outputs } from '../mocks/fixtures'
+import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
 import { EditPage } from './EditPage'
 import { HistoryPage } from './HistoryPage'
+import { libraryLabel, pinChange } from '../lib/libraryPins'
 
 function render() {
   return renderPage(
@@ -428,5 +429,59 @@ describe('HistoryPage, item context (#975)', () => {
     for (const value of values) expect(value).toMatch(/^.+, default .+$/)
     // The old value is marked up as a deletion, not only struck through by CSS.
     expect(nova.querySelector('dd del')).not.toBeNull()
+  })
+})
+
+describe('HistoryPage · libraries an output was rendered with (#1296)', () => {
+  const dotscad = {
+    name: 'dotSCAD',
+    ref: 'v3.3',
+    url: 'https://github.com/JustinSDK/dotSCAD',
+    commit: 'bb33edf0123456789abcdef0123456789abcdef0',
+  }
+
+  function serve(outputLibraries: object[], modelLibraries: object[]) {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([{ ...first, libraries: outputLibraries }]),
+      ),
+      http.get('/api/v1/models/name-keychain', () =>
+        HttpResponse.json({ ...models.find((m) => m.slug === 'name-keychain'), libraries: modelLibraries }),
+      ),
+    )
+  }
+
+  it('names each library and its short commit', async () => {
+    serve([dotscad], [dotscad])
+    render()
+    const item = await row('Reagan')
+    const line = within(item).getByLabelText('Rendered with libraries')
+    expect(line).toHaveTextContent('dotSCAD v3.3 · bb33edf')
+    expect(line).not.toHaveTextContent('now')
+  })
+
+  it("flags a library the model now pins at another commit", async () => {
+    serve([dotscad], [{ ...dotscad, ref: 'v3.4', commit: 'c0ffee1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }])
+    render()
+    const item = await row('Reagan')
+    await waitFor(() =>
+      expect(within(item).getByLabelText('Rendered with libraries')).toHaveTextContent(
+        'dotSCAD v3.3 · bb33edf(now dotSCAD v3.4 · c0ffee1)',
+      ),
+    )
+  })
+
+  it('shows no line for an output rendered with no library', async () => {
+    serve([], [dotscad])
+    render()
+    const item = await row('Reagan')
+    expect(within(item).queryByLabelText('Rendered with libraries')).toBeNull()
+  })
+
+  it('flags nothing until the model is known, and a dropped pin once it is', () => {
+    expect(libraryLabel(dotscad)).toBe('dotSCAD v3.3 · bb33edf')
+    expect(pinChange(dotscad, undefined)).toBeNull()
+    expect(pinChange(dotscad, [])).toBe('no longer pinned')
   })
 })
