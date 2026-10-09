@@ -174,3 +174,12 @@ messages, stay with #886.
   the scripted session's render preview.
 - e2e (`e2e/assistant.spec.ts`, mocked agent): the scripted turn shows a group of two
   calls with the preview image, opens Details, and still reaches the approval card.
+
+## 5. Screens
+
+The mocked panel (`src/mocks/agent.ts`'s first turn), captured headlessly with Playwright:
+a group of two calls closed, with the render view's image in its header, then the
+outward call waiting for its approval card; and the group open, with one call's Details.
+
+![A closed group of two steps with its image, then a call waiting for approval](media/2026-10-08-friendly-tool-calls/group-closed.png)
+![The group open, with a call's arguments and result shown](media/2026-10-08-friendly-tool-calls/group-open-details.png)
