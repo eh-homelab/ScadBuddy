@@ -266,7 +266,6 @@ class PrintActivities:
                     plate=input.plate,
                     sliced=input.sliced,
                     rack=self.d.rack,
-                    credit=input.credit,
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None

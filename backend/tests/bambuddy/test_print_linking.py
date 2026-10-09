@@ -33,7 +33,7 @@ from scadbuddy.bambuddy.linking import (
     scan_library_by_hash,
 )
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
-from scadbuddy.bambuddy.progress import progress_for
+from scadbuddy.bambuddy.progress import library_progress, progress_for
 from scadbuddy.bambuddy.projects import attach_results
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
@@ -675,3 +675,98 @@ async def test_a_library_item_gone_from_bambuddy_has_its_file_scanned_by_hash_on
     assert scan.call_count == 1
     await scan_library_by_hash(bambuddy, uploads, links, 89)
     assert scan.call_count == 1
+
+
+# --- A library file's print, read as its follow reads it (#1073) ---
+
+
+async def _plates(links: PrintLinkStore, *ids: int) -> None:
+    await links.record_sends(
+        PrintSubject.library(89),
+        [
+            PrintSend(queue_item_id=queue_item_id, plate_id=plate, printer_id=1)
+            for plate, queue_item_id in enumerate(ids, start=1)
+        ],
+    )
+
+
+async def test_a_library_file_never_printed_has_no_progress(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    assert await library_progress(bambuddy, PrintSubject.library(89), links) is None
+
+
+@respx.mock
+async def test_a_library_print_settles_once_every_plate_has_and_links_each_archive(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    await _plates(links, 51, 52)
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="completed", archive_id=90))
+    )
+    plate_2 = respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json=queue_item(52, status="printing", archive_id=91))
+    )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and not progress.settled
+    assert [(c.plate_id, c.stage) for c in progress.copies_detail] == [
+        (1, "done"),
+        (2, "running"),
+    ]
+    assert {link.archive_id for link in await links.for_subject(PrintSubject.library(89))} == {
+        90,
+        91,
+    }
+
+    plate_2.mock(
+        return_value=httpx.Response(200, json=queue_item(52, status="failed", archive_id=91))
+    )
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.settled and progress.stage == "failed"
+
+
+@respx.mock
+async def test_a_library_print_bambuddy_dropped_reads_as_done(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    await _plates(links, 51)
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.settled and progress.stage == "done"
+    assert await _pending(links) == set()
+
+
+@respx.mock
+async def test_a_library_print_bambuddy_dropped_is_found_by_hash_as_an_outputs_is(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """#1755: the follow's read looks for the file's archives by hash, as an output's
+    read does once its queue item is gone."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    await _plates(links, 51)
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    archives_page(archive_row(18, HASH))
+
+    await library_progress(bambuddy, LIBRARY, links, uploads=uploads)
+
+    linked = await links.linked(18)
+    assert linked is not None and linked.library_file_id == 89
+
+
+@respx.mock
+async def test_a_library_print_follows_its_newest_run_not_one_long_settled(
+    bambuddy: BambuddyClient, links: PrintLinkStore, pool_store: JobProjection
+) -> None:
+    await _plates(links, 50)
+    with pool_store.pool.connection() as conn:
+        conn.execute("UPDATE print_sends SET first_seen = now() - interval '3 days'")
+    await _plates(links, 51)
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="pending", archive_id=None))
+    )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.queue_item_id == 51 and not progress.settled

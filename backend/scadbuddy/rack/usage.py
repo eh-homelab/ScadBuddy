@@ -26,7 +26,6 @@ from scadbuddy.bambuddy.models import ArchiveDetail, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import Usage, rack_serials
 from scadbuddy.render.pg_store import migrate
@@ -49,8 +48,8 @@ ARCHIVE_TIMEOUT = 15.0
 #: The whole budget of a settle's settings read, its wait for a connection included (#1111):
 #: well inside the follow's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
 #: answer, not a connection that gets no reply at all (#1226). A settle whose read is cut
-#: off records nothing: its archives are recorded only by that output's next settle,
-#: which a one-off output may never have. That loss is the price of freeing the thread.
+#: off records nothing: its archives are recorded only by that subject's next settle,
+#: which a one-off print may never have. That loss is the price of freeing the thread.
 SETTINGS_READ_TIMEOUT = 10.0
 #: How long an open pick (one whose print has not settled) counts toward Least used
 #: (#1079, spec §4). A cancelled queue item never settles, so its pick ages out here; a
@@ -387,7 +386,7 @@ SETTLED_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 async def record_settled(
-    output_id: str,
+    subject: PrintSubject,
     *,
     client: ArchiveReader,
     links: LinkReader,
@@ -401,8 +400,9 @@ async def record_settled(
     archive linked by hash has no queue item and is not counted. Idempotent, so a
     settle seen twice writes nothing the second time. Each failure is logged by type
     and ids and skipped, as is an archive read that stalls past ``archive_timeout``.
-    Nothing is retried now: an archive skipped here is recorded by the output's next
-    settle, which reads every linked archive not yet recorded. A settle cut off by the
+    ``subject`` is an output's or a library file's: both are linked by queue item
+    (#1073). Nothing is retried now: an archive skipped here is recorded by the subject's
+    next settle, which reads every linked archive not yet recorded. A settle cut off by the
     follow logs the ids of those it had not recorded (``RACK_SETTLE_CUT_OFF``, stage
     ``archives``). One cut off during the initial reads logs stage ``read`` with the
     links read so far, which may include archives already recorded. A cut-off before
@@ -411,7 +411,7 @@ async def record_settled(
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
-            for link in await links.for_subject(PrintSubject.output(output_id))
+            for link in await links.for_subject(subject)
             if link.queue_item_id is not None
         ]
         picked = await store.picked_items(item for _, item in linked)
@@ -422,7 +422,7 @@ async def record_settled(
         logger.warning(
             RACK_SETTLE_CUT_OFF,
             extra={
-                "output_id": output_id,
+                "subject": subject.key,
                 "stage": "read",
                 "archive_ids": [archive for archive, _ in linked],
             },
@@ -431,14 +431,14 @@ async def record_settled(
     except Exception as exc:
         logger.warning(
             RACK_SETTLE_READ_FALLBACK,
-            extra={"output_id": output_id, "error": type(exc).__name__},
+            extra={"subject": subject.key, "error": type(exc).__name__},
         )
         return 0
 
     async def record_one(archive_id: int, queue_item_id: int) -> int:
         archive = await asyncio.wait_for(client.archive(archive_id), timeout=archive_timeout)
         if archive.status not in SETTLED_STATUSES:
-            # Another print of this output, still running: its own settle counts it,
+            # Another print of this subject, still running: its own settle counts it,
             # with its real time, which DO NOTHING would never let in after this.
             return 0
         seconds = (
@@ -469,7 +469,7 @@ async def record_settled(
             logger.warning(
                 RACK_SETTLE_CUT_OFF,
                 extra={
-                    "output_id": output_id,
+                    "subject": subject.key,
                     "stage": "archives",
                     "archive_ids": [archive for archive, _ in pending[index:]],
                 },
@@ -479,7 +479,7 @@ async def record_settled(
             logger.warning(
                 RACK_SETTLE_FALLBACK,
                 extra={
-                    "output_id": output_id,
+                    "subject": subject.key,
                     "archive_id": archive_id,
                     "error": type(exc).__name__,
                 },
@@ -497,7 +497,7 @@ def settle_hook(
     the hook runs after that read. So a print dispatched and settled between two polls is
     linked by the read that finds it settled (``tests/rack/test_settle.py``)."""
 
-    async def hook(meta: OutputMeta) -> None:
+    async def hook(subject: PrintSubject) -> None:
         if not links.available:
             return
         # A settings read is a database read: off the event loop, so the follow stops
@@ -510,10 +510,10 @@ def settle_hook(
             # Type only, as every rack log (spec §7).
             logger.warning(
                 RACK_SETTLE_SETTINGS_DROPPED,
-                extra={"output_id": meta.id, "error": type(exc).__name__},
+                extra={"subject": subject.key, "error": type(exc).__name__},
             )
             raise
         async with client_for(settings) as client:
-            await record_settled(meta.id, client=client, links=links, store=store)
+            await record_settled(subject, client=client, links=links, store=store)
 
     return hook

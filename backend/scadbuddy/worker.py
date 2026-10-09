@@ -30,8 +30,14 @@ from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
 from scadbuddy.bambuddy.output_reader import RemoteOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.progress import (
+    PrintProgress,
+    ProgressObserver,
+    library_progress,
+    progress_for,
+)
 from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRunStore
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
@@ -672,10 +678,15 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         async with client_for(settings_store.load()) as client:
             return await progress_for(client, meta, uploads=uploads, links=links)
 
+    async def read_library(subject: PrintSubject) -> PrintProgress | None:
+        async with client_for(settings_store.load()) as client:
+            return await library_progress(client, subject, links, uploads=uploads)
+
     follower = Follower(
         outputs=outputs,
         observer=observer,
         read=read_progress,
+        read_library=read_library,
         events=events,
         on_settled=[settle_hook(rack, links, settings_store.load)],
     )
