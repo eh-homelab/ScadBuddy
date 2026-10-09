@@ -498,8 +498,6 @@ def settle_hook(
     linked by the read that finds it settled (``tests/rack/test_settle.py``)."""
 
     async def hook(subject: PrintSubject) -> None:
-        if not links.available:
-            return
         # A settings read is a database read: off the event loop, so the follow stops
         # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
         # stuck on a slow Postgres gives its thread back to the shared executor rather

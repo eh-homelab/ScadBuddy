@@ -654,9 +654,7 @@ async def get_progress(
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
-            progress = await progress_for(
-                client, meta, uploads=uploads, links=links if links.available else None
-            )
+            progress = await progress_for(client, meta, uploads=uploads, links=links)
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

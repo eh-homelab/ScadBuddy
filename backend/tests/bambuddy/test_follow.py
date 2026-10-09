@@ -685,9 +685,8 @@ def test_a_newest_failure_read_that_breaks_publishes_the_print_as_before(
 class _Runs:
     """`PrintRunStore` as `newest_failure` reads it."""
 
-    def __init__(self, latest: PrintRun | Exception | None, *, available: bool = True) -> None:
+    def __init__(self, latest: PrintRun | Exception | None) -> None:
         self.latest = latest
-        self.available = available
 
     async def latest_for_output(self, output_id: str) -> PrintRun | None:
         if isinstance(self.latest, Exception):
@@ -716,9 +715,8 @@ def _run(status: str, *, may_have_queued: bool = False) -> PrintRun:
         (_Runs(_run("succeeded")), None),
         (_Runs(None), None),  # never run
         (_Runs(psycopg.OperationalError("down")), None),  # unreachable database
-        (_Runs(_run("failed"), available=False), None),  # no database
     ],
-    ids=["failed", "may-have-queued", "succeeded", "none", "unreachable", "no-database"],
+    ids=["failed", "may-have-queued", "succeeded", "none", "unreachable"],
 )
 def test_newest_failure(runs: _Runs, expected: str | None) -> None:
     assert asyncio.run(newest_failure(cast(PrintRunStore, runs), OUTPUT)) == expected

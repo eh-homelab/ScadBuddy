@@ -8,7 +8,7 @@ import os
 import shutil
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -20,7 +20,6 @@ from scadbuddy.library.catalogue import (
     Catalogue,
     MediaNotFoundError,
     MediaOrderError,
-    MediaUnavailableError,
     ModelMeta,
     TooManyMediaError,
     meta_from_raw,
@@ -40,6 +39,7 @@ from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.support.media import MemoryMediaStore
 
 
 @pytest.mark.parametrize(
@@ -539,37 +539,8 @@ def test_a_delete_removes_the_templates_rows(
     assert store.items("demo") == []
 
 
-# ── without a database ────────────────────────────────────────────────────────
-
-
-def test_without_a_database_only_the_legacy_thumbnail_is_listed(data: DataPaths) -> None:
-    catalogue = Catalogue(data, wrapper_prefix=WRAPPER_PREFIX)
-    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), thumbnail=PNG)
-
-    assert [item.id for item in catalogue.list_media("demo")] == [LEGACY_ID]
-    assert catalogue.record("demo").thumbnail_source == "model"
-
-
-def test_without_a_database_a_media_write_is_refused(data: DataPaths) -> None:
-    catalogue = Catalogue(data, wrapper_prefix=WRAPPER_PREFIX)
-    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), thumbnail=PNG)
-    staged = _stage(catalogue, PNG, "image", "png")
-
-    writes: list[Callable[[], object]] = [
-        lambda: catalogue.add_media("demo", staged),
-        lambda: catalogue.set_caption("demo", LEGACY_ID, "x"),
-        lambda: catalogue.reorder("demo", [LEGACY_ID]),
-        lambda: catalogue.remove_media("demo", LEGACY_ID),
-    ]
-    for write in writes:
-        with pytest.raises(MediaUnavailableError):
-            write()
-    assert staged.path.exists()
-    assert catalogue.thumbnail_path("demo").read_bytes() == PNG
-
-
 def test_a_crashed_uploads_staging_is_swept_once_it_is_old(data: DataPaths) -> None:
-    catalogue = Catalogue(data, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(data, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     fresh = _stage(catalogue, PNG, "image", "png")
     stale = _stage(catalogue, PNG, "image", "png")

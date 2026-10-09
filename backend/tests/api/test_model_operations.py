@@ -50,7 +50,7 @@ def _commits(app: FastAPI) -> int:
 
 
 def _workflow_ids(app: FastAPI, kind: str) -> list[str]:
-    pool = _state(app).components.get(OPERATIONS).store._require()
+    pool = _state(app).components.get(OPERATIONS).store._pool
     with pool.connection() as conn:
         rows = conn.execute(
             "SELECT workflow_id FROM operations WHERE kind = %s ORDER BY created_at", (kind,)

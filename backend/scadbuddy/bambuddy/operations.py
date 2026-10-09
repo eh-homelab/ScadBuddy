@@ -137,7 +137,7 @@ def bambuddy_kinds_over(
         the queue items asked for, else its newest run's. Its archives are linked by its
         progress read, so none is linked here."""
         ids: list[int] = body.get("queue_item_ids") or []
-        if not ids and links.available:
+        if not ids:
             sends = await links.last_run(PrintSubject.library(file_id))
             ids = [send.queue_item_id for send in sends]
         if not ids:
@@ -161,21 +161,19 @@ def bambuddy_kinds_over(
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             # The body's ids are filed under the project as asked, but only the output's
             # own items are linked to it: a caller-named item would open its archive's media.
-            linkable = (
-                await owned_queue_items(client, meta, links, ids) if links.available else set()
-            )
+            linkable = await owned_queue_items(client, meta, links, ids)
             attached = await attach_results(
                 client,
                 checked["project_id"],
                 queue_item_ids=ids,
                 output_id=meta.id,
-                links=links if links.available else None,
+                links=links,
                 linkable=linkable,
             )
         return _json(attached)
 
     async def _linked(archive_id: int) -> Any:
-        linked = await links.linked(archive_id) if links.available else None
+        linked = await links.linked(archive_id)
         if linked is None:
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,

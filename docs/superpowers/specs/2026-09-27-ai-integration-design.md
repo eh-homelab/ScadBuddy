@@ -1017,9 +1017,8 @@ whose `X-Forwarded-*` are believed, §8.4), and `SCADBUDDY_SECRET_KEY_PREVIOUS_F
 - Rotating it re-wraps the data keys only.
 - Without the file, Settings refuses to save credentials and says why.
 
-**The database is required** (#401). Until #401 lands, a ScadBuddy with
-`SCADBUDDY_DATABASE_URL` unset still starts: AI features are disabled, and Settings
-explains that they need the database.
+**The database is required** (#401): the backend does not start without
+`SCADBUDDY_DATABASE_URL`.
 
 ## 10. Plugins (#297, #299)
 

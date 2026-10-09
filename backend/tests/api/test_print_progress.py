@@ -7,6 +7,7 @@ import json
 import time
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi import FastAPI
@@ -98,11 +99,11 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_progress_reads_and_follows_without_the_run_store(
+def test_progress_reads_and_follows_while_the_run_store_is_down(
     client: TestClient, model: str, watched: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The read needs Bambuddy, and the follow only Temporal: neither waits on the
-    print runs' store (#1053)."""
+    """The read needs Bambuddy, and the follow only Temporal: neither waits on a
+    print runs' store that does not answer (#1053)."""
     configure(client)
     output_id = make_output(client, model)
     upload_route()
@@ -114,7 +115,11 @@ def test_progress_reads_and_follows_without_the_run_store(
         return_value=httpx.Response(200, json={"id": 51, "printer_id": 1, "status": "pending"})
     )
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    monkeypatch.setattr(state.print_runs.store, "_pool", None)
+
+    async def down(_subject: str) -> None:
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(state.print_runs.store, "latest_for_output", down)
 
     response = client.get(f"/api/v1/print/outputs/{output_id}/progress")
     assert response.status_code == 200

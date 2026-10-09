@@ -51,7 +51,6 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.params import require_valid_presets
-from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import DataPaths, is_builtin
@@ -1332,13 +1331,13 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
     if output_ids:
         try:
             await state.uploads.delete_outputs(output_ids)
-        except (DatabaseRequiredError, psycopg.Error):
+        except psycopg.Error:
             logger.exception(
                 "could not forget a deleted model's Bambuddy uploads", extra={"slug": slug}
             )
         try:
             await state.print_links.delete_outputs(output_ids)
-        except (DatabaseRequiredError, psycopg.Error):
+        except psycopg.Error:
             logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
         # Their Parts go with them, or no sweep ever removes them (blob_refs, spec §7).
         # Best effort, like the records above: the model is gone either way. Each output

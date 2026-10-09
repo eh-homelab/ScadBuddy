@@ -11,7 +11,6 @@ import pytest
 
 from scadbuddy.bambuddy.uploads import (
     BambuddyUploadStore,
-    DatabaseRequiredError,
     LibraryCopy,
     SlicedCopy,
 )
@@ -145,14 +144,6 @@ async def test_deleting_an_output_deletes_only_its_rows(
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT count(*) FROM output_bambuddy_slices").fetchone()
     assert row is not None and row[0] == 0
-
-
-async def test_without_a_database_every_use_says_so() -> None:
-    uploads = BambuddyUploadStore(None)
-    with pytest.raises(DatabaseRequiredError, match="SCADBUDDY_DATABASE_URL"):
-        await uploads.for_output(OUTPUT)
-    with pytest.raises(DatabaseRequiredError):
-        await uploads.record(OUTPUT, copy(11))
 
 
 @pytest.mark.requires_postgres
