@@ -161,6 +161,7 @@ export const outputTools: Tool[] = [
     input: z.object({ output_id: outputId, plate: z.number().int().min(1).optional() }),
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}/thumbnail', 'GET /api/v1/outputs/{output_id}/plates/{index}/thumbnail'],
+    title: ({ output_id, plate }) => `Get the picture of output ${output_id}${plate ? `, plate ${plate}` : ''}`,
     handler: async ({ output_id, plate }, ctx) =>
       plate === undefined
         ? binary(

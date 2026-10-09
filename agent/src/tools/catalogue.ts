@@ -21,6 +21,7 @@ export const catalogueTools: Tool[] = [
     source:
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models'],
+    title: () => 'List templates',
     // The backend pages (#843): it builds only this page's records, not the catalogue.
     handler: async (args, { backend }) =>
       json(
@@ -39,6 +40,7 @@ export const catalogueTools: Tool[] = [
     source:
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models/{slug}'],
+    title: ({ slug }) => `Read template → ${slug}`,
     handler: async ({ slug }, { backend }) =>
       json(await ok(backend.GET('/api/v1/models/{slug}', { params: { path: { slug } } }), `get model ${slug}`)),
   }),
@@ -93,6 +95,7 @@ export const catalogueTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models'],
+    title: ({ name }) => `Create template → ${name}`,
     handler: async (body, ctx) =>
       json(await command(ctx, `create model ${body.name}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers }))),
   }),
@@ -177,6 +180,7 @@ export const catalogueTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/source'],
+    title: ({ slug, message }) => `Edit source → ${slug}${message ? `: ${message}` : ''}`,
     handler: async ({ slug, source, message, force, base }, ctx) =>
       json(
         await command(ctx, `update source of ${slug}`, (headers) =>

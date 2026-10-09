@@ -3,6 +3,7 @@ import type { Context } from '@opentelemetry/api'
 import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
 import type { TierResolver } from '../harness/permissions.js'
 import type { TurnPrincipal } from '../sessions/manager.js'
+import type { TitleResolver } from '../sessions/sdkEvents.js'
 import type { Owner } from '../sessions/protocol.js'
 import { ALL_TOOLS } from './index.js'
 import { createHarnessServer, SERVER_NAME } from './projections.js'
@@ -29,6 +30,8 @@ import type { Tool, ToolServices, WaitForTab } from './registry.js'
 
 export type HarnessTools = {
   tierOf: TierResolver
+  /** Each call's title for the panel (#782, registry.ts `ToolSpec.title`); undefined for any other name. */
+  titleOf: TitleResolver
   mcpServers: (
     session: { id?: string; owner: Owner },
     turn?: TurnPrincipal,
@@ -37,9 +40,10 @@ export type HarnessTools = {
 }
 
 export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
-  const risk = new Map(tools.map((t) => [`mcp__${SERVER_NAME}__${t.name}`, t.risk]))
+  const byName = new Map(tools.map((t) => [`mcp__${SERVER_NAME}__${t.name}`, t]))
   return {
-    tierOf: (name) => risk.get(name),
+    tierOf: (name) => byName.get(name)?.risk,
+    titleOf: (name, input) => byName.get(name)?.title(input),
     mcpServers: (session, turn, extras) => {
       const principal = turnPrincipal(session.owner, turn)
       const allowed = tools.filter((t) => hasTier(principal, t.risk))

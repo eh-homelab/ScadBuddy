@@ -327,6 +327,7 @@ export const libraryTools: Tool[] = [
     source:
       'font metadata from the Google Fonts catalogue on the web',
     routes: ['GET /api/v1/fonts/catalogue'],
+    title: ({ q }) => (q ? `Search fonts → ${q}` : 'Browse fonts'),
     handler: async ({ q, category, limit }, { backend }) =>
       json(await ok(backend.GET('/api/v1/fonts/catalogue', { params: { query: { q, category, limit } } }), 'search fonts')),
   }),

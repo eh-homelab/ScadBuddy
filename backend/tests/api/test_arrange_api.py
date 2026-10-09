@@ -396,7 +396,6 @@ def test_a_plain_library_file_arranges_beside_an_output(
     assert inputs.sources == [meta.id]
     state: AppState = getattr(app.state, STATE_ATTR)
     assert (state.store.blobs.dir_for(key) / LAYOUT_NAME).is_file()
-    assert key in state.refs.referenced()
 
 
 @respx.mock

@@ -39,6 +39,10 @@ import { ready, type RouteModule } from './module.js'
 //   GET  /api/v1/ai/sessions/:id/resources        {resources}: what its tool calls created,
 //                                                 changed or deleted, oldest first (#931,
 //                                                 sessions/touched.ts)
+//   GET  /api/v1/ai/sessions/:id/blobs/:name      an image one of its tool results carried (#782,
+//                                                 sessions/blobs.ts), by the name its tool.result
+//                                                 event gives; 404 for any other name. Never a path:
+//                                                 the name is looked up in ai_session_blobs
 //   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
 //                                                 events, replayed from `Last-Event-ID`
@@ -271,6 +275,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get(
     `${base}/:id/resources`,
     route('read', async (c, sessions) => c.json({ resources: await sessions.resources(idOf(c), BROWSER_USER) })),
+  )
+
+  app.get(
+    `${base}/:id/blobs/:name`,
+    route('read', async (c, sessions) => {
+      const blob = await sessions.blob(idOf(c), c.req.param('name') ?? '', BROWSER_USER)
+      return c.body(new Uint8Array(blob.bytes), 200, {
+        'Content-Type': blob.mediaType,
+        'X-Content-Type-Options': 'nosniff',
+        // An image, shown by an <img> on the UI's page: nothing in it may run,
+        // and no other site may embed it.
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Cross-Origin-Resource-Policy': 'same-origin',
+        // The name is the bytes' hash: what it names never changes.
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      })
+    }),
   )
 
   app.post(
