@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 from fastapi import status
+from pydantic import BaseModel
 
 from scadbuddy.core.problems import ApiError
 
@@ -69,12 +70,52 @@ def upstream_body(response: httpx.Response) -> Any:
         return None
 
 
+#: The most of an answer's body `UpstreamAnswer` keeps.
+MAX_ANSWER_CHARS = 2000
+
+
+class UpstreamAnswer(BaseModel):
+    """What Bambuddy itself answered to a failed call, as it said it (#1542): the
+    status, the ``Retry-After`` it asked for, and the body as text; or, when it never
+    answered, why not."""
+
+    status: int | None = None
+    retry_after: str | None = None
+    body: str | None = None
+    error: str | None = None
+
+
+def _answered(error: ApiError, answer: UpstreamAnswer) -> ApiError:
+    error.upstream = answer
+    return error
+
+
+def _body_text(response: httpx.Response) -> str | None:
+    try:
+        text = response.text
+    except (UnicodeDecodeError, httpx.ResponseNotRead):
+        return None
+    return text[:MAX_ANSWER_CHARS] if text else None
+
+
 def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiError:
-    """Turn a failed Bambuddy response into the problem the browser should see.
+    """Turn a failed Bambuddy response into the problem the browser should see, with
+    Bambuddy's own answer kept on it (`UpstreamAnswer`).
 
     ``what`` names the operation in the first person plural of the UI ("upload the
     3MF"), so the detail reads as a sentence.
     """
+    answer = UpstreamAnswer(
+        status=response.status_code,
+        retry_after=response.headers.get("Retry-After"),
+        body=_body_text(response),
+    )
+    return _answered(_mapped(response, scope=scope, what=what, answer=answer), answer)
+
+
+def _mapped(
+    response: httpx.Response, *, scope: Scope, what: str, answer: UpstreamAnswer
+) -> ApiError:
     code = response.status_code
     detail = upstream_detail(response)
     suffix = f": {detail}" if detail else ""
@@ -114,6 +155,14 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
             bambuddy_status=code,
             bambuddy_body=upstream_body(response),
         )
+    if code == status.HTTP_429_TOO_MANY_REQUESTS:
+        wait = f"; it asks to wait {answer.retry_after} s" if answer.retry_after else ""
+        return ApiError(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Bambuddy is limiting requests and refused to {what}{wait}{suffix}",
+            type_=UNAVAILABLE_PROBLEM,
+            bambuddy_status=code,
+        )
     return ApiError(
         status.HTTP_502_BAD_GATEWAY,
         f"Bambuddy answered {code} when asked to {what}{suffix}",
@@ -148,8 +197,11 @@ def map_transport(error: httpx.HTTPError, *, what: str) -> ApiError:
         if isinstance(error, httpx.TimeoutException)
         else status.HTTP_502_BAD_GATEWAY
     )
-    return ApiError(
-        code,
-        f"could not reach Bambuddy to {what}: {type(error).__name__}",
-        type_=UNAVAILABLE_PROBLEM,
+    return _answered(
+        ApiError(
+            code,
+            f"could not reach Bambuddy to {what}: {type(error).__name__}",
+            type_=UNAVAILABLE_PROBLEM,
+        ),
+        UpstreamAnswer(error=f"{type(error).__name__}: {error}"[:MAX_ANSWER_CHARS]),
     )

@@ -20,6 +20,7 @@ from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.errors import MAX_ANSWER_CHARS
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
@@ -308,6 +309,7 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
 
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is True
+    assert body["upstream"] is None
     assert "3DP-31B-598" in body["detail"]
     assert body["printers"] == [
         {"id": 1, "name": "3DP-31B-598", "model": "H2C", "is_active": True, "nozzle_count": None}
@@ -344,6 +346,44 @@ def test_an_unreachable_bambuddy_is_reported_not_raised(client: TestClient) -> N
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is False
     assert "ConnectError" in body["detail"]
+    # What went wrong, as httpx said it (#1542).
+    assert body["upstream"] == {
+        "status": None,
+        "retry_after": None,
+        "body": None,
+        "error": "ConnectError: no route to host",
+    }
+
+
+@respx.mock
+def test_a_rate_limited_test_shows_what_bambuddy_said(client: TestClient) -> None:
+    """#1542: a 429's own words and its Retry-After, not only ScadBuddy's sentence."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(
+        return_value=httpx.Response(
+            429, headers={"Retry-After": "30"}, text="Too many requests for this API key"
+        )
+    )
+
+    body = client.post("/api/v1/settings/test").json()
+    assert body["ok"] is False
+    assert "limiting requests" in body["detail"]
+    assert "wait 30 s" in body["detail"]
+    assert body["upstream"] == {
+        "status": 429,
+        "retry_after": "30",
+        "body": "Too many requests for this API key",
+        "error": None,
+    }
+
+
+@respx.mock
+def test_a_long_answer_is_cut(client: TestClient) -> None:
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(500, text="x" * 10_000))
+
+    body = client.post("/api/v1/settings/test").json()
+    assert len(body["upstream"]["body"]) == MAX_ANSWER_CHARS
 
 
 def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> None:
