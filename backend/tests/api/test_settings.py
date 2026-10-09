@@ -72,8 +72,8 @@ def test_the_api_key_is_write_only(client: TestClient, settings: Settings) -> No
     assert "bambuddy_api_key" not in body
     assert "s3cret" not in response.text
 
-    # Stored as given, in plain text, as the old 0600 file held it: the backend has no
-    # secret store, so it is in every backup of the database.
+    # Stored as given, in plain text: this app has no SCADBUDDY_SECRET_KEY_FILE. With
+    # one it is sealed (#602, tests/test_settings_secrets.py).
     stored = read_stored(settings.database_url)
     assert stored["bambuddy_api_key"] == "s3cret"
 

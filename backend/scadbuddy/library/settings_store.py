@@ -24,10 +24,13 @@ statement on its own row, so neither can drop the other's change.
 
 from __future__ import annotations
 
+import base64
+import functools
 import logging
 import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
@@ -55,9 +58,17 @@ from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
+from scadbuddy.core.secrets import (
+    Envelope,
+    Kek,
+    SealError,
+    load_kek,
+    open_secret,
+    seal_secret,
+)
+from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
-from scadbuddy.render.pg_store import migrate
+from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
 
@@ -184,12 +195,12 @@ class StoredSettings(BambuddyIds):
     """
 
     bambuddy_url: str | None = None
-    bambuddy_api_key: str | None = None
+    bambuddy_api_key: str | None = Field(default=None, repr=False)
     bambuddy_web_urls: str | None = None
     #: The Manage-Library-only key render workers hold (spec 2026-09-27 §9). Stored
-    #: exactly as `bambuddy_api_key` is (the backend has no secret store; see
-    #: tests/api/test_settings.py), written from Settings, never sent to the browser.
-    bambuddy_render_api_key: str | None = None
+    #: exactly as `bambuddy_api_key` is (sealed under SCADBUDDY_SECRET_KEY_FILE when it
+    #: is set, #602), written from Settings, never sent to the browser.
+    bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     #: Where blobs live. Read at process start by the API and every worker.
     store_backend: StoreBackend = "local"
     public_url: str | None = None
@@ -440,6 +451,8 @@ class SettingsStore:
         #: Told of every write, as ``settings.changed`` with the section it touched.
         self.events = events
         self.connect_timeout = connect_timeout
+        #: Seals the `SECRET_FIELDS` at rest (#602); None keeps them plaintext.
+        self._kek = settings_kek(defaults.secret_key_file)
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             defaults.database_url,
             min_size=1,
@@ -455,8 +468,17 @@ class SettingsStore:
         self._pool.open(wait=True, timeout=self.connect_timeout)
         with self._pool.connection() as conn:
             applied = migrate(conn)
-        if applied:
-            logger.info("applied database migrations", extra={"versions": applied})
+            if applied:
+                logger.info("applied database migrations", extra={"versions": applied})
+            if self._kek is None:
+                logger.warning(
+                    "SCADBUDDY_SECRET_KEY_FILE is not set: the stored API keys are kept in"
+                    " plaintext"
+                )
+            else:
+                sealed = _seal_plaintext_rows(conn, self._kek)
+                if sealed:
+                    logger.info("sealed plaintext API keys", extra={"settings": sealed})
 
     def close(self) -> None:
         self._pool.close()
@@ -497,7 +519,7 @@ class SettingsStore:
             rows = read("SELECT name, value FROM settings")
             choices = read("SELECT model_id, choices FROM model_print_choices")
             beds = read("SELECT printer_id, bed_type FROM printer_bed_types")
-        stored_rows = {row["name"]: row["value"] for row in rows}
+        stored_rows = _opened(self._kek, {row["name"]: row["value"] for row in rows})
         runtime = self.defaults.model_copy()
         sources: dict[str, SettingSource] = {}
         for name in ENV_SEEDED:
@@ -571,7 +593,7 @@ class SettingsStore:
                 conn.execute("DELETE FROM settings WHERE name = %s", (name,))
             for name, value in changes.items():
                 if value is not None:
-                    _put(conn, name, value)
+                    _put(conn, name, _sealed(self._kek, name, value))
                 elif name in ENV_SEEDED:
                     # Cleared, which must beat the environment: a JSON null row.
                     _put(conn, name, None)
@@ -779,6 +801,87 @@ class SettingsStore:
         return self._written("remembered")
 
 
+#: The jsonb a sealed secret is stored as: ``{"sealed": {"secret", "dek", "kek_id"}}``,
+#: the first two base64. A plaintext secret is a JSON string, as before #602.
+SEALED = "sealed"
+
+
+@functools.cache
+def settings_kek(path: Path | None) -> Kek | None:
+    """The key the secret settings are sealed with, read once per process. A key file
+    that is set but unreadable or malformed raises `SecretKeyError`, failing the start."""
+    return None if path is None else load_kek(path)
+
+
+def _aad(name: str) -> str:
+    """Binds a sealed value to its setting: copied into another row, it does not open."""
+    return f"settings:{name}"
+
+
+def _sealed(kek: Kek | None, name: str, value: object) -> object:
+    """``value`` as stored: sealed when it is a secret and there is a key."""
+    if kek is None or name not in SECRET_FIELDS or not isinstance(value, str):
+        return value
+    envelope = seal_secret(kek, value, _aad(name))
+    return {
+        SEALED: {
+            "secret": base64.b64encode(envelope.secret_sealed).decode(),
+            "dek": base64.b64encode(envelope.dek_sealed).decode(),
+            "kek_id": envelope.kek_id,
+        }
+    }
+
+
+def _opened(kek: Kek | None, rows: dict[str, Any]) -> dict[str, Any]:
+    """``rows`` with each sealed secret opened. One this process cannot open (no key,
+    another key, altered bytes) is dropped with a warning, so the field follows the
+    environment, as a row this version refuses does."""
+    out = dict(rows)
+    for name in SECRET_FIELDS & rows.keys():
+        value = rows[name]
+        if not (isinstance(value, dict) and SEALED in value):
+            continue
+        del out[name]
+        try:
+            if kek is None:
+                raise SealError("SCADBUDDY_SECRET_KEY_FILE is not set")
+            sealed = value[SEALED]
+            envelope = Envelope(
+                secret_sealed=base64.b64decode(sealed["secret"]),
+                dek_sealed=base64.b64decode(sealed["dek"]),
+                kek_id=str(sealed["kek_id"]),
+            )
+            out[name] = open_secret(kek, envelope, _aad(name))
+        except (SealError, KeyError, TypeError, ValueError) as error:
+            # A SealError names key ids only; the others are not formatted at all.
+            reason = str(error) if isinstance(error, SealError) else "malformed"
+            logger.warning(
+                "ignoring a stored secret this process cannot open: %s",
+                reason,
+                extra={"setting": name},
+            )
+    return out
+
+
+def _seal_plaintext_rows(conn: Connection[DictRow], kek: Kek) -> list[str]:
+    """Seal every secret row still in plaintext (#602), under the migration lock, so
+    replicas starting together seal each row once. A sealed or cleared row is left
+    alone, so a second run changes nothing."""
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+        rows = conn.execute(
+            "SELECT name, value FROM settings"
+            " WHERE name = ANY(%s) AND jsonb_typeof(value) = 'string' FOR UPDATE",
+            (sorted(SECRET_FIELDS),),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE settings SET value = %s, updated_at = now() WHERE name = %s",
+                (Jsonb(_sealed(kek, row["name"], row["value"])), row["name"]),
+            )
+    return sorted(row["name"] for row in rows)
+
+
 def _put(conn: Connection[DictRow], name: str, value: object) -> None:
     """Store one setting's value; ``None`` stores a JSON ``null`` (cleared)."""
     conn.execute(
@@ -813,7 +916,7 @@ class RenderStoreSettings(BaseModel):
 
     store_backend: StoreBackend = "local"
     bambuddy_url: str | None = None
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
     #: True when `api_key` is the full key because no render key is stored.
     key_is_fallback: bool = False
     library_folder_id: int | None = None
@@ -823,6 +926,7 @@ def load_render_store_settings(
     pool: ConnectionPool[Connection[DictRow]], defaults: Settings
 ) -> RenderStoreSettings:
     """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9)."""
+    kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(
             "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(RENDER_FIELDS),)
@@ -830,9 +934,8 @@ def load_render_store_settings(
     values: dict[str, Any] = {
         name: getattr(defaults, name) for name in ENV_SEEDED if name in RENDER_FIELDS
     }
-    for row in rows:
-        # A JSON null is a field cleared in Settings: it beats the environment's seed.
-        values[row["name"]] = row["value"]
+    # A JSON null is a field cleared in Settings: it beats the environment's seed.
+    values.update(_opened(kek, {row["name"]: row["value"] for row in rows}))
     stored = StoredSettings.model_validate(values)
     key, fallback = stored.render_bambuddy_key()
     return RenderStoreSettings(
