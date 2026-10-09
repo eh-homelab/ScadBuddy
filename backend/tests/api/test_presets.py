@@ -27,7 +27,6 @@ from scadbuddy.library.presets import (
     PRESET_LOCK_PREFIX,
     ParamPresetCreate,
     PresetStore,
-    SavedPresetsUnavailableError,
 )
 from scadbuddy.main import sweep_assets
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
@@ -664,16 +663,6 @@ def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
     # Held from the check to the write, so a save cannot land between them.
     assert store.with_names_free("m", ["A"], write) is None
     assert held == [(False, True)]
-
-
-def test_a_store_without_a_database_reads_only_the_template_s_own(
-    paths: DataPaths,
-) -> None:
-    store = PresetStore(paths)
-    assert store.saved_presets("m") == []
-    assert store.with_names_free("m", ["A"], lambda: "written") == "written"
-    with pytest.raises(SavedPresetsUnavailableError):
-        store.create("m", ParamPresetCreate(name="A", params={}))
 
 
 @pytest.mark.requires_git

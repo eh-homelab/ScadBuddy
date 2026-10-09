@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
-from scadbuddy.bambuddy.runs import DatabaseRequiredError, PrintRunError, TransactionalEvents
+from scadbuddy.bambuddy.runs import PrintRunError, TransactionalEvents
 from scadbuddy.core.events import OperationEvent
 
 OperationStatus = Literal["running", "succeeded", "failed"]
@@ -50,21 +50,12 @@ class OperationAccepted(Operation):
 class OperationStore:
     def __init__(
         self,
-        pool: ConnectionPool[Connection[DictRow]] | None,
+        pool: ConnectionPool[Connection[DictRow]],
         *,
         events: TransactionalEvents | None = None,
     ) -> None:
         self._pool = pool
         self.events = events
-
-    @property
-    def available(self) -> bool:
-        return self._pool is not None
-
-    def _require(self) -> ConnectionPool[Connection[DictRow]]:
-        if self._pool is None:
-            raise DatabaseRequiredError
-        return self._pool
 
     async def find(self, operation_key: str) -> Operation | None:
         """The key's newest operation, whatever its status: one key is one effect."""
@@ -134,7 +125,7 @@ class OperationStore:
             )
 
     def _find(self, operation_key: str) -> Operation | None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {_COLUMNS} FROM operations WHERE operation_key = %s"
                 " ORDER BY created_at DESC LIMIT 1",
@@ -143,14 +134,14 @@ class OperationStore:
         return Operation.model_validate(row) if row else None
 
     def _get(self, op_id: str) -> Operation | None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {_COLUMNS} FROM operations WHERE id = %s", (op_id,)
             ).fetchone()
         return Operation.model_validate(row) if row else None
 
     def _keyed(self, kind: str, subject: str, idempotency_key: str) -> bool:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT 1 FROM operations"
                 " WHERE idempotency_key = %s AND kind = %s AND subject = %s LIMIT 1",
@@ -159,7 +150,7 @@ class OperationStore:
         return row is not None
 
     def _named_by_running(self, names: list[str]) -> set[str]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT name FROM unnest(%s::text[]) AS name WHERE EXISTS ("
                 " SELECT 1 FROM operations"
@@ -180,7 +171,7 @@ class OperationStore:
         retention: timedelta | None,
         idempotency_key: str | None,
     ) -> Operation:
-        with self._require().connection() as conn, conn.transaction():
+        with self._pool.connection() as conn, conn.transaction():
             if retention is not None:
                 conn.execute("DELETE FROM operations WHERE finished_at < now() - %s", (retention,))
             row = conn.execute(
@@ -216,7 +207,7 @@ class OperationStore:
         self, op_id: str, result: dict[str, Any] | None, error: PrintRunError | None
     ) -> Operation:
         status: OperationStatus = "failed" if error is not None else "succeeded"
-        with self._require().connection() as conn, conn.transaction():
+        with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE operations SET status = %s, result = %s, error = %s, finished_at = now()"
                 f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}",
@@ -239,7 +230,7 @@ class OperationStore:
         return Operation.model_validate(current)
 
     def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, workflow_id, workflow_run_id FROM operations"
                 " WHERE status = 'running' AND created_at <= now() - %s ORDER BY created_at",

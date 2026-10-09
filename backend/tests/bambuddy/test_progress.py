@@ -538,7 +538,7 @@ class FakeLinks(PrintLinkStore):
     """Links in memory; ``fail`` makes every write raise what a lost database would."""
 
     def __init__(self, *, fail: bool = False) -> None:
-        super().__init__(None)
+        super().__init__(None)  # type: ignore[arg-type]  # never reaches Postgres
         self.fail = fail
         self.recorded: list[PrintLink] = []
 
@@ -558,7 +558,7 @@ class FakeUploads(BambuddyUploadStore):
     """One library copy whose slice's hash is already known."""
 
     def __init__(self) -> None:
-        super().__init__(None)
+        super().__init__(None)  # type: ignore[arg-type]  # never reaches Postgres
 
     async def for_output(self, output_id: str) -> list[LibraryCopy]:
         return [
@@ -642,22 +642,6 @@ async def test_a_gone_slice_job_still_looks_for_the_print_by_hash(
     assert scan.called
     assert progress is not None
     assert (progress.stage, progress.settled) == ("unknown", True)
-
-
-@respx.mock
-@pytest.mark.usefixtures("no_recent_scans")
-async def test_without_a_database_a_gone_item_still_reads_as_finished(
-    bambuddy: BambuddyClient,
-) -> None:
-    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
-    progress = await progress_for(
-        bambuddy,
-        meta(queue_item_id=51, print_route="slice_queue"),
-        uploads=BambuddyUploadStore(None),
-        links=PrintLinkStore(None),
-    )
-    assert progress is not None
-    assert progress.stage == "done"
 
 
 @pytest.mark.usefixtures("no_recent_scans")

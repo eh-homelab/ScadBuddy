@@ -44,7 +44,6 @@ from scadbuddy.bambuddy.send import (
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import (
     BambuddyUploadStore,
-    DatabaseRequiredError,
     ProjectTarget,
     SlicedCopy,
 )
@@ -208,7 +207,7 @@ async def record_sends(
     """Record one plate's queue items under ``subject`` (#1750), for either source, with
     the run that queued them (#1751). Best effort: the plate is queued, and failing the
     run over its record would tell the user it was not (#976)."""
-    if sends is None or not sends.available:
+    if sends is None:
         return
     try:
         await sends.record_sends(
@@ -225,7 +224,7 @@ async def record_sends(
                 for item in outcome.queue_item_ids
             ],
         )
-    except (psycopg.Error, DatabaseRequiredError) as exc:
+    except psycopg.Error as exc:
         logger.warning("could not record the sends of %s: %s", subject.key, type(exc).__name__)
 
 

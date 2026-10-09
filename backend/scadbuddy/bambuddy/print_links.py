@@ -36,7 +36,6 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 
 MatchedBy = Literal["queue_item", "content_hash"]
 
@@ -142,18 +141,8 @@ class PrintLinkStore:
     `BambuddyUploadStore`: the progress read records links on every poll.
     """
 
-    def __init__(self, pool: ConnectionPool[Connection[DictRow]] | None) -> None:
+    def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
-
-    @property
-    def available(self) -> bool:
-        """Whether there is a database to record links in; without one they are skipped."""
-        return self._pool is not None
-
-    def _require(self) -> ConnectionPool[Connection[DictRow]]:
-        if self._pool is None:
-            raise DatabaseRequiredError
-        return self._pool
 
     async def record(self, subject: PrintSubject, link: PrintLink) -> None:
         """Record a link. A second sighting of the same archive changes nothing: the
@@ -230,7 +219,7 @@ class PrintLinkStore:
         await asyncio.to_thread(self._library_gone, queue_item_id)
 
     def _record(self, subject: PrintSubject, link: PrintLink) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO print_links"
                 " (subject, archive_id, queue_item_id, plate_id, printer_id, matched_by)"
@@ -247,7 +236,7 @@ class PrintLinkStore:
             )
 
     def _for_subject(self, subject: PrintSubject) -> list[PrintLink]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT archive_id, matched_by, queue_item_id, plate_id, printer_id, first_seen"
                 " FROM print_links WHERE subject = %s"
@@ -263,7 +252,7 @@ class PrintLinkStore:
         # 3MF (`render/provenance.py`), so the same parameters rendered twice differ at
         # the source; whether the sliced file keeps that stamp is the #306 spike's to
         # confirm. If it does not, one output's prints can show under another's id.
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
                 (archive_id,),
@@ -274,7 +263,7 @@ class PrintLinkStore:
         self, limit: int, before: int | None, only: Sequence[PrintSubject] | None
     ) -> list[LinkedPrint]:
         subjects = [subject.key for subject in only] if only is not None else None
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 # Each archive's owner is chosen over all its rows first, as `_linked`
                 # does, and only then kept or dropped by subject: filtering first would
@@ -289,14 +278,14 @@ class PrintLinkStore:
         return [_linked_print(dict(row)) for row in rows]
 
     def _delete_subjects(self, keys: list[str]) -> None:
-        with self._require().connection() as conn, conn.transaction():
+        with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM print_links WHERE subject = ANY(%s)", (keys,))
             conn.execute("DELETE FROM print_sends WHERE subject = ANY(%s)", (keys,))
 
     def _record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
         if not sends:
             return
-        with self._require().connection() as conn, conn.cursor() as cursor:
+        with self._pool.connection() as conn, conn.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO print_sends"
                 " (queue_item_id, subject, plate_id, printer_id, project_id, slice_job_id,"
@@ -317,7 +306,7 @@ class PrintLinkStore:
             )
 
     def _sends_for(self, subject: PrintSubject) -> list[PrintSend]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT queue_item_id, plate_id, printer_id, project_id, slice_job_id,"
                 " run_id, first_seen FROM print_sends WHERE subject = %s"
@@ -327,7 +316,7 @@ class PrintLinkStore:
         return [PrintSend.model_validate(dict(row)) for row in rows]
 
     def _pending_library(self, limit: int, max_age: timedelta) -> list[PendingLibraryPrint]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 f"UPDATE print_sends SET gone = true WHERE {_UNLINKED} AND first_seen < now() - %s",
                 (max_age,),
@@ -347,7 +336,7 @@ class PrintLinkStore:
         return pending
 
     def _link_library(self, queue_item_id: int, archive_id: int, name: str | None) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO print_links"
                 " (subject, archive_id, matched_by, queue_item_id, plate_id, printer_id, name)"
@@ -358,7 +347,7 @@ class PrintLinkStore:
             )
 
     def _library_gone(self, queue_item_id: int) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 f"UPDATE print_sends SET gone = true WHERE queue_item_id = %s AND {_UNLINKED}",
                 (queue_item_id,),

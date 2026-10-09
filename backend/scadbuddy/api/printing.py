@@ -620,11 +620,9 @@ async def failed_before_queueing(state: AppState, run_subject: str) -> str | Non
     """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
     #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
     run that may have queued recorded what it queued, so its print's own progress says
-    more. Without a database, or with one that does not answer, there are no runs to
-    read, and the progress is read as it was before."""
+    more. With a database that does not answer, there are no runs to read, and the
+    progress is read as it was before."""
     runs = state.print_runs.store
-    if not runs.available:
-        return None
     try:
         latest = await runs.latest_for_output(run_subject)
     except DATABASE_ERRORS:
@@ -668,9 +666,7 @@ async def get_progress(
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
-            progress = await progress_for(
-                client, meta, uploads=uploads, links=links if links.available else None
-            )
+            progress = await progress_for(client, meta, uploads=uploads, links=links)
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

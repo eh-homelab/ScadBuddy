@@ -7,9 +7,6 @@ than in the output's ``meta.json``. The tables are migration
 ``20260928T0720Z_output_bambuddy_uploads``. Beside them, the printer and nozzle each
 Bambuddy project last printed on (``20260928T0937Z_project_print_targets``, #317): what
 the project's file is laid out for when Generate files it there.
-
-The database is required (#401): without ``SCADBUDDY_DATABASE_URL`` there is no
-fallback, and every call raises `DatabaseRequiredError`.
 """
 
 from __future__ import annotations
@@ -26,14 +23,6 @@ from pydantic import BaseModel, Field
 
 #: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
 COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
-
-
-class DatabaseRequiredError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__(
-            "recording an output's Bambuddy uploads needs the database; "
-            "set SCADBUDDY_DATABASE_URL (#401)"
-        )
 
 
 class SlicedCopy(BaseModel):
@@ -92,13 +81,8 @@ class BambuddyUploadStore:
     progress poll alone would otherwise hold the event loop for a round trip each time.
     """
 
-    def __init__(self, pool: ConnectionPool[Connection[DictRow]] | None) -> None:
+    def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
-
-    def _require(self) -> ConnectionPool[Connection[DictRow]]:
-        if self._pool is None:
-            raise DatabaseRequiredError
-        return self._pool
 
     @asynccontextmanager
     async def copy_lock(self, key: str) -> AsyncIterator[None]:
@@ -113,7 +97,7 @@ class BambuddyUploadStore:
         once would exhaust the pool against itself. Closing the connection releases
         the lock however the section ends, cancellation and a lost connection included.
         """
-        pool = self._require()
+        pool = self._pool
         conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
         conn = await AsyncConnection.connect(conninfo, autocommit=True)
         try:
@@ -210,7 +194,7 @@ class BambuddyUploadStore:
     # The blocking bodies, run in a worker thread by the coroutines above.
 
     def _project_targets(self) -> dict[int, ProjectTarget]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT project_id, printer_id, nozzle_diameter FROM project_print_targets"
                 " ORDER BY project_id"
@@ -223,7 +207,7 @@ class BambuddyUploadStore:
         }
 
     def _forget_project_targets(self, project_id: int | None) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             if project_id is None:
                 conn.execute("DELETE FROM project_print_targets")
             else:
@@ -232,7 +216,7 @@ class BambuddyUploadStore:
                 )
 
     def _project_target(self, project_id: int) -> ProjectTarget | None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT printer_id, nozzle_diameter FROM project_print_targets"
                 " WHERE project_id = %s",
@@ -243,7 +227,7 @@ class BambuddyUploadStore:
         return ProjectTarget(printer_id=row["printer_id"], nozzle_diameter=row["nozzle_diameter"])
 
     def _remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO project_print_targets (project_id, printer_id, nozzle_diameter)"
                 " VALUES (%s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
@@ -254,7 +238,7 @@ class BambuddyUploadStore:
 
     def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             copies = conn.execute(
                 "SELECT output_id, library_file_id, folder_id, target_key"
                 " FROM output_bambuddy_uploads WHERE output_id = ANY(%s)"
@@ -289,7 +273,7 @@ class BambuddyUploadStore:
         return found
 
     def _record(self, output_id: str, copy: LibraryCopy) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_uploads"
                 " (output_id, library_file_id, folder_id, target_key) VALUES (%s, %s, %s, %s)"
@@ -299,7 +283,7 @@ class BambuddyUploadStore:
             )
 
     def _recorded(self, ids: list[int]) -> set[int]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT library_file_id FROM output_bambuddy_uploads"
                 " WHERE library_file_id = ANY(%s)",
@@ -310,7 +294,7 @@ class BambuddyUploadStore:
     def _outputs_for_files(self, ids: list[int]) -> dict[int, str]:
         if not ids:
             return {}
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             # A library print's copy is recorded under its subject, `library:<file id>`
             # (`send.upload_copy`), which is no output.
             rows = conn.execute(
@@ -323,14 +307,14 @@ class BambuddyUploadStore:
         return {row["library_file_id"]: row["output_id"] for row in rows}
 
     def _forget(self, output_id: str, library_file_id: int) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "DELETE FROM output_bambuddy_uploads WHERE output_id = %s AND library_file_id = %s",
                 (output_id, library_file_id),
             )
 
     def _record_sliced(self, output_id: str, library_file_id: int, sliced: SlicedCopy) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_slices"
                 " (output_id, source_library_file_id, sliced_library_file_id, preset_key)"
@@ -347,7 +331,7 @@ class BambuddyUploadStore:
             )
 
     def _record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE output_bambuddy_slices SET file_hash = %s"
                 " WHERE output_id = %s AND sliced_library_file_id = %s",
@@ -355,7 +339,7 @@ class BambuddyUploadStore:
             )
 
     def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT (SELECT min(created_at) FROM output_bambuddy_uploads"
                 "  WHERE output_id = %(output)s) AS first_upload,"
@@ -368,5 +352,5 @@ class BambuddyUploadStore:
         return row["first_upload"], row["last_slice"]
 
     def _delete_outputs(self, ids: list[str]) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute("DELETE FROM output_bambuddy_uploads WHERE output_id = ANY(%s)", (ids,))

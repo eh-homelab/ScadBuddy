@@ -41,6 +41,7 @@ from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import write_openscad_3mf
+from tests.support.media import MemoryMediaStore
 
 SLUG = "widget"
 CONFIG = Config(data_dir=Path("/unused"))
@@ -132,14 +133,19 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_only(
     store.write(SLUG, "a" * 64, b"png")
 
     removed = Catalogue(
-        paths, previews=store, wrapper_prefix=WRAPPER_PREFIX
+        paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
     ).sweep_orphan_previews()
 
     assert removed == ["gone"]
     assert store.record("gone") is None
     assert store.image(SLUG) == b"png"
     # The file sweep has nothing of the previews' to look at.
-    assert Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans() == []
+    assert (
+        Catalogue(
+            paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+        ).sweep_orphans()
+        == []
+    )
 
 
 def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
@@ -153,7 +159,10 @@ def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
 
     with caplog.at_level("ERROR"):
         removed = Catalogue(
-            paths, previews=PreviewStore(unreachable), wrapper_prefix=WRAPPER_PREFIX
+            paths,
+            previews=PreviewStore(unreachable),
+            media_store=MemoryMediaStore(),
+            wrapper_prefix=WRAPPER_PREFIX,
         ).sweep_orphan_previews()
 
     assert removed == []
@@ -181,7 +190,9 @@ def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
 def test_the_catalogue_ranks_its_own_image_over_the_preview(
     store: PreviewStore, paths: DataPaths
 ) -> None:
-    catalogue = Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(
+        paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
     store.write(SLUG, "a" * 64, b"preview")
 
     origin = catalogue.thumbnail_source(SLUG)
@@ -198,7 +209,11 @@ def test_the_catalogue_ranks_its_own_image_over_the_preview(
 def test_a_catalogue_not_serving_previews_shows_none(store: PreviewStore, paths: DataPaths) -> None:
     store.write(SLUG, "a" * 64, b"preview")
     catalogue = Catalogue(
-        paths, previews=store, serve_previews=False, wrapper_prefix=WRAPPER_PREFIX
+        paths,
+        previews=store,
+        serve_previews=False,
+        media_store=MemoryMediaStore(),
+        wrapper_prefix=WRAPPER_PREFIX,
     )
 
     assert catalogue.thumbnail_source(SLUG).source is None
@@ -324,7 +339,11 @@ def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
     a render's write, whether or not previews are served, so the previous model's
     preview never survives it."""
     catalogue = Catalogue(
-        paths, previews=store, serve_previews=serving, wrapper_prefix=WRAPPER_PREFIX
+        paths,
+        previews=store,
+        serve_previews=serving,
+        media_store=MemoryMediaStore(),
+        wrapper_prefix=WRAPPER_PREFIX,
     )
     writer, _, release = _held_write(store)
 
@@ -348,7 +367,9 @@ def test_the_orphan_sweep_leaves_a_live_model_being_written(
     writer, _, release = _held_write(store)
 
     sweeping = threading.Thread(
-        target=Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphan_previews
+        target=Catalogue(
+            paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+        ).sweep_orphan_previews
     )
     sweeping.start()
     sweeping.join(0.2)

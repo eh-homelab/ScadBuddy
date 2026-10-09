@@ -1,6 +1,6 @@
 """The Postgres event bus (spec §7; #264, #266): NOTIFY delivery across replicas,
 the payload cap, resync after a dropped listener, the replay log and its pruning,
-job events through it, and the fallback without a database."""
+job events through it, and the bus a database URL selects."""
 
 from __future__ import annotations
 
@@ -532,7 +532,7 @@ def _jobs(events: list[Event]) -> list[tuple[str, str]]:
     return [(e.kind, e.job_id) for e in events if isinstance(e, JobEvent)]
 
 
-# --- selection and the fallback ------------------------------------------------------
+# --- selection -----------------------------------------------------------------------
 
 
 @pytest.mark.requires_postgres
