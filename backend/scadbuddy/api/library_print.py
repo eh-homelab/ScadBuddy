@@ -31,7 +31,7 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.outputs import OutputPlate, read_plain_files
-from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, _failed_before_queueing, accept_run
+from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
@@ -349,7 +349,7 @@ async def get_library_progress(
     on ``print:library:<file id>``."""
     subject = PrintSubject.library(file_id)
     key = subject.run_subject
-    failed = await _failed_before_queueing(state, key)
+    failed = await failed_before_queueing(state, key)
     progress: PrintProgress | None = None
     async with client_for(store.load()) as client:
         if failed is not None:

@@ -591,6 +591,11 @@ def test_a_library_file_never_printed_has_no_progress(
     assert response.status_code == 200, response.text
     assert response.json() is None
     assert watched == []
+    # Nor is there anything to file under a project.
+    attached = client.post(
+        "/api/v1/print/library/89/project", json={"project_id": 7}, headers=press()
+    )
+    assert attached.status_code == 409, attached.text
 
 
 @respx.mock

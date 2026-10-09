@@ -140,6 +140,11 @@ def bambuddy_kinds_over(
         if not ids and links.available:
             sends = await links.last_run(PrintSubject.library(file_id))
             ids = [send.queue_item_id for send in sends]
+        if not ids:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "ScadBuddy has not queued this file, so there is nothing to file under the project",
+            )
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             return await attach_results(client, project_id, queue_item_ids=ids)
 
