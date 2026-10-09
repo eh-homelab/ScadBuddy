@@ -887,6 +887,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
               updatedAt: expect.any(String),
               costUsd: 0,
               budgetUsd: 1,
+              // Plan 5d: the default (durable) ran classic, with no Temporal here.
+              mode: 'classic',
             },
           ],
         })
