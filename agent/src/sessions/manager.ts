@@ -1733,7 +1733,8 @@ export class SessionManager {
     // ends the turn with no model call. The tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
-    // A question never outlives its turn (questions/service.ts), shutdown or not.
+    // A question never outlives its turn (questions/service.ts), shutdown or not;
+    // a posted `done` summary does, and cancelPending leaves it pending.
     // Only this turn's: if its claim was lost, a newer turn's question is not ours to cancel.
     await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false, turnId })
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))

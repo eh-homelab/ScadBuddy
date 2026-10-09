@@ -99,6 +99,11 @@ export const ATTENTION_RATE_WINDOW_S = 600
  * model's own limit, which tab waits never use up.
  */
 export const TAB_WAIT_RATE_LIMIT = 10
+/**
+ * #1383: the most `done` summaries one turn posts. Outside the rate limit, so a
+ * model looping on done is bounded here, before each post scans the turn's touches.
+ */
+export const DONE_POSTS_PER_TURN = 3
 /** The advisory lock the rate limit's count and insert are taken under. */
 const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 
@@ -795,7 +800,26 @@ export class QuestionService {
           // or the request was refused above), then one open request per reason.
           // The limit spans sessions and replicas, so its count and insert hold one
           // lock that does too (to commit), or two turns could each read 9 and insert.
-          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+          // A done summary is neither limited nor counted, so it does not take the lock:
+          // its scans of the turn's touches and away windows must not hold up every other
+          // session's attention post (#1383). It is capped per turn instead (DONE_POSTS_PER_TURN),
+          // a count the session row locked above serialises.
+          if (attention.reason === 'done') {
+            const [posted] = await tx<{ n: number }[]>`
+              SELECT count(*)::int AS n FROM ai_questions
+              WHERE session_id = ${sessionId} AND turn_id = ${turnId} AND kind = 'attention' AND attention_reason = 'done'`
+            if ((posted?.n ?? 0) >= DONE_POSTS_PER_TURN) {
+              return {
+                value: {
+                  ...none,
+                  limited: `The summary was not posted: a turn posts at most ${DONE_POSTS_PER_TURN} done summaries, and the last one is still shown.`,
+                },
+                events: [],
+              }
+            }
+          } else {
+            await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+          }
           // Only the model's own requests count against its limit: a browser_* call's
           // wait for its tab (sessions/manager.ts waitForTab) is ScadBuddy's, at most
           // TAB_WAITS_PER_TURN per turn and TAB_WAIT_RATE_LIMIT per window, and must not
