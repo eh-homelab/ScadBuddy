@@ -82,6 +82,8 @@ import { UnpricedSpend } from './unpricedSpend.js'
 import { previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
+import type { DurableGate } from '../gate/durable.js'
+import { PendingProjection } from '../gate/projection.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -777,6 +779,13 @@ export class SessionManager {
   readonly approvals: ApprovalService
   /** Questions the agent asks the user (#940); `questions.answer` is the panel's answer. */
   readonly questions: QuestionService
+  /** Durable sessions' parked calls as projected in ai_pending_input (spec §6.6). */
+  readonly projection: PendingProjection
+  /**
+   * A durable session's gate (its workflow's `pending_input`, `respond`, `cancel_input`,
+   * `interrupt`), when Temporal is configured; main.ts sets it.
+   */
+  durable: DurableGate | undefined
   private readonly deps: SessionManagerDeps
   private readonly run: QueryRunner
   private readonly leaseMs: number
@@ -813,6 +822,7 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
+    this.projection = new PendingProjection(deps.sql)
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS

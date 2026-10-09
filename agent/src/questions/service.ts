@@ -775,7 +775,7 @@ export class QuestionService {
         const tail: ServerEvent[] = []
         let superseded: Resolved[] = []
         let expiresAt: Date | null = null
-        let createdAt = new Date()
+        let createdAt: Date
         let summary: string | null = null
         const own = request.tool === ATTENTION_TOOL
         if (attention?.reason === 'tab_disconnected') {

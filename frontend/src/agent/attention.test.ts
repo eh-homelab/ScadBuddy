@@ -59,6 +59,15 @@ describe('fetchPendingInput', () => {
     expect(summaryLabel(await fetchPendingInput())).toBe(`${APPROVALS_LIST_MAX} summaries`)
   })
 
+  it('does not count a durable entry past its timer: it waits on its worker, not on the user (spec §6.6)', async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({ entries: [{ kind: 'approval' }, { kind: 'approval', expiring: true }, { kind: 'answer', expiring: true }] }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0 })
+  })
+
   it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {
     server.use(
       http.get('/api/v1/ai/pending-input', () =>

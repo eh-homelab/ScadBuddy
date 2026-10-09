@@ -538,6 +538,31 @@ export class ApprovalService {
     }
   }
 
+  /** Whether a non-browser principal holds the per-token approval grant (spec §6). */
+  async holdsGrant(principal: Owner): Promise<boolean> {
+    return this.hasGrant(principal)
+  }
+
+  /**
+   * Every pending approval `principal` may see, oldest first: all of them for the
+   * browser user and grant holders; for anyone else, those of sessions it owns or
+   * started and its own session-less ones (MCP prepares).
+   */
+  async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
+    if (principal.kind === 'browser' || (await this.hasGrant(principal))) return this.list(principal, { pending: true })
+    await this.expireDue()
+    const rows = await this.deps.sql.unsafe<Row[]>(
+      `SELECT ${COLUMNS} FROM ai_approvals a
+       WHERE a.decision IS NULL AND (
+         (a.session_id IS NULL AND a.requested_by_kind = $1 AND a.requested_by_id = $2)
+         OR EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id = a.session_id
+                    AND ((s.owner_kind = $1 AND s.owner_id = $2) OR (s.creator_kind = $1 AND s.creator_id = $2))))
+       ORDER BY a.created_at, a.id LIMIT 500`,
+      [principal.kind, principal.id],
+    )
+    return rows.map(record)
+  }
+
   private async hasGrant(principal: Owner): Promise<boolean> {
     return principal.kind !== 'browser' && this.deps.grants !== undefined && (await this.deps.grants(principal))
   }

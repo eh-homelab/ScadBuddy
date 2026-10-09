@@ -3,34 +3,49 @@ import { z } from 'zod'
 import { ApprovalError, conflictReason } from '../approvals/service.js'
 import { BACK_REPLIES } from '../harness/attention.js'
 import { ANSWER_MAX } from '../harness/questions.js'
-import { parseRequestId } from '../gate/ids.js'
+import { parseRequestId, type RequestId } from '../gate/ids.js'
+import { WorkflowNotFoundError } from '@temporalio/common'
 import { REFUSAL_STATUS, RESPONSE_MAX, RespondRefusal, validateRespond } from '../gate/validate.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { QuestionError } from '../questions/service.js'
 import type { SessionManager } from '../sessions/manager.js'
-import { type Owner, PROTOCOL_VERSION } from '../sessions/protocol.js'
+import { canSee, type InputOutcome, type Owner, PROTOCOL_VERSION } from '../sessions/protocol.js'
+import { approvalEntry, questionEntry } from '../gate/classic.js'
+import { DurableUnavailable } from '../gate/durable.js'
+import type { PendingInputEntry } from '../gate/projection.js'
+import { roleOf } from '../gate/role.js'
+import { isUuid } from '../harness/stateDirs.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
 // GET /api/v1/ai/pending-input (#815; durable-agents spec §6.6, PR #1070): every
 // tool call parked on a person that the browser user may answer, in one shape,
-// for the Assistant badge. Classic sessions only so far: the pending rows of
-// `ai_approvals` (kind `approval`, session-less MCP prepares included) and of
-// `ai_questions` (kind `answer`: questions, #940, and attention requests,
-// #815). The durable projection (`ai_pending_input`) joins this union when
-// durable sessions land.
+// for the Assistant badge. One Postgres read of the union of the pending rows of
+// `ai_approvals` (kind `approval`, session-less MCP prepares included), of
+// `ai_questions` (kind `answer`: questions, #940, and attention requests, #815),
+// and of `ai_pending_input`, durable sessions' projection, never a Query per
+// workflow. A durable entry past its timer whose worker has not resolved it yet is
+// listed `expiring`, and the badge does not count it.
 //
-// A read, behind guard.ts `uiReadProblem` like the approvals list. An approval
-// carries its scrubbed summary and input hash, never its input; an answer
+// GET /api/v1/ai/sessions/{id}/pending-input answers for one session: a classic
+// one from those tables, a durable one by its workflow's `pending_input` Query,
+// the source of truth (503 when its worker does not answer; plan 5b ruling 11).
+//
+// Both are reads, behind guard.ts `uiReadProblem` like the approvals list. An
+// approval carries its scrubbed summary and input hash, never its input; an answer
 // carries its prompt (the question or the attention message), which the gate
-// stored with the turn's secrets redacted.
+// stored with the turn's secrets redacted. Other principals read through the
+// `pending_input_list` and `sessions_pending_input` tools (tools/pendingInput.ts).
 //
 // POST /api/v1/ai/pending-input/{request_id} is §6.6's `respond`: one route
-// that answers any entry the read lists, dispatching on the id's prefix to its
-// store. The body names the entry's kind, and the route refuses, in this order,
-// an unknown id (404, stale), an entry no longer pending (409, whatever the body's
-// kind), and a body that does not match the entry (400):
+// that answers any entry the reads list, dispatching on the id's prefix: an
+// `approval:` or `question:` id to its store, after the gate's shared validator
+// (gate/validate.ts); a `durable:` id to the session's workflow as the `respond`
+// Update, whose validator is the same. A `flow:` id, or any other, is stale until
+// flows exist (plan 5b ruling 2). The body names the entry's kind, and the route
+// refuses, in this order, an unknown id (404, stale), an entry no longer pending
+// (409, whatever the body's kind), and a body that does not match the entry (400):
 //
 //   approval  {"kind": "approval", "decision": "approve" | "deny", "input_hash"?: "<64 hex>"}
 //   question  {"kind": "answer", "answers": {"<question>": "…" | ["…", …]}}
@@ -39,36 +54,13 @@ import { ready, type RouteModule } from './module.js'
 //
 // It is a write from the UI, so it passes guard.ts `uiRequestProblem` and acts
 // as the browser user, like the approval decisions. Those routes
-// (/api/v1/ai/approvals/:id/approve|deny) and `sessions_approve` /
-// `sessions_deny` stay as aliases for the `approval` kind (§6.6, "Classic
-// sessions"), as do the chat socket's `approval.decision` and
-// `question.answer`, which a panel loaded before this route existed still sends.
+// (/api/v1/ai/approvals/:id/approve|deny, `ai_approvals` ids only) and
+// `sessions_approve` / `sessions_deny` (any approval id, `durable:` included) stay
+// as aliases for the `approval` kind (§6.6, "Classic sessions"), as do the chat
+// socket's `approval.decision` and `question.answer`, which a panel loaded before
+// this route existed still sends.
 
-export type PendingInputEntry = {
-  /** Opaque; the prefix names the store (`approval:` or `question:`, then the row id). */
-  id: string
-  kind: 'approval' | 'answer'
-  session_id: string | null
-  tool: string
-  /** An approval's scrubbed summary; empty for an answer. */
-  summary: string
-  input_hash: string | null
-  /** An answer's question or attention message; empty for an approval. */
-  prompt: string
-  /** Who asked for the approval; null for an answer (the session's agent). */
-  requested_by: Owner | null
-  /** Who may answer: the browser user, and for an approval also a grant holder. */
-  responders: ('browser' | 'grant')[]
-  created_at: string
-  /** When its timer fires: an approval's expiry, an attention request's; null for a question, which has none. */
-  expires_at: string | null
-  /**
-   * Set on an attention request (#815) only. A `done` summary has no timer
-   * (`on_timeout` null) and carries `summary`, ScadBuddy's record of what its
-   * turn touched; it stays listed until the user dismisses it.
-   */
-  attention?: { reason: string; on_timeout: string | null; summary?: string }
-}
+export type { PendingInputEntry }
 
 export type PendingInputRouteDeps = {
   sessions: SessionManager | undefined
@@ -87,49 +79,59 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
  */
 export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncated: boolean }
 
-export async function pendingInput(sessions: SessionManager): Promise<PendingInputPage> {
-  const [approvals, { questions: answers, summariesTruncated }] = await Promise.all([
-    sessions.approvals.list(BROWSER_USER, { pending: true }),
-    sessions.questions.listPending(BROWSER_USER),
+/**
+ * Every entry `principal` may see (plan 5b ruling 10): for the browser user, all of
+ * them. For anyone else, the approvals it may see (all of them with the approval
+ * grant; else its own sessions' and its own MCP prepares), and the answers of the
+ * sessions it owns. `sessionId` narrows it to one session.
+ */
+export async function pendingInput(
+  sessions: SessionManager,
+  principal: Owner = BROWSER_USER,
+  filter: { sessionId?: string } = {},
+): Promise<PendingInputPage> {
+  const browser = principal.kind === 'browser'
+  const grant = !browser && (await sessions.approvals.holdsGrant(principal))
+  const [approvals, { questions: answers, summariesTruncated }, durable] = await Promise.all([
+    sessions.approvals.listVisiblePending(principal),
+    sessions.questions.listPending(principal),
+    sessions.projection.entries({
+      ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
+      ...(browser ? {} : { ownedBy: principal, allApprovals: grant }),
+    }),
   ])
+  const inSession = (e: PendingInputEntry) => filter.sessionId === undefined || e.session_id === filter.sessionId
   const entries: PendingInputEntry[] = [
-    ...approvals.map((a) => ({
-      id: `approval:${a.id}`,
-      kind: 'approval' as const,
-      session_id: a.sessionId,
-      tool: a.tool,
-      summary: a.inputSummary,
-      input_hash: a.inputHash,
-      prompt: '',
-      requested_by: a.requestedBy,
-      responders: ['browser' as const, 'grant' as const],
-      created_at: a.createdAt,
-      expires_at: a.expiresAt,
-    })),
-    ...answers.map((q) => ({
-      id: `question:${q.id}`,
-      kind: 'answer' as const,
-      session_id: q.sessionId,
-      tool: q.tool,
-      summary: '',
-      input_hash: null,
-      prompt: q.questions.map((v) => v.question).join('\n'),
-      requested_by: null,
-      responders: ['browser' as const],
-      created_at: q.createdAt,
-      expires_at: q.expiresAt,
-      ...(q.kind === 'attention' && q.attentionReason
-        ? {
-            attention: {
-              reason: q.attentionReason,
-              on_timeout: q.onTimeout,
-              ...(q.summary === null ? {} : { summary: q.summary }),
-            },
-          }
-        : {}),
-    })),
+    ...approvals.map(approvalEntry).filter(inSession),
+    ...answers.map(questionEntry).filter(inSession),
+    ...durable,
   ]
   return { entries: entries.sort((a, b) => a.created_at.localeCompare(b.created_at)), summaries_truncated: summariesTruncated }
+}
+
+/**
+ * One session's entries, as `principal` may see them: a durable session's from its
+ * workflow (DurableUnavailable when its worker does not answer), a classic one's
+ * from its stores. Undefined when there is no such session for the principal.
+ */
+export async function sessionPendingInput(
+  sessions: SessionManager,
+  principal: Owner,
+  sessionId: string,
+): Promise<PendingInputPage | undefined> {
+  if (!isUuid(sessionId)) return undefined
+  const session = await sessions.projection.session(sessionId)
+  if (!session) return undefined
+  const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
+  const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
+  if (principal.kind !== 'browser' && !grant && !own) return undefined
+  if (session.mode === 'durable') {
+    if (!sessions.durable) throw new DurableUnavailable("durable sessions need Temporal, and this agent service has none configured")
+    const entries = await sessions.durable.pendingInput(sessionId)
+    // A grant holder that does not own the session sees its approvals only, as in the aggregate.
+    return { entries: principal.kind === 'browser' || own ? entries : entries.filter((e) => e.kind === 'approval'), summaries_truncated: false }
+  }
+  return pendingInput(sessions, principal, { sessionId })
 }
 
 /** A response's cap (gate/validate.ts, plan 5b ruling 1). */
@@ -156,7 +158,7 @@ export const RespondBody = z.discriminatedUnion('kind', [
 ])
 export type RespondBody = z.infer<typeof RespondBody>
 
-export type RespondResult = { id: string; kind: PendingInputEntry['kind']; outcome: 'approved' | 'denied' | 'answered' }
+export type RespondResult = { id: string; kind: PendingInputEntry['kind']; outcome: InputOutcome }
 
 /**
  * A refused respond, with the HTTP status the route answers. A 409's `reason` says
@@ -205,7 +207,10 @@ export async function respond(
 ): Promise<RespondResult> {
   const parsed = parseRequestId(requestId)
   const stale = new RespondError(404, `no pending input ${requestId}: it is stale or was never asked`)
+  if (parsed?.store === 'durable') return respondDurable(sessions, principal, parsed, requestId, body, stale)
   if (parsed?.store !== 'approval' && parsed?.store !== 'question') throw stale
+  // The classic stores authorize other principals themselves (sessions_approve calls them directly).
+  if (principal.kind !== 'browser') throw new RespondError(403, 'only the user in the ScadBuddy panel responds through this route')
   const rowId = parsed.rowId
   const request = { requestId, response: body, responder: principal, role: 'browser' as const }
 
@@ -295,6 +300,50 @@ export async function respond(
   return { id: requestId, kind: 'answer', outcome: 'answered' }
 }
 
+/**
+ * `respond` for a durable session's entry: the session must be durable; the route
+ * decides the role (gate/role.ts) and the workflow's `respond` Update validates and
+ * resolves (spec §6.6). Its refusals keep their status; a workflow that is gone is
+ * stale, and one whose worker does not answer is a 503 the caller may retry.
+ */
+async function respondDurable(
+  sessions: SessionManager,
+  principal: Owner,
+  parsed: Extract<RequestId, { store: 'durable' }>,
+  requestId: string,
+  body: RespondBody,
+  stale: RespondError,
+): Promise<RespondResult> {
+  const session = await sessions.projection.session(parsed.sessionId)
+  if (!session || session.mode !== 'durable') throw stale
+  if (!sessions.durable) throw new RespondError(503, 'durable sessions need Temporal, and this agent service has none configured')
+  const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
+  const role = roleOf(principal, session, grant)
+  if (!role) {
+    throw new RespondError(
+      403,
+      `${principal.label} may not respond: outward actions need a human approval in the ScadBuddy UI, ` +
+        'and another agent needs a per-token approval grant (spec §6, §8.2)',
+    )
+  }
+  // No kind accepts `owner` (gate/validate.ts), so it is refused here, with no Update sent.
+  if (role === 'owner') {
+    throw new RespondError(
+      403,
+      "an approval grant is for approving another agent's outward actions, never your own; ask the user in the ScadBuddy UI",
+    )
+  }
+  try {
+    const out = await sessions.durable.respond(parsed.sessionId, { request_id: requestId, response: body, responder: principal, role })
+    return { id: requestId, kind: out.kind, outcome: out.outcome }
+  } catch (err) {
+    if (err instanceof RespondRefusal) throw refused(err)
+    if (err instanceof WorkflowNotFoundError) throw stale
+    if (err instanceof DurableUnavailable) throw new RespondError(503, err.message)
+    throw err
+  }
+}
+
 export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDeps): void {
   app.get('/api/v1/ai/pending-input', async (c) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'pending input reads')
@@ -302,6 +351,21 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     return c.json(await pendingInput(deps.sessions))
+  })
+
+  app.get('/api/v1/ai/sessions/:id/pending-input', async (c) => {
+    const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'pending input reads')
+    if (problem) return c.json({ detail: problem }, 403)
+    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
+    try {
+      const page = await sessionPendingInput(deps.sessions, BROWSER_USER, c.req.param('id'))
+      return page ? c.json(page) : c.json({ detail: `no session ${c.req.param('id')}` }, 404)
+    } catch (err) {
+      if (err instanceof DurableUnavailable) return c.json({ detail: err.message, retry: true }, 503)
+      if (err instanceof WorkflowNotFoundError) return c.json({ detail: `session ${c.req.param('id')} has no running workflow` }, 404)
+      throw err
+    }
   })
 
   // Anything over the cap is 413 unread.
@@ -329,7 +393,12 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
         // `stale` marks the agent's own 404, so the panel can tell it from one a proxy or
         // an older replica without this route answers: only this one closes the card.
         return c.json(
-          { detail: err.message, ...(err.reason === undefined ? {} : { reason: err.reason }), ...(err.status === 404 ? { stale: true } : {}) },
+          {
+            detail: err.message,
+            ...(err.reason === undefined ? {} : { reason: err.reason }),
+            ...(err.status === 404 ? { stale: true } : {}),
+            ...(err.status === 503 ? { retry: true } : {}),
+          },
           err.status,
         )
       }

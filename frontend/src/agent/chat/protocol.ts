@@ -159,6 +159,8 @@ export const PendingInputSchema = z.object({
   entries: z.array(
     z.object({
       kind: z.enum(['approval', 'answer']),
+      /** A durable entry past its timer whose worker has not resolved it yet: not waiting on anyone. */
+      expiring: z.boolean().optional(),
       attention: z
         .object({ reason: z.string(), on_timeout: z.string().nullable(), summary: z.string().optional() })
         .optional(),

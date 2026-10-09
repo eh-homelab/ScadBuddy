@@ -42,6 +42,7 @@ import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { AgentWorker } from './temporal/worker.js'
+import { DurableGate } from './gate/durable.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
@@ -336,14 +337,17 @@ const temporalWorker =
         },
       })
     : undefined
-// Routes start commands through a lazy client: a Temporal that is down answers 503.
+// Routes start commands, and reach durable sessions' gates, through a lazy client: a
+// Temporal that is down answers 503.
+const temporalClient = temporal
+  ? new Client({ connection: Connection.lazy({ address: temporal.address }), namespace: config.temporalNamespace })
+  : undefined
+// A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
 const commands =
-  temporal && operationStore
+  temporalClient && operationStore
     ? new AgentCommands({
-        client: new Client({
-          connection: Connection.lazy({ address: temporal.address }),
-          namespace: config.temporalNamespace,
-        }),
+        client: temporalClient,
         store: operationStore,
         kinds: commandKinds,
         searchAttributes: config.temporalSearchAttributes,

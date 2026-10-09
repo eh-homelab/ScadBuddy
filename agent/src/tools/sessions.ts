@@ -3,6 +3,7 @@ import { ownerOf } from '../approvals/mcp.js'
 import { ApprovalError, type ApprovalRecord } from '../approvals/service.js'
 import type { Principal } from '../auth/principal.js'
 import { approvalView, type ApprovalView, BROWSER_USER } from '../routes/approvals.js'
+import { RespondError, respond } from '../routes/pendingInput.js'
 import { sessionView } from '../routes/sessions.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import type { LoggedEvent } from '../sessions/eventLog.js'
@@ -96,7 +97,9 @@ async function refusals<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run()
   } catch (err) {
-    if (err instanceof SessionError || err instanceof ApprovalError) throw new ToolError(err.message, err.status)
+    if (err instanceof SessionError || err instanceof ApprovalError || err instanceof RespondError) {
+      throw new ToolError(err.message, err.status)
+    }
     throw err
   }
 }
@@ -282,6 +285,21 @@ function decideTool(approve: boolean): Tool {
     source: 'the approval record: its summary quotes the arguments the requesting agent chose',
     handler: async ({ approval_id, session_id, input_hash }, ctx) => {
       notInHarness(ctx, `Deciding an approval (sessions_${verb})`)
+      // A durable session's approval is its workflow's (spec §6.6): `respond`, with the
+      // role the route decides (gate/role.ts); a principal that owns the session is refused.
+      if (approval_id.startsWith('durable:')) {
+        if (session_id !== undefined && !approval_id.startsWith(`durable:${session_id.toLowerCase()}:`)) {
+          throw new ToolError(`no approval ${approval_id} in session ${session_id}`, 404)
+        }
+        const decided = await refusals(() =>
+          respond(manager(ctx), ownerOf(ctx.principal), approval_id, {
+            kind: 'approval',
+            decision: verb,
+            ...(input_hash === undefined ? {} : { input_hash }),
+          }),
+        )
+        return json(decided)
+      }
       const decided = await refusals(() =>
         manager(ctx).approvals.decide(ownerOf(ctx.principal), approval_id, approve, {
           ...(session_id === undefined ? {} : { sessionId: session_id }),
