@@ -628,6 +628,10 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 - Conventional-commit titles (`feat(scope):`, `fix(scope):`, `docs:`, `ci:` …);
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
+- Agent-authored changes and docs cite their sources (#259): every external fact gets
+  a link, every measured fact says where and how it was measured (spec §3).
+  `lint-plugin.sh` checks it for plugin skills only; `link-check.yml` checks weekly that
+  the links in `docs/`, `README.md`, this file and every `SKILL.md` still resolve.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
