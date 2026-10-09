@@ -681,3 +681,31 @@ async def test_an_export_lost_to_the_prune_on_a_worker_without_git_fails_clearly
 ) -> None:
     with pytest.raises(SnapshotUnavailableError, match="demo@"):
         await resolve_source("demo", "8" * 40, paths=DataPaths(tmp_path / "worker"), history=None)
+
+
+async def test_every_piece_activity_brings_the_source_back_when_the_export_is_gone(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    """#1884: `prepare` materializes the snapshot, but the next activity may run on
+    another worker (its own emptyDir) or after the prune took the export. Each one
+    reads `prepared.scad`, so each one brings the source in again."""
+    rev = "e" * 40
+    await _stored(tmp_path, content, rev)
+    worker_paths = DataPaths(tmp_path / "worker")
+    deps = replace(
+        _worker_deps(tmp_path, pool, SnapshotStore(content, worker_paths, history=None)),
+        config=install_fake_openscad(tmp_path, worker_paths),
+    )
+    activities = RenderActivities(deps)
+    req = PieceRequest(
+        slug="demo", revision=rev, params={}, piece_key=piece_key("demo", rev, "model.scad", {})
+    )
+    export = worker_paths.model_revision_dir("demo", rev)
+    prepared = await activities.prepare(req)
+    shutil.rmtree(export)
+    main = await activities.render_main(req, prepared)
+    shutil.rmtree(export)
+    await activities.render_solids(req, prepared, main)
+    shutil.rmtree(export)
+    await activities.finish_piece(req, prepared, main)
+    assert (export / "model.scad").read_text() == "cube(4);"
