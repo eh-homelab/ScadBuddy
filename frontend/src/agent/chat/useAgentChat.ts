@@ -3,7 +3,7 @@ import { clientMessage, parseServerEvent, type ClientMessage, type PageContext, 
 import { TAB_ID } from '../tabId'
 import { answerBody, decisionBody, respond, type RespondBody, type RespondError } from '../respond'
 import { messageTraceparent, traceAction } from '../../lib/traceAction'
-import { chatReducer, initialChatState, type ChatState } from './state'
+import { chatReducer, initialChatState, type ChatState, type SessionPatch } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
 /** The respond route acts as the browser user (agent `routes/approvals.ts` BROWSER_USER). */
@@ -57,6 +57,8 @@ export interface AgentChat {
   takeOver: (sessionId: string) => void
   /** Open a session to watch it live; null starts a fresh chat on the next send. */
   select: (sessionId: string | null) => void
+  /** #792 — what a session route answered (a fork, a rename, done), shown at once. */
+  patch: (patch: SessionPatch) => void
 }
 
 /** Binds a transport to the stream reducer. One transport per mount. */
@@ -205,5 +207,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     if (sessionId && live.current) transport.current?.send(clientMessage({ type: 'session.attach', sessionId }))
   }, [])
 
-  return { state, send, decide, answer, interrupt, takeOver, select }
+  const patch = useCallback((p: SessionPatch) => dispatch({ type: 'session-patched', patch: p }), [])
+
+  return { state, send, decide, answer, interrupt, takeOver, select, patch }
 }

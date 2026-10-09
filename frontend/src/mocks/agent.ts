@@ -53,8 +53,13 @@ export const COST_PER_TURN = 0.0184
 
 /** The session routes' side of the open mock agent (fork, raise), for the msw handlers. */
 export interface MockAgentSessions {
-  /** The new session's id and title, or an error to answer with. */
-  fork(sessionId: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
+  /**
+   * The new session's id and title, or an error to answer with. `upTo` (#793) is a
+   * reply's message id: the fork keeps the conversation through it.
+   */
+  fork(sessionId: string, upTo?: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
+  /** #795 — renames a session or marks it done, as agent `sessions/edits.ts` does; the owner only. */
+  update(sessionId: string, edit: { title?: string; done?: boolean }): { title: string; status: SessionStatus; costUsd: number; budgetUsd: number; parentId: string | null } | { error: string; status: number }
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
@@ -88,6 +93,8 @@ interface MockSession extends SessionSummary {
   turns: number
   costUsd: number
   budgetUsd: number
+  /** #795 — the session it was forked from. */
+  parentId?: string
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -457,10 +464,29 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     }
   }
 
+  /** The session picker's list, as the agent's `sessions.snapshot` carries it. */
+  const snapshot = (): ServerEvent => ({
+    v: PROTOCOL_VERSION,
+    type: 'sessions.snapshot',
+    sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd }) => ({
+      sessionId,
+      title,
+      origin,
+      owner,
+      status,
+      parentId: parentId ?? null,
+      updatedAt: new Date().toISOString(),
+      costUsd,
+      budgetUsd,
+    })),
+  })
+
   const controls: MockAgentSessions = {
-    fork(sessionId) {
+    fork(sessionId, upTo) {
       const parent = sessions.get(sessionId)
       if (!parent) return { error: `no session ${sessionId}`, status: 404 }
+      const cut = upTo === undefined ? parent.log.length : parent.log.findIndex((e) => e.type === 'assistant.text.done' && e.messageId === upTo) + 1
+      if (cut === 0) return { error: `session ${sessionId} has no finished reply ${upTo} to fork from`, status: 400 }
       const child: MockSession = {
         sessionId: nextId('chat'),
         title: `${parent.title || 'session'} (fork)`,
@@ -472,15 +498,33 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         turns: 0,
         costUsd: 0,
         budgetUsd,
+        parentId: parent.sessionId,
       }
       sessions.set(child.sessionId, child)
       const conversation = new Set(['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result'])
       child.log.push(
         { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd },
-        ...parent.log.filter((e) => conversation.has(e.type)).map((e) => ({ ...e, sessionId: child.sessionId }) as ServerEvent),
+        ...parent.log
+          .slice(0, cut)
+          .filter((e) => conversation.has(e.type))
+          .map((e) => ({ ...e, sessionId: child.sessionId }) as ServerEvent),
         { v: PROTOCOL_VERSION, type: 'session.status', sessionId: child.sessionId, status: 'idle' },
       )
+      // The real agent's socket re-reads the list every few seconds; the mock sends it now.
+      deliver(snapshot())
       return { id: child.sessionId, title: child.title, budgetUsd, parentId: parent.sessionId }
+    },
+    update(sessionId, edit) {
+      const s = sessions.get(sessionId)
+      if (!s) return { error: `no session ${sessionId}`, status: 404 }
+      if (s.owner.kind !== 'browser') return { error: `session ${sessionId} is controlled by ${s.owner.label}; take it over first`, status: 403 }
+      if (edit.done && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input')) {
+        return { error: `session ${sessionId} is running a turn; Stop it first, then mark it done`, status: 409 }
+      }
+      if (edit.title !== undefined) s.title = edit.title
+      if (edit.done && s.status !== 'done') setStatus(s, 'done')
+      deliver(snapshot())
+      return { title: s.title, status: s.status, costUsd: s.costUsd, budgetUsd: s.budgetUsd, parentId: s.parentId ?? null }
     },
     has(sessionId) {
       return sessions.has(sessionId)
@@ -521,17 +565,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
       // In-process, so open at once (the real socket reports it when its handshake is done).
       h.onOpen?.()
       seedExternal()
-      deliver({
-        v: PROTOCOL_VERSION,
-        type: 'sessions.snapshot',
-        sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status }) => ({
-          sessionId,
-          title,
-          origin,
-          owner,
-          status,
-        })),
-      })
+      deliver(snapshot())
     },
     send(message) {
       sent.push(message)

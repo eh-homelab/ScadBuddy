@@ -19,6 +19,39 @@ const started = run([
   server({ type: 'session.started', sessionId: 's1', origin: 'chat', owner: you }),
 ])
 
+describe('the session switcher’s fields (#795)', () => {
+  const listed = (over: Record<string, unknown> = {}) =>
+    server({
+      type: 'sessions.snapshot',
+      sessions: [
+        { sessionId: 's1', title: 't', origin: 'chat', owner: you, status: 'idle', parentId: null, updatedAt: '2026-10-09T01:00:00Z', costUsd: 0.5, budgetUsd: 1 },
+        { sessionId: 'f1', title: 't (fork)', origin: 'chat', owner: you, status: 'idle', parentId: 's1', updatedAt: '2026-10-09T02:00:00Z', costUsd: 0.25, budgetUsd: 2, ...over },
+      ],
+    })
+
+  it("takes each listed session's parent, last activity and spend", () => {
+    const state = run([listed()])
+    expect(state.sessions.f1).toMatchObject({ parentId: 's1', updatedAt: '2026-10-09T02:00:00Z', budget: { costUsd: 0.25, budgetUsd: 2 } })
+    expect(state.sessions.s1).toMatchObject({ parentId: null, budget: { costUsd: 0.5, budgetUsd: 1 } })
+  })
+
+  it("keeps the open session's live spend over the list's older one", () => {
+    const live = run(
+      [server({ type: 'session.budget', sessionId: 's1', costUsd: 0.75, budgetUsd: 1 }), listed()],
+      started,
+    )
+    expect(live.sessions.s1?.budget).toEqual({ costUsd: 0.75, budgetUsd: 1 })
+  })
+
+  it('lays a route’s answer over a session, and adds one the panel has not heard of first', () => {
+    const renamed = run([{ type: 'session-patched', patch: { id: 's1', title: 'renamed', status: 'done' } }], started)
+    expect(renamed.sessions.s1).toMatchObject({ title: 'renamed', status: 'done' })
+    const forked = run([{ type: 'session-patched', patch: { id: 'f9', title: 'fork', parentId: 's1', costUsd: 0, budgetUsd: 1 } }], started)
+    expect(forked.order).toEqual(['f9', 's1'])
+    expect(forked.sessions.f9).toMatchObject({ title: 'fork', parentId: 's1', origin: 'chat', owner: you, status: 'idle', items: [] })
+  })
+})
+
 describe('chatReducer', () => {
   it('adopts the session its own first turn started', () => {
     expect(started.activeId).toBe('s1')

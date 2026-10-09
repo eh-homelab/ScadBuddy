@@ -373,7 +373,7 @@ describe('assistant panel', () => {
       await user.click(screen.getByRole('button', { name: 'New chat' }))
       await user.click(screen.getByRole('button', { name: /^Sessions/ }))
       const picker = screen.getByRole('navigation', { name: 'Sessions' })
-      within(picker).getByRole('button', { name: /Make the name bigger/ }).focus()
+      within(picker).getByRole('button', { name: /^Make the name bigger/ }).focus()
       await user.keyboard('{Enter}')
 
       expect(screen.queryByRole('navigation', { name: 'Sessions' })).not.toBeInTheDocument()
@@ -381,7 +381,7 @@ describe('assistant panel', () => {
 
       await user.click(screen.getByRole('button', { name: /^Sessions/ }))
       const reopened = screen.getByRole('navigation', { name: 'Sessions' })
-      const open = within(reopened).getByRole('button', { name: /Make the name bigger/ })
+      const open = within(reopened).getByRole('button', { name: /^Make the name bigger/ })
       expect(open).toHaveAttribute('aria-current', 'true')
       expect(open).toHaveTextContent('Open')
       for (const other of within(reopened).getAllByRole('button').filter((b) => b !== open)) {
