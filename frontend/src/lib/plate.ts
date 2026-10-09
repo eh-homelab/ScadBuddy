@@ -1,4 +1,4 @@
-import type { Job, PlateFit } from '../api/types'
+import type { Job, Param, Plate, PlateFit } from '../api/types'
 import { length, type DisplayUnit } from './units'
 
 /**
@@ -73,4 +73,29 @@ export function platesFitMessages(fits: PlateFit[], targets: FitTarget[], unit: 
 /** The fit the Print button reports: the first plate that does not fit, else the first. */
 export function worstFit(fits: PlateFit[]): PlateFit | undefined {
   return fits.find((fit) => fitLabel(fit) !== null) ?? fits[0]
+}
+
+/** A plate's limit on an axis, as `GET /plate/fit` judges it: X and Y where every extruder reaches. */
+function plateLimit(plate: Plate, axis: NonNullable<Param['plate_max']>): number {
+  if (axis === 'x') return plate.usable.max_x - plate.usable.min_x
+  if (axis === 'y') return plate.usable.max_y - plate.usable.min_y
+  return plate.height
+}
+
+/**
+ * #81 — the schema with each `// plate name = x` parameter's max shrunk to the plate in
+ * view, so its widget's range is what fits that printer. Never under the parameter's
+ * min: a plate too small for even that is the fit warning's to say. The same object
+ * back when nothing changes.
+ */
+export function boundByPlate<S extends { parameters: Param[] }>(schema: S, plate: Plate | undefined): S {
+  if (!plate || !schema.parameters.some((param) => param.plate_max)) return schema
+  return {
+    ...schema,
+    parameters: schema.parameters.map((param) => {
+      if (!param.plate_max) return param
+      const limit = Math.max(plateLimit(plate, param.plate_max), param.min ?? -Infinity)
+      return param.max != null && param.max <= limit ? param : { ...param, max: limit }
+    }),
+  }
 }

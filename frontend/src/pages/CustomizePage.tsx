@@ -51,7 +51,7 @@ import { findParamRow } from '../template-ui/elements'
 import type { HostDeps } from '../template-ui/host'
 import { TemplateUi } from '../template-ui/TemplateUi'
 import type { GenerateResult, TemplateUiFailure, UiDeclaration } from '../template-ui/types'
-import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
+import { boundByPlate, fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
 import { useSubscription } from '../lib/realtime'
@@ -335,7 +335,10 @@ export function CustomizePage() {
   const settled = debounced === values
   // #921 — a number outside its declared range is flagged on its field; the render
   // would only answer 422, so none is started and Generate waits until it is fixed.
-  const unrenderable = schema ? outOfRange(schema, values) : undefined
+  // #81 — a `// plate` parameter's range is what fits the plate in view. Only the form
+  // and this check see it: the page's other uses of `schema` key effects on it.
+  const formSchema = useMemo(() => (schema ? boundByPlate(schema, plate) : undefined), [schema, plate])
+  const unrenderable = formSchema ? outOfRange(formSchema, values) : undefined
   const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
   // with no parameters, whose defaults still render (#941).
@@ -1173,7 +1176,7 @@ export function CustomizePage() {
             </div>
           ) : (
             <ParameterPanel
-              schema={schema}
+              schema={formSchema ?? schema}
               slug={slug}
               version={version}
               values={values}

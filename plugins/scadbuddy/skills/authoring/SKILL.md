@@ -157,6 +157,13 @@ overlay_file = ""; // file:svg,png
 Because these are ordinary strings to OpenSCAD, the same file still opens in the
 OpenSCAD GUI and on MakerWorld (main spec §5.5).
 
+A size in millimetres that can never usefully exceed the plate can say so on a
+comment line of its own, `// plate width = x` (or `y`, `z`). The customizer then
+caps that parameter's range at the selected printer's plate (main spec §6.1,
+"Printer-bound sizes"). Put the line somewhere other than directly above a
+parameter, such as the end of the file. Judgement: OpenSCAD's customizer takes a
+comment directly above a parameter as that parameter's description.
+
 ## 4. Check before you save
 
 `POST /api/v1/models/check` runs the same customizer export the schema is built

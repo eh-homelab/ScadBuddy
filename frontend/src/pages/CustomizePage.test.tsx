@@ -1046,6 +1046,45 @@ describe('CustomizePage', () => {
     // Two generates, two picker opens and a debounced re-render.
   }, 20000)
 
+  it('bounds a `// plate` parameter by the plate in view, and the chosen printer widens it (#81)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({
+          ...keychainSchema,
+          parameters: (keychainSchema.parameters ?? []).map((p) =>
+            p.name === 'padding' ? { ...p, plate_max: 'x' } : p,
+          ),
+        }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Plate' }))
+    const padding = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    // The default plate: 256 mm.
+    await waitFor(() => expect(padding).toHaveAttribute('max', '256'))
+    await user.clear(padding)
+    await user.type(padding, '280')
+    await waitFor(() => expect(screen.getByText('Margin around the text must be at most 256.')).toBeInTheDocument())
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    await user.clear(padding)
+    await user.type(padding, '6')
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+    // The print dialog opens on the H2C: 300 mm where both nozzles reach.
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('H2C 330 × 320'))
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    const widened = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    expect(widened).toHaveAttribute('max', '300')
+    await user.clear(widened)
+    await user.type(widened, '280')
+    expect(screen.queryByText(/Margin around the text must be at most/)).not.toBeInTheDocument()
+  }, 20000)
+
   it('warns of what the send would refuse even when every axis fits (#81)', async () => {
     // The server runs the send's own placement; a box inside the reachable area can
     // still leave no room for a multi-colour print's prime tower.
