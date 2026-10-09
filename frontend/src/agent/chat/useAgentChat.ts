@@ -23,11 +23,6 @@ function closed(err: RespondError): { closed?: string } {
 }
 
 /**
- * A response as the user action `assistant.respond` (#1384): its POST is the span's
- * child, so it carries the span's `traceparent` as other API calls do, where the socket
- * frame it replaced carried `messageTraceparent()`.
- */
-/**
  * The respond route's id for a card: a classic card's id is its row's, so it takes its
  * store's prefix; a durable session's card already carries its whole request id
  * (`durable:…`, agent src/gate/ids.ts).
@@ -35,6 +30,11 @@ function closed(err: RespondError): { closed?: string } {
 export const requestIdOf = (kind: 'approval' | 'question', id: string): string =>
   id.startsWith('durable:') ? id : `${kind}:${id}`
 
+/**
+ * A response as the user action `assistant.respond` (#1384): its POST is the span's
+ * child, so it carries the span's `traceparent` as other API calls do, where the socket
+ * frame it replaced carried `messageTraceparent()`.
+ */
 const tracedRespond = (requestId: string, body: RespondBody) =>
   traceAction('assistant.respond', { 'scadbuddy.respond_kind': body.kind }, () => respond(requestId, body))
 

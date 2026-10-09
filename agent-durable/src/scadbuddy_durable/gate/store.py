@@ -308,7 +308,9 @@ async def open_input(conn: psycopg.AsyncConnection[Any], args: OpenInput) -> boo
             INSERT INTO ai_pending_input
               (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary,
                input_hash, prompt, requested_by, responders, attention, expires_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz
+            -- A retried open that lands after its entry was resolved opens nothing.
+            WHERE NOT EXISTS (SELECT 1 FROM ai_input_responses WHERE request_id = %s)
             ON CONFLICT (request_id) DO NOTHING
             RETURNING *
             """,
@@ -326,6 +328,7 @@ async def open_input(conn: psycopg.AsyncConnection[Any], args: OpenInput) -> boo
                 list(args.responders),
                 None if args.attention is None else json.dumps(args.attention),
                 args.expires_at,
+                args.request_id,
             ),
         )
         if not inserted:

@@ -86,6 +86,18 @@ _ALLOWED: dict[str, tuple[Role, ...]] = {"approval": ("browser", "grant"), "answ
 _HEX64 = frozenset("0123456789abcdef")
 
 
+# What JavaScript's String.prototype.trim removes (WhiteSpace and LineTerminator,
+# ECMA-262), which str.strip() does not match: it keeps U+FEFF and strips U+001C-U+001F.
+_JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _js_trim(text: str) -> str:
+    return text.strip(_JS_WHITESPACE)
+
+
 def utf16_length(text: str) -> int:
     """A JavaScript string's length, which the agent's bounds count."""
     return len(text.encode("utf-16-le")) // 2
@@ -187,7 +199,7 @@ def _answer(entry: GateEntry, rid: str, body: dict[str, Any]) -> ValidResponse:
                     " own words"
                 )
             return ValidResponse(answers=(choice,))
-        if not isinstance(text, str) or not _is_answer(text) or not text.strip():
+        if not isinstance(text, str) or not _is_answer(text) or not _js_trim(text):
             raise _malformed(f'"text" must be 1 to {ANSWER_MAX} characters, not only spaces')
         return ValidResponse(answers=(text,))
     asked = entry.questions or ()
@@ -226,6 +238,6 @@ def _answer(entry: GateEntry, rid: str, body: dict[str, Any]) -> ValidResponse:
             f"each answer must be at most {ANSWER_MAX} characters, a multi-select's picks joined"
             ' with ", "'
         )
-    if any(not a.strip() for a in answers):
+    if any(not _js_trim(a) for a in answers):
         raise _malformed("an answer must not be only spaces")
     return ValidResponse(answers=tuple(answers))

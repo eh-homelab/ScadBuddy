@@ -153,6 +153,15 @@ async def test_resolve_records_the_outcome_events_and_audit(agent_db: Conn) -> N
     assert await cur.fetchone() == ("running",)
 
 
+async def test_an_open_retried_after_its_resolution_opens_nothing(agent_db: Conn) -> None:
+    sid = await _session(agent_db)
+    args = _open(sid)
+    await open_input(agent_db, args)
+    await resolve_input(agent_db, ResolveInput(args.request_id, "denied", ME))
+    assert await open_input(agent_db, args) is False
+    assert await _count(agent_db, "SELECT count(*) FROM ai_pending_input") == 0
+
+
 async def test_an_expiry_is_recorded_as_expired_by_the_system(agent_db: Conn) -> None:
     sid = await _session(agent_db)
     args = _open(sid)

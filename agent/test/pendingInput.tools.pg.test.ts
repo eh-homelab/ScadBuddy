@@ -65,6 +65,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input read tools${TEST_DATABASE
     expect(theirs.requested_by).not.toHaveProperty('id')
   })
 
+  it('a grant holder approves a classic entry by the id pending_input_list gave it', async () => {
+    const { m, call, b } = await setUp()
+    const page = firstText(await call(agentA, 'pending_input_list')) as Page
+    expect(page.entries.map((e) => e.id)).toContain(b)
+    const result = await call(agentA, 'sessions_approve', { approval_id: b })
+    expect(result.isError ?? false, JSON.stringify(result.content)).toBe(false)
+    expect((await m.approvals.list(agentA, { pending: true })).map((a) => `approval:${a.id}`)).not.toContain(b)
+  })
+
   it('a principal without the grant sees its own requests and its own sessions, answers included', async () => {
     const { call, ids, b } = await setUp()
     const page = firstText(await call(agentB, 'pending_input_list')) as Page

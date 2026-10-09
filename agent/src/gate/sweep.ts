@@ -85,12 +85,15 @@ export class PendingInputSweep {
   }
 
   /** Runs `sweep` every `intervalMs`; returns the stop. */
-  start(intervalMs: number, options: { onError?: (err: unknown) => void } = {}): () => void {
+  start(intervalMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
+    const ready = options.ready ?? (() => Promise.resolve(true))
     let running = false
     const timer = setInterval(() => {
       if (running) return
       running = true
-      this.sweep()
+      // Not until the database answers and its migrations have applied.
+      ready()
+        .then((ok) => (ok ? this.sweep() : 0))
         .catch((err: unknown) => options.onError?.(err))
         .finally(() => {
           running = false

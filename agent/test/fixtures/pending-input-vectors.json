@@ -1426,6 +1426,108 @@
         "ok": true,
         "decision": "approve"
       }
+    },
+    {
+      "name": "an answer of only a byte-order mark (trim removes U+FEFF in both languages)",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "﻿",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an answer of an information separator, which trim keeps (U+001F)",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "\u001f",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "answers": [
+          "\u001f",
+          "Lid"
+        ]
+      }
     }
   ]
 }

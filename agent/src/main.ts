@@ -358,7 +358,10 @@ const stopOrphanSweep =
   sessions && temporalClient
     ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit }).start(
         APPROVAL_SWEEP_MS,
-        { onError: (err) => console.error('pending-input orphan sweep failed:', (err as Error).message) },
+        {
+          ...(database ? { ready: database.ready } : {}),
+          onError: (err) => console.error('pending-input orphan sweep failed:', (err as Error).message),
+        },
       )
     : undefined
 const commands =

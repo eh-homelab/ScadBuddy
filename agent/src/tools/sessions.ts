@@ -5,6 +5,7 @@ import type { Principal } from '../auth/principal.js'
 import { approvalView, type ApprovalView, BROWSER_USER } from '../routes/approvals.js'
 import { WorkflowNotFoundError } from '@temporalio/common'
 import { DurableUnavailable } from '../gate/durable.js'
+import { parseRequestId } from '../gate/ids.js'
 import { pendingInput, type PendingInputEntry, RespondError, respond, sessionPendingInput } from '../routes/pendingInput.js'
 import { sessionView } from '../routes/sessions.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
@@ -279,7 +280,8 @@ function decideTool(approve: boolean): Tool {
     name: `sessions_${verb}`,
     description:
       `${approve ? 'Approve' : 'Deny'} another agent's pending outward action (an approval.required in a session, ` +
-      'or an outward call prepared over /mcp). Only for a token with the approval grant, minted in ScadBuddy ' +
+      'or an outward call prepared over /mcp; any approval id pending_input_list gives, or a bare approval id). ' +
+      'Only for a token with the approval grant, minted in ScadBuddy ' +
       "Settings; never for this caller's own calls or sessions, which only the user in the ScadBuddy UI decides.",
     input: approvalInput,
     risk: 'outward',
@@ -304,8 +306,11 @@ function decideTool(approve: boolean): Tool {
         )
         return json(decided)
       }
+      // pending_input_list's `approval:<uuid>`, or the bare row id (sessions_list_approvals, approval.required).
+      const parsed = parseRequestId(approval_id)
+      const rowId = parsed?.store === 'approval' ? parsed.rowId : approval_id
       const decided = await refusals(() =>
-        manager(ctx).approvals.decide(ownerOf(ctx.principal), approval_id, approve, {
+        manager(ctx).approvals.decide(ownerOf(ctx.principal), rowId, approve, {
           ...(session_id === undefined ? {} : { sessionId: session_id }),
           ...(input_hash === undefined ? {} : { inputHash: input_hash }),
           clientIp: ctx.principal.clientIp,
