@@ -61,6 +61,8 @@ class Usage:
     first_seen_at: datetime | None = None
     #: Picks whose print has not settled yet (#1079): queued, or printing.
     pending: int = 0
+    #: When its newest recorded print settled (#1298); ``None`` before its first.
+    last_used_at: datetime | None = None
 
 
 @dataclass(frozen=True)

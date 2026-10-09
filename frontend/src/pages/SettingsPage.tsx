@@ -43,6 +43,7 @@ import {
   type FieldSpec,
   type SectionId,
 } from './settings/fields'
+import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
@@ -1165,9 +1166,10 @@ export function SettingsPage() {
           <Section
             id="remembered"
             title={sectionTitle('remembered')}
-            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults."
+            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults. A printer with a nozzle rack also lists what each hotend has printed, which Least used ranks by."
           >
             <RememberedChoicesPanel targets={targetsState.data} projects={projectsState.data} />
+            <HotendUsagePanel targets={targetsState.data} />
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">

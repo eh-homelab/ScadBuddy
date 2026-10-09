@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -899,3 +900,61 @@ def test_a_sliced_library_run_with_high_flow_chosen_warns_of_the_high_flow_left(
     assert response.status_code == 200, response.text
     assert response.json()["rack_picks"]
     assert _high_flow_sides(response.json()["warnings"]) == {"left"}
+
+
+SETTLED = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+
+@respx.mock
+def test_the_rack_usage_lists_each_position_and_never_a_serial(client: TestClient) -> None:
+    """#1298: Settings' Hotend usage table, by position; a serial stays backend-only (§7)."""
+    configure(client)
+    invented_rack_route()
+    store = rack_usage(client)
+    asyncio.run(store.seen(1, [serial(17)]))
+    asyncio.run(
+        store.record_picks(51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17))])
+    )
+    asyncio.run(
+        store.record_prints(
+            archive_id=101, queue_item_id=51, settled_at=SETTLED, print_seconds=600, grams=12.5
+        )
+    )
+
+    response = client.get("/api/v1/print/printers/1/rack-usage")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["printer_id"] == 1
+    hotends = {hotend["position"]: hotend for hotend in body["hotends"]}
+    assert hotends[2]["prints"] == 1
+    assert hotends[2]["print_seconds"] == 600
+    assert hotends[2]["grams"] == 12.5
+    assert hotends[2]["pending"] == 0
+    assert hotends[2]["last_used_at"] == "2026-10-02T12:00:00Z"
+    assert hotends[2]["first_seen_at"] is not None
+    assert {hotends[position]["prints"] for position in hotends if position != 2} == {0}
+    assert all(hotend["last_used_at"] is None for p, hotend in hotends.items() if p != 2)
+    assert list(hotends) == sorted(hotends)
+    for invented in INVENTED_SERIALS:
+        assert invented not in response.text
+    assert "serial" not in response.text
+
+
+class UnreadableUsage(BrokenUsage):
+    async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
+        raise psycopg.OperationalError("the database went away")
+
+
+@respx.mock
+def test_the_rack_usage_is_503_when_the_database_cannot_be_read(client: TestClient) -> None:
+    client.app.dependency_overrides[getter_for(RACK_USAGE)] = UnreadableUsage  # type: ignore[attr-defined]
+    configure(client)
+    invented_rack_route()
+
+    response = client.get("/api/v1/print/printers/1/rack-usage")
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    for invented in INVENTED_SERIALS:
+        assert invented not in response.text
