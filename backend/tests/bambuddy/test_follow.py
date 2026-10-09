@@ -24,18 +24,27 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.follow import FollowActivities, Follower, FollowInput
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.progress import (
+    QUEUE_PATH,
     PrintProgress,
     ProgressObserver,
     from_failed_run,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore, newest_failure
+from scadbuddy.bambuddy.runs import (
+    NewestFailed,
+    PrintRun,
+    PrintRunError,
+    PrintRunStore,
+    newest_failed_from,
+    newest_failure,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.glb import BoundingBox
 
 OUTPUT = "c" * 32
@@ -720,3 +729,34 @@ def _run(status: str, *, may_have_queued: bool = False) -> PrintRun:
 )
 def test_newest_failure(runs: _Runs, expected: str | None) -> None:
     assert asyncio.run(newest_failure(cast(PrintRunStore, runs), OUTPUT)) == expected
+
+
+def _newest_failed_of(newest_failed: NewestFailed) -> PrintProgress | None:
+    async def read() -> PrintProgress | None:
+        return await newest_failed(OUTPUT)
+
+    return asyncio.run(read())
+
+
+def test_newest_failed_from_links_the_queue_as_the_routes_do() -> None:
+    """#2015: the worker's and the API's follow build the failure's link from the stored
+    settings as the progress routes do from ``client.config.web_url(QUEUE_PATH)``: the
+    browser-facing URL, not the internal one."""
+    settings = StoredSettings(
+        bambuddy_url="http://bambuddy:8000",
+        bambuddy_api_key="bb_test",
+        bambuddy_web_urls="https://bambuddy.example",
+    )
+    newest_failed = newest_failed_from(cast(PrintRunStore, _Runs(_run("failed"))), lambda: settings)
+    failed = _newest_failed_of(newest_failed)
+    assert failed is not None
+    assert failed.bambuddy_url == "https://bambuddy.example/queue"
+    assert failed.bambuddy_url == BambuddyConfig.from_settings(settings).web_url(QUEUE_PATH)
+
+
+def test_newest_failed_from_reads_no_settings_without_a_failure() -> None:
+    def load() -> StoredSettings:
+        raise AssertionError("read the settings for nothing")
+
+    newest_failed = newest_failed_from(cast(PrintRunStore, _Runs(_run("succeeded"))), load)
+    assert _newest_failed_of(newest_failed) is None
