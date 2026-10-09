@@ -2262,7 +2262,8 @@ describe('PrintPicker · A library file (#313)', () => {
     )
     expect(outputRun).not.toHaveBeenCalled()
     expect(modelRemember).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('print-progress')).toBeNull()
+    // #1751 — followed as an output's print is, through the file's own progress route.
+    expect(await screen.findByTestId('print-progress')).toHaveTextContent('Queue entry #8803')
     expect(screen.getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
   })
 
