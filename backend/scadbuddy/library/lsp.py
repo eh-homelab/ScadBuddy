@@ -37,6 +37,10 @@ params it cannot read, or a URI it never saw gets no reply at all. The editor
 (``frontend/src/lib/languageClient.ts``) keeps to that; a request outside it would
 end a healthy session.
 
+The server runs under ``editor/nonet.py``: a socket that a browser opens starts it, so
+it can open no network socket (#95). It also gets only ``env_for``'s variables, so no
+``SCADBUDDY_*`` setting or secret.
+
 A killed server is given ``KILL_WAIT`` seconds to be reaped, then its permit is let go
 whether or not it has died. That is deliberate: a process stuck in the kernel (a hung
 filesystem) cannot be killed, and holding the permit for it wedges the editor all the
@@ -59,6 +63,8 @@ from typing import Any
 import anyio
 from starlette import status
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
+
+from scadbuddy.editor import nonet
 
 logger = logging.getLogger(__name__)
 
@@ -184,8 +190,7 @@ async def serve(
     the editor's socket.
     """
     process = await asyncio.create_subprocess_exec(
-        binary,
-        "--stdio",
+        *nonet.command(binary, "--stdio"),
         cwd=root,
         env=dict(env),
         stdin=asyncio.subprocess.PIPE,

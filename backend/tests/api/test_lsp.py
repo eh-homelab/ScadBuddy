@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import platform
 import re
 import signal
 import time
@@ -21,6 +22,7 @@ from starlette.websockets import WebSocketDisconnect
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.editor import nonet
 from scadbuddy.library import lsp
 from scadbuddy.library.lsp import DEFAULT_CLIENT_ROOT, frame, read_message
 from scadbuddy.main import create_app
@@ -35,6 +37,7 @@ from .conftest import set_fake_env
 FAKE_LSP = """#!/usr/bin/env python3
 import json
 import os
+import platform
 import signal
 import pathlib
 import sys
@@ -90,6 +93,19 @@ while True:
         stdout.flush()
         os.close(1)
         time.sleep(60)
+    if method == "network":
+        # What the server would get for a socket of each family.
+        import socket
+        opened = {}
+        for name, family in (("unix", socket.AF_UNIX), ("inet", socket.AF_INET),
+                             ("inet6", socket.AF_INET6)):
+            try:
+                socket.socket(family, socket.SOCK_STREAM).close()
+                opened[name] = True
+            except OSError:
+                opened[name] = False
+        send({"jsonrpc": "2.0", "id": message["id"], "result": opened})
+        continue
     if "id" not in message:
         continue
     cwd = pathlib.Path.cwd()
@@ -288,6 +304,19 @@ def test_messages_before_initialize_are_rewritten(client: TestClient, model: str
     # After `initialize`, the client's own root is the one rewritten, both ways.
     assert json.loads(late["seen"])["textDocument"]["uri"].endswith(real)
     assert late["location"]["uri"] == CLIENT_ROOT + "helper.scad"
+
+
+@pytest.mark.skipif(
+    platform.machine() not in nonet.ARCHES, reason="no seccomp filter for this architecture"
+)
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+def test_the_server_has_no_network(client: TestClient, model: str, which: int) -> None:
+    """A browser socket starts this process: it may open no network socket (#95)."""
+    with client.websocket_connect(_lsp_routes(model)[which]) as session:
+        _initialize(session)
+        session.send_json({"jsonrpc": "2.0", "id": 2, "method": "network", "params": {}})
+        opened = session.receive_json()["result"]
+    assert opened == {"unix": True, "inet": False, "inet6": False}
 
 
 def test_closing_the_editor_stops_the_server(
