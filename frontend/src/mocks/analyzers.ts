@@ -160,12 +160,20 @@ export function digest(text: string, length = 16): string {
 /** The material each mock plate slot holds, as `material_keys` spells it. */
 export const SLOT_MATERIALS: Record<number, string> = { 1: 'pla', 2: 'petg' }
 
+/** #1753 — a file in Bambuddy's library, judged as any print is. */
+export type LibrarySubject = { library_file_id: number }
+
+/** What a report judges: an output, or a library file. */
+export type AnalysisSubject = Output | LibrarySubject
+
+function isLibrary(subject: AnalysisSubject): subject is LibrarySubject {
+  return 'library_file_id' in subject
+}
+
 /** Every scope a decision about this print can be stored at, broadest first (`context.scopes`). */
-export function analysisScopes(output: Output, request: AnalysisRequest): ScopeRef[] {
+export function analysisScopes(subject: AnalysisSubject, request: AnalysisRequest): ScopeRef[] {
   const printerId = request.printer_id ?? 1
-  const values = output.params ?? {}
-  const params = JSON.stringify(values, Object.keys(values).sort())
-  return [
+  const common: ScopeRef[] = [
     { kind: 'global', key: '' },
     ...[...new Set(Object.values(SLOT_MATERIALS))].map((key) => ({
       kind: 'material' as const,
@@ -173,6 +181,14 @@ export function analysisScopes(output: Output, request: AnalysisRequest): ScopeR
     })),
     { kind: 'printer', key: 'model:h2c' },
     { kind: 'printer', key: `id:${printerId}` },
+  ]
+  // A library file has no template: its own prints are its narrowest scope.
+  if (isLibrary(subject)) return [...common, { kind: 'print', key: `library:${subject.library_file_id}` }]
+  const output = subject
+  const values = output.params ?? {}
+  const params = JSON.stringify(values, Object.keys(values).sort())
+  return [
+    ...common,
     { kind: 'template', key: output.slug },
     ...(output.model_version
       ? [{ kind: 'template_version' as const, key: `${output.slug}@${output.model_version}` }]
@@ -248,14 +264,14 @@ function decide(
   })
 }
 
-/** The report for `output`: `diagnostics` decided, sorted and counted as `build_report` does. */
+/** The report for `subject`: `diagnostics` decided, sorted and counted as `build_report` does. */
 export function analysisReport(
-  output: Output,
+  subject: AnalysisSubject,
   request: AnalysisRequest,
   diagnostics: AnalyzerDiagnostic[] = [overhangDiagnostic, openEdgesDiagnostic],
   decisions: AnalyzerDecision[] = [],
 ): AnalysisReport {
-  const scopes = analysisScopes(output, request)
+  const scopes = analysisScopes(subject, request)
   const sorted = decide(diagnostics, decisions, scopes).sort(
     (left, right) =>
       SEVERITY_ORDER[left.severity] - SEVERITY_ORDER[right.severity] ||
@@ -278,8 +294,9 @@ export function analysisReport(
     .map(([n, noun]) => `${n} ${noun}${n === 1 ? '' : 's'}`)
   const nozzles = request.choices?.nozzles ?? []
   return {
-    output_id: output.id,
-    slug: output.slug,
+    output_id: isLibrary(subject) ? null : subject.id,
+    slug: isLibrary(subject) ? null : subject.slug,
+    library_file_id: isLibrary(subject) ? subject.library_file_id : null,
     detail: 'advanced',
     summary: {
       headline: parts.length > 0 ? parts.join(', ') : 'Nothing to report',
