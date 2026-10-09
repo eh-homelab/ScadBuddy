@@ -77,6 +77,8 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, type StoredBlob } from './blobs.js'
+import { SessionEdits } from './edits.js'
+import { forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
@@ -350,6 +352,7 @@ export type SessionErrorCode =
   | 'budget_exhausted'
   | 'closed'
   | 'invalid'
+  | 'no_transcript'
   | 'rate_limited'
 
 type SessionErrorStatus = 400 | 403 | 404 | 409 | 429
@@ -361,6 +364,7 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   budget_exhausted: 409,
   closed: 409,
   invalid: 400,
+  no_transcript: 409,
   rate_limited: 429,
 }
 
@@ -789,6 +793,8 @@ export class SessionManager {
   readonly questions: QuestionService
   /** Durable sessions' parked calls as projected in ai_pending_input (spec §6.6). */
   readonly projection: PendingProjection
+  /** Renaming a session and marking it done (#795, edits.ts). */
+  readonly edits: SessionEdits
   /**
    * A durable session's gate (its workflow's `pending_input`, `respond`, `cancel_input`,
    * `interrupt`), when Temporal is configured; main.ts sets it.
@@ -834,6 +840,7 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.edits = new SessionEdits({ sql: deps.sql, events: this.events, get: (id, principal) => this.get(id, principal) })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
@@ -892,6 +899,11 @@ export class SessionManager {
         origin: s.origin,
         owner: s.owner,
         status: s.status,
+        // The switcher's nesting, last activity and spend (#795).
+        parentId: s.parentId,
+        updatedAt: s.updatedAt,
+        costUsd: s.costUsd,
+        budgetUsd: s.budgetUsd,
       })),
     })
   }
@@ -2019,16 +2031,35 @@ export class SessionManager {
    * child joins the parent's lineage (`budget_root_id`), and a turn in either
    * debits the one budget. Forking therefore never creates budget, and cannot
    * stand in for the user-only `raiseBudget` (#823).
+   *
+   * `upTo` (#793) is a reply's panel message id: the child keeps the conversation
+   * through that reply and nothing after it (forkPoint.ts). With `audit`, the fork
+   * is a `resource` row on the child (action `session_fork`).
    */
   async fork(
     id: string,
     principal: Owner,
-    options: { title?: string; origin?: Origin; rateLimited?: boolean; freshBudget?: boolean; agentActor?: boolean } = {},
+    options: {
+      title?: string
+      origin?: Origin
+      rateLimited?: boolean
+      freshBudget?: boolean
+      agentActor?: boolean
+      upTo?: string
+      audit?: Omit<AuditContext, 'actor'>
+    } = {},
   ): Promise<SessionRecord> {
+    const startedAt = new Date()
     const fresh = options.freshBudget === true && principal.kind === 'browser' && !options.agentActor
     const parent = await this.get(id, principal)
-    if (!(await this.store.exists(id))) {
-      throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
+    const transcript = await this.store.load({ projectKey: '', sessionId: id })
+    if (!transcript) {
+      throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
+    }
+    const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
+    const history = await forkHistory(this.events, id, options.upTo)
+    if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
+      throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
     }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
@@ -2048,6 +2079,7 @@ export class SessionManager {
       sessionStore: this.store,
       dir: sessionWorkDir(this.deps.paths, id),
       title,
+      ...(upToMessageId === undefined ? {} : { upToMessageId }),
     })
     const child = await this.insert(childId, principal, {
       origin: options.origin ?? parent.origin,
@@ -2056,24 +2088,19 @@ export class SessionManager {
       scope: parent.scope,
       parentId: parent.id,
     }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
-    // The conversation so far, re-addressed to the child. Lifecycle events
-    // (status, owner, result) are the parent's own and are not copied.
-    const history: ServerEvent[] = []
-    for (let after = 0; ; ) {
-      const page = await this.events.read(id, after)
-      if (page.length === 0) break
-      after = page.at(-1)?.seq ?? after
-      for (const { event: e } of page) {
-        if (
-          e.type === 'user.turn' ||
-          e.type === 'assistant.text.delta' ||
-          e.type === 'assistant.text.done' ||
-          e.type === 'tool.call' ||
-          e.type === 'tool.result'
-        ) {
-          history.push({ ...e, sessionId: childId })
-        }
-      }
+    if (options.audit) {
+      await this.deps.audit?.record({
+        kind: 'resource',
+        action: 'session_fork',
+        surface: options.audit.surface,
+        actor: principal,
+        clientIp: options.audit.clientIp,
+        sessionId: childId,
+        outcome: 'ok',
+        detail: `forked from ${id}${options.upTo === undefined ? '' : ` up to ${options.upTo}`}`,
+        startedAt,
+        finishedAt: new Date(),
+      })
     }
     // The images those results name (#782), before the events that name them.
     await this.blobs.copy(id, childId)
@@ -2086,7 +2113,8 @@ export class SessionManager {
         title,
         budgetUsd: child.budgetUsd,
       }),
-      ...history,
+      // The conversation, re-addressed to the child.
+      ...history.map((e) => ({ ...e, sessionId: childId })),
       event({ type: 'session.status', sessionId: childId, status: 'idle' }),
     ])
     return child

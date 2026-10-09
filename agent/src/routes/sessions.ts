@@ -11,6 +11,7 @@ import {
   type SessionRecord,
 } from '../sessions/manager.js'
 import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
+import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
@@ -53,11 +54,17 @@ import { ready, type RouteModule } from './module.js'
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
-//   POST /api/v1/ai/sessions/:id/fork             {title?} → 201 {session}: a new session with the
-//                                                 transcript so far and a fresh budget, owned by
-//                                                 the browser user; counted against the new-session
-//                                                 limit (429). The panel's "Continue in a new chat"
-//                                                 (#790). #793 adds `up_to`, the socket message and audit.
+//   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true} → {session}: rename it, or
+//                                                 mark it done (#795, sessions/edits.ts). Owner-only
+//                                                 (403); done is refused while a turn runs and on a
+//                                                 durable session (409)
+//   POST /api/v1/ai/sessions/:id/fork             {title?, up_to?} → 201 {session}: a new session with the
+//                                                 transcript so far, or (`up_to`, a reply's panel message
+//                                                 id, #793) through that reply, and a fresh budget,
+//                                                 owned by the browser user; counted against the
+//                                                 new-session limit (429); 409 with no transcript yet.
+//                                                 The panel's Fork, "Fork from here" and "Continue in
+//                                                 a new chat" (#790, #794). A `resource` audit row.
 //   POST /api/v1/ai/sessions/:id/budget           {add_usd} → {session}: adds to that session's
 //                                                 budget (#790). User-only and owner-only
 //                                                 (manager.ts raiseBudget): a request with the
@@ -125,7 +132,14 @@ const StartBody = z.strictObject({
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
-const ForkBody = z.strictObject({ title: z.string().max(200).optional() })
+/** `up_to`: a reply's panel message id (`assistant.text.done`'s `messageId`), #793. */
+const ForkBody = z.strictObject({
+  title: z.string().max(200).optional(),
+  up_to: z.string().min(1).max(MESSAGE_ID_MAX).optional(),
+})
+const UpdateBody = z
+  .strictObject({ title: z.string().trim().min(1).max(200).optional(), done: z.literal(true).optional() })
+  .refine((b) => b.title !== undefined || b.done !== undefined, { message: 'name a title, or done: true' })
 const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -329,6 +343,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!body.ok) return body.response
       const child = await sessions.fork(idOf(c), BROWSER_USER, {
         ...(body.value.title ? { title: body.value.title } : {}),
+        ...(body.value.up_to === undefined ? {} : { upTo: body.value.up_to }),
+        audit: { surface: 'http', clientIp: deps.remoteAddress(c) },
         rateLimited: true,
         // A budget of its own is the user's to give, like a raise (#823); the manager refuses it to the
         // headless browser's marked request, whose fork shares the parent's.
@@ -336,6 +352,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
       })
       return c.json({ session: sessionView(child, BROWSER_USER) }, 201)
+    }),
+  )
+
+  app.patch(
+    `${base}/:id`,
+    limit,
+    route('write', async (c, sessions) => {
+      const body = await jsonBody(c, UpdateBody, undefined)
+      if (!body.ok) return body.response
+      const session = await sessions.edits.update(idOf(c), BROWSER_USER, {
+        ...(body.value.title === undefined ? {} : { title: body.value.title }),
+        ...(body.value.done ? { done: true as const } : {}),
+      })
+      return c.json({ session: sessionView(session, BROWSER_USER) })
     }),
   )
 

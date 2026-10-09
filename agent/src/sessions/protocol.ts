@@ -63,6 +63,11 @@ export type SessionSummary = {
   origin: Origin
   owner: Owner
   status: SessionStatus
+  /** The session switcher's nesting, last activity and spend (#795). */
+  parentId: string | null
+  updatedAt: string
+  costUsd: number
+  budgetUsd: number
 }
 
 type V = { v: typeof PROTOCOL_VERSION }

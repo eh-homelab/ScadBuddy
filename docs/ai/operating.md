@@ -659,8 +659,9 @@ its $1.00 budget.") and offers:
 
 - **Continue in a new chat**: `POST /api/v1/ai/sessions/:id/fork` copies the transcript
   into a new session with the current Settings budget, owned by the browser user, and
-  the panel switches to it. It counts against the new-session limit (`429`). #793 adds
-  forking from a given message (`up_to`), a socket message and an audit row.
+  the panel switches to it. It counts against the new-session limit (`429`). With
+  `up_to` (a reply's panel message id, #793) it copies the conversation only through
+  that reply. Each fork is a `resource` audit row (action `session_fork`).
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
   (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
   (take one over first), and never past $100. A request with the headless browser's
