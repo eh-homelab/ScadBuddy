@@ -21,6 +21,8 @@ from typing import Any
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
@@ -29,6 +31,9 @@ with workflow.unsafe.imports_passed_through():
 FLOW_ENTRY_TIMEOUT = "flow_entry_timeout"
 #: The error a timed-out callback is resolved with; what the harness hands the caller.
 TIMED_OUT = "timed out"
+#: A transport failure is retried a few times (the same Update id makes a resend
+#: safe); any other refusal from the harness is final.
+TIMEOUT_RETRY = RetryPolicy(maximum_attempts=5, non_retryable_error_types=["EntryRefused"])
 
 
 class EntryTimeout(BaseModel):
@@ -50,7 +55,11 @@ async def flow_entry_timeout(entry: EntryTimeout) -> bool:
     except CallbackResultError as err:
         if err.error_type in {"CallbackAlreadyResolved", "UnknownCallback"}:
             return False
-        raise
+        raise ApplicationError(
+            f"the harness refused the timeout ({err.error_type})",
+            type="EntryRefused",
+            non_retryable=True,
+        ) from None
     return True
 
 
@@ -78,6 +87,7 @@ async def run_callback(
             EntryTimeout(workflow_id=workflow.info().workflow_id, call_id=call_id),
             result_type=bool,
             start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=TIMEOUT_RETRY,
         )
     try:
         return await call

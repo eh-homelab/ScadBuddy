@@ -1,6 +1,12 @@
 """The backend's subject payload codec (spec 2026-10-01 §6.5, plan 6 Ruling 10): the
-agent's agent/test/fixtures/payload-vectors.json opened and sealed again byte for byte,
-as agent-durable's tests/test_codec.py does, so the three implementations cannot drift."""
+agent's payload vectors opened and sealed again byte for byte, as agent-durable's
+tests/test_codec.py does, so the three implementations cannot drift.
+
+The backend's tests run in an image that holds only backend/, so the vectors and the
+agent's key migration are copies under tests/fixtures/;
+.github/scripts/lint-codec-copies.sh fails CI when a copy differs from the agent's
+file, or this codec from agent-durable's.
+"""
 
 import base64
 import json
@@ -35,9 +41,11 @@ from scadbuddy.workflows.payload_codec import (
 )
 from tests.support.temporal import temporal_available, temporal_server
 
-ROOT = Path(__file__).resolve().parents[2]
-VECTORS = ROOT / "agent" / "test" / "fixtures" / "payload-vectors.json"
-MIGRATIONS = ROOT / "agent" / "src" / "db" / "migrations"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+#: agent/test/fixtures/payload-vectors.json
+VECTORS = FIXTURES / "payload-vectors.json"
+#: The agent migration that creates ai_payload_keys and ai_forgotten_subjects.
+MIGRATIONS = FIXTURES / "agent-migrations"
 SUBJECT = "session-0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
 FLOW = "flow-0b0e2a0c-1111-4222-8333-444455556666"
 
@@ -130,7 +138,7 @@ async def test_a_forgotten_subject_does_not_decode() -> None:
 
 @pytest.fixture
 async def agent_db() -> AsyncIterator[psycopg.AsyncConnection[Any]]:
-    """A throwaway schema holding the agent's tables, from its own migration files."""
+    """A throwaway schema holding the agent's key tables, from its migration file."""
     url = os.environ.get("SCADBUDDY_TEST_DATABASE_URL")
     if not url:
         pytest.skip("SCADBUDDY_TEST_DATABASE_URL is not set")

@@ -10,6 +10,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from temporal_agent_harness.harness.agent_protocol import (
     AgentEvent,
     AgentEventType,
 )
+from temporalio import activity
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
@@ -35,7 +37,11 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.workflow_streams import WorkflowStreamClient
 from temporalio.worker import Worker
 
-from scadbuddy.workflows.flow_entries import flow_entry_timeout
+from scadbuddy.workflows.flow_entries import (
+    FLOW_ENTRY_TIMEOUT,
+    EntryTimeout,
+    flow_entry_timeout,
+)
 from scadbuddy.workflows.flows_client import connect_flows, harness_plugins
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
 from tests.flows.harness_probe import (
@@ -169,18 +175,33 @@ async def _until(read: Any, check: Any, timeout: float = 20) -> Any:
         await asyncio.sleep(0.1)
 
 
-@pytest.fixture
-async def probe(temporal_address: str) -> AsyncIterator[Probe]:
-    client = await connect_flows(temporal_address, "default", _Keys())
+@asynccontextmanager
+async def _probe(address: str, timeout_activity: Any) -> AsyncIterator[Probe]:
+    client = await connect_flows(address, "default", _Keys())
     queue = f"probe-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client,
         task_queue=queue,
         workflows=[ProbeWorkflow, ProbeChild],
-        activities=[probe_close, flow_entry_timeout],
+        activities=[probe_close, timeout_activity],
         plugins=harness_plugins(PROBE_TOOLS),
     ):
         yield Probe(client, queue)
+
+
+@pytest.fixture
+async def probe(temporal_address: str) -> AsyncIterator[Probe]:
+    async with _probe(temporal_address, flow_entry_timeout) as p:
+        yield p
+
+
+@activity.defn(name=FLOW_ENTRY_TIMEOUT)
+async def answer_lands_first(entry: EntryTimeout) -> bool:
+    """The timer fired, but a person's answer reaches the harness before the timeout's
+    Update does: the real activity then finds the entry resolved."""
+    client = AgentClient(activity.client(), entry.workflow_id)
+    await client.provide_callback_result(entry.call_id, result={"answer": "just in time"})
+    return await flow_entry_timeout(entry)
 
 
 def _script(*body: str) -> str:
@@ -281,6 +302,16 @@ async def test_a_timed_out_wait_leaves_no_pending_callback(probe: Probe) -> None
     with pytest.raises(CallbackResultError) as err:
         await client.provide_callback_result(pending[0].tool_id, result={"answer": "late"})
     assert err.value.error_type in {"UnknownCallback", "CallbackAlreadyResolved"}
+
+
+# 7, the race: an answer that lands while the timeout activity runs is the result.
+async def test_an_answer_that_beats_the_timeout_update_is_the_result(
+    temporal_address: str,
+) -> None:
+    async with _probe(temporal_address, answer_lands_first) as probe:
+        wf_id, _ = await probe.start(_script("a = await wait('anyone?', 2)", "return a['answer']"))
+        assert await probe.reply(wf_id) == "result: 'just in time'"
+        assert (await AgentClient(probe.client, wf_id).get_status()).pending_callbacks == []
 
 
 # 8
