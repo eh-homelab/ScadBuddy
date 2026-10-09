@@ -58,11 +58,16 @@ async def run_callback(
     run_tool: Callable[..., Awaitable[Any]],
     tool: Callable[..., Awaitable[Any]],
     timeout_s: float,
+    *,
+    call_id: str | None = None,
     **kwargs: Any,
 ) -> Any:
     """Run the callback `tool` through the runner's `run_tool`, ending it after
-    `timeout_s` seconds with the harness's own Update. Raises `TimeoutError` then."""
-    call_id = str(workflow.uuid4())
+    `timeout_s` seconds with the harness's own Update. Raises `TimeoutError` then.
+
+    `call_id` is the harness's id for the call (a fresh one when omitted): the id the
+    entry is listed and answered under, which the caller may record first."""
+    call_id = call_id if call_id is not None else str(workflow.uuid4())
     call = asyncio.ensure_future(run_tool(call_id, tool, **kwargs))
     timed_out = False
     try:
