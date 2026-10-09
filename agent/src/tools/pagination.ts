@@ -108,11 +108,6 @@ export type PageOptions = {
   complete?: boolean
 }
 
-/**
- * One page of `items`, in their given order. `key` must be unique within the
- * list (a slug, an id; compositeKey for several fields): it is what the cursor
- * records.
- */
 /** The cursor's item, checked to belong to this listing; undefined for a first page. */
 function resume(args: PageArgs, tool: string, scope: string): { key: string; position: number } | undefined {
   if (args.cursor === undefined) return undefined
@@ -126,6 +121,11 @@ function resume(args: PageArgs, tool: string, scope: string): { key: string; pos
   return after
 }
 
+/**
+ * One page of `items`, in their given order. `key` must be unique within the
+ * list (a slug, an id; compositeKey for several fields): it is what the cursor
+ * records.
+ */
 export function page<T>(
   items: readonly T[],
   args: PageArgs,

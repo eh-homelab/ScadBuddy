@@ -120,7 +120,7 @@ def test_outputs_page_with_limit_and_after(
 
     whole = client.get("/api/v1/models/widget/outputs")
     assert [row["id"] for row in whole.json()] == newest_first
-    assert "x-total-count" not in whole.headers or whole.headers["x-total-count"] == "5"
+    assert whole.headers["x-total-count"] == "5"
 
     detailed: list[str] = []
     real = outputs_api.detail
