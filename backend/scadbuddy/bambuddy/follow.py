@@ -36,7 +36,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from prometheus_client import Gauge
 from pydantic import BaseModel
@@ -49,6 +49,10 @@ from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
+
+if TYPE_CHECKING:
+    # Annotations only: runs imports print_run, which reaches rack.usage, which imports this.
+    from scadbuddy.bambuddy.runs import NewestFailed
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +87,6 @@ FOLLOW_SLOTS = 200
 Reader = Callable[[OutputMeta], Awaitable[PrintProgress | None]]
 #: A library file's print, read by its subject (#1073): its recent sends' queue items.
 LibraryReader = Callable[[PrintSubject], Awaitable[PrintProgress | None]]
-#: A run subject's newest-run failure, as the progress it shows (``Follower.newest_failed``).
-NewestFailed = Callable[[str], Awaitable[PrintProgress | None]]
 Ended = Literal["settled", "gone", "deleted", "quiet"]
 #: Awaited on each read that finds a print settled (#836): after its ``print.settled``
 #: is published. Given the print's subject, an output's or a library file's (#1073).
@@ -142,7 +144,9 @@ class Follower:
         #: (``runs.newest_failure``), else None. While it is not None that is what is
         #: published, as the progress routes publish it: a follow of an older print
         #: publishing that print's progress meanwhile made the two alternate (#1837).
-        #: The follow still reads the older print until it settles, for its hooks.
+        #: The follow still reads the older print until it settles, for its hooks. Its
+        #: settle then emits no ``print.settled`` on that subject: the subject shows the
+        #: newer failure, not the older print, and that is intended (#2015).
         self.newest_failed = newest_failed
 
     async def follow(

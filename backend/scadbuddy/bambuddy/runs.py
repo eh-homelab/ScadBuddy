@@ -505,9 +505,11 @@ async def newest_failure(runs: PrintRunStore, run_subject: str) -> str | None:
     return latest.error.detail if latest.error is not None else None
 
 
-def newest_failed_from(
-    runs: PrintRunStore, load: Callable[[], StoredSettings]
-) -> Callable[[str], Awaitable[PrintProgress | None]]:
+#: A run subject's newest-run failure, as the progress it shows (``Follower.newest_failed``).
+NewestFailed = Callable[[str], Awaitable[PrintProgress | None]]
+
+
+def newest_failed_from(runs: PrintRunStore, load: Callable[[], StoredSettings]) -> NewestFailed:
     """``Follower.newest_failed`` over ``runs``: the progress the routes show for a
     run subject whose newest run failed before queueing, else None."""
 
