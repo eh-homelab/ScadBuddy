@@ -24,7 +24,7 @@ export function PackageFiles({ review, of }: { review: PackageReview; of: Packag
         type="button"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className="cursor-pointer text-muted hover:text-ink"
+        className="inline-flex min-h-6 cursor-pointer items-center text-muted hover:text-ink"
       >
         <span aria-hidden className="mr-1 inline-block w-2">
           {open ? '▾' : '▸'}
