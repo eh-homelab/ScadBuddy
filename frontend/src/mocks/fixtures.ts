@@ -1546,7 +1546,7 @@ export const prints: PrintDetail[] = [
         info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
         poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
       },
-      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail' }],
+      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],
     },
   }),

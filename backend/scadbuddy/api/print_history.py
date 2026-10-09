@@ -19,6 +19,8 @@ import asyncio
 import json
 import logging
 import re
+import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Awaitable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import PurePosixPath
@@ -78,6 +80,7 @@ from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import OperationAccepted
+from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
 
@@ -213,6 +216,9 @@ class PrintTimelapse(_Response):
 class PlateThumbnail(_Response):
     index: int
     url: str
+    #: What the plate holds (#2055, as #929 names a plate), read from what was printed: the
+    #: output's 3MF or the library file. ``None`` when nothing names it or it is unreadable.
+    name: str | None = None
 
 
 class PrintAttachment(_Response):
@@ -787,6 +793,36 @@ async def _media(
     )
 
 
+def _output_plate_names(outputs: OutputStore, output_id: str) -> dict[int, str]:
+    try:
+        plates = plates_of(outputs.directory(output_id) / MODEL_NAME)
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError):
+        return {}
+    return {plate.index: plate.name for plate in plates if plate.name}
+
+
+async def _plate_names(
+    link: LinkedPrint, outputs: OutputStore, client: BambuddyClient
+) -> dict[int, str]:
+    """#2055 — each plate's name, from what this print was of. Advisory: an unreadable
+    source names nothing, and the caption keeps the plate's number."""
+    if link.output_id is not None:
+        return await asyncio.to_thread(_output_plate_names, outputs, link.output_id)
+    if link.library_file_id is None:
+        return {}
+    try:
+        plates = await client.library_plates(link.library_file_id)
+    # The client maps transport failures to ApiError; a body that is not the expected
+    # shape is a ValueError (pydantic's ValidationError, or undecodable JSON).
+    except (ApiError, ValueError) as error:
+        logger.info(
+            "could not read a printed library file's plate names",
+            extra={"library_file_id": link.library_file_id, "error": type(error).__name__},
+        )
+        return {}
+    return {plate.index: plate.name for plate in plates.plates if plate.name}
+
+
 def _run(run: ArchiveRun, archive_grams: float | None) -> PrintedRun:
     grams = run.filament_used_grams
     if not archive_grams or not grams or grams <= archive_grams * SUSPECT_RUN_GRAMS_RATIO:
@@ -875,6 +911,12 @@ async def get_print(
                 _media(cache, client, link, archive), cache.runs(client, archive_id)
             )
             runs = run_list.items
+            if media.plate_thumbnails:
+                names = await _plate_names(link, outputs, client)
+                media.plate_thumbnails = [
+                    thumbnail.model_copy(update={"name": names.get(thumbnail.index)})
+                    for thumbnail in media.plate_thumbnails
+                ]
             summary = summary.model_copy(update={"printer_name": _printer_name(runs)})
             if printer_media:
                 on_printer = await client.printer_media(archive_id)
