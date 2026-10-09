@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { Job, Plate, PlateFit } from '../api/types'
-import { fitLabel, fitMessages, fitTargets, platesFitMessages, worstFit } from './plate'
+import type { Job, Param, Plate, PlateFit } from '../api/types'
+import { boundByPlate, fitLabel,fitMessages, fitTargets, platesFitMessages, worstFit } from './plate'
 
 const H2C: Plate = {
   model: 'Bambu Lab H2C',
@@ -120,5 +120,39 @@ describe('multi-plate fit (#289)', () => {
     expect(platesFitMessages([over], [{ plate: null, size: [1, 1, 1], colours: 1 }])).toEqual([
       'Y is 10.0 mm over the H2C (330.0 of 320.0 mm)',
     ])
+  })
+})
+
+describe('boundByPlate', () => {
+  const param = (rest: Partial<Param>): Param => ({ name: 'width', type: 'number', group: '', ...rest }) as Param
+  const schema = (...parameters: Param[]) => ({ title: null, groups: [], parameters })
+
+  it('shrinks a plate-bound max to where every extruder reaches, and Z to the height', () => {
+    const bound = boundByPlate(
+      schema(
+        param({ name: 'width', type: 'slider', min: 10, max: 400, plate_max: 'x' }),
+        param({ name: 'depth', plate_max: 'y' }),
+        param({ name: 'tall', max: 500, plate_max: 'z' }),
+      ),
+      H2C,
+    )
+    expect(bound.parameters.map((p) => p.max)).toEqual([300, 320, 325])
+  })
+
+  it('keeps a declared max that already fits, and every unbound parameter', () => {
+    const narrow = param({ name: 'width', max: 100, plate_max: 'x' })
+    const free = param({ name: 'free', max: 900 })
+    expect(boundByPlate(schema(narrow, free), H2C).parameters).toEqual([narrow, free])
+  })
+
+  it('never puts the max under the min', () => {
+    const big = param({ name: 'width', min: 350, max: 400, plate_max: 'x' })
+    expect(boundByPlate(schema(big), H2C).parameters.map((p) => p.max)).toEqual([350])
+  })
+
+  it('is the schema itself with no plate, or nothing to bound', () => {
+    const plain = schema(param({ name: 'free', max: 900 }))
+    expect(boundByPlate(plain, undefined)).toBe(plain)
+    expect(boundByPlate(plain, H2C)).toBe(plain)
   })
 })

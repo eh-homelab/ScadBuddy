@@ -276,6 +276,17 @@ export interface SessionLimits {
   max_turns: number
 }
 
+/**
+ * The long edge, in pixels, the assistant panel scales an attached image to before
+ * sending it (`GET/PUT /api/v1/ai/settings/images`, agent `src/routes/imageSettings.ts`).
+ * `min` and `max` are the bounds the agent accepts; the PUT sends `long_edge` only.
+ */
+export interface ImageSettings {
+  long_edge: number
+  min: number
+  max: number
+}
+
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
 export interface AiSessionView {
   id: string

@@ -7,6 +7,7 @@ import { diffFiles, hashTree, PackageContentError } from '../src/plugins/package
 import {
   loadPackagesForRun,
   marketplaceTarget,
+  BuiltInPluginError,
   PackageInstaller,
   PackageRefusedError,
 } from '../src/plugins/packages/install.js'
@@ -15,6 +16,7 @@ import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
 import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
+import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 
 // Plugin packages (#297, src/plugins/packages/): source validation, the
@@ -464,10 +466,22 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     )
   })
 
-  it('refuses ScadBuddy\'s own plugin as already loaded, with every reason', async () => {
+  it('reviews each built-in plugin from its own files', () => {
+    // A symlink or layout change in agent/plugins would quietly empty the review.
+    for (const b of BUILT_INS) {
+      const v = vetPackage(b.dir, b.name)
+      expect(v.fatal, b.name).toEqual([])
+      expect(v.review?.name).toBe(b.name)
+    }
+    const own = vetPackage(BUILT_INS[0]!.dir, BUILT_INS[0]!.name).review!
+    expect(own.skills).toEqual(['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'])
+    expect(own.agents).toEqual(['scadbuddy:model-author', 'scadbuddy:print-analyst'])
+  })
+
+  it('answers that a built-in plugin is built in, not that it is refused', async () => {
     const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
-    // plugins/scadbuddy, for Claude Code outside ScadBuddy: its placeholder
-    // URL fails the egress check, which must not hide the other reasons.
+    // plugins/scadbuddy, for Claude Code outside ScadBuddy: its placeholder URL
+    // would fail the egress check, but the name answers first.
     repos.greeter = gitRepo({
       ...GREETER,
       '.claude-plugin/plugin.json': JSON.stringify({
@@ -479,17 +493,13 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
       }),
     })
     const own = await installer.prepare(source).catch((e: unknown) => e)
-    expect(own).toBeInstanceOf(PackageRefusedError)
-    const problems = (own as PackageRefusedError).problems
-    expect(problems[0]).toMatch(/MCP server "scadbuddy": \$\{user_config\.scadbuddy_url\}\/mcp is not a valid URL/)
-    expect(problems[1]).toMatch(/ScadBuddy's own plugin.*already loads/)
-    expect(problems.join('\n')).toMatch(/userConfig/)
-    expect(problems.join('\n')).toMatch(/MCP server "scadbuddy" references a variable/)
+    expect(own).toBeInstanceOf(BuiltInPluginError)
+    expect((own as Error).message).toMatch(/ScadBuddy's own plugin is built in.*nothing to install/)
 
-    // With nothing fatal, the name alone stays allowable, as any reserved name.
-    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })
-    const allowable = await installer.prepare(source)
-    expect(allowable.review.refused).toEqual([expect.stringMatching(/reserved: this is ScadBuddy's own plugin/)])
+    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'playwright' }) })
+    const browser = await installer.prepare(source).catch((e: unknown) => e)
+    expect(browser).toBeInstanceOf(BuiltInPluginError)
+    expect((browser as Error).message).toMatch(/Playwright plugin is built in as the headless browser/)
   })
 
   it('lists a fatal problem before the cap cuts the allowable ones', async () => {
