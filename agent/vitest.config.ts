@@ -18,8 +18,13 @@ export default defineConfig({
     // loaded CI runner slows about tenfold (measured: 0.2 s tests took 2 s
     // beside the rest of the suite). vitest's own 1 s poll default was never a
     // chosen limit, and the polls that did choose one chose 5 s, so that is the
-    // default. A test may poll several times, so it gets room for a few.
+    // default. A test may poll several times, so it gets room for a few. A
+    // timeout a test passes itself still overrides testTimeout: those are chosen
+    // per test, so leave them be rather than raise them to match.
     expect: { poll: { timeout: 5000 } },
     testTimeout: 20_000,
+    // Migrates the template every Postgres test's database is copied from, once
+    // (#2018; test/support/postgres.ts).
+    globalSetup: ['test/support/globalSetup.ts'],
   },
 })

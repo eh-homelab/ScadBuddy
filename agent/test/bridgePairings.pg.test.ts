@@ -49,6 +49,7 @@ describe('pairedTab abort', () => {
 describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
   let schema: string
+  let url: string
   let drop: () => Promise<void>
   let store: PostgresPairingStore
   let agent: Principal
@@ -57,7 +58,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
   // across the whole database (db/migrations.ts MIGRATION_LOCK), so a schema per
   // test would hold up every other file's migrations.
   beforeAll(async () => {
-    ;({ db, schema, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     store = new PostgresPairingStore(db.sql)
   })
@@ -95,7 +96,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
 
   // #1410: a lookup actually blocked on the server (#1352), not one aborted before postgres.js sent it.
   it('stops waiting for a pairedTab lookup blocked on the server, and the pool still serves afterwards', async () => {
-    const admin = postgres(TEST_DATABASE_URL!, { max: 2, onnotice: () => {} })
+    const admin = postgres(url, { max: 2, onnotice: () => {} })
     let unlock!: () => void
     const unlocked = new Promise<void>((resolve) => (unlock = resolve))
     const locked = admin.begin(async (tx) => {

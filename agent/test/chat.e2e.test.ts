@@ -45,6 +45,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
   let script: (request: RecordedRequest) => Reply
   let db: Database
   let schema: string
+  let url: string
   let drop: () => Promise<void>
   let agent: LiveAgent | undefined
   let printed: string[]
@@ -52,7 +53,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
 
   beforeEach(async () => {
     fake = await startFakeAnthropic((r) => script(r))
-    ;({ db, schema, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     printed = []
   })
@@ -75,7 +76,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
   async function sessions(): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
-    const pool = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+    const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
     return manager({
       sql: pool.sql,
