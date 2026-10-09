@@ -8,6 +8,7 @@ import asyncio
 import os
 import platform
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -142,7 +143,8 @@ def test_a_slug_runs_it_in_the_models_directory(
 
 
 @pytest.mark.skipif(
-    platform.machine() not in nonet.ARCHES, reason="no seccomp filter for this architecture"
+    sys.platform != "linux" or platform.machine() not in nonet.ARCHES,
+    reason="no seccomp filter for this platform",
 )
 def test_the_server_has_no_network(client: TestClient) -> None:
     """The same launcher as the editor's socket (#95)."""

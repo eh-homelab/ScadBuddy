@@ -7,10 +7,17 @@ a loop cannot hold every server and leave other editors without one. A client is
 telemetry relay's rate limits count (`telemetry/admission.py` `relay_client`,
 `bucket_key`): the peer, or the client a peer in ``SCADBUDDY_TRUSTED_PROXIES`` names,
 with an IPv6 client counted by its /64.
+
+The cap is on only with ``SCADBUDDY_TRUSTED_PROXIES`` set. Empty, a deployment behind a
+gateway sees every socket from the gateway's address, so a per-client cap would be one
+cap for every browser together, shrinking the install to ``LSP_SESSIONS_PER_CLIENT``
+sessions. Nothing here can tell a gateway from a lone browser, so it is said once at
+start instead, and the global cap is the only one.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Final
@@ -25,6 +32,8 @@ from scadbuddy.telemetry.admission import bucket_key, relay_client
 #: second tab, or a reconnect that lands before the old socket's close is seen.
 LSP_SESSIONS_PER_CLIENT: Final = 2
 
+logger = logging.getLogger(__name__)
+
 
 class LanguageServerClients:
     def __init__(
@@ -33,16 +42,19 @@ class LanguageServerClients:
         self._trusted_proxies = trusted_proxies
         self._per_client = per_client
         self._held: dict[str, int] = {}
+        #: Whether a key tells clients apart (the module's docstring).
+        self.enabled = bool(trusted_proxies)
 
     def client(self, headers: Headers, peer: str | None) -> str:
         """The key a socket from ``peer`` with ``headers`` counts against."""
         return bucket_key(relay_client(headers, peer, self._trusted_proxies))
 
     def sessions(self, client: str) -> int:
+        # `bucket_key` of a key `client` already bucketed is the same key.
         return self._held.get(bucket_key(client), 0)
 
     def full(self, client: str) -> bool:
-        return self.sessions(client) >= self._per_client
+        return self.enabled and self.sessions(client) >= self._per_client
 
     @contextmanager
     def slot(self, client: str) -> Iterator[None]:
@@ -66,7 +78,15 @@ LANGUAGE_SERVER_CLIENTS: Key[LanguageServerClients] = Key("language_server_clien
 
 def _build(core: Core, components: Components) -> LanguageServerClients:
     # A bootstrap setting, never changed after start: parsed once.
-    return LanguageServerClients(core.settings.trusted_proxy_networks)
+    clients = LanguageServerClients(core.settings.trusted_proxy_networks)
+    if not clients.enabled:
+        logger.info(
+            "SCADBUDDY_TRUSTED_PROXIES is empty, so the per-client language-server cap "
+            "(%d of SCADBUDDY_LSP_SESSIONS) is off: behind a gateway every browser "
+            "would count as one client",
+            LSP_SESSIONS_PER_CLIENT,
+        )
+    return clients
 
 
 COMPONENT = Component(LANGUAGE_SERVER_CLIENTS, build=_build)

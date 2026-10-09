@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import signal
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -311,7 +312,8 @@ def test_messages_before_initialize_are_rewritten(client: TestClient, model: str
 
 
 @pytest.mark.skipif(
-    platform.machine() not in nonet.ARCHES, reason="no seccomp filter for this architecture"
+    sys.platform != "linux" or platform.machine() not in nonet.ARCHES,
+    reason="no seccomp filter for this platform",
 )
 @pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
 def test_the_server_has_no_network(client: TestClient, model: str, which: int) -> None:
@@ -489,7 +491,9 @@ def test_one_client_cannot_take_every_session(settings: Settings, model: str, wh
 def test_an_untrusted_peer_cannot_name_another_client(settings: Settings, model: str) -> None:
     """``X-Forwarded-For`` from a peer outside ``SCADBUDDY_TRUSTED_PROXIES`` is not
     believed, so a fresh value per socket is no way past the per-client limit."""
-    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 4}))
+    app: FastAPI = create_app(
+        settings.model_copy(update={"lsp_sessions": 4, "trusted_proxies": PROXY})
+    )
     route = f"/api/v1/models/{model}/lsp"
     with TestClient(app, client=("192.0.2.30", 40000)) as client, contextlib.ExitStack() as open_:
         for n in range(LSP_SESSIONS_PER_CLIENT):
@@ -504,6 +508,38 @@ def test_an_untrusted_peer_cannot_name_another_client(settings: Settings, model:
         ):
             pass
         assert refused.value.code == 1013
+
+
+def test_without_trusted_proxies_there_is_no_per_client_cap(
+    settings: Settings, model: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Behind a gateway with ``SCADBUDDY_TRUSTED_PROXIES`` empty every socket comes from
+    the gateway, so a per-client cap would be one cap for everyone: only the global one
+    applies, and start says so."""
+    # On the logger itself: the app's start replaces the root's handlers, caplog's too.
+    said = logging.getLogger("scadbuddy.editor.component")
+    caplog.set_level(logging.INFO, logger=said.name)
+    said.addHandler(caplog.handler)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 4}))
+    route = f"/api/v1/models/{model}/lsp"
+    with (
+        TestClient(app, client=(PROXY, 40000)) as client,
+        contextlib.ExitStack() as open_,
+    ):
+        open_.callback(said.removeHandler, caplog.handler)
+        for n in range(4):
+            _initialize(
+                open_.enter_context(
+                    client.websocket_connect(route, headers={"x-forwarded-for": f"192.0.2.{n}"})
+                )
+            )
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route),
+        ):
+            pass
+        assert refused.value.code == 1013
+    assert "per-client language-server cap" in caplog.text
 
 
 def test_a_refused_socket_takes_no_share(settings: Settings, model: str) -> None:

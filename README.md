@@ -1043,7 +1043,11 @@ ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
 whose `X-Forwarded-For` is believed, and then only its last value, as the agent's
 `SCADBUDDY_AGENT_TRUSTED_PROXIES` does; set it to the gateway's range so each browser
-gets a bucket of its own. Empty, every browser behind the gateway shares one. It is the
+gets a bucket of its own. Empty, every browser behind the gateway shares one. The
+editor's language servers use the same client: with it set, one client may hold at most
+2 of the `SCADBUDDY_LSP_SESSIONS` (default 4) openscad-lsp sessions; empty, that
+per-client cap is off (logged at start), since behind a gateway it would count every
+browser as one client and shrink the whole install to 2. It is the
 only trust decision: the image starts uvicorn with `--no-proxy-headers`, so uvicorn's own
 `FORWARDED_ALLOW_IPS` (loopback by default) rewrites nothing; a custom command that drops
 that flag lets any loopback caller name its own client.

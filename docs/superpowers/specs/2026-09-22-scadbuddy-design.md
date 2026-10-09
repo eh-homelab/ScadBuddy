@@ -1257,7 +1257,8 @@ this document are the ones its design depends on.
   open. Past the cap an editor is refused a language server and works without
   completion and hover. One client holds at most 2 of them
   (`editor/component.py` `LSP_SESSIONS_PER_CLIENT`, a client counted as the telemetry
-  relay counts one), and each runs under `editor/nonet.py`'s seccomp filter, so it can
+  relay counts one; on only with `SCADBUDDY_TRUSTED_PROXIES` set, since behind a gateway
+  without it every browser is one client), and each runs under `editor/nonet.py`'s seccomp filter, so it can
   open no network socket.
 - `clusters/prod/scadbuddy/`: HTTPRoute `scadbuddy.internal.nullreference.io`
   on the internal Envoy gateway, `OnePasswordItem` for the Bambuddy API key
