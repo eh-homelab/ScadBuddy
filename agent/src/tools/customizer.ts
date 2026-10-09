@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
-import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
+import { CAMERA, cameraQuery, decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
@@ -274,20 +274,23 @@ export const customizerTools: Tool[] = [
     name: 'get_render_view',
     description:
       "A render job's preview mesh drawn from a named view (iso, front, back, left, right, top, bottom) as a " +
-      'shaded PNG, to check the geometry without a 3D viewer.',
-    input: z.object({ job_id: jobId, view: VIEW, size: VIEW_SIZE }),
+      'shaded PNG, to check the geometry without a 3D viewer. Give `azimuth`/`elevation` (degrees; Z up, ' +
+      "azimuth 0 is the front, 90 the right side) to look from any angle, an angle left out being the named view's, " +
+      'and `zoom`/`target` (model mm) to come in closer on a feature. The same camera again draws the same ' +
+      'picture, for comparing before and after an edit.',
+    input: z.object({ job_id: jobId, view: VIEW, size: VIEW_SIZE, ...CAMERA }),
     risk: 'read',
     routes: ['GET /api/v1/jobs/{job_id}/views/{view}.png'],
-    handler: async ({ job_id, view, size }, ctx) =>
+    handler: async ({ job_id, view, size, ...camera }, ctx) =>
       binary(
         ctx.backend.GET('/api/v1/jobs/{job_id}/views/{view}.png', {
-          params: { path: { job_id, view }, query: { size } },
+          params: { path: { job_id, view }, query: { size, ...cameraQuery(camera) } },
           parseAs: 'stream',
         }),
         `draw ${view} view of ${job_id}`,
         ctx,
         {
-          path: `/api/v1/jobs/${job_id}/views/${view}.png${size ? `?size=${size}` : ''}`,
+          path: withQuery(`/api/v1/jobs/${job_id}/views/${view}.png`, { size, ...cameraQuery(camera) }),
           name: `${job_id}-${view}.png`,
           fallbackType: 'image/png',
         },
