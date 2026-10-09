@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices } from '../api/types'
-import { DEFAULT_NOZZLES, refKey } from './printChoices'
+import { DEFAULT_NOZZLES, defaultsOf, refKey } from './printChoices'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import type { CarryBox } from './useFilamentPlan'
 import { useLatest } from './useLatest'
@@ -68,9 +68,19 @@ export function usePrintChoices(
    * what the user has changed since.
    */
   const seeded = useRef(false)
-  function seedDialog(last: ChoicesView['model_choices']) {
+  /**
+   * #1895 — the nozzles are still the chosen printer's defaults: the model remembers
+   * none and the user has not changed them, so a read for another printer applies
+   * that printer's defaults instead.
+   */
+  const defaulted = useRef(false)
+  function seedDialog(next: ChoicesView) {
+    const last = next.model_choices
     const remembered = last?.nozzles ?? []
-    const nextNozzles = remembered.length > 0 ? remembered : DEFAULT_NOZZLES
+    // A remembered choice wins, a Standard one included: the run still warns when the
+    // mounted nozzle is of the other flow (#797).
+    defaulted.current = remembered.length === 0
+    const nextNozzles = remembered.length > 0 ? remembered : defaultsOf(next)
     const nextProcess = remembered.length > 0 ? (last?.process_name ?? null) : null
     const nextTier = nextProcess ? null : (last?.tier ?? 'standard')
     setNozzles(nextNozzles)
@@ -99,7 +109,12 @@ export function usePrintChoices(
           carry.markReady()
         } else if (!seeded.current) {
           seeded.current = true
-          seedDialog(next.model_choices)
+          seedDialog(next)
+        } else if (defaulted.current) {
+          const defaults = defaultsOf(next)
+          setNozzles(defaults)
+          // Opened, never closed: Simple would send the High Flow unseen.
+          if (defaults.some((n) => n.flow === 'high_flow')) setAdvanced(true)
         }
       })
       .catch((cause: unknown) => {
@@ -155,9 +170,11 @@ export function usePrintChoices(
     setAdvanced(false)
     setOverrides({})
     seeded.current = false
+    defaulted.current = false
   }
 
   function changeNozzles(next: NozzleChoice[]) {
+    defaulted.current = false
     // A preset chosen for one size is not one the other size takes.
     if (next[0]?.size !== size) {
       setOverrides({})
@@ -174,6 +191,7 @@ export function usePrintChoices(
 
   function toggleAdvanced() {
     if (advanced) {
+      defaulted.current = false
       // Back to Simple: a flow, named process or preset override would be sent unseen.
       setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow: 'standard' })))
       setProcessName(null)

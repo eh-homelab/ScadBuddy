@@ -203,7 +203,7 @@ const tier = z.enum(['fine', 'standard', 'draft'])
 type NozzleChoice = z.infer<typeof nozzleChoice>
 type SlotChoice = z.infer<typeof slotChoice>
 
-/** The dialog's own default: 0.4 mm standard on both sides (frontend PrintPicker `DEFAULT_NOZZLES`). */
+/** 0.4 mm standard on both sides, when the choices name no defaults (frontend `DEFAULT_NOZZLES`). */
 const DEFAULT_NOZZLES: NozzleChoice[] = [
   { size: '0.4', flow: 'standard' },
   { size: '0.4', flow: 'standard' },
@@ -479,7 +479,8 @@ export const printTools: Tool[] = [
       'derives from the chosen spools, nozzles, quality and plate, then queue it on one printer, behind one ' +
       'approval. Any choice left out is filled ' +
       "the way the print dialog opens: the chosen printer, the model's (or file's) remembered nozzles, tier or " +
-      "process and spools (else 0.4 mm standard, the Standard tier and the suggested spools), and the printer's " +
+      "process and spools (else 0.4 mm, High Flow on each side with a High Flow nozzle of that size and Standard " +
+      "elsewhere, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
       'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
@@ -562,7 +563,11 @@ export const printTools: Tool[] = [
         bedType ??= view.bed_type
         const last = view.model_choices
         const remembered = last?.nozzles ?? []
-        if (chosenNozzles === undefined) chosenNozzles = remembered.length > 0 ? remembered : DEFAULT_NOZZLES
+        // With nothing remembered, the printer's defaults: High Flow on each side that has
+        // a High Flow nozzle of the size (#1895).
+        const defaults = view.default_nozzles ?? []
+        if (chosenNozzles === undefined)
+          chosenNozzles = remembered.length > 0 ? remembered : defaults.length > 0 ? defaults : DEFAULT_NOZZLES
         if (chosenTier === undefined && processName === undefined) {
           // A remembered process belongs to the remembered nozzle size.
           processName = remembered.length > 0 && args.nozzles === undefined ? (last?.process_name ?? null) : null

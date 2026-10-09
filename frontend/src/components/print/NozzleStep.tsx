@@ -11,7 +11,9 @@ const SIDES = ['Left', 'Right'] as const
 
 /**
  * An Advanced step (#768): Simple mode does not show it, and sends the size the dialog
- * opened on (this model's last, else 0.4 mm) with Standard flow on both sides.
+ * opened on (this model's last, else 0.4 mm) with Standard flow on both sides. The dialog
+ * opens in Advanced instead when the flow it opens on is High Flow, remembered or the
+ * printer's default (#1895).
  *
  * Spec 2026-09-27 §4.1 — Bambuddy rejects mixed nozzle sizes on the left and right
  * extruder (422 "different sizes"), so size is ONE radiogroup setting both sides. There
