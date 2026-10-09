@@ -126,23 +126,33 @@ export type TestChromium = { executablePath?: string }
  *
  * - SCADBUDDY_TEST_CHROMIUM, an explicit executable, when set;
  * - otherwise the chromium-headless-shell build the pinned `playwright-core`
- *   expects, under PLAYWRIGHT_BROWSERS_PATH or Playwright's default cache: then
- *   nothing is overridden and the launch resolves exactly as in the image
- *   (`install-browser --only-shell chromium`, as ci.yml's agent job runs);
+ *   expects (`install-browser --only-shell chromium`, as ci.yml's agent job
+ *   runs). Under PLAYWRIGHT_BROWSERS_PATH, as in the image, nothing is
+ *   overridden and the launch resolves exactly as there. In Playwright's default
+ *   cache (`~/.cache/ms-playwright`, as in CI) it is passed as an explicit
+ *   executable: the server starts under `env -i HOME=<session dir>`, so it
+ *   would look for it under that HOME instead;
  * - otherwise a `chromium` link at the top of PLAYWRIGHT_BROWSERS_PATH, as a
  *   dev container with another Chromium revision pre-installed has.
  */
 export function testChromium(): TestChromium | undefined {
   const fromEnv = process.env.SCADBUDDY_TEST_CHROMIUM
   if (fromEnv) return existsSync(fromEnv) ? { executablePath: fromEnv } : undefined
-  const root = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(os.homedir(), '.cache', 'ms-playwright')
-  if (pinnedHeadlessShell(root)) return {}
+  const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH
+  const root = browsersPath || path.join(os.homedir(), '.cache', 'ms-playwright')
+  const pinned = pinnedHeadlessShell(root)
+  if (pinned) return browsersPath ? {} : { executablePath: pinned }
   const link = path.join(root, 'chromium')
   return existsSync(link) ? { executablePath: link } : undefined
 }
 
-/** Whether `root` holds the headless shell at the revision playwright-core pins. */
-function pinnedHeadlessShell(root: string): boolean {
+/**
+ * The headless shell at the revision playwright-core pins, under `root`, or
+ * undefined. Its binary was `headless_shell` and is `chrome-headless-shell` in
+ * 1247 (playwright-core 1.64); matching only the old name skipped every test
+ * that needs it, in CI too.
+ */
+function pinnedHeadlessShell(root: string): string | undefined {
   try {
     // playwright-core is @playwright/mcp's dependency, so resolve it from there.
     const fromMcp = createRequire(createRequire(import.meta.url).resolve('@playwright/mcp/package.json'))
@@ -151,9 +161,16 @@ function pinnedHeadlessShell(root: string): boolean {
       browsers: { name: string; revision: string }[]
     }
     const revision = browsers.browsers.find((b) => b.name === 'chromium-headless-shell')?.revision
+    if (revision === undefined) return undefined
     const dir = path.join(root, `chromium_headless_shell-${revision}`)
-    return revision !== undefined && readdirSync(dir).some((d) => existsSync(path.join(dir, d, 'headless_shell')))
+    for (const sub of readdirSync(dir)) {
+      for (const binary of ['chrome-headless-shell', 'headless_shell']) {
+        const file = path.join(dir, sub, binary)
+        if (existsSync(file)) return file
+      }
+    }
+    return undefined
   } catch {
-    return false
+    return undefined
   }
 }
