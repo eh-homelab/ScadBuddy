@@ -32,8 +32,8 @@ import { event, type Owner, type SessionStatus } from './protocol.js'
 //   status `finish_turn` writes, and is read only when asked for.
 // - interrupt: `cancel_input`, then the `interrupt` Signal, which is recorded even while
 //   no worker runs.
-// - handoff: `cancel_input`; while the workflow does not answer it the handoff is
-//   refused `unavailable` (retryable), since the parked calls belong to the old owner.
+// - handoff: after the owner change is committed, `cancel_input`, best-effort; when
+//   it goes unanswered the `interrupt` Signal ends the parked calls (and the turn).
 //
 // The wire shapes are agent-durable's session/models.py (`SessionStart`, `Message`,
 // `ImageRef`, `Owner`). No prompt, image or tool content is logged or traced here.
@@ -288,19 +288,19 @@ export class DurableTurns {
     return true
   }
 
-  /** Ends the parked calls before the session changes owner; refused while the workflow does not answer. */
+  /**
+   * Ends the parked calls of a session that has just changed owner. Best-effort: the
+   * handoff already applied and is never undone or failed here. When `cancel_input`
+   * goes unanswered, the `interrupt` Signal (recorded even while no worker runs) ends
+   * them and the turn; a session with no workflow has nothing parked.
+   */
   async handoff(session: SessionRecord, reason: string): Promise<void> {
     try {
       await this.#gate.cancelInput(session.id, reason)
+      return
     } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return // no turn ever ran: nothing parked
-      if (err instanceof DurableUnavailable) {
-        throw new SessionError(
-          'unavailable',
-          `session ${session.id}'s workflow did not answer, so its waiting calls could not be ended; try the handoff again in a moment`,
-        )
-      }
-      throw err
+      if (err instanceof WorkflowNotFoundError) return
     }
+    await this.#gate.interrupt(session.id, reason).catch(() => {})
   }
 }

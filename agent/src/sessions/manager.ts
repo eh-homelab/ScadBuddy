@@ -2074,11 +2074,8 @@ export class SessionManager {
   private async transfer(session: SessionRecord, to: Owner, options: { accepting?: boolean } = {}): Promise<SessionRecord> {
     const { id } = session
     if (sameOwner(session.owner, to) && session.owner.label === to.label && !session.offer) return session
-    // A durable session's parked calls were asked for the previous owner's turn: ended
-    // first, and the handoff refused (retryable) while the workflow does not answer.
-    if (session.mode === 'durable' && !sameOwner(session.owner, to)) {
-      await this.durableOrRefuse().handoff(session, `the session was handed off to ${publicLabel(to)}`)
-    }
+    // Refused before anything changes when this service cannot reach a durable session's workflow.
+    const durable = session.mode === 'durable' && !sameOwner(session.owner, to) ? this.durableOrRefuse() : undefined
     // Conditional on the owner read above (and, accepting, on the offer still
     // being the live one to `to`), so two concurrent handoffs cannot both apply.
     const offerStill = options.accepting
@@ -2103,6 +2100,10 @@ export class SessionManager {
       await this.announceOwner(id)
       return this.get(id, to)
     }
+    // A durable session's parked calls were asked for the previous owner's turn: ended
+    // only once the owner change above applied, with no lock held, best-effort (the
+    // interrupt Signal when cancel_input goes unanswered).
+    await durable?.handoff(session, `the session was handed off to ${publicLabel(to)}`)
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)

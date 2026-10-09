@@ -259,7 +259,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(await m.interrupt(session.id, browser)).toBe(false)
   }, 60_000)
 
-  it("hands off after cancel_input, and refuses (retryable) while it goes unanswered", async () => {
+  it("hands off, then ends the old owner's parked calls with cancel_input, or the interrupt Signal when it goes unanswered", async () => {
     const m = await durableManager({ cancelTimeoutMs: 1_000 })
     const { session } = await m.start(agentA, { origin: 'mcp', prompt: 'hello' })
     const taken = await m.handoff(session.id, browser, browser)
@@ -268,12 +268,32 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
 
     const other = (await m.start(agentA, { origin: 'mcp', prompt: 'hello' })).session
     await env.client.workflow.getHandle(sessionWorkflowId(other.id)).signal('hold_cancel')
-    const refused = m.handoff(other.id, browser, browser)
-    // No row lock is held while cancel_input waits: the row stays writable (NOWAIT throws if locked).
+    const handing = m.handoff(other.id, browser, browser)
+    // The owner change is committed before cancel_input is sent: while it waits, the
+    // row is the new owner's and holds no lock (NOWAIT throws if locked).
     await new Promise((r) => setTimeout(r, 300))
-    await db.sql.begin((tx) => tx`SELECT id FROM ai_sessions WHERE id = ${other.id} FOR UPDATE NOWAIT`)
-    await expect(refused).rejects.toMatchObject({ code: 'unavailable', status: 503 })
-    expect((await m.get(other.id, browser)).owner).toEqual(agentA)
+    const [row] = await db.sql.begin((tx) => tx`SELECT owner_id FROM ai_sessions WHERE id = ${other.id} FOR UPDATE NOWAIT`)
+    expect(row?.owner_id).toBe(browser.id)
+    // A cancel that goes unanswered neither fails nor undoes the handoff.
+    expect((await handing).owner).toEqual(browser)
+    expect((await recorded(other.id)).calls).toEqual([
+      'cancel_input:the session was handed off to You',
+      'interrupt:the session was handed off to You',
+    ])
+  }, 60_000)
+
+  it('sends nothing to the workflow when the owner changed meanwhile', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(agentA, { origin: 'mcp', prompt: 'hello' })
+    const get = m.get.bind(m)
+    m.get = async (...args: Parameters<SessionManager['get']>) => {
+      const read = await get(...args)
+      // Another handoff applies between the read and this one's UPDATE.
+      await db.sql`UPDATE ai_sessions SET owner_kind = 'bearer', owner_id = 'token:b' WHERE id = ${session.id}`
+      return read
+    }
+    await expect(m.handoff(session.id, browser, browser)).rejects.toMatchObject({ code: 'busy' })
+    expect((await recorded(session.id)).calls).toEqual([])
   }, 60_000)
 
   it('hands off a durable session that never ran a turn (no workflow yet)', async () => {
