@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import tracemalloc
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -25,11 +26,13 @@ from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL_SMALL,
     PLATE_TOP,
     PRODUCTION_NS,
+    ArchiveTooLargeError,
     PlateParts,
     cover_names,
     laid_out_plates,
     layout_of,
     nozzles_statable,
+    parse_model,
     plate_columns,
     plate_origin,
     plate_settings,
@@ -1117,3 +1120,81 @@ def test_a_write_that_fails_part_way_leaves_the_previous_3mf_whole(
         _write_plates(out, covers=False)
     assert out.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["model.3mf"]
+
+
+def _model_zip(body: str, name: str = "3D/3dmodel.model") -> zipfile.ZipFile:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, f'<model xmlns="{CORE_NS}"><resources>{body}</resources></model>')
+    return zipfile.ZipFile(io.BytesIO(out.getvalue()))
+
+
+def test_a_model_file_s_meshes_are_read_into_arrays_and_left_out_of_the_tree() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices>'
+        '<vertex x="1" y="2" z="3"/><vertex x="4" y="5" z="6"><x/></vertex><vertex x="7"/>'
+        "</vertices><triangles>"
+        '<triangle v1="0" v2="1" v3="2"/>'
+        '<triangle v1="2" v2="1" v3="0" pid="5" p1="1"/>'
+        '<triangle v1="0" v2="2" v3="1" pid="7"/>'
+        "</triangles></mesh></object>"
+        '<object id="2"><components><component objectid="1"/></components></object>'
+    )
+
+    model = parse_model(archive, "3D/3dmodel.model")
+
+    (mesh_element, mesh), *rest = model.meshes.items()
+    assert not rest
+    assert model.root.find(f".//{{{CORE_NS}}}mesh") is mesh_element
+    left = mesh_element.find(f"{{{CORE_NS}}}vertices")
+    assert left is not None and not len(left)
+    assert model.root.find(f".//{{{CORE_NS}}}component") is not None
+    assert mesh.vertices.tolist() == [[1, 2, 3], [4, 5, 6], [7, 0, 0]]
+    assert mesh.faces.tolist() == [[0, 1, 2], [2, 1, 0], [0, 2, 1]]
+    assert [mesh.pids[i] if i >= 0 else None for i in mesh.pid] == [None, "5", "7"]
+    assert mesh.p1.tolist() == [-1, 1, -1]
+    assert not mesh.painted
+
+
+@pytest.mark.parametrize("attribute", ['paint_color="8"', 'mmu_segmentation="4"'])
+def test_a_painted_triangle_marks_its_mesh(attribute: str) -> None:
+    namespace = 'xmlns:s="http://schemas.slic3r.org/3mf/2017/06" '
+    attribute = attribute if attribute.startswith("paint") else f"{namespace}s:{attribute}"
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f'<triangles><triangle v1="0" v2="0" v3="0" {attribute}/></triangles></mesh></object>'
+    )
+
+    (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
+
+    assert mesh.painted
+
+
+def test_a_model_file_past_its_cap_is_refused_whatever_its_header_says() -> None:
+    archive = _model_zip("<object/>" * 1000)
+
+    with pytest.raises(ArchiveTooLargeError, match="inflates past 100 bytes"):
+        parse_model(archive, "3D/3dmodel.model", cap=100)
+
+
+def test_a_model_file_costs_about_its_own_size_to_read() -> None:
+    """An element per vertex costs some 500 bytes against the 27 of XML it is read from,
+    so an untrusted model entry near the archive's cap would take gigabytes (#1949)."""
+    vertices = 300_000
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices>'
+        + '<vertex x="1" y="2" z="3"/>' * vertices
+        + "</vertices><triangles/></mesh></object>"
+    )
+    size = archive.getinfo("3D/3dmodel.model").file_size
+
+    tracemalloc.start()
+    try:
+        model = parse_model(archive, "3D/3dmodel.model")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    (mesh,) = model.meshes.values()
+    assert mesh.vertices.shape == (vertices, 3)
+    assert peak < 2 * size, f"{peak} bytes to read {size}"
