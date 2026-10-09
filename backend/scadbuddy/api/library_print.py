@@ -120,12 +120,14 @@ class LibraryFileObjects(BaseModel):
     response_model=LibraryFileObjects,
     summary="The objects Arrange reads from a library file",
 )
-async def get_library_objects(file_id: FileIdPath, store: SettingsStoreDep) -> LibraryFileObjects:
+async def get_library_objects(
+    file_id: FileIdPath, store: SettingsStoreDep, state: StateDep
+) -> LibraryFileObjects:
     """Each object the file's 3MF places, with its count (#1863): what the Arrange
     dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the
     arrange's own 422 (code `library_file_not_arrangeable`), saying why."""
     async with client_for(store.load()) as client:
-        found = (await read_plain_files(client, [file_id]))[file_id]
+        found = (await read_plain_files(client, [file_id], state))[file_id]
     return LibraryFileObjects(
         file_id=file_id,
         filename=found.filename,
