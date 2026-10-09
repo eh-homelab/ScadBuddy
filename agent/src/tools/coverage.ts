@@ -211,4 +211,14 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       'Browser-only for `answer` kinds (only the user answers a question); an `approval` is decided through ' +
       'sessions_approve / sessions_deny, which take every approval id, durable ones included.',
   },
+  {
+    route: 'GET /api/v1/ai/settings/session-mode',
+    reason:
+      "Settings → Assistant's default session mode (plan 5d), for the user. An agent picks its own " +
+      "session's mode with sessions_start's `mode`, and sessions_start says when the default ran classic.",
+  },
+  {
+    route: 'PUT /api/v1/ai/settings/session-mode',
+    reason: 'Changes how every new session runs: an operator decision made in Settings, never by an agent.',
+  },
 ]

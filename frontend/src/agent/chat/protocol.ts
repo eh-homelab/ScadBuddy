@@ -461,6 +461,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     context: PageContextSchema,
     /** #1941 — uploaded images for the model, by id (#1866 sent them inline). */
     images: z.array(AttachmentRefSchema).min(1).optional(),
+    /** Plan 5d — a new chat's mode, from the composer's picker; absent, the agent's default applies. */
+    mode: SessionModeSchema.optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent

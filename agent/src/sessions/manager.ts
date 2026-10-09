@@ -171,6 +171,11 @@ export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
 export const SETTING_SESSION_MODE = 'session_mode'
 export { SESSION_MODES, type SessionMode } from './protocol.js'
 
+/** The stored `session_mode` as a mode: `classic` only when it says so (plan 5d Ruling 1, the owner's default). */
+export function sessionModeOf(stored: unknown): SessionMode {
+  return stored === 'classic' ? 'classic' : 'durable'
+}
+
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
 export const MAX_SESSION_BUDGET_USD = 100
 /** The largest `max_turns` per reply Settings takes. */
@@ -1036,9 +1041,17 @@ export class SessionManager {
     return session
   }
 
-  /** The `session_mode` setting: `classic` only when it says so (plan 5d Ruling 1, the owner's default). */
+  /** The `session_mode` setting (sessionModeOf). */
   private async modeSetting(): Promise<SessionMode> {
-    return (await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE)) === 'classic' ? 'classic' : 'durable'
+    return sessionModeOf(await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE))
+  }
+
+  /** Why a new durable session could not run now, or undefined when it could (plan 5d Ruling 2b). */
+  async durableUnready(): Promise<string | undefined> {
+    if (!this.durableTurns) {
+      return 'durable sessions need Temporal (SCADBUDDY_TEMPORAL_ADDRESS) and the secret key; this agent service has not got them'
+    }
+    return this.durableTurns.unready()
   }
 
   /**
@@ -1049,9 +1062,7 @@ export class SessionManager {
   private async startMode(asked: SessionMode | undefined): Promise<{ mode: SessionMode; fallback?: string }> {
     const mode = asked ?? (await this.modeSetting())
     if (mode === 'classic') return { mode }
-    const why = this.durableTurns
-      ? await this.durableTurns.unready()
-      : 'durable sessions need Temporal (SCADBUDDY_TEMPORAL_ADDRESS) and the secret key; this agent service has not got them'
+    const why = await this.durableUnready()
     if (why === undefined) return { mode }
     if (asked) throw new SessionError('unavailable', why)
     return { mode: 'classic', fallback: `ran as classic: ${why}` }

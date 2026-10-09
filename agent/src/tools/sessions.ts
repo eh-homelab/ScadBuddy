@@ -13,7 +13,7 @@ import type { LoggedEvent } from '../sessions/eventLog.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
-import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
+import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
 import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveSendImages } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
@@ -363,7 +363,9 @@ export const sessionTools: Tool[] = [
       "Start a ScadBuddy agent session owned by this caller, optionally with its first message. The session's " +
       "tools run with this caller's tiers; an outward action waits for a decision: a human's in the ScadBuddy UI, " +
       'or sessions_approve/sessions_deny from a token holding the approval grant. ' +
-      'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach.',
+      'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach. ' +
+      '`mode` picks classic or durable; omitted, the default in ScadBuddy Settings applies, and `mode_fallback` ' +
+      'says why a default durable session runs classic.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
       title: z.string().max(200).optional(),
@@ -376,27 +378,42 @@ export const sessionTools: Tool[] = [
         })
         .optional()
         .describe('What the session is about (spec §6 "scope"), recorded with it.'),
+      mode: z
+        .enum(SESSION_MODES)
+        .optional()
+        .describe(
+          'classic runs in the agent service; durable runs as a Temporal workflow that survives restarts. ' +
+            'Asked for, durable is refused when it cannot run now; omitted, the default applies.',
+        ),
       wait_seconds: waitSeconds,
     }),
     risk: 'write',
     routes: [],
     source: TRANSCRIPT_SOURCE,
     summarize: ({ title, prompt }) => `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}`,
-    handler: async ({ prompt, title, tags, scope, wait_seconds }, ctx) => {
+    handler: async ({ prompt, title, tags, scope, mode, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
-      const { session, turn } = await refusals(() =>
+      const { session, turn, modeFallback } = await refusals(() =>
         sessions.start(ownerOf(ctx.principal), {
           origin: originOf(ctx.principal),
           ...(title === undefined ? {} : { title }),
           ...(tags === undefined ? {} : { tags }),
           ...(scope === undefined ? {} : { scope }),
+          ...(mode === undefined ? {} : { mode }),
           ...(prompt === undefined ? {} : { prompt, tiers: ctx.principal.tiers }),
         }),
       )
-      if (!turn) return json({ session: sessionView(session, viewerOf(ctx)) })
+      const fellBack = modeFallback ? { mode_fallback: modeFallback } : {}
+      if (!turn) return json({ session: sessionView(session, viewerOf(ctx)), ...fellBack })
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session.id, ownerOf(ctx.principal)))
-      return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: 0 })
+      return json({
+        session: sessionView(now, viewerOf(ctx)),
+        turn_id: turn.turnId,
+        turn: outcomeView(outcome),
+        after_seq: 0,
+        ...fellBack,
+      })
     },
   }),
 

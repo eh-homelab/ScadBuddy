@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import { type AttachmentRef, AttachmentRefsSchema } from '../attachments/store.js'
 import { UserImagesSchema } from './images.js'
-import { PROTOCOL_VERSION } from './protocol.js'
+import { PROTOCOL_VERSION, SESSION_MODES } from './protocol.js'
 
 // The panel → server half of the assistant panel's wire protocol, version 1,
 // as the agent's chat socket (routes/chat.ts) accepts it. The contract is the
@@ -51,6 +51,11 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      * TODO(#1959): drop the UserImagesSchema branch.
      */
     images: z.union([AttachmentRefsSchema, UserImagesSchema]).optional(),
+    /**
+     * Plan 5d: the new session's mode (spec §6.1). Absent, the `session_mode`
+     * setting's applies; with `sessionId` it is refused (routes/chat.ts).
+     */
+    mode: z.enum(SESSION_MODES).optional(),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (questions/service.ts).
