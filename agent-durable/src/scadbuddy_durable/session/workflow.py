@@ -20,6 +20,7 @@ tools' input is checked before any of it is kept (Ruling 9).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -143,6 +144,9 @@ class DurableSession:
         self._seen: set[str] = set()
         self._parks: list[asyncio.Task[None]] = []
         self._task: asyncio.Task[str] | None = None
+        # From a message's acceptance until its turn's finish_turn has run: the plugin's
+        # run() returns before the gate is drained and the turn is written (review of #1958).
+        self._in_turn = start.turn is not None
         self._interrupted: str | None = None
         self._settings = GateSettings(approval_expiry_s=600, question_expiry_s=3600)
         self._agent = DurableClaudeAgent(
@@ -173,7 +177,10 @@ class DurableSession:
                 self._turn = TurnStart(message.turn_id, message.author, list(message.images))
                 await self._run_turn(prompt_of(message))
             self._turn = None
-            if self._agent.should_continue_as_new():
+            self._in_turn = False
+            if self._message is None and self._agent.should_continue_as_new():
+                # Refuses sends from here: one accepted now would not be carried over.
+                self._in_turn = True
                 await self._agent.continue_as_new()
 
     # ---- a turn ----
@@ -237,7 +244,20 @@ class DurableSession:
             for call in self._agent.pending_approvals():
                 if call["id"] not in self._seen:
                     self._seen.add(call["id"])
-                    self._parks.append(asyncio.create_task(self._park(call)))
+                    self._parks.append(asyncio.create_task(self._park_or_refuse(call)))
+
+    async def _park_or_refuse(self, call: dict[str, Any]) -> None:
+        """A call that could not be described or opened is refused to the model, never
+        left undecided: the turn would wait on it until an interrupt (review of #1958)."""
+        try:
+            await self._park(call)
+        except asyncio.CancelledError:
+            raise
+        except FailureError:
+            if any(p.call_id == str(call["id"]) for p in self._parked.values()):
+                raise  # parked, and failed resolving: its entry is the gate's to end
+            with contextlib.suppress(ValueError):
+                self._agent.decide(str(call["id"]), False, approver="scadbuddy")
 
     async def _park(self, call: dict[str, Any]) -> None:
         sid = self._start.session_id
@@ -374,11 +394,12 @@ class DurableSession:
     @workflow.update(name=SEND_MESSAGE_UPDATE)
     async def send_message(self, message: Message) -> SendAnswer:
         self._message = message
+        self._in_turn = True
         return SendAnswer(accepted=True, turn_id=message.turn_id)
 
     @send_message.validator
     def _validate_send(self, message: Message) -> None:
-        if self._message is not None or self._task is not None or self._agent.busy:
+        if self._in_turn or self._message is not None or self._task is not None or self._agent.busy:
             raise ApplicationError("the session is running a turn", type="busy", non_retryable=True)
 
     def _request(self, args: dict[str, Any]) -> RespondRequest:
@@ -396,7 +417,11 @@ class DurableSession:
         parked = self._parked.get(request.request_id)
         if parked is None:
             raise _refused("stale", f"no pending input {request.request_id}")
-        valid = validate_respond(parked.entry, request)
+        try:
+            # The validator passed, but another handler may have moved the entry since.
+            valid = validate_respond(parked.entry, request)
+        except RespondRefused as refused:
+            raise _refused(refused.code, str(refused)) from None
         responder = args.get("responder") or {}
         who = {
             "kind": str(responder.get("kind", "")),

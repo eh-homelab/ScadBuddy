@@ -97,10 +97,15 @@ def connector(url: str, search_path: str | None = None) -> Connect:
 
 
 def build_worker(
-    client: Client, connect: Connect, runner: SegmentRunner, *, task_queue: str = TASK_QUEUE
+    client: Client,
+    connect: Connect,
+    runner: SegmentRunner,
+    *,
+    task_queue: str = TASK_QUEUE,
+    session: SessionActivities | None = None,
 ) -> Worker:
     gate = GateActivities(connect)
-    session = SessionActivities(connect)
+    session = session or SessionActivities(connect)
     events = SessionEvents(connect)
     return Worker(
         client,

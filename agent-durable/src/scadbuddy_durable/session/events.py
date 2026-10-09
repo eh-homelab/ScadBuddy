@@ -155,11 +155,11 @@ class SessionEvents:
 
     @activity.defn(name="follow_session")
     async def follow_session(self, args: FollowArgs) -> FollowResult:
-        start = await self._start(args.session_id)
         tiers = {e.name: e.tier for e in tools.manifest()}
-        at = [start]
+        at = [0]
         failed: str | None = None
         try:
+            at[0] = await self._start(args.session_id)
             return await self._follow(args, at, tiers)
         except asyncio.CancelledError:
             raise
@@ -169,7 +169,12 @@ class SessionEvents:
             # only the type and the offset, never the message; it is raised outside this
             # block so the original is not even its context (security review of 5c).
             failed = type(err).__name__
-        raise ApplicationError(f"follow_session failed at offset {at[0]}: {failed}", type=failed)
+        raise ApplicationError(
+            f"follow_session failed at offset {at[0]}: {failed}",
+            type=failed,
+            # A session that is gone stays gone: no retry until the drain cancels it.
+            non_retryable=failed == "LookupError",
+        )
 
     async def _follow(self, args: FollowArgs, at: list[int], tiers: dict[str, str]) -> FollowResult:
         written = 0

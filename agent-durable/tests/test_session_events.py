@@ -155,3 +155,16 @@ async def test_a_failure_carries_no_event_content(
     assert "offset 7" in str(err)
     assert "DataError" in str(err)
     assert SECRET not in caplog.text
+
+
+@pytest.mark.requires_postgres
+async def test_a_session_that_is_gone_is_not_retried(connect: object) -> None:
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    gone = "9b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f61"
+    with pytest.raises(ApplicationError) as failed:
+        await env.run(
+            acts.follow_session, FollowArgs(session_id=gone, workflow_id=f"session-{gone}")
+        )
+    assert failed.value.type == "LookupError"
+    assert failed.value.non_retryable

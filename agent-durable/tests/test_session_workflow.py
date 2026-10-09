@@ -27,6 +27,7 @@ from session_support import (
     tools_worker,
     until,
 )
+from temporalio import activity
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
@@ -42,6 +43,8 @@ from scadbuddy_durable.gate.names import (
 )
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
+from scadbuddy_durable.session.activities import SessionActivities
+from scadbuddy_durable.session.models import FinishTurn
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -88,6 +91,7 @@ class Harness:
     queue: str
     agent: Worker
     handles: list[WorkflowHandle[Any, Any]]
+    session_activities: SessionActivities | None = None
 
     async def session(self, conn: Conn) -> tuple[str, WorkflowHandle[Any, Any]]:
         sid = await insert_session(conn)
@@ -97,7 +101,11 @@ class Harness:
 
     def restart_agent(self) -> Worker:
         self.agent = build_worker(
-            self.client, self.connect, ScriptedClaude(policy), task_queue=self.queue
+            self.client,
+            self.connect,
+            ScriptedClaude(policy),
+            task_queue=self.queue,
+            session=self.session_activities,
         )
         return self.agent
 
@@ -407,3 +415,87 @@ async def _status_now(conn: Conn, sid: str) -> str:
 def _failure_type(err: WorkflowUpdateFailedError) -> str | None:
     cause = err.cause
     return cause.type if isinstance(cause, ApplicationError) else None
+
+
+class HeldFinish(SessionActivities):
+    """finish_turn held until the test lets it go, to open the window a turn ends in."""
+
+    def __init__(self, connect: Connect) -> None:
+        super().__init__(connect)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @activity.defn(name="finish_turn")
+    async def finish_turn(self, args: FinishTurn) -> bool:
+        self.entered.set()
+        await self.release.wait()
+        return await super().finish_turn(args)
+
+
+async def test_a_send_while_a_turn_is_finishing_is_refused_busy(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """Review of #1958: the plugin's run() has returned, but finish_turn has not: a send
+    accepted then would be dropped by continue-as-new or marked idle by finish_turn."""
+    held = HeldFinish(connect)
+    await harness.agent.shutdown()
+    harness.session_activities = held
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "hello there")
+        await asyncio.wait_for(held.entered.wait(), 30)
+        with pytest.raises(WorkflowUpdateFailedError) as refused:
+            await send(handle, "too soon")
+        assert _failure_type(refused.value) == "busy"
+        held.release.set()
+        assert await settled(connect, sid) == "idle"
+        await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        assert (await send(handle, "now")).accepted
+        assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts == ["you said: hello there", "you said: now"]
+
+
+async def test_two_responds_at_once_refuse_the_second_and_the_session_goes_on(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """Review of #1958: both pass the validator; the second finds the entry resolving and
+    must fail as an Update, not fail the workflow task."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    [entry] = await _parked(handle)
+    approve = _respond(entry, {"kind": "approval", "decision": "approve"})
+    # Sent while the worker is down, both reach it in one activation: both validators
+    # pass before either handler runs.
+    await harness.agent.shutdown()
+    both = asyncio.gather(
+        handle.execute_update(RESPOND_UPDATE, approve),
+        handle.execute_update(RESPOND_UPDATE, approve),
+        return_exceptions=True,
+    )
+    await asyncio.sleep(2)
+    async with harness.restart_agent():
+        results = await asyncio.wait_for(both, 60)
+        assert await settled(connect, sid) == "idle"
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    failed = [r for r in results if isinstance(r, BaseException)]
+    assert ok == [{"kind": "approval", "outcome": "approved"}]
+    assert len(failed) == 1
+    assert isinstance(failed[0], WorkflowUpdateFailedError)
+    assert _failure_type(failed[0]) in ("GateRefused:resolving", "GateRefused:stale")
+    assert [r[0] for r in harness.stand_in.ran] == ["print_output"]
+
+
+async def test_a_call_that_cannot_be_described_is_refused_not_left_waiting(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """Review of #1958: describe_call failing must not leave the turn waiting forever."""
+    harness.stand_in.describe_refuses = True
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+    assert await handle.query(PENDING_INPUT_QUERY) == []
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts and texts[-1].startswith("print_output: error")

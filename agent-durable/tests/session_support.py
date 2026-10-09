@@ -106,6 +106,7 @@ class StandInTools:
     def __init__(self, connect: Connect) -> None:
         self._connect = connect
         self.ran: list[tuple[str, dict[str, Any]]] = []
+        self.describe_refuses = False
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -150,6 +151,8 @@ class StandInTools:
 
         @activity.defn(name="gate.describe_call")
         async def describe_call(args: dict[str, Any]) -> dict[str, str]:
+            if self.describe_refuses:
+                raise ApplicationError("no such session", type="UnknownSession", non_retryable=True)
             return {"summary": f"{args['tool']} call", "input_hash": "a" * 64}
 
         return [render_preview, print_output, ask_user, wait_for_user, describe_call]
