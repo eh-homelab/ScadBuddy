@@ -169,9 +169,11 @@ def stl_volume(path):
                for k in range(n))
 
 
-def stl_open_edges(path):
-    """Edges not on exactly two faces: a corner two same-colour pixels meet at
-    puts one edge on four, which an STL holds but a 3MF part cannot (#1883)."""
+def stl_nonconforming_edges(path):
+    """Edges not on exactly two faces: a conforming-edge check. It counts a corner
+    two same-colour pixels meet at, whose edge sits on four faces, which an STL
+    holds but a 3MF part cannot (#1883). It also counts T-junctions, where a vertex
+    lies along another face's edge, so it is stricter than "closed"."""
     data = open(path, "rb").read()
     n = struct.unpack("<I", data[80:84])[0]
     edges = Counter()
@@ -378,7 +380,7 @@ for line in open(os.path.join(OUT, "cases.txt")):
         path = os.path.join(OUT, "%s@%s.stl" % (name, mats[i][1][1:]))
         if os.path.exists(path):
             vols[mats[i][1]] = stl_volume(path)
-            bad = stl_open_edges(path)
+            bad = stl_nonconforming_edges(path)
             check(name, bad == 0, "%s is a closed 2-manifold: every edge on two faces (%d are not)" % (mats[i][1], bad))
     check(name, len(vols) == len(named), "each of the %d colours rendered closed on its own" % len(named))
     total = sum(vols.values())
