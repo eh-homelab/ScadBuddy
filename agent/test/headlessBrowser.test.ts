@@ -153,41 +153,53 @@ describe('the navigation guard and file names', () => {
     expect(decide(t('browser_navigate'), browserTierOf, { url: `${ORIGIN}/` }, guard)).toEqual({ decision: 'allow', tier: 'read' })
   })
 
-  describe('aliases of the backend (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS)', () => {
+  describe("ScadBuddy's own origins (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS), #983", () => {
     const origins = browserOrigins({
       backendUrl: ORIGIN,
       publicUrl: 'https://scadbuddy.internal.example/',
-      uiOrigins: 'https://scadbuddy.lan:8443, http://127.0.0.1:8000',
+      uiOrigins: 'https://scadbuddy.sso.example, https://scadbuddy.lan:8443',
     })
 
-    it('are the UI origins other than the backend', () => {
+    it('are the configured UI origins, without the backend', () => {
       expect(origins).toEqual({
         backend: ORIGIN,
-        aliases: ['https://scadbuddy.internal.example', 'https://scadbuddy.lan:8443'],
+        ui: ['https://scadbuddy.internal.example', 'https://scadbuddy.sso.example', 'https://scadbuddy.lan:8443'],
         allowed: [],
       })
     })
 
-    it('rewrites a URL on one to the same path, query and fragment on the backend', () => {
+    it('opens a URL on any of them as it is, at the tool’s tier', () => {
       const url = 'https://scadbuddy.internal.example/m/builtin%3Aspinning-top-pip?tab=params#preview'
-      expect(check('browser_navigate', { url }, origins)).toEqual({
-        input: { url: `${ORIGIN}/m/builtin%3Aspinning-top-pip?tab=params#preview` },
-      })
-      expect(check('browser_tabs', { action: 'new', url: 'https://scadbuddy.lan:8443/' }, origins)).toEqual({
-        input: { action: 'new', url: `${ORIGIN}/` },
-      })
-      // Allowed at the tool's tier, with the new input.
+      expect(check('browser_navigate', { url }, origins)).toBeUndefined()
+      expect(check('browser_navigate', { url: 'https://scadbuddy.sso.example/m/foo' }, origins)).toBeUndefined()
+      expect(check('browser_tabs', { action: 'new', url: 'https://scadbuddy.lan:8443/' }, origins)).toBeUndefined()
       const guard = (name: string, input: unknown) => browserInputGuard(name, input, origins, none)
-      expect(decide(t('browser_navigate'), browserTierOf, { url }, guard)).toEqual({
-        decision: 'allow',
-        tier: 'read',
-        input: { url: `${ORIGIN}/m/builtin%3Aspinning-top-pip?tab=params#preview` },
-      })
+      expect(decide(t('browser_navigate'), browserTierOf, { url }, guard)).toEqual({ decision: 'allow', tier: 'read' })
     })
 
-    it('still refuses the alias host on another scheme or port', () => {
-      expect(check('browser_navigate', { url: 'http://scadbuddy.internal.example/' }, origins)).toHaveProperty('deny')
-      expect(check('browser_navigate', { url: 'https://scadbuddy.lan/' }, origins)).toHaveProperty('deny')
+    it.each([
+      ['another scheme', 'http://scadbuddy.internal.example/'],
+      ['another port', 'https://scadbuddy.lan/'],
+      ['a lookalike suffix', 'https://scadbuddy.internal.example.evil.example/'],
+      ['a lookalike prefix', 'https://evilscadbuddy.internal.example/'],
+      ['userinfo naming it', 'https://scadbuddy.internal.example@evil.example/'],
+    ])('still refuses %s', (_label, url) => {
+      expect(check('browser_navigate', { url }, origins)).toHaveProperty('deny')
+    })
+
+    it('no longer opens the backend once a UI origin is configured, and names the URL to open instead', () => {
+      expect(check('browser_navigate', { url: `${ORIGIN}/m/box?x=1#p` }, origins)).toEqual({
+        deny: expect.stringContaining('"https://scadbuddy.internal.example/m/box?x=1#p"'),
+      })
+      // Not even under `*` with an approval: its requests would carry no marker.
+      const any = browserOrigins({ backendUrl: ORIGIN, publicUrl: 'https://scadbuddy.internal.example', browserAllowed: '*' })
+      expect(check('browser_navigate', { url: `${ORIGIN}/` }, any, new Set([ORIGIN]))).toHaveProperty('deny')
+      expect(originToApprove(t('browser_navigate'), { url: `${ORIGIN}/` }, any, none)).toBeUndefined()
+    })
+
+    it('keeps the backend when it is listed, or when nothing else is configured', () => {
+      expect(browserOrigins({ backendUrl: ORIGIN, uiOrigins: `https://ui.example, ${ORIGIN}` }).ui).toEqual(['https://ui.example', ORIGIN])
+      expect(only.ui).toEqual([ORIGIN])
     })
   })
 
@@ -222,10 +234,10 @@ describe('the navigation guard and file names', () => {
       }
     })
 
-    it('never treats the backend or an alias as off-origin', () => {
+    it('never treats the backend or a UI origin as off-origin', () => {
       const both = browserOrigins({ backendUrl: ORIGIN, publicUrl: 'https://ui.example', browserAllowed: `${ORIGIN}, https://ui.example` })
       expect(both.allowed).toEqual([])
-      expect(check('browser_navigate', { url: 'https://ui.example/x' }, both)).toEqual({ input: { url: `${ORIGIN}/x` } })
+      expect(check('browser_navigate', { url: 'https://ui.example/x' }, both)).toBeUndefined()
     })
 
     it.each([
@@ -241,7 +253,7 @@ describe('the navigation guard and file names', () => {
 
 describe('the per-session plugin', () => {
   it('writes the server config spec §5.3 asks for', async () => {
-    const { configFile, outputDir, allowedOrigin } = await materialized()
+    const { configFile, outputDir } = await materialized()
     type Config = {
       network: unknown
       outputDir: string
@@ -256,7 +268,6 @@ describe('the per-session plugin', () => {
       }
     }
     const config = JSON.parse(readFileSync(configFile, 'utf8')) as Config
-    expect(allowedOrigin).toBe(ORIGIN)
     expect(config.network).toEqual({ allowedOrigins: [ORIGIN] })
     expect(config.browser.isolated).toBe(true)
     expect(config.browser.userDataDir).toBeUndefined()
@@ -275,15 +286,15 @@ describe('the per-session plugin', () => {
     const config = JSON.parse(readFileSync(configFile, 'utf8')) as { browser: { initPage?: string[] } }
     expect(config.browser.initPage).toHaveLength(1)
     const guard = readFileSync(config.browser.initPage![0]!, 'utf8')
-    expect(guard).toContain(`const BACKEND = ${JSON.stringify(ORIGIN)}`)
+    expect(guard).toContain(`const UI = ${JSON.stringify([ORIGIN])}`)
     expect(guard).toContain(`const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}`)
     expect(guard).toContain('maxRedirects: 0')
     const approvedFile = path.join(dir, 'approved-origins.json')
-    expect(guard).toBe(redirectGuardSource({ backend: ORIGIN, aliases: [], sessionId, approvedFile }))
+    expect(guard).toBe(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile }))
     expect(JSON.parse(readFileSync(approvedFile, 'utf8'))).toEqual([])
   })
 
-  it('widens the server allow-list to the aliases and the listed origins, and drops it under `*`', async () => {
+  it('sets the server allow-list to the UI origins and the listed origins, and drops it under `*`', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
     const network = (file: string) => (JSON.parse(readFileSync(file, 'utf8')) as { network?: unknown }).network
     const listed = materializeHeadlessBrowser({
@@ -293,7 +304,8 @@ describe('the per-session plugin', () => {
       browserAllowedOrigins: 'https://docs.example',
       dir: path.join(dir, 'a'),
     })
-    expect(network(listed.configFile)).toEqual({ allowedOrigins: [ORIGIN, 'https://ui.example', 'https://docs.example'] })
+    expect(network(listed.configFile)).toEqual({ allowedOrigins: ['https://ui.example', 'https://docs.example'] })
+    expect(readFileSync(path.join(dir, 'a', 'redirect-guard.cjs'), 'utf8')).toContain(`const UI = ${JSON.stringify(['https://ui.example'])}`)
     // "Default is to allow all" (config.d.ts): the hook and the request guard are the gate.
     const any = materializeHeadlessBrowser({ sessionId: randomUUID(), backendUrl: ORIGIN, browserAllowedOrigins: '*', dir: path.join(dir, 'b') })
     expect(network(any.configFile)).toBeUndefined()
@@ -423,7 +435,7 @@ describe('buildHarnessOptions with the headless browser', () => {
     await expect(options.canUseTool!(t('browser_click'), { target: 'e3' }, ctx)).resolves.toMatchObject({ behavior: 'allow' })
   })
 
-  it('hands the tool an alias URL rewritten onto the backend', async () => {
+  it('hands the tool a URL on a UI origin unchanged', async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
     const options = buildHarnessOptions({
       paths: { stateDir },
@@ -439,7 +451,7 @@ describe('buildHarnessOptions with the headless browser', () => {
     const ctx = { signal: new AbortController().signal, toolUseID: 'tu', suggestions: [] } as never
     await expect(
       options.canUseTool!(t('browser_navigate'), { url: 'https://scadbuddy.internal.example/m/builtin%3Abox?x=1' }, ctx),
-    ).resolves.toEqual({ behavior: 'allow', updatedInput: { url: `${ORIGIN}/m/builtin%3Abox?x=1` } })
+    ).resolves.toMatchObject({ behavior: 'allow', updatedInput: { url: 'https://scadbuddy.internal.example/m/builtin%3Abox?x=1' } })
   })
 
   it('parks the first navigation to an allowed origin, then remembers the origin for the session', async () => {

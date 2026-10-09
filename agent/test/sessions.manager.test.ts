@@ -677,6 +677,28 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(runs[2]!.headlessBrowser).toBeUndefined()
     })
 
+    it("reads the backend's public_url for each browser turn, and runs without it when the read fails (#983)", async () => {
+      const paths = await tempPaths()
+      const settings = new SettingsStore(db.sql)
+      await settings.set(SETTING_HEADLESS_BROWSER, true)
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      let live: () => Promise<string | undefined> = () => Promise.resolve('https://scadbuddy.internal.example')
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: runner,
+        settings,
+        headlessBrowser: { backendUrl: 'http://127.0.0.1:8000', livePublicUrl: () => live() },
+      })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
+      await turn!.done
+      expect(runs[0]!.headlessBrowser?.livePublicUrl).toBe('https://scadbuddy.internal.example')
+      live = () => Promise.reject(new Error('backend down'))
+      await (await m.send(session.id, agentA, 'again')).done
+      expect(runs[1]!.headlessBrowser).toBeDefined()
+      expect(runs[1]!.headlessBrowser?.livePublicUrl).toBeUndefined()
+    })
+
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
       const paths = await tempPaths()
       const settings = new SettingsStore(db.sql)

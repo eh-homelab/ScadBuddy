@@ -7,7 +7,7 @@ actions always need a human approval (§8.2). So the backend enforces it itself:
 request from the headless context to the backend carries the **agent-actor marker**,
 an ``X-ScadBuddy-Agent-Session`` header added by the agent's request guard
 (``agent/src/harness/headlessBrowser.ts`` ``AGENT_ACTOR_HEADER``,
-``redirectGuardSource``; it is sent to the backend's origin only, never to the other
+``redirectGuardSource``; it is sent to ScadBuddy's own origins only, never to the other
 origins a session may be allowed to open), and this gate lets such a request through
 only when it cannot change anything outward:
 
@@ -45,6 +45,10 @@ API key there. The agent refuses to ask for such a grant too
 Anything else, including a database that is unset, unreachable or has no ``ai_*``
 tables, is refused: the gate fails closed. ``agent/test/headlessGrants.pg.test.ts``
 runs :data:`GRANT_SQL` against the agent's real schema.
+
+Since #983 the headless browser opens ScadBuddy's public origins rather than the backend's
+loopback address, so the marker arrives through whatever ingress fronts the backend;
+nothing here depends on the client's address.
 
 The marker is not authentication. A request without it is exactly as trusted as today
 (§4.3); forging one can only get a request refused. Measured on the pinned

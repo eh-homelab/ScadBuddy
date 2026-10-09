@@ -750,9 +750,12 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     re-pointed at the agent sends its own name in both `Host` and `Origin`,
     which is not on the list.
 - **Where the headless browser may go** (`agent/src/harness/browserOrigins.ts`,
-  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It always opens the
-  backend (`SCADBUDDY_BACKEND_URL`), and a URL on `SCADBUDDY_PUBLIC_URL` or
-  `SCADBUDDY_ALLOWED_ORIGINS` is rewritten onto it. **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It opens ScadBuddy's
+  own origins as they are: `SCADBUDDY_PUBLIC_URL` (and the stored `public_url`
+  setting) and `SCADBUDDY_ALLOWED_ORIGINS`, through the ingress, so the agent pod
+  must reach at least one of them without an interactive login (#983). Only with
+  none configured does it open the backend (`SCADBUDDY_BACKEND_URL`) instead.
+  **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
   (comma-separated origins, or `*` for any) lets it open other origins too, each only
   after a human approves it once per session in the ScadBuddy UI. Unset, it opens
   nothing else. `*` plus that approval is the intended setting for full use; it also

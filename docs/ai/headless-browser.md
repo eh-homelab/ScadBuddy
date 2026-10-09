@@ -23,7 +23,7 @@ from the next turn on, every session turn gets the browser (`main.ts` gives the
 | The pinned server, `@playwright/mcp` **0.0.83** (Apache-2.0, [npm](https://www.npmjs.com/package/@playwright/mcp/v/0.0.83), [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)) | exact dependency in [`agent/package.json`](../../agent/package.json) |
 | The official plugin's manifest, vendored byte for byte from [`anthropics/claude-plugins-official` at `fa59bc9`](https://github.com/anthropics/claude-plugins-official/tree/fa59bc9037741ecfa131aa27938272605710d7b2/external_plugins/playwright) (Apache-2.0, the repository's root `LICENSE`) | [`agent/plugins/playwright/`](../../agent/plugins/playwright/README.md) |
 | Per-session plugin copy, server config, tier map, disallowed tools, input guard, request guard | [`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts) |
-| Where it may go: the backend, its aliases, and origins a human approved per session | [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts), table `ai_browser_origins` ([migration](../../agent/src/db/migrations/20260930T0342Z_browser_origins.sql)), `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` in [`agent/src/config.ts`](../../agent/src/config.ts) |
+| Where it may go: ScadBuddy's own origins, and origins a human approved per session | [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts), table `ai_browser_origins` ([migration](../../agent/src/db/migrations/20260930T0342Z_browser_origins.sql)), `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` in [`agent/src/config.ts`](../../agent/src/config.ts) |
 | Loading it into a query | `buildHarness()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts) (`HarnessRun.headlessBrowser`) |
 | Turning it on per turn | `runTurn()` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts): `deps.headlessBrowser` **and** the `ai_settings` key `headless_browser_enabled` = `true` |
 | Its directory | `sessionBrowserDir()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts): `<state dir>/browser/<session id>` |
@@ -48,8 +48,9 @@ rejects that, so it is not vendored. Instead, for each turn with the browser on,
   - `browser.initPage: [redirect-guard.cjs]`, the request guard (Guards, 3);
   - `acceptDownloads: false`, `serviceWorkers: "block"`, and **no**
     `extraHTTPHeaders`: the request guard adds the agent-actor marker
-    (`X-ScadBuddy-Agent-Session: <session id>`) to requests to the backend only;
-  - `network.allowedOrigins`: the backend's origin, its aliases and the origins
+    (`X-ScadBuddy-Agent-Session: <session id>`) to requests to ScadBuddy's own
+    origins only;
+  - `network.allowedOrigins`: ScadBuddy's own origins and the origins
     `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` lists; left out under `*` (the server then
     allows all, and the guards below are the gate);
   - `outputDir: <browser dir>/output`, `allowUnrestrictedFileAccess: false`,
@@ -98,14 +99,14 @@ In order, from the model outwards:
    (`browser_navigate`, `browser_tabs` new) with `classifyNavigation()`
    ([`browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts)), comparing origins
    with `normaliseOrigin()` from [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts):
-   - the backend's origin: runs at the tool's tier;
-   - an **alias** (the origin of `SCADBUDDY_PUBLIC_URL`, or one in
-     `SCADBUDDY_ALLOWED_ORIGINS`): runs with the URL **rewritten** to the same path,
-     query and fragment on the backend (`canUseTool`'s `updatedInput`);
+   - one of **ScadBuddy's own origins** (next section): runs at the tool's tier,
+     with the URL as it is;
+   - the backend's origin when ScadBuddy's own are configured and it is not among
+     them: **denied**, naming the same path on the public URL to open instead;
    - an origin `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` allows: **outward** until a human
      approves it for the session, then runs at the tool's tier (next section);
    - anything else is **denied** at any tier: `file:`, `data:`, `javascript:`, other
-     ports, hosts and schemes, and `http://backend@evil.example/`.
+     ports, hosts and schemes, lookalike suffixes, and `http://backend@evil.example/`.
 
    It also denies a `filename` that is not a plain file name (no directory part, no
    leading dot).
@@ -115,20 +116,21 @@ In order, from the model outwards:
    own routes would, so the allow-list only matters if the guard is not loaded.
 3. **The request guard** (`redirectGuardSource()`, loaded through the server's
    `browser.initPage` and installed once on the browser context, so popups are covered
-   from their first request) routes every request itself. A request may go to the
-   backend; to an alias, which is never fetched (a GET navigation becomes one to the
-   same path on the backend, anything else is refused); or to an origin approved in
-   this session. Anything else is refused. A request that may go is made with
+   from their first request) routes every request itself. A request may go to one of
+   ScadBuddy's own origins, or to an origin approved in this session. Anything else
+   is refused. A request that may go is made with
    `maxRedirects: 0`; a 3xx to a place the session may not go is refused, an allowed
    3xx on a GET navigation becomes a new navigation (which the guard sees again), and
-   any other 3xx is refused. So neither a backend page redirecting off-origin nor an
+   any other 3xx is refused. So neither a ScadBuddy page redirecting off-origin nor an
    approved origin redirecting to an unapproved one gets through, whatever sits in
-   front of the backend (measured, below). The guard adds the marker to requests to the
-   backend, replacing any copy the page set, and removes it from every other request.
-   A WebSocket is connected only to the backend or an approved origin
-   (`routeWebSocket`); others are closed.
-4. **The backend's agent-actor gate.** Every request from the headless context to the
-   backend carries `X-ScadBuddy-Agent-Session`. `AgentActorGate` lets such a request
+   front of the backend (measured, below). The guard adds the marker to requests to
+   ScadBuddy's own origins, replacing any copy the page set, and removes it from every
+   other request. A WebSocket is connected only to one of ScadBuddy's own origins or an
+   approved origin (`routeWebSocket`); others are closed.
+4. **The backend's agent-actor gate.** Every request from the headless context to
+   ScadBuddy carries `X-ScadBuddy-Agent-Session`, and reaches the backend through
+   the ingress like the user's own. The gate reads the header, not the client's
+   address, so it holds there exactly as it did on loopback. `AgentActorGate` lets such a request
    through for `GET`/`HEAD`/`OPTIONS`, and for the non-safe routes in
    `AGENT_ALLOWED_WRITES` (the read/write tools' routes that no outward tool shares;
    `agent/test/agentActor.test.ts` derives the same list from the tool registry and
@@ -139,17 +141,34 @@ In order, from the model outwards:
 
 ## Beyond the backend: `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`
 
-By default the browser opens ScadBuddy and nothing else. Two things widen that.
+By default the browser opens ScadBuddy and nothing else.
 
-**Aliases, always on.** ScadBuddy's own public URL (`SCADBUDDY_PUBLIC_URL`) and the
-other names it is served under (`SCADBUDDY_ALLOWED_ORIGINS`, the same list the agent
-accepts credential writes and `/mcp` from) are aliases of the backend. The model sees
-them in links, READMEs and what the user pastes; in production it navigated to
+**ScadBuddy's own origins, opened as they are** (#799, #983). ScadBuddy's public URL
+(`SCADBUDDY_PUBLIC_URL`, and the backend's stored `public_url` setting, read when each
+turn starts) and the other names it is served under (`SCADBUDDY_ALLOWED_ORIGINS`, the
+same list the agent accepts credential writes and `/mcp` from) are ScadBuddy's own
+origins. The model sees them in links, READMEs and what the user pastes; in
+production it navigated to
 `https://scadbuddy.internal.nullreference.io/m/builtin%3Aspinning-top-pip` and was
-refused. Now such a URL is rewritten to the same path on `SCADBUDDY_BACKEND_URL`
-before the tool runs, and the request guard does the same for a link or redirect to an
-alias inside a page. The browser never talks to the public URL itself, which would go
-out through the ingress and back.
+refused. Now such a URL opens as it is, through the ingress, so the page, its cookies,
+its absolute links and the realtime socket's origin check are the same as in the
+user's own tab. Matching is by exact origin: `https://scadbuddy.internal.nullreference.io.evil.example`
+or another scheme or port is not one of them.
+
+Once any is configured, the backend's own address (`SCADBUDDY_BACKEND_URL`,
+`http://127.0.0.1:8080` in the pod) is **not** opened: a navigation to it is refused
+with the same path on the public URL to open instead, and it can never be approved
+under `*` either, since its requests would carry no marker. With none configured (a
+dev run, the tests) the backend's origin is the one ScadBuddy origin. Listing it in
+`SCADBUDDY_ALLOWED_ORIGINS` keeps it.
+
+So the agent pod must reach at least one of those origins without an interactive login.
+An origin behind SSO answers the browser with a redirect to its identity provider,
+which the request guard refuses like any off-origin redirect; list an origin the pod
+reaches directly (in this deployment, the internal one) first, as `SCADBUDDY_PUBLIC_URL`
+or in `SCADBUDDY_ALLOWED_ORIGINS`. Nothing about the safety model depends on the
+loopback address: the marker goes to every one of these origins, and the backend's gate
+judges it the same however the request arrives (Guards, 4).
 
 **Other origins, opt-in**, with the infrastructure variable
 `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` (read by `config.ts`, so the operator decides it; no
@@ -157,12 +176,12 @@ request can change it):
 
 | Value | Meaning |
 |---|---|
-| unset (default) | Only the backend and its aliases, exactly as before. |
+| unset (default) | Only ScadBuddy's own origins. |
 | `https://docs.example, http://printer.lan:8080` | Those origins too (scheme, host and port; no path), each after its approval. |
 | `*` | Any `http(s)` origin, each after its approval. |
 
 **Approval, once per origin per session.** The first `browser_navigate` (or
-`browser_tabs` new) to an allowed origin that is not the backend's is an **outward**
+`browser_tabs` new) to an allowed origin that is not ScadBuddy's is an **outward**
 call whatever the tool's tier: it parks for the user's approval in the ScadBuddy UI
 through the normal approval flow (`approvals/service.ts`, `ai_approvals`), bound to that
 exact URL. When the user approves it, the harness (`run.ts`) first records the origin
@@ -211,7 +230,7 @@ narrower menu to approve from.
   things: approve only what you asked for.
 - **What a third party sees.** A request to an approved origin carries no agent-actor
   marker and no ScadBuddy credential. Chromium may send a `Referer` naming the page it
-  came from, which can be a backend URL (`http://127.0.0.1:8080/...` in the pod layout).
+  came from, which can be a ScadBuddy URL on its public origin.
 
 ## Approving one outward request
 
@@ -267,7 +286,10 @@ this line once they have. The tests are
 [`agent/test/headlessBrowser.e2e.test.ts`](../../agent/test/headlessBrowser.e2e.test.ts)
 (the real SDK and Claude Code, a scripted model on the local fake Anthropic endpoint,
 a real Chromium); both skip without a Chromium. ci.yml's agent job installs the pinned
-headless shell before the tests.
+headless shell before the tests. Until #983 they skipped in CI too: the shell's binary
+became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only for
+`headless_shell`. The #983 lines below were measured on 0.0.83 with chromium-headless-shell
+1247, the other tests passing alongside them.
 
 - **Plugin MCP servers need `strictMcpConfig: false`.** With it `true`, the init message
   lists the plugin but starts no server and no tool appears. The harness turns it off
@@ -297,10 +319,13 @@ headless shell before the tests.
   nothing reaches the origin until the approval, the second navigation and a second
   turn's run without asking, and `ai_browser_origins` holds one row naming the one
   approval.
-- **Aliases**: a navigation to the public URL runs as one to the backend: the server's
-  own record of the call (`await page.goto(...)`) names the backend URL, so Claude Code
-  2.1.283 and 2.1.287 ran the plugin tool with `canUseTool`'s `updatedInput` (e2e test); inside a
-  page the guard moves an alias navigation onto the backend.
+- **ScadBuddy's public origin** (#983; the tests serve the stand-in UI as
+  `http://localhost:<port>` for the public URL and `http://127.0.0.1:<port>` for the
+  backend): a navigation to the public URL opens it unchanged (the server's record of the
+  call names it, e2e test), the request arrives with the public host and the marker, and
+  so does the page's own `fetch` (server test). A navigation to the backend's origin is
+  refused before the browser is asked (e2e test) and by the guard (server test), and the
+  server receives nothing.
 - **A direct navigation off the origin** fails with `net::ERR_BLOCKED_BY_CLIENT` (and the
   harness refuses it before that). **The allow-list alone follows a redirect off the
   origin**: the tool usually reports an interrupted navigation, but the other origin has
@@ -364,7 +389,7 @@ unprivileged user namespaces). No capability and no privileged container is need
 ## Redirects: guarded in the browser, and none from the backend
 
 The request guard (Guards, 3) is what stops an off-origin redirect, including one
-added by an ingress, auth proxy or CDN in front of `SCADBUDDY_BACKEND_URL`. The backend
+added by an ingress, auth proxy or CDN in front of ScadBuddy's public origins. The backend
 also serves none of its own, as defence in depth: `backend/tests/api/test_no_open_redirect.py` sends paths
 shaped to provoke a redirect (`//evil.example/`, `/%2F%2Fevil.example/`, trailing
 slashes, the SPA's directories) to the app with a built SPA mounted and asserts every
@@ -372,8 +397,8 @@ slashes, the SPA's directories) to the app with a built SPA mounted and asserts 
 redirect by hand until that redirect is reviewed. A proxy in front of the backend
 that redirects off the origin (a login bounce, a canonical-host redirect) no longer
 leaks anything, but it does make the headless browser useless there: its pages are
-refused. In the pod layout of spec §4.1 `SCADBUDDY_BACKEND_URL` is
-`http://127.0.0.1:<backend port>`, the backend alone, with no proxy in between.
+refused. Since #983 the browser goes through the ingress, so give it an origin with no
+such proxy (see "Beyond the backend").
 
 ## Status and what is not done
 
@@ -385,6 +410,10 @@ refused. In the pod layout of spec §4.1 `SCADBUDDY_BACKEND_URL` is
   driving a stand-in UI through the whole approve-and-click flow (session e2e test).
 - **Pages on approved origins lose cross-origin subresources** from origins that are
   not approved, and every redirected subresource (Beyond the backend).
+- **Not measured through the live ingress** (#983): that the marker survives it and
+  that the agent pod reaches the internal origin without SSO are expected (the gate
+  reads only the header; the internal origin has no login) but not yet seen in the
+  cluster.
 - **The model has to find the request's path itself** (the `403` detail and
   `browser_network_requests`); an approval card shows that method and path.
 

@@ -4,20 +4,22 @@ import { normaliseOrigin, OriginConfigError, originPolicy } from '../http/origin
 // Where the headless browser (#349, headlessBrowser.ts) may go, and how a
 // session remembers the origins a human let it open.
 //
-// THREE KINDS OF ORIGIN, for a URL a tool takes (`browser_navigate`,
+// TWO KINDS OF ORIGIN, for a URL a tool takes (`browser_navigate`,
 // `browser_tabs` new) and for every request the page makes (the guard,
 // headlessBrowser.ts `redirectGuardSource`):
 //
-//   - the BACKEND's (SCADBUDDY_BACKEND_URL): it serves the SPA, the one place
-//     the browser always may go; only its requests carry the agent-actor marker;
-//   - ALIASES of it: the origins the agent already treats as the UI's own,
-//     SCADBUDDY_PUBLIC_URL and SCADBUDDY_ALLOWED_ORIGINS (http/origins.ts
-//     `originPolicy`, the same list the credential writes and `/mcp` accept).
-//     The model sees those in links and READMEs (in production it opened
-//     `https://scadbuddy.internal.nullreference.io/m/…` and was refused), so a
-//     URL on one is REWRITTEN to the same path, query and fragment on the
-//     backend origin rather than refused. The browser never talks to an alias
-//     itself: that would go out through the ingress and back, as a stranger;
+//   - ScadBuddy's own, the UI origins: SCADBUDDY_PUBLIC_URL, the backend's
+//     stored `public_url` (read each turn) and SCADBUDDY_ALLOWED_ORIGINS
+//     (http/origins.ts `originPolicy`, the same list the credential writes and
+//     `/mcp` accept). They are opened AS THEY ARE (#983): the model sees them
+//     in links, READMEs and what the user pastes, and the pages, cookies and
+//     the realtime socket's origin check are the user's. Every request to one
+//     carries the agent-actor marker, so the backend's gate (agent_actor.py)
+//     refuses outward requests behind the ingress exactly as it did on
+//     loopback. When none is configured (a dev run, the tests), the backend's
+//     own origin (SCADBUDDY_BACKEND_URL) is the one UI origin. Once one is,
+//     the backend's origin is NOT opened, and never approvable: its requests
+//     would carry no marker. Matched by exact origin, never by suffix;
 //   - OFF-ORIGIN: anything else. Refused, as before, unless
 //     SCADBUDDY_BROWSER_ALLOWED_ORIGINS (config.ts) lists it or is `*`. An
 //     allowed one is an `outward` call the first time in a session: it parks
@@ -31,9 +33,10 @@ import { normaliseOrigin, OriginConfigError, originPolicy } from '../http/origin
 
 /** The browser's origins, normalised (`scheme://host[:port]`, default port dropped). */
 export type BrowserOrigins = {
+  /** SCADBUDDY_BACKEND_URL's origin: in `ui` only when listed or nothing else is; never approvable. */
   backend: string
-  /** Rewritten to the backend; never the backend itself. */
-  aliases: readonly string[]
+  /** ScadBuddy's own origins, opened as they are; their requests carry the marker. Never empty. */
+  ui: readonly string[]
   /** Off-origin origins that may be approved; `*` for any http(s) origin. Empty: none (the default). */
   allowed: '*' | readonly string[]
 }
@@ -73,6 +76,11 @@ export function parseBrowserAllowedOrigins(raw: string | undefined): '*' | strin
 export function browserOrigins(options: {
   backendUrl: string
   publicUrl?: string | undefined
+  /**
+   * The backend's stored `public_url` setting, read when the turn starts so a
+   * change applies from the next turn. Ignored unless an http(s) URL.
+   */
+  livePublicUrl?: string | undefined
   /** SCADBUDDY_ALLOWED_ORIGINS, raw. */
   uiOrigins?: string | undefined
   /** SCADBUDDY_BROWSER_ALLOWED_ORIGINS, raw. */
@@ -80,31 +88,34 @@ export function browserOrigins(options: {
 }): BrowserOrigins {
   const backend = normaliseOrigin(options.backendUrl)
   if (!backend) throw new BrowserOriginsError(`not an http(s) origin: ${options.backendUrl}`)
-  let ui: ReadonlySet<string>
+  const ui = new Set<string>()
+  const live = options.livePublicUrl === undefined ? undefined : normaliseOrigin(options.livePublicUrl)
+  if (live) ui.add(live)
   try {
-    ui = originPolicy(options.publicUrl, undefined, options.uiOrigins).publicOrigins
+    for (const o of originPolicy(options.publicUrl, undefined, options.uiOrigins).publicOrigins) ui.add(o)
   } catch (err) {
     if (err instanceof OriginConfigError) throw new BrowserOriginsError(err.message)
     throw err
   }
+  if (ui.size === 0) ui.add(backend)
   const allowed = parseBrowserAllowedOrigins(options.browserAllowed)
   return {
     backend,
-    aliases: [...ui].filter((o) => o !== backend),
-    // The backend and its aliases are never off-origin.
+    ui: [...ui],
+    // The backend and the UI origins are never off-origin.
     allowed: allowed === '*' ? '*' : allowed.filter((o) => o !== backend && !ui.has(o)),
   }
 }
 
 /** Whether `origin` may be approved at all. */
 export function mayApprove(origins: BrowserOrigins, origin: string): boolean {
-  if (origin === origins.backend || origins.aliases.includes(origin)) return false
+  if (origin === origins.backend || origins.ui.includes(origin)) return false
   return origins.allowed === '*' || origins.allowed.includes(origin)
 }
 
 export type Navigation =
-  /** On the backend: open `url` (an alias URL already rewritten onto the backend). */
-  | { kind: 'backend'; url: string; rewritten: boolean }
+  /** One of ScadBuddy's own origins: open `url` as it is. */
+  | { kind: 'ui'; url: string }
   /** Off-origin, and approved in this session. */
   | { kind: 'approved'; origin: string }
   /** Off-origin and allowed, not yet approved in this session: outward. */
@@ -116,14 +127,19 @@ export function classifyNavigation(url: unknown, origins: BrowserOrigins, approv
   const origin = typeof url === 'string' ? normaliseOrigin(url) : undefined
   const shown = typeof url === 'string' ? JSON.stringify(url) : 'that URL'
   if (typeof url === 'string' && origin !== undefined) {
-    if (origin === origins.backend) return { kind: 'backend', url, rewritten: false }
-    if (origins.aliases.includes(origin)) {
+    if (origins.ui.includes(origin)) return { kind: 'ui', url }
+    if (origin === origins.backend) {
+      // Its requests would carry the marker only on a UI origin; say where to go instead.
       const u = new URL(url.trim())
-      return { kind: 'backend', url: `${origins.backend}${u.pathname}${u.search}${u.hash}`, rewritten: true }
+      const instead = JSON.stringify(`${origins.ui[0]}${u.pathname}${u.search}${u.hash}`)
+      return {
+        kind: 'refused',
+        reason: `does not open ScadBuddy's backend at ${origin}, only its UI at ${origins.ui.join(', ')}; open ${instead} instead.`,
+      }
     }
     if (mayApprove(origins, origin)) return approved.has(origin) ? { kind: 'approved', origin } : { kind: 'ask', origin }
   }
-  const ui = [origins.backend, ...origins.aliases].join(', ')
+  const ui = origins.ui.join(', ')
   if (origins.allowed !== '*' && origins.allowed.length === 0) {
     return { kind: 'refused', reason: `may only open ScadBuddy's own UI at ${ui}; ${shown} is not on it, so it was not opened.` }
   }
