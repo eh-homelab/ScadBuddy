@@ -40,7 +40,9 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
-import { PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { gateActivities, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { DURABLE_TOOLS } from './tools/manifest.js'
+import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
 import { DurableGate } from './gate/durable.js'
 import { Runtime } from '@temporalio/worker'
@@ -328,7 +330,13 @@ const temporalWorker =
         address: temporal.address,
         namespace: config.temporalNamespace,
         activities: {
-          ...toolActivities(ALL_TOOLS, { services: toolServices, sessions: new PgSessionOwners(temporal.sql), audit }),
+          ...toolActivities(DURABLE_TOOLS, {
+            services: toolServices,
+            sessions: new PgSessionOwners(temporal.sql),
+            audit,
+            answers: new PgAnswers(temporal.sql),
+          }),
+          ...gateActivities({ audit }),
           ...operationActivities(commandKinds, operationStore),
         },
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).

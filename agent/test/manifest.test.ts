@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { toolManifest, writeManifest } from '../src/tools/manifest.js'
+import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
+import { DURABLE_TOOLS, toolManifest, writeManifest } from '../src/tools/manifest.js'
 import { createExternalServer } from '../src/tools/projections.js'
 import { services } from './helpers/mcp.js'
 
@@ -23,13 +24,19 @@ async function mcpListing() {
 }
 
 describe('the tool manifest', () => {
-  it('is what /mcp lists, with every tool and its tier', async () => {
+  it('is what /mcp lists, with every tool, its tier and its gate kind, plus the durable-only answer tools', async () => {
     const manifest = await toolManifest()
-    expect(manifest.map((t) => t.name)).toEqual(ALL_TOOLS.map((t) => t.name).sort())
-    const risk = new Map(ALL_TOOLS.map((t) => [t.name, t.risk]))
-    for (const entry of manifest) expect(entry.tier).toBe(risk.get(entry.name))
-    const listed = new Map((await mcpListing()).map((t) => [t.name, t]))
+    expect(manifest.map((t) => t.name)).toEqual(DURABLE_TOOLS.map((t) => t.name).sort())
+    const byName = new Map(DURABLE_TOOLS.map((t) => [t.name, t]))
     for (const entry of manifest) {
+      expect(entry.tier).toBe(byName.get(entry.name)!.risk)
+      expect(entry.hitl, entry.name).toBe(byName.get(entry.name)!.gated ? 'approval' : entry.name.match(/^(ask_user|wait_for_user)$/) ? 'answer' : null)
+    }
+    expect(manifest.filter((t) => t.hitl === 'answer').map((t) => t.name)).toEqual(['ask_user', 'wait_for_user'])
+    const listed = new Map((await mcpListing()).map((t) => [t.name, t]))
+    // Durable-only: never on /mcp.
+    for (const tool of DURABLE_ONLY_TOOLS) expect(listed.has(tool.name), tool.name).toBe(false)
+    for (const entry of manifest.filter((e) => listed.has(e.name))) {
       const tool = listed.get(entry.name)!
       expect({ name: entry.name, description: entry.description, input_schema: entry.input_schema }).toEqual({
         name: tool.name,

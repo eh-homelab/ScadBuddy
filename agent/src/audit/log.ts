@@ -98,6 +98,13 @@ export type AuditEntry = {
   inputHash?: string | undefined
   inputSummary?: string | undefined
   approvalId?: string | null | undefined
+  /**
+   * A durable session's gate request id (`durable:…`, spec §6.6), on a durable
+   * approval's `approval` row and on the `tool_call` row of the call: an auditor
+   * joins them on it, and the tool_call row's approver is copied from
+   * ai_input_responses by it.
+   */
+  requestId?: string | undefined
   detail?: string | undefined
   startedAt?: Date | undefined
   finishedAt?: Date | undefined
@@ -276,11 +283,16 @@ export class AuditLog implements AuditRepo {
     // A tool call that ran on an approval names who approved it, copied from
     // ai_approvals now (it goes with its session; this row stays).
     const approved = this.deps.sql`decision = 'approved' AND ${entry.kind === 'tool_call'}`
+    // A durable call has no ai_approvals row: its approver is the responder of its request's `approved` outcome.
+    const requestId = entry.requestId ?? null
+    const responder = this.deps.sql`
+      SELECT responder FROM ai_input_responses
+      WHERE request_id = ${entry.kind === 'tool_call' ? requestId : null} AND outcome = 'approved'`
     try {
       await this.deps.sql`
         INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label, client_ip,
                               session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id,
-                              approved_by_kind, approved_by_id, approved_by_label,
+                              approved_by_kind, approved_by_id, approved_by_label, request_id,
                               outcome, detail, started_at, finished_at, duration_ms)
         VALUES (${entry.kind}, ${cap(entry.action, 200)}, ${entry.surface}, ${cap(entry.actor.kind, 50)},
                 ${cap(entry.actor.id, 200)}, ${cap(entry.actor.label, 200)}, ${entry.clientIp ?? null},
@@ -289,9 +301,13 @@ export class AuditLog implements AuditRepo {
                 ${entry.toolUseId ?? null}, ${entry.tier ?? null}, ${entry.inputHash ?? null},
                 ${entry.inputSummary === undefined ? null : cap(entry.inputSummary, SUMMARY_MAX)},
                 ${approvalId},
-                (SELECT decided_by_kind FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
-                (SELECT decided_by_id FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
-                (SELECT decided_by_label FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                COALESCE((SELECT decided_by_kind FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                         (SELECT r.responder->>'kind' FROM (${responder}) r)),
+                COALESCE((SELECT decided_by_id FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                         (SELECT r.responder->>'id' FROM (${responder}) r)),
+                COALESCE((SELECT decided_by_label FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                         (SELECT r.responder->>'label' FROM (${responder}) r)),
+                ${requestId === null ? null : cap(requestId, 500)},
                 ${entry.outcome}, ${entry.detail === undefined ? null : cap(entry.detail, DETAIL_MAX)},
                 ${started}, ${finished}, ${duration})`
     } catch (err) {
