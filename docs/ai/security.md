@@ -952,8 +952,17 @@ session: their bytes go to `ai_session_blobs` through `SessionBlobs.put`, named
 `<sha256>.<ext>`, and the staging rows are deleted. The session's own lifetime governs
 them from then on (deleting the session cascades). A durable session (#1056) reads
 images from that table by name in an activity, so no image enters a Temporal payload.
-The `user.turn` event keeps only the previews, and an MCP transcript (`sessions_get`)
-only their count. Nothing logs or traces the bytes.
+Every image a turn starts with, whatever brought it (an attachment, a backend
+reference over `sessions_send`, an old tab's inline image), is also stored in
+`ai_session_blobs` before the `user.turn` event is logged (`sessions/manager.ts`
+`sentImages`; an attachment's later move then finds its row there). The event keeps
+the previews, each with its image's name, and an MCP transcript (`sessions_get`) only
+their count. The panel's full-size view loads an image by that name from
+`GET /api/v1/ai/sessions/:id/blobs/:name` (`routes/sessions.ts`): the same UI-read
+check as the session's other reads, `Content-Type` from the stored type, `nosniff`,
+`Content-Disposition: inline`, a sandboxing CSP, `Cross-Origin-Resource-Policy:
+same-origin` and `Cache-Control: private, immutable` (the name is the bytes' hash).
+Nothing logs or traces the bytes.
 
 **The socket.** The chat socket takes frames up to 256 KiB (`CHAT_FRAME_MAX`), the
 same as the tab socket (`BRIDGE_FRAME_MAX`), and at most 32 unhandled frames per

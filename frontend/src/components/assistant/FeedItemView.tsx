@@ -427,7 +427,7 @@ export function FeedItemView({
           {item.author.kind !== 'browser' && (
             <p className="mb-0.5 text-[11px] text-faint">{item.author.label}</p>
           )}
-          {item.images && <SentImages images={item.images} />}
+          {item.images && <SentImages images={item.images} sessionId={sessionId} />}
           <p className="whitespace-pre-wrap">{item.text}</p>
           {onForkHere && (
             <ForkHere

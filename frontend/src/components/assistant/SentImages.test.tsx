@@ -1,15 +1,16 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState, type KeyboardEvent, type ReactNode } from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
-import { forgetFullSizes, rememberFullSize } from '../../agent/chat/images'
-import type { ImagePreview } from '../../agent/chat/protocol'
+import { describe, expect, it } from 'vitest'
+import { blobUrl, type SentImage } from '../../agent/chat/protocol'
 import { ModalCompanionContext } from '../../lib/modal'
 import { SentImages } from './SentImages'
 
 // #1891 — a sent image, opened large from the transcript.
 
-const preview = (name: string): ImagePreview => ({ mediaType: 'image/jpeg', data: btoa(`preview of ${name}`) })
+const preview = (name: string): SentImage => ({ mediaType: 'image/jpeg', data: btoa(`preview of ${name}`) })
+/** A preview whose full image the agent stored under a name. */
+const stored = (name: string, hex: string): SentImage => ({ ...preview(name), name: `${hex.repeat(64)}.png` })
 const previewUrl = (name: string) => `data:image/jpeg;base64,${btoa(`preview of ${name}`)}`
 
 /**
@@ -32,8 +33,6 @@ function Panel({ children }: { children: ReactNode }) {
   )
 }
 
-afterEach(() => forgetFullSizes())
-
 describe('sent images (#1891)', () => {
   it('shows each preview as a button that names the image, at least 24 px', () => {
     render(<SentImages images={[preview('a'), preview('b')]} />)
@@ -51,12 +50,12 @@ describe('sent images (#1891)', () => {
     expect(within(list).getByRole('img', { name: 'Image 1 of 2' })).toHaveAttribute('src', previewUrl('a'))
   })
 
-  it('opens the image this tab sent, full size, in a modal that traps focus and closes on Esc', async () => {
+  it('loads the stored image, showing the preview until it has, in a modal that traps focus and closes on Esc', async () => {
     const user = userEvent.setup()
-    rememberFullSize({ mediaType: 'image/png', data: btoa('the whole of a'), preview: preview('a') })
+    const image = stored('a', 'a')
     render(
       <Panel>
-        <SentImages images={[preview('a')]} />
+        <SentImages images={[image]} sessionId="sess-1" />
       </Panel>,
     )
     const thumb = screen.getByRole('button', { name: 'View image 1 of 1 larger' })
@@ -65,11 +64,15 @@ describe('sent images (#1891)', () => {
     const dialog = screen.getByRole('dialog', { name: 'Image 1 of 1' })
     // Modal even though it opens from the assistant panel, which a dialog otherwise sits beside.
     expect(dialog).toHaveAttribute('aria-modal', 'true')
-    expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, as sent' })).toHaveAttribute(
-      'src',
-      `data:image/png;base64,${btoa('the whole of a')}`,
-    )
-    expect(within(dialog).queryByText(/only a preview/i)).not.toBeInTheDocument()
+    // While the full image loads, its preview stands in for it.
+    expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, preview' })).toHaveAttribute('src', previewUrl('a'))
+    const full = within(dialog).getByAltText('Image 1 of 1, as sent')
+    expect(full).toHaveAttribute('src', blobUrl('sess-1', `${'a'.repeat(64)}.png`))
+    expect(full).not.toBeVisible()
+    fireEvent.load(full)
+    expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, as sent' })).toBeVisible()
+    expect(within(dialog).queryByRole('img', { name: 'Image 1 of 1, preview' })).not.toBeInTheDocument()
+    expect(within(dialog).queryByText(/preview/i)).not.toBeInTheDocument()
 
     const close = within(dialog).getByRole('button', { name: 'Close' })
     expect(close).toHaveFocus()
@@ -87,7 +90,27 @@ describe('sent images (#1891)', () => {
     expect(thumb).toHaveFocus()
   })
 
-  it('opens from the keyboard and shows the preview enlarged when this tab has no full image', async () => {
+  it('falls back to the preview, saying so, when the stored image cannot be loaded', async () => {
+    const user = userEvent.setup()
+    render(<SentImages images={[stored('a', 'a'), stored('b', 'b')]} sessionId="sess-gone" />)
+    await user.click(screen.getByRole('button', { name: 'View image 2 of 2 larger' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Image 2 of 2' })
+    fireEvent.error(within(dialog).getByAltText('Image 2 of 2, as sent'))
+    expect(within(dialog).queryByAltText('Image 2 of 2, as sent')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('img', { name: 'Image 2 of 2, preview' })).toHaveAttribute('src', previewUrl('b'))
+    expect(dialog).toHaveTextContent(/the full image could not be loaded/i)
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toHaveFocus()
+
+    // Opening another image tries its own full image afresh.
+    await user.keyboard('{Escape}')
+    await user.click(screen.getByRole('button', { name: 'View image 1 of 2 larger' }))
+    const again = screen.getByRole('dialog', { name: 'Image 1 of 2' })
+    expect(within(again).getByAltText('Image 1 of 2, as sent')).toHaveAttribute('src', blobUrl('sess-gone', `${'a'.repeat(64)}.png`))
+    expect(again).not.toHaveTextContent(/could not be loaded/i)
+  })
+
+  it('opens from the keyboard and shows the preview enlarged for a turn that names no stored image', async () => {
     const user = userEvent.setup()
     render(<SentImages images={[preview('a'), preview('b')]} />)
     screen.getByRole('button', { name: 'View image 2 of 2 larger' }).focus()
@@ -96,6 +119,7 @@ describe('sent images (#1891)', () => {
     const dialog = screen.getByRole('dialog', { name: 'Image 2 of 2' })
     expect(within(dialog).getByRole('img', { name: 'Image 2 of 2, preview' })).toHaveAttribute('src', previewUrl('b'))
     expect(dialog).toHaveTextContent(/only a preview of this image is kept/i)
+    expect(within(dialog).queryByAltText(/as sent/)).not.toBeInTheDocument()
 
     await user.click(within(dialog).getByRole('button', { name: 'Close' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
