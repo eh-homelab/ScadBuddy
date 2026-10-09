@@ -637,9 +637,26 @@ jobs:
       # validator port, as the agent job runs them against agent/src/gate/validate.ts.
       # Opens and re-seals agent/test/fixtures/payload-vectors.json, which the agent
       # job regenerates from agent/src/temporal/payloadCodec.ts.
+      # DurableSession's tests (tests/test_session_*.py, #1056 phase 5c) start their own
+      # dev server from this CLI and skip without one. Same version and digest as the
+      # agent job's step and the Dockerfile's `test` stage; bump together.
+      - name: Install the Temporal CLI
+        working-directory: .
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
       - name: Tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: uv run --frozen pytest -v
 
       - uses: docker/setup-buildx-action@v4

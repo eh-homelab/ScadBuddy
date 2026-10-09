@@ -5,6 +5,7 @@ import { binary } from './binary.js'
 import { CAMERA, cameraQuery, outputId, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
 import { backendPage, compositeKey, page, PAGED, pageInput, totalCount } from './pagination.js'
+import { sourceOf, withSource } from './print.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
 // images, plate fit, and the 3MF. Routes: backend/scadbuddy/api/{outputs,plates}.py.
@@ -89,49 +90,101 @@ export const outputTools: Tool[] = [
   defineTool({
     name: 'download_3mf',
     description:
-      "An output's multi-colour 3MF, embedded as a base64 resource (model/3mf); when it is too large to " +
-      'inline, a link to fetch it instead.',
-    input: z.object({ output_id: outputId }),
+      "An output's multi-colour 3MF (model/3mf), or a Bambuddy library file as the library holds it " +
+      '(`library_file_id`: what a print of it slices, a 3MF or an STL), embedded as a base64 resource; when it ' +
+      'is too large to inline, a link to fetch it instead.',
+    input: withSource({}),
     risk: 'read',
-    routes: ['GET /api/v1/outputs/{output_id}/model.3mf'],
-    handler: async ({ output_id }, ctx) =>
-      binary(
+    // A library file is read from Bambuddy; an output never is.
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/outputs/{output_id}/model.3mf', 'GET /api/v1/print/library/{file_id}/file'],
+    handler: async (args, ctx) => {
+      const source = sourceOf(args)
+      if (source.kind === 'library') {
+        const id = source.id
+        return binary(
+          ctx.backend.GET('/api/v1/print/library/{file_id}/file', { params: { path: { file_id: id } }, parseAs: 'stream' }),
+          `download library file ${id}`,
+          ctx,
+          { path: `/api/v1/print/library/${id}/file`, name: `library-${id}`, fallbackType: 'application/octet-stream' },
+          (bytes, mimeType) => blob(`scadbuddy://print/library/${id}/file`, bytes, mimeType),
+        )
+      }
+      const output_id = source.id
+      return binary(
         ctx.backend.GET('/api/v1/outputs/{output_id}/model.3mf', { params: { path: { output_id } }, parseAs: 'stream' }),
         `download 3MF of ${output_id}`,
         ctx,
         { path: `/api/v1/outputs/${output_id}/model.3mf`, name: `${output_id}.3mf`, fallbackType: 'model/3mf' },
         (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/model.3mf`, bytes, mimeType),
-      ),
+      )
+    },
   }),
 
   defineTool({
     name: 'get_output_preview',
     description:
-      "An output's preview mesh as a binary glTF (model/gltf-binary), embedded as a base64 resource; " +
-      'when it is too large to inline, a link to fetch it instead.',
-    input: z.object({ output_id: outputId }),
+      "An output's preview mesh, or one plate of a Bambuddy library file (`library_file_id`, `plate` from 1) " +
+      'read from the 3MF a print of it slices, as a binary glTF (model/gltf-binary), embedded as a base64 ' +
+      'resource; when it is too large to inline, a link to fetch it instead.',
+    input: withSource({ plate: z.number().int().min(1).optional().describe("A library file's plate; 1 by default") }),
     risk: 'read',
-    routes: ['GET /api/v1/outputs/{output_id}/preview.glb'],
-    handler: async ({ output_id }, ctx) =>
-      binary(
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/outputs/{output_id}/preview.glb', 'GET /api/v1/print/library/{file_id}/preview.glb'],
+    handler: async ({ plate, ...rest }, ctx) => {
+      const source = sourceOf(rest)
+      if (source.kind === 'library') {
+        const id = source.id
+        return binary(
+          ctx.backend.GET('/api/v1/print/library/{file_id}/preview.glb', {
+            params: { path: { file_id: id }, query: { plate } },
+            parseAs: 'stream',
+          }),
+          `get preview of library file ${id}`,
+          ctx,
+          {
+            path: `/api/v1/print/library/${id}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
+            name: `library-${id}.glb`,
+            fallbackType: 'model/gltf-binary',
+          },
+          (bytes, mimeType) => blob(`scadbuddy://print/library/${id}/preview.glb`, bytes, mimeType),
+        )
+      }
+      const output_id = source.id
+      return binary(
         ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', { params: { path: { output_id } }, parseAs: 'stream' }),
         `get preview of ${output_id}`,
         ctx,
         { path: `/api/v1/outputs/${output_id}/preview.glb`, name: `${output_id}.glb`, fallbackType: 'model/gltf-binary' },
         (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/preview.glb`, bytes, mimeType),
-      ),
+      )
+    },
   }),
 
   defineTool({
     name: 'get_output_plates',
-    description: "The plates in an output's 3MF: objects, colours and slots per plate.",
-    input: z.object({ output_id: outputId }),
+    description:
+      "The plates in an output's 3MF: objects, colours and slots per plate. For a Bambuddy library file " +
+      '(`library_file_id`), the plates Bambuddy reads from it (index and name), what print_output takes as ' +
+      '`plate_id`; empty when it reads none, which prints as plate 1.',
+    input: withSource({}),
     risk: 'read',
-    routes: ['GET /api/v1/outputs/{output_id}/plates'],
-    handler: async ({ output_id }, { backend }) =>
-      json(
-        await ok(backend.GET('/api/v1/outputs/{output_id}/plates', { params: { path: { output_id } } }), `get plates of ${output_id}`),
-      ),
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/outputs/{output_id}/plates', 'GET /api/v1/print/library/{file_id}/plates'],
+    handler: async (args, { backend }) => {
+      const source = sourceOf(args)
+      return json(
+        source.kind === 'library'
+          ? await ok(
+              backend.GET('/api/v1/print/library/{file_id}/plates', { params: { path: { file_id: source.id } } }),
+              `get plates of library file ${source.id}`,
+            )
+          : await ok(
+              backend.GET('/api/v1/outputs/{output_id}/plates', { params: { path: { output_id: source.id } } }),
+              `get plates of ${source.id}`,
+            ),
+      )
+    },
   }),
 
   defineTool({

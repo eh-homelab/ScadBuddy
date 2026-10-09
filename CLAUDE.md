@@ -486,7 +486,17 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `agent`. `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (open
   only; the agent alone writes it); `check_cli_version.py` is the build's bundled-CLI
   check (Python `claude-agent-sdk` pinned exactly; it bundles a Claude Code of its own,
-  not the TypeScript SDK's). Phase 5a serves `/healthz` on 8082 only; the worker is 5c.
+  not the TypeScript SDK's). `python -m scadbuddy_durable` serves `/healthz` on 8082
+  and runs the `agent` queue's worker (`worker.py`; without its variables, health only,
+  saying why). `scadbuddy_durable/session/` is `DurableSession` (5c): `workflow.py`
+  (turns, the gate wiring), `tools.py` (the manifest from `SCADBUDDY_DURABLE_TOOLS_JSON`
+  as `activity_as_tool` stubs on `agent-tools`; the sandbox passes the module through,
+  or a workflow sees an empty manifest), `runner.py` (`ScadBuddyRunner`: credential,
+  budget and cost per segment, `view_user_images`), `events.py` (`follow_session`,
+  the live output into `ai_session_events` from `ai_sessions.durable_offset`),
+  `activities.py` (`gate_settings`, `finish_turn`). Its tests start a dev server from
+  `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` and skip without one; `tests/fake_anthropic.py`
+  is the Python fake endpoint the bundled Claude Code is pointed at.
   `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
   validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
   activities that write `ai_pending_input`, `ai_input_responses`, the session's events
@@ -628,6 +638,10 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 - Conventional-commit titles (`feat(scope):`, `fix(scope):`, `docs:`, `ci:` …);
   Release Drafter labels and groups PRs by title. Body links the issue: `Fixes #N`.
+- Agent-authored changes and docs cite their sources (#259): every external fact gets
+  a link, every measured fact says where and how it was measured (spec §3).
+  `lint-plugin.sh` checks it for plugin skills only; `link-check.yml` checks weekly that
+  the links in `docs/`, `README.md`, this file and every `SKILL.md` still resolve.
 - Required checks on `main`: **`CI Summary`** and **`claude-review`** (the ruleset
   lives in eh-homelab/clusters, so renaming either job breaks the gate silently).
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
