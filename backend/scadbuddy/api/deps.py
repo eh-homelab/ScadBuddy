@@ -24,7 +24,7 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents
+from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.components import Components, discover_components
@@ -389,6 +389,7 @@ def _build_core(settings: Settings) -> AppState:
                 client, subject, print_links, uploads=uploads if pool is not None else None
             )
 
+    print_run_store = PrintRunStore(pool, events=transactional_events(events))
     return AppState(
         settings=settings,
         config=config,
@@ -418,9 +419,10 @@ def _build_core(settings: Settings) -> AppState:
             read=read_progress,
             read_library=read_library,
             events=events,
+            newest_failed=newest_failed_from(print_run_store, settings_store.load),
         ),
         print_runs=PrintCommands(
-            store=PrintRunStore(pool, events=transactional_events(events)),
+            store=print_run_store,
             client=temporal,
             task_queue=settings.temporal_task_queue_bambuddy,
             search_attributes=settings.temporal_search_attributes,

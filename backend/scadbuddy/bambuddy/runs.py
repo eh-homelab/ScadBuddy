@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any, Literal, LiteralString, Protocol
 
@@ -42,9 +43,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field, computed_field, model_validator
 
+from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
+from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
+from scadbuddy.core.problems import DATABASE_ERRORS
+from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
 
@@ -494,3 +499,41 @@ class PrintRunStore:
         if current is None:
             raise LookupError(f"there is no print run {run_id}")
         return PrintRun.model_validate(current)
+
+
+async def newest_failure(runs: PrintRunStore, run_subject: str) -> str | None:
+    """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
+    #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
+    run that may have queued recorded what it queued, so its print's own progress says
+    more. Without a database, or with one that does not answer, there are no runs to
+    read, and the progress is read as it was before.
+
+    The one rule for what a subject's progress is: the progress routes and the print
+    follow both apply it, so the two never publish different progress for it (#1837)."""
+    if not runs.available:
+        return None
+    try:
+        latest = await runs.latest_for_output(run_subject)
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; progress read without them")
+        return None
+    if latest is None or latest.status != "failed" or latest.may_have_queued:
+        return None
+    return latest.error.detail if latest.error is not None else None
+
+
+def newest_failed_from(
+    runs: PrintRunStore, load: Callable[[], StoredSettings]
+) -> Callable[[str], Awaitable[PrintProgress | None]]:
+    """``Follower.newest_failed`` over ``runs``: the progress the routes show for a
+    run subject whose newest run failed before queueing, else None."""
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        detail = await newest_failure(runs, run_subject)
+        if detail is None:
+            return None
+        settings = await asyncio.to_thread(load)
+        url = BambuddyConfig.from_settings(settings).web_url(QUEUE_PATH)
+        return from_failed_run(detail, bambuddy_url=url)
+
+    return newest_failed

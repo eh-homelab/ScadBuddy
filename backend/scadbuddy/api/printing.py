@@ -64,7 +64,7 @@ from scadbuddy.bambuddy.projects import (
     ProjectView,
     describe_projects,
 )
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
@@ -617,22 +617,8 @@ async def get_choices(
 
 
 async def failed_before_queueing(state: AppState, run_subject: str) -> str | None:
-    """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
-    #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
-    run that may have queued recorded what it queued, so its print's own progress says
-    more. Without a database, or with one that does not answer, there are no runs to
-    read, and the progress is read as it was before."""
-    runs = state.print_runs.store
-    if not runs.available:
-        return None
-    try:
-        latest = await runs.latest_for_output(run_subject)
-    except DATABASE_ERRORS:
-        logger.warning("print runs unreadable; progress read without them")
-        return None
-    if latest is None or latest.status != "failed" or latest.may_have_queued:
-        return None
-    return latest.error.detail if latest.error is not None else None
+    """`newest_failure` over this process's print runs."""
+    return await newest_failure(state.print_runs.store, run_subject)
 
 
 @router.get(
