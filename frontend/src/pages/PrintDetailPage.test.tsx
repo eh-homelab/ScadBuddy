@@ -145,6 +145,36 @@ describe('PrintDetailPage (#311)', () => {
     expect(within(files).queryByText('Parameters')).not.toBeInTheDocument()
   })
 
+  it('shows a library print’s plate beside it and lists the library file (#1753)', async () => {
+    const base = prints.find((print) => print.archive_id === 35)!
+    const preview = '/api/v1/print/library/89/preview.glb?plate=2'
+    server.use(
+      http.get('/api/v1/prints/90', () =>
+        HttpResponse.json({
+          ...base,
+          archive_id: 90,
+          output_id: null,
+          slug: null,
+          library_file_id: 89,
+          output_name: 'Bambu Spool Lock',
+          params_diff: null,
+          provenance: null,
+          files: [
+            { kind: 'library_file', name: 'spool-lock.3mf', size: 1234, url: '/api/v1/print/library/89/file' },
+            { kind: 'preview_glb', name: 'spool-lock.glb', size: null, url: preview },
+            ...base.files.filter((file) => file.kind === 'sliced'),
+          ],
+          links: { ...base.links, customize_url: null },
+        }),
+      ),
+    )
+    render(90)
+    expect(await screen.findByTestId('preview')).toHaveAttribute('data-url', preview)
+    const files = await section('Files')
+    expect(within(files).getByText('Library file')).toBeInTheDocument()
+    expect(within(files).getByText('spool-lock.3mf')).toBeInTheDocument()
+  })
+
   it('links the template', async () => {
     const { user } = render(35)
     const provenance = await section('Provenance')

@@ -35,7 +35,7 @@ function reportWith(diagnostics: AnalyzerDiagnostic[], extra: object = {}) {
 }
 
 function renderPanel(props: { allPlates?: boolean } = {}) {
-  return renderPage(<AnalyzerPanel outputId={output.id} request={request} {...props} />)
+  return renderPage(<AnalyzerPanel target={{ output_id: output.id }} request={request} {...props} />)
 }
 
 describe('AnalyzerPanel', () => {

@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import numpy as np
 import pytest
 import respx
+import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -26,6 +28,8 @@ from scadbuddy.analyzers.sources import ACCESSED
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.split import ColourPart
 from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -482,3 +486,108 @@ def test_without_choices_the_models_remembered_ones_and_printer_are_used(
     assert base["process_preset_name"] == "0.08mm High Quality @BBL H2C 0.2 nozzle"
     assert base["bed_type"] == "Supertack Plate"
     assert {row["id"] for row in report["diagnostics"]} >= {"SB2001", "SB2003"}
+
+
+# --- #1753: a library file is judged as any print is -------------------------------------
+
+
+def open_box_3mf(tmp_path: Path) -> bytes:
+    """A 3MF whose one part is a box missing a face: its mesh has open edges."""
+    box = trimesh.creation.box(extents=(20, 20, 10))
+    box.apply_translation((10, 10, 5))
+    box.update_faces(np.arange(len(box.faces)) > 1)
+    out = tmp_path / "open.3mf"
+    write_bambu_3mf([ColourPart(1, "Color 1", "#FFFFFF", box)], out, thumbnails=None)
+    return out.read_bytes()
+
+
+def library_routes(file_id: int, content: bytes) -> respx.Route:
+    respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": file_id, "filename": "bracket.3mf", "file_type": "3mf"}
+        )
+    )
+    respx.get(f"{API}/library/files/{file_id}/filament-requirements").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "file_id": file_id,
+                "filaments": [
+                    {"slot_id": 1, "type": "PLA", "color": "#FFFFFF", "used_grams": 2000}
+                ],
+            },
+        )
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=recording("printer.json"))
+    )
+    respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+    return respx.get(f"{API}/library/files/{file_id}/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+
+
+def _run_library(client: TestClient, file_id: int, **body: Any) -> Any:
+    return _ok(
+        client.post("/api/v1/analyzers/run", json={"target": {"library_file_id": file_id}, **body})
+    )
+
+
+@respx.mock
+@pytest.mark.requires_postgres
+def test_a_library_file_is_judged_on_its_mesh_and_its_own_slots(
+    client: TestClient, tmp_path: Path
+) -> None:
+    configure(client)
+    bambuddy_routes()
+    library_routes(89, open_box_3mf(tmp_path))
+
+    report = _run_library(client, 89, request=SILK_REQUEST, detail="advanced")
+
+    assert report["library_file_id"] == 89
+    assert report["output_id"] is None and report["slug"] is None
+    found = {row["key"]: row for row in report["diagnostics"]}
+    # The mesh checks read the file's own 3MF, and the inventory its own slots.
+    assert any(key.startswith("SB1002") for key in found)
+    assert "SB3002:slot-1" in found
+    assert {"SB2001", "SB2003"} <= {row["id"] for row in report["diagnostics"]}
+    # Plate fit reads an output: a library file prints where its author placed it.
+    [fit] = [row for row in report["skipped"] if row["id"] == "SB4001"]
+    assert "author placed it" in fit["missing"][0]["reason"]
+    # Its narrowest scope is its own prints; there is no template to name.
+    kinds = [scope["kind"] for scope in report["scopes"]]
+    assert "template" not in kinds and "configuration" not in kinds
+    assert report["scopes"][-1] == {"kind": "print", "key": "library:89"}
+    assert all(call.request.method == "GET" for call in respx.calls)
+
+    decision = {
+        "diagnostic_id": "SB2001",
+        "kind": "ignore",
+        "scope": {"kind": "print", "key": "library:89"},
+    }
+    _ok(client.post("/api/v1/analyzers/decisions", json=decision), 201)
+    again = _run_library(client, 89, request=SILK_REQUEST, detail="advanced")
+    [silk] = [row for row in again["diagnostics"] if row["id"] == "SB2001"]
+    assert silk["status"] == "ignored"
+
+
+@respx.mock
+def test_a_library_file_that_cannot_be_read_skips_the_mesh_checks_saying_why(
+    client: TestClient,
+) -> None:
+    configure(client)
+    bambuddy_routes()
+    library_routes(89, b"not a zip")
+    report = _run_library(client, 89)
+    geometry = next(row for row in report["inputs"] if row["name"] == "geometry")
+    assert not geometry["available"] and "not a 3MF" in geometry["reason"]
+
+
+def test_a_library_target_names_nothing_else(client: TestClient) -> None:
+    for target in ({"library_file_id": 1, "output_id": "0" * 32}, {"library_file_id": 0}):
+        _ok(client.post("/api/v1/analyzers/run", json={"target": target}), 422)

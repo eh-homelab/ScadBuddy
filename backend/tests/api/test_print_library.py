@@ -513,7 +513,12 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     assert detail.status_code == 200, detail.text
     assert detail.json()["provenance"] is None
     assert detail.json()["links"]["customize_url"] is None
-    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
+    assert {file["kind"] for file in detail.json()["files"]} == {
+        "library_file",
+        "preview_glb",
+        "sliced",
+        "source",
+    }
     respx.get(f"{API}/archives/90/thumbnail").mock(
         return_value=httpx.Response(200, content=b"png", headers={"content-type": "image/png"})
     )
@@ -783,3 +788,64 @@ def test_a_library_print_into_a_project_is_filed_there_and_remembered(
     assert asyncio.run(uploads.project_target(7)) == ProjectTarget(
         printer_id=1, nozzle_diameter="0.2"
     )
+
+
+# --- #1753: viewing a library file as an output is viewed ---------------------------------
+
+
+@respx.mock
+def test_a_library_files_plate_is_served_as_a_preview_mesh(
+    client: TestClient, tmp_path: Path
+) -> None:
+    configure(client)
+    library_file(89, content=scadbuddy_3mf(tmp_path))
+
+    preview = client.get("/api/v1/print/library/89/preview.glb", params={"plate": 1})
+    missing = client.get("/api/v1/print/library/89/preview.glb", params={"plate": 3})
+
+    assert preview.status_code == 200, preview.text
+    assert preview.headers["content-type"] == "model/gltf-binary"
+    assert preview.content[:4] == b"glTF"
+    assert missing.status_code == 404, missing.text
+
+
+@respx.mock
+def test_a_library_file_with_no_mesh_to_read_is_a_422_saying_why(client: TestClient) -> None:
+    configure(client)
+    library_file(89, file_type="gcode.3mf", content=library_3mf(sliced=True))
+
+    preview = client.get("/api/v1/print/library/89/preview.glb")
+
+    assert preview.status_code == 422, preview.text
+    assert "sliced already" in preview.json()["detail"]
+
+
+@respx.mock
+def test_the_library_file_itself_is_served(client: TestClient) -> None:
+    configure(client)
+    library_file(89, content=b"the file's bytes")
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.content == b"the file's bytes"
+
+
+@respx.mock
+def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) -> None:
+    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin."""
+    configure(client)
+    respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"<svg onload='alert(1)'/>",
+            headers={"content-type": "image/svg+xml", "content-disposition": "inline"},
+        )
+    )
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.headers["content-type"] == "application/octet-stream"
+    assert served.headers["content-disposition"].startswith("attachment")
+    assert served.headers["x-content-type-options"] == "nosniff"
