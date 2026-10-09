@@ -11,6 +11,7 @@ import {
   classifyNavigation,
   mayApprove,
 } from './browserOrigins.js'
+import type { UiReachMap } from './browserReach.js'
 import { isUuid } from './stateDirs.js'
 import type { GuardVerdict, RiskTier } from './permissions.js'
 
@@ -275,6 +276,11 @@ export type HeadlessBrowserOptions = {
   uiOrigins?: string
   /** SCADBUDDY_BROWSER_ALLOWED_ORIGINS (raw): off-origin origins a human may approve. Unset: none. */
   browserAllowedOrigins?: string
+  /**
+   * How each UI origin answered this turn's probe (browserReach.ts): the
+   * browser is sent to one that answered without a login (browserOrigins.ts).
+   */
+  uiReach?: UiReachMap
   /** The origins approved in this session so far (browserOrigins.ts `loadApprovedOrigins`). */
   approvedOrigins?: readonly string[]
   /**
@@ -599,6 +605,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
     livePublicUrl: options.livePublicUrl,
     uiOrigins: options.uiOrigins,
     browserAllowed: options.browserAllowedOrigins,
+    reach: options.uiReach,
   })
 
   const dir = path.resolve(options.dir)
