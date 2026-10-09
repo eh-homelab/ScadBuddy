@@ -99,7 +99,7 @@ Facts this plan relies on. 6a pins each one with a test (Task A3), so a pin bump
   - The harness then ends the call its own way, with `CallbackToolError`, and `run_callback` re-raises it as `TimeoutError`. The entry leaves `pending_callbacks`, and a late answer is refused (`CallbackAlreadyResolved`).
   - If an answer reached the harness first, the activity gets `CallbackAlreadyResolved` or `UnknownCallback`, returns `False`, and the caller gets the answer.
   - The activity has `start_to_close_timeout` 10 s and retries a transport failure at most 5 times, with Temporal's default backoff (1 s, doubling); the same Update id makes a resend safe. Any other refusal from the harness is non-retryable (`EntryRefused`), so the host call fails rather than retrying forever. The worst case before a timed-out call fails is therefore about 65 s past its timer.
-  - **When the activity itself fails** (`EntryRefused`, or its 5 attempts spent), the host call raises that failure and the callback's `run_tool` task stays parked. Accepted, and named: an uncaught failure ends the script, so `execute` writes `failed` and closes the run (Ruling 8), and the harness's close times out the entry. Only a script that catches the failure and carries on leaves the entry answerable until the run closes. An answer sent then is accepted and unused, as with any answer to a closed question, and the run's step already shows the call `failed`.
+  - **When the activity itself fails** (`EntryRefused`, or its 5 attempts spent), the host call raises that failure and the callback's `run_tool` task stays parked. Accepted, and named: an uncaught failure ends the script, so `execute` writes `failed` and closes the run (Ruling 8), and the harness's close ends the entry: the callback gate's `wait_condition` also wakes on close and finalizes the call as closed (`agent_workflow.py`, `AgentWorkflowRunner.await_callback_result`, line 2786, `wait_condition(lambda: … or self._closed)` then `finalize_callback(closed=self._closed, …)`, at 04a49d1). Only a script that catches the failure and carries on leaves the entry answerable until the run closes. An answer sent then is accepted and unused, as with any answer to a closed question, and the run's step already shows the call `failed`.
   - The activity runs on `projects`, the worker that runs the flow (Task B4 registers it).
   - `wait_for_human(question, timeout_s=3600)` is the first user. It checks `10 <= timeout_s <= 86400`, raising `ValueError` at run time for a computed value. It runs the callback tool `human_answer` (`callback_tool_defn(inherently_safe=True, timeout=timedelta(seconds=86400))`, the decorator's timeout as a backstop) through `run_callback`, under the call id its step records (Task B3). On timeout the host call raises `TimeoutError` and never returns an answer (§6.6's table).
   - A literal `timeout_s` outside the range is refused at registration and at run start by `flows/typecheck.py`, an `ast` pass beside `code_mode_type_check`.
@@ -593,8 +593,14 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner, Injected
 
+    # Passed through like the harness it wraps: it holds no module state, and its
+    # workflow calls (a task, a timer, an activity) go through `workflow.*`, which
+    # resolves the running workflow per call, as the harness's own tools do.
     from scadbuddy.workflows.flow_entries import run_callback
-    from scadbuddy.workflows.flow_steps import step  # the context manager, below
+
+# Not passed through: it keeps a per-run step counter, which the sandbox's reload gives
+# each workflow run.
+from scadbuddy.workflows.flow_steps import step  # the context manager, below
 
 MIN_WAIT_S = 10
 MAX_WAIT_S = 86_400
