@@ -470,12 +470,16 @@ jobs:
 
       # `pnpm gen:api`, which typecheck, test and build run first, exports the
       # backend's spec with uv: the spec and the generated clients are not
-      # committed (#492). Same pinned action as the `freshness` job.
+      # committed (#492). Same pinned action as the `freshness` job. The durable
+      # session's end-to-end test (test/durable.e2e.test.ts) runs agent-durable's
+      # worker with uv too.
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: backend/uv.lock
+          cache-dependency-glob: |
+            backend/uv.lock
+            agent-durable/uv.lock
 
       - name: Enable corepack
         run: corepack enable
