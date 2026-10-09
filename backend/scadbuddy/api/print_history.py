@@ -485,30 +485,40 @@ async def _named(
     return [item.model_copy(update={"printer_name": names.get(item.archive_id)}) for item in items]
 
 
-class _FileNames:
-    """The library files' names, once per file per request (#1755). A name is a
-    label: a file Bambuddy no longer has, or a read that fails, has none, and the print
-    is listed without it."""
+class _LibraryFiles:
+    """The library files prints were made of, once per file per request (#1755). The
+    file names a print and lists its files, but the print is Bambuddy's archive: a
+    file Bambuddy no longer has, or a read that fails, is None, and the print is shown
+    without it."""
 
     def __init__(self, cache: ArchiveCache, client: BambuddyClient) -> None:
         self._cache = cache
         self._client = client
-        self._known: dict[int, str | None] = {}
+        self._known: dict[int, LibraryFile | None] = {}
 
-    async def name(self, file_id: int | None) -> str | None:
+    async def read(self, file_ids: Sequence[int | None]) -> None:
+        """Read the files of a batch of prints at once, ahead of `file`."""
+        wanted = [i for i in dict.fromkeys(file_ids) if i is not None and i not in self._known]
+        await _bounded([self.file(file_id) for file_id in wanted], READ_CONCURRENCY)
+
+    async def file(self, file_id: int | None) -> LibraryFile | None:
         if file_id is None:
             return None
         if file_id not in self._known:
             try:
-                file = await self._cache.library_file(self._client, file_id)
+                found = await self._cache.library_file(self._client, file_id)
             except ApiError as error:
                 logger.warning(
-                    "could not read a printed library file's name",
+                    "could not read a printed library file",
                     extra={"library_file_id": file_id, "status": error.status},
                 )
-                file = None
-            self._known[file_id] = file.filename if file is not None else None
+                found = None
+            self._known[file_id] = found
         return self._known[file_id]
+
+    async def name(self, file_id: int | None) -> str | None:
+        file = await self.file(file_id)
+        return file.filename if file is not None else None
 
 
 async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
@@ -586,7 +596,7 @@ async def list_prints(
     scanned = 0
 
     async with client_for(store.load()) as client:
-        names = _FileNames(cache, client)
+        files = _LibraryFiles(cache, client)
         if cursor is None and slug is None:
             # Only the first page can show a print linked now, and a slug filter
             # leaves every library print out (#1663). The other filters can show
@@ -603,6 +613,7 @@ async def list_prints(
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )
+            await files.read([link.library_file_id for link in batch])
             for index, (link, archive) in enumerate(zip(batch, archives, strict=True)):
                 before = link.archive_id
                 output = None
@@ -619,7 +630,7 @@ async def list_prints(
                     output.meta if output else None,
                     archive,
                     None,
-                    await names.name(link.library_file_id),
+                    await files.name(link.library_file_id),
                 )
                 if not _matches(filters, summary, link, archive, output):
                     continue
@@ -852,11 +863,7 @@ async def get_print(
     async with client_for(store.load()) as client:
         archive = await cache.archive(client, archive_id)
         diff = await defaults.diff(output) if output is not None else None
-        file = (
-            await cache.library_file(client, link.library_file_id)
-            if link.library_file_id is not None
-            else None
-        )
+        file = await _LibraryFiles(cache, client).file(link.library_file_id)
         summary = _summary(link, meta, archive, diff, file.filename if file else None)
         media = PrintMedia()
         runs: list[ArchiveRun] = []

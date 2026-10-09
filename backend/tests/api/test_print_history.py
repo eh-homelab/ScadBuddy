@@ -774,6 +774,23 @@ def test_a_library_print_whose_file_is_gone_lists_bambuddys_files_alone(
     assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
 
 
+@respx.mock
+def test_a_library_print_whose_file_cannot_be_read_still_has_its_detail(
+    client: TestClient,
+) -> None:
+    """#1755: the print is Bambuddy's archive; the file only names it and lists its files."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, timelapse_path=None)
+    respx.get(f"{API}/library/files/89").mock(return_value=httpx.Response(500))
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["library_file_name"] is None
+    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
+
+
 # --- one library file's history (#1755) ------------------------------------------
 
 

@@ -69,6 +69,8 @@ LIBRARY_LINK_CONCURRENCY = 8
 LIBRARY_LINK_BACKSTOP = timedelta(days=180)
 #: How often one library file's archives are scanned by hash at most, as an output's
 #: are (`progress.HASH_SCAN_INTERVAL`): each scan pages Bambuddy's archive list (#1755).
+#: Per process, like the output's: the API and the print worker each keep their own, so
+#: a file can be scanned once by each in one interval.
 LIBRARY_HASH_SCAN_INTERVAL = 600.0
 _last_library_scan: dict[int, float] = {}
 #: The stages a queue item never leaves once it has no archive (#1705). On a
@@ -250,7 +252,7 @@ async def scan_library_by_hash(
     links: PrintLinkStore,
     file_id: int,
 ) -> None:
-    """`link_subject_by_hash` for a library file, at most once per
+    """`link_subject_by_hash` for a library file, at most once per process per
     `LIBRARY_HASH_SCAN_INTERVAL` (#1755). Best effort, as an output's scan from the
     progress read is: a failure is logged, never raised."""
     if not _claim_library_scan(file_id, time.monotonic()):
@@ -258,6 +260,8 @@ async def scan_library_by_hash(
     try:
         await link_subject_by_hash(client, uploads, links, PrintSubject.library(file_id))
     except (ApiError, psycopg.Error, DatabaseRequiredError):
+        # A failed scan found nothing, so the next read may try again.
+        _last_library_scan.pop(file_id, None)
         logger.exception(
             "could not scan a library file's prints by hash", extra={"library_file_id": file_id}
         )

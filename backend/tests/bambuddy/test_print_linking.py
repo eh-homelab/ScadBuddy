@@ -677,6 +677,25 @@ async def test_a_library_item_gone_from_bambuddy_has_its_file_scanned_by_hash_on
     assert scan.call_count == 1
 
 
+@respx.mock
+async def test_a_library_scan_that_fails_can_be_tried_again_at_once(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """It found nothing, so it does not hold the file's interval."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    scan = respx.get(f"{API}/archives/").mock(
+        side_effect=[httpx.Response(500), httpx.Response(200, json=[archive_row(18, HASH)])]
+    )
+
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+    assert await links.linked(18) is None
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+
+    assert scan.call_count == 2
+    assert await links.linked(18) is not None
+
+
 # --- A library file's print, read as its follow reads it (#1073) ---
 
 
