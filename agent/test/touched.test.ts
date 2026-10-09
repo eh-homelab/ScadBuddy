@@ -11,6 +11,7 @@ import { SERVER_NAME } from '../src/tools/projections.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { z } from 'zod'
 import { defineTool, ERROR_DETAIL_SOURCE, json, type Risk, runToolWithOutcome } from '../src/tools/registry.js'
+import { RenderLimiter } from '../src/tools/renderLimits.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 // What a session touched (#931, src/sessions/touched.ts): the per-tool
@@ -446,6 +447,46 @@ describe('the harness projection', () => {
     expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result, seen[0]!.ok)).toEqual([
       { type: 'render_job', id: 'j9', action: 'created', model: 'box', after: null },
     ])
+  })
+
+  // #1072: once submitted, the job exists however the wait for it ends.
+  const submittedRender = (id: string) => [
+    http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json({ groups: [], parameters: [] })),
+    http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: id, status_url: `/api/v1/jobs/${id}` }, { status: 202 })),
+  ]
+  const renderCtx = (rows: unknown[], signal: AbortSignal, progress: (message?: string) => void = () => {}) => ({
+    ...services({
+      touched: { record: async (c: TouchedCall) => void rows.push(...touchesOf(c.tool, c.input, c.result, c.ok ?? true)) },
+    }),
+    principal: harnessPrincipal({ kind: 'browser', id: 'browser', label: 'You' }),
+    progress: async (_step: number, _total?: number, message?: string) => progress(message),
+    signal,
+    session: 'sess-7',
+    // Its own: a job handed back unsettled holds its slot past the call.
+    renderLimiter: new RenderLimiter(),
+  })
+
+  it('records a submitted render whose poll failed, and answers its job id', async () => {
+    backend.use(...submittedRender('j7'), http.get(`${BACKEND}/api/v1/jobs/j7`, () => HttpResponse.json({ detail: 'down' }, { status: 502 })))
+    const rows: unknown[] = []
+    const run = await runToolWithOutcome(ALL_TOOLS.find((t) => t.name === 'render_model')!, { slug: 'box' }, renderCtx(rows, new AbortController().signal))
+    expect(run.outcome).toBe('error')
+    expect(resultJson(run.result)).toMatchObject({ job_id: 'j7', status: null, error: expect.stringContaining('HTTP 502') })
+    expect(run.detail).toContain('down')
+    expect(rows).toEqual([{ type: 'render_job', id: 'j7', action: 'created', model: 'box', after: null }])
+  })
+
+  it('records a submitted render whose wait was interrupted, and answers its job id', async () => {
+    backend.use(...submittedRender('j6'), http.get(`${BACKEND}/api/v1/jobs/j6`, () => HttpResponse.json({ id: 'j6', slug: 'box', status: 'running', params: {} })))
+    const rows: unknown[] = []
+    const abort = new AbortController()
+    const ctx = renderCtx(rows, abort.signal, (message) => {
+      if (message?.startsWith('render queued')) abort.abort()
+    })
+    const run = await runToolWithOutcome(ALL_TOOLS.find((t) => t.name === 'render_model')!, { slug: 'box' }, ctx)
+    expect(run.outcome).toBe('error')
+    expect(resultJson(run.result)).toMatchObject({ job_id: 'j6', status: null, error: expect.stringMatching(/interrupted/) })
+    expect(rows).toEqual([{ type: 'render_job', id: 'j6', action: 'created', model: 'box', after: null }])
   })
 
   it('answers the call unchanged when the sink throws', async () => {
