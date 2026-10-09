@@ -18,8 +18,14 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import Follower
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.progress import (
+    PrintProgress,
+    ProgressObserver,
+    library_progress,
+    progress_for,
+)
 from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
@@ -374,6 +380,13 @@ def _build_core(settings: Settings) -> AppState:
                 links=print_links if print_links.available else None,
             )
 
+    async def read_library(subject: PrintSubject) -> PrintProgress | None:
+        # A library print is linked by its sends (#1073): without a database it has none.
+        if not print_links.available:
+            return None
+        async with client_for(settings_store.load()) as client:
+            return await library_progress(client, subject, print_links)
+
     return AppState(
         settings=settings,
         config=config,
@@ -401,6 +414,7 @@ def _build_core(settings: Settings) -> AppState:
             outputs=LocalOutputs(outputs, catalogue),
             observer=print_progress,
             read=read_progress,
+            read_library=read_library,
             events=events,
         ),
         print_runs=PrintCommands(

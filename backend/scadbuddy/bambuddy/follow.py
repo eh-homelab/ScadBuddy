@@ -45,6 +45,7 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.output_reader import OutputReader
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
@@ -65,9 +66,9 @@ HEARTBEAT_SLICE = 5.0
 #: activity, which heartbeats meanwhile (a hook longer than ``FOLLOW_HEARTBEAT`` would
 #: otherwise time the attempt out, and each retry would run it again), so one that never
 #: returns would hold the follow open. A hook cut off here is not retried now: the rack's
-#: settle leaves the archives it had not yet started unrecorded until that output settles
+#: settle leaves the archives it had not yet started unrecorded until that subject settles
 #: again (another print of it), which records them with its own time; the warning names
-#: the output so the gap can be traced. Cutting a hook off stops the wait, not the work:
+#: the subject so the gap can be traced. Cutting a hook off stops the wait, not the work:
 #: a database read or write it started in a thread runs on until Postgres answers, so
 #: the archive whose write was in flight may still be recorded.
 SETTLE_TIMEOUT = 60.0
@@ -80,10 +81,12 @@ FOLLOW_ACTIVITY = "follow_print"
 FOLLOW_SLOTS = 200
 
 Reader = Callable[[OutputMeta], Awaitable[PrintProgress | None]]
+#: A library file's print, read by its subject (#1073): its recent sends' queue items.
+LibraryReader = Callable[[PrintSubject], Awaitable[PrintProgress | None]]
 Ended = Literal["settled", "gone", "deleted", "quiet"]
 #: Awaited on each read that finds a print settled (#836): after its ``print.settled``
-#: is published.
-SettledHook = Callable[[OutputMeta], Awaitable[None]]
+#: is published. Given the print's subject, an output's or a library file's (#1073).
+SettledHook = Callable[[PrintSubject], Awaitable[None]]
 
 
 def _now() -> datetime:
@@ -91,6 +94,8 @@ def _now() -> datetime:
 
 
 class FollowInput(BaseModel):
+    #: The run subject (`PrintSubject.run_subject`): an output's id, or
+    #: ``library:<file id>`` (#1073). Named as it was when only outputs were followed.
     output_id: str
     #: A poke (a new print, someone reading it): read now, the age counts from now.
     fresh: bool = False
@@ -111,10 +116,13 @@ class Follower:
         now: Callable[[], datetime] = _now,
         on_settled: Sequence[SettledHook] = (),
         settle_timeout: float = SETTLE_TIMEOUT,
+        read_library: LibraryReader | None = None,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
         self.read = read
+        #: Without one, a library file's follow ends at once, as ``gone``.
+        self.read_library = read_library
         self.events = events
         self.min_interval = min_interval
         self.max_interval = max_interval
@@ -130,15 +138,20 @@ class Follower:
 
     async def follow(
         self,
-        output_id: str,
+        run_subject: str,
         active: datetime,
         heartbeat: Callable[[datetime], None] = lambda _: None,
         *,
         read_now: bool = False,
     ) -> Ended:
-        """Read ``output_id``'s print until it ends; ``active`` is when it last moved.
+        """Read ``run_subject``'s print until it ends; ``active`` is when it last moved.
         It waits first, unless ``read_now`` (a poke: a new print, read at once); either
-        way the waits after that back off from `min_interval`."""
+        way the waits after that back off from `min_interval`. ``run_subject`` is an output's
+        id, or ``library:<file id>`` for a library file's print (#1073)."""
+        subject = PrintSubject.from_run_subject(run_subject)
+        if subject.kind == "library":
+            return await self._follow_library(subject, active, heartbeat, read_now=read_now)
+        output_id = subject.id
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
         while True:
@@ -183,24 +196,67 @@ class Follower:
             if progress is not None and progress.settled:
                 # After observe, so print.settled is already published (#836). Not on
                 # progress None: an output never printed through slice_queue has no picks.
-                await self._settled(meta, active, heartbeat)
+                await self._settled(subject, active, heartbeat)
             if progress is None or progress.settled:
                 return "settled"
             if changed:
                 active = self.now()
             interval = self.min_interval if changed else min(self.max_interval, interval * 2)
 
+    async def _follow_library(
+        self,
+        subject: PrintSubject,
+        active: datetime,
+        heartbeat: Callable[[datetime], None],
+        *,
+        read_now: bool,
+    ) -> Ended:
+        """A library file's print, followed as an output's is (#1073): read until it
+        settles, then the settle hooks. Its progress is not published yet: the library
+        print's progress route and events are #1751."""
+        if self.read_library is None:
+            return "gone"
+        interval = self.min_interval
+        last: str | None = None
+        while True:
+            if read_now:
+                read_now = False
+            else:
+                await self._wait(interval, active, heartbeat)
+            if self.now() - active > self.max_age:
+                return "quiet"
+            try:
+                progress = await self._heartbeating(self.read_library(subject), active, heartbeat)
+            except ApiError as error:
+                if error.status == 404:
+                    return "gone"
+                interval = self.error_interval
+                continue
+            except Exception:
+                logger.exception("a print progress read failed", extra={"subject": subject.key})
+                interval = self.error_interval
+                continue
+            if progress is not None and progress.settled:
+                await self._settled(subject, active, heartbeat)
+            if progress is None or progress.settled:
+                return "settled"
+            fingerprint = progress.model_dump_json()
+            changed, last = fingerprint != last, fingerprint
+            if changed:
+                active = self.now()
+            interval = self.min_interval if changed else min(self.max_interval, interval * 2)
+
     async def _settled(
-        self, meta: OutputMeta, active: datetime, heartbeat: Callable[[datetime], None]
+        self, subject: PrintSubject, active: datetime, heartbeat: Callable[[datetime], None]
     ) -> None:
         for hook in self.on_settled:
             try:
-                await self._bounded(hook(meta), active, heartbeat)
+                await self._bounded(hook(subject), active, heartbeat)
             except Exception as exc:
                 # Type only: a hook's error can carry data it must not log (#836, spec §7).
                 logger.warning(
                     "a settled-print hook failed",
-                    extra={"output_id": meta.id, "error": type(exc).__name__},
+                    extra={"subject": subject.key, "error": type(exc).__name__},
                 )
 
     async def _bounded(

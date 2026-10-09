@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.follow import FollowActivities, Follower, FollowInput
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
@@ -423,8 +424,8 @@ def test_a_settled_print_runs_each_settled_hook_once(paths: DataPaths) -> None:
     )
     heard: list[tuple[str, str]] = []
 
-    async def hook(meta: OutputMeta) -> None:
-        heard.append((meta.id, kinds(seen)[-1]))
+    async def hook(subject: PrintSubject) -> None:
+        heard.append((subject.id, kinds(seen)[-1]))
 
     follower.on_settled.append(hook)
     assert follow(follower) == "settled"
@@ -436,11 +437,11 @@ def test_a_failing_settled_hook_does_not_fail_the_follow(paths: DataPaths) -> No
     follower, _ = follower_for(paths, Script(progress("done", settled=True)))
     ran: list[str] = []
 
-    async def broken(meta: OutputMeta) -> None:
+    async def broken(subject: PrintSubject) -> None:
         raise RuntimeError("serial ABC123 leaked")
 
-    async def after(meta: OutputMeta) -> None:
-        ran.append(meta.id)
+    async def after(subject: PrintSubject) -> None:
+        ran.append(subject.id)
 
     follower.on_settled.extend([broken, after])
     assert follow(follower) == "settled"
@@ -457,7 +458,7 @@ def test_a_settled_hook_that_hangs_is_cut_off_and_the_print_still_settles(
         paths, Script(progress("done", settled=True, done=1)), settle_timeout=0.05
     )
 
-    async def hook(meta: OutputMeta) -> None:
+    async def hook(subject: PrintSubject) -> None:
         await asyncio.Event().wait()
 
     follower.on_settled.append(hook)
@@ -479,9 +480,9 @@ def test_the_activity_heartbeats_while_a_settled_hook_runs(
     follower, _ = follower_for(paths, Script(progress("done", settled=True)))
     finished: list[str] = []
 
-    async def hook(meta: OutputMeta) -> None:
+    async def hook(subject: PrintSubject) -> None:
         await asyncio.sleep(0.2)
-        finished.append(meta.id)
+        finished.append(subject.id)
 
     follower.on_settled.append(hook)
     env = ActivityEnvironment()
@@ -565,3 +566,34 @@ def test_running_follows_are_counted_and_a_full_worker_is_said(
     assert during == 1
     assert held() == 0
     assert any("every follow slot" in r.message for r in caplog.records)
+
+
+def test_a_library_print_is_followed_until_it_settles_and_runs_the_hooks(
+    paths: DataPaths,
+) -> None:
+    """#1073: a library file's print is read by its subject until it settles, then the
+    settle hooks run with that subject, as an output's do."""
+    read = Script(progress("queued"), progress("running"), progress("done", settled=True))
+    follower, _ = follower_for(paths, Script(None), read_library=read)
+    heard: list[str] = []
+
+    async def hook(subject: PrintSubject) -> None:
+        heard.append(subject.key)
+
+    follower.on_settled.append(hook)
+    ended = asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5))
+    assert ended == "settled"
+    assert read.reads == 3
+    assert heard == ["library:89"]
+
+
+def test_a_library_print_bambuddy_no_longer_has_ends_the_follow(paths: DataPaths) -> None:
+    follower, _ = follower_for(
+        paths, Script(None), read_library=Script(ApiError(404, "queue item gone"))
+    )
+    assert asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5)) == "gone"
+
+
+def test_without_a_library_reader_a_library_follow_ends_at_once(paths: DataPaths) -> None:
+    follower, _ = follower_for(paths, Script(None))
+    assert asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5)) == "gone"

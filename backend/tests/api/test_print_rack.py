@@ -15,6 +15,8 @@ import respx
 from fastapi.testclient import TestClient
 from google.protobuf import text_format
 from psycopg_pool import PoolTimeout
+from temporalio.client import Client
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.deps import STATE_ATTR
@@ -366,10 +368,27 @@ def test_no_serial_enters_the_runs_workflow_history(
     assert positions >= 1
 
 
+async def started(temporal: Client, workflow_id: str) -> None:
+    """Wait for ``workflow_id`` to exist, for up to 30 s."""
+    async with asyncio.timeout(30):
+        while True:
+            try:
+                await temporal.get_workflow_handle(workflow_id).describe()
+                return
+            except RPCError as error:
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    raise
+            await asyncio.sleep(0.1)
+
+
 @respx.mock
-def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> None:
-    """The watcher never settles a library print (its record and settle hook are keyed
-    by output id), so a pick row would never be credited."""
+def test_a_library_print_credits_its_hotend_like_an_outputs(
+    client: TestClient, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """#1073: a library-file print is printed, followed and settled as an output's is,
+    so the hotend it picked is credited with the print's time. The run records its pick,
+    starts the file's `FollowPrint`, and the app's follower settles it through the rack's
+    hook, keyed by the print's subject."""
     configure(client)
     one_color(89)
     flow_copy_routes()
@@ -391,7 +410,43 @@ def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> No
 
     assert response.status_code == 200, response.text
     assert json.loads(queued.calls.last.request.content)["nozzle_rack_choice"] == {"0": 4}
-    assert asyncio.run(rack_usage(client).picked_items([51])) == set()
+    assert asyncio.run(rack_usage(client).picked_items([51])) == {51}
+    # The run records its outcome before it starts the follow, so the follow may start
+    # just after the run reads as succeeded.
+    assert workflow_reaper.client is not None
+    workflow_reaper.run(started(workflow_reaper.client, "follow-print-library:89"))
+
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **recording("queue-item.json"),
+                "id": 51,
+                "status": "completed",
+                "archive_id": 101,
+            },
+        )
+    )
+    respx.get(f"{API}/archives/101").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 101,
+                "status": "completed",
+                "actual_time_seconds": 75,
+                "filament_used_grams": 1.5,
+            },
+        )
+    )
+    follower = getattr(client.app.state, STATE_ATTR).print_follower  # type: ignore[attr-defined]
+    assert asyncio.run(follower.follow("library:89", follower.now(), read_now=True)) == "settled"
+
+    with psycopg.connect(pg_conninfo) as conn:
+        rows = conn.execute(
+            "SELECT archive_id, print_seconds, grams FROM rack_nozzle_prints"
+            " WHERE queue_item_id = 51"
+        ).fetchall()
+    assert rows == [(101, 75, 1.5)]
 
 
 def test_the_rack_feature_hooks_the_settle_write_into_the_follow(client: TestClient) -> None:
