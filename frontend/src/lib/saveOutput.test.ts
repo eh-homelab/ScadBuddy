@@ -1,7 +1,9 @@
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { fakeRealtime } from './realtime.fake'
 import { ExtraOutputsError, saveOutput, saveRemaining } from './saveOutput'
 
 const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
@@ -36,6 +38,11 @@ function recordOutputs(refuse?: (body: Record<string, unknown>) => boolean, stat
   return bodies
 }
 
+/** The job moves on, as a real one does, and says so over the socket (#1909). */
+function announceLater(jobId: string) {
+  setTimeout(() => emitRealtime('job.running', [`job:${jobId}`], { job_id: jobId, slug: 'demo' }), 20)
+}
+
 describe('saveOutput', () => {
   it('saves every output of a pipeline job and returns the first', async () => {
     const bodies = recordOutputs()
@@ -61,7 +68,9 @@ describe('saveOutput', () => {
       }),
       http.get('/api/v1/jobs/j2', () => {
         reads += 1
-        return HttpResponse.json(reads < 2 ? { ...aJob('j2', 2), status: 'running' } : aJob('j2', 2))
+        if (reads >= 2) return HttpResponse.json(aJob('j2', 2))
+        announceLater('j2')
+        return HttpResponse.json({ ...aJob('j2', 2), status: 'running' })
       }),
     )
     const created = await saveOutput({
@@ -81,7 +90,56 @@ describe('saveOutput', () => {
     expect(created.job_id).toBe('j2')
   })
 
-  it('leaves no abort listener behind on the signal once its polls are done', async () => {
+  /** j1 cannot be saved with new inputs; j2, their render, runs until `finish`. */
+  function renderUntilFinished() {
+    recordOutputs((body) => body.job_id === 'j1')
+    let done = false
+    let reads = 0
+    server.use(
+      http.post('/api/v1/models/demo/render', () =>
+        HttpResponse.json({ job_id: 'j2', status_url: '/api/v1/jobs/j2' }, { status: 202 }),
+      ),
+      http.get('/api/v1/jobs/j2', () => {
+        reads += 1
+        return HttpResponse.json(done ? aJob('j2', 1) : { ...aJob('j2', 1), status: 'running' })
+      }),
+    )
+    return {
+      reads: () => reads,
+      finish() {
+        done = true
+      },
+    }
+  }
+
+  const save = (signal?: AbortSignal) =>
+    saveOutput({ slug: 'demo', job: aJob('j1', 1), extra: { v: 1, house: { cols: 2 } }, capture: async () => null, signal })
+
+  it('reads the render on each event for it, not on a timer (#1909)', async () => {
+    const render = renderUntilFinished()
+    const saving = save()
+    await vi.waitFor(() => expect(render.reads()).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    expect(render.reads()).toBe(1)
+    render.finish()
+    emitRealtime('job.done', ['job:j2'], { job_id: 'j2', slug: 'demo' })
+    expect((await saving).job_id).toBe('j2')
+    expect(render.reads()).toBe(2)
+  })
+
+  it('reads the render on a timer only while the socket is unavailable (#1909)', async () => {
+    const realtime = fakeRealtime({ confirm: false })
+    const render = renderUntilFinished()
+    const saving = save()
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    expect(render.reads()).toBe(0)
+    realtime.setStatus('unavailable')
+    await vi.waitFor(() => expect(render.reads()).toBeGreaterThanOrEqual(2))
+    render.finish()
+    expect((await saving).job_id).toBe('j2')
+  })
+
+  it('leaves no abort listener behind on the signal once its wait is done', async () => {
     recordOutputs((body) => body.job_id === 'j1')
     let reads = 0
     server.use(
@@ -90,7 +148,9 @@ describe('saveOutput', () => {
       ),
       http.get('/api/v1/jobs/j2', () => {
         reads += 1
-        return HttpResponse.json(reads < 4 ? { ...aJob('j2', 1), status: 'running' } : aJob('j2', 1))
+        if (reads >= 4) return HttpResponse.json(aJob('j2', 1))
+        announceLater('j2')
+        return HttpResponse.json({ ...aJob('j2', 1), status: 'running' })
       }),
     )
     const controller = new AbortController()
@@ -103,7 +163,7 @@ describe('saveOutput', () => {
       capture: async () => null,
       signal: controller.signal,
     })
-    expect(added.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(added.mock.calls.length).toBeGreaterThanOrEqual(1)
     expect(removed.mock.calls.length).toBe(added.mock.calls.length)
   })
 

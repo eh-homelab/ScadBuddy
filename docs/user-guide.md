@@ -1,13 +1,14 @@
 # ScadBuddy user guide
 
 Covers writing models for ScadBuddy, the multi-colour rules, connecting it to
-Bambuddy, and the day-to-day features. For installing it, see the
+Bambuddy, the day-to-day features, and the AI assistant. For installing it, see the
 [README](../README.md).
 
 - [Writing a model](#writing-a-model)
 - [Multi-colour output](#multi-colour-output)
 - [Connecting Bambuddy](#connecting-bambuddy)
 - [Using ScadBuddy](#using-scadbuddy)
+- [Assistant](#assistant)
 
 ## Writing a model
 
@@ -360,3 +361,198 @@ you confirm. It is refused while one of its renders is still running. The source
 stays in the git history. A built-in template (a bundled example, such as the
 name keychain) cannot be deleted or edited; it is refreshed from the image on every
 restart.
+
+## Assistant
+
+ScadBuddy has an AI assistant, Claude, that can customize, author and print models the
+way you would, and that other Claude clients can reach over MCP. It runs in the agent
+sidecar. The operator's side (deploying it, the key-encryption key, routing) is in
+[Operating the agent sidecar](ai/operating.md), and what it may and may not do is in
+[AI security](ai/security.md). Everything below is in **Settings → Assistant** or the
+assistant panel.
+
+### Adding the Claude credential
+
+The assistant panel, MCP access tokens and plugins show only once a credential is saved
+([operating.md §4](ai/operating.md#4-setting-up-the-claude-credential),
+[AI README](ai/README.md#what-the-ai-integration-is-today)).
+
+1. Open **Settings → Assistant → Claude credentials**.
+2. Choose the kind: **Anthropic API** (an `sk-ant-api03-…` key), **Claude Code OAuth
+   token** (run `claude setup-token` on a machine signed in to your Claude subscription
+   and paste the `sk-ant-oat01-…` token it prints), or **Gateway (base URL and token)**.
+3. Press **Save**. **Test** sends one short prompt and shows "Works (…)" or the failure.
+
+You can **Add** more than one. They are tried in the order listed (**Up** and **Down**
+move them), and one that is rate limited is skipped until its limit resets. The key is
+encrypted on the server and never sent back to the browser.
+
+The same section sets **Assistant chat limits** (each new chat's budget in USD and its
+turns per reply), **Assistant images**, and two switches that are off by default:
+**AI headless browser** ([below](#the-headless-browser)) and **AI HTTP requests** (GET
+and HEAD run at once; anything else waits for your approval). **AI activity** is the
+log of what the assistant did.
+
+### The assistant panel
+
+Once the credential works, an **Assistant** button appears at the top right. It and
+**Ctrl+`** (Ctrl on macOS too) open the panel; **Esc** closes it. The assistant sees
+the page you are on, so "make the text bigger" on a model's page means that model.
+
+- Type and press **Enter** (Shift+Enter for a new line). **Image** attaches up to four
+  PNG, JPEG, GIF or WebP pictures; pasting or dropping them works too.
+- The microphone is **Voice input** (press to talk and again to stop, or hold it), and
+  **Read replies aloud** speaks the answers. Inside Bambuddy's frame, voice needs
+  ScadBuddy open in a tab of its own.
+- **Stop** ends the running reply. Runs of tool calls fold into "N steps", with
+  **Details** to see each one.
+- Each chat has a budget. When it is spent the chat says so and offers **Continue in a
+  new chat**, **Raise this chat's budget** or **Start a new chat**.
+
+### Sessions, forks and the switcher
+
+Every chat is a session kept on the server: close the panel or the browser and it is
+still there
+([agent-sessions.md §4.2](ai/agent-sessions.md#42-forks-and-the-session-switcher-in-the-panel-792)).
+
+- **New chat** starts one. **Sessions (N)** lists them all, with who owns each ("you",
+  or the MCP client's token name), where it came from (chat, MCP, analyzer, plugin
+  hook), its status (Working, Waiting for input, Waiting for approval, Idle, Done,
+  Failed, Out of budget), its spend and when it last changed. Forks are listed under
+  their parent.
+- On a model's page, **Only sessions that changed {model}** narrows the list to those,
+  and the toolbar's **Changed by assistant (N)** opens one. **Touched** in a session's
+  bar lists everything that session created, changed or deleted, each linked to its
+  page ([agent-sessions.md §4.1](ai/agent-sessions.md#41-what-a-session-touched-931)).
+- **Rename** and **Done** are on your own chats. Done ends a chat: it takes no more
+  messages. Nothing is deleted.
+- **Fork** copies the whole chat into a new one and continues there; the original stays
+  as it was. **Fork from here** on a reply forks up to that reply; on one of your
+  messages it forks up to the reply before it and puts your message back in the box to
+  edit. A fork's bar says **Forked from …**, which opens the parent. Each fork you make
+  gets a budget of its own.
+- A session another agent started over MCP shows **Controlled by …**. Press **Take
+  over** to send it messages yourself
+  ([agent-sessions.md §2](ai/agent-sessions.md#2-who-sees-and-controls-what)).
+
+### What needs your approval
+
+Every tool has a tier ([security.md](ai/security.md#risk-tiers-and-the-permission-seam)):
+**Reads only**, **Changes a model** (undoable through its
+[history](#history-and-versions)), or **Leaves ScadBuddy** (send, print, delete, and
+any settings or credential change). The first two run at once. Anything that leaves
+ScadBuddy, any plugin tool not marked otherwise, and every mutating HTTP request stops
+and shows **Needs your approval** in the chat, with **Approve** and **Deny**. If nobody
+decides in time, it is not run. There is no "always allow".
+
+The assistant can also stop to ask you something ("A question for you", answered with
+**Send answer**), or call for your attention ("The assistant needs you: …"). The
+attention card says what happens if you don't reply in time: it carries on with work
+that needs no approval, it stops, or it waits. A timeout never approves anything. When
+it finishes a piece of work it may leave "The assistant is done", with what ScadBuddy
+recorded that turn doing; **Dismiss** clears it.
+
+All of these count on the **Assistant** button's badge (its tooltip breaks the count
+down), and the browser tab's title starts with the count, so you can leave the panel
+closed and still see that something is waiting for you.
+
+Some buttons only you can press, whatever the assistant is allowed: Print, Send,
+Delete, Settings' **Save**, the approval and question cards, Fork, Take over, and every
+Assistant setting. Asked to press one, the assistant is told to ask you instead
+([browser-bridge.md](ai/browser-bridge.md#data-agent-user-only)).
+
+### Connecting Claude Code or Claude Desktop
+
+Other Claude clients reach ScadBuddy's tools at `https://<your ScadBuddy>/mcp` (plain
+HTTP is refused, except on loopback). They sign in with a token from **Settings →
+Assistant → MCP access tokens** ([operating.md §4.1](ai/operating.md#41-mcp-access-tokens)),
+or through your identity provider when the operator has turned on **MCP sign-in
+(OIDC)** ([operating.md §6a](ai/operating.md#6a-mcp-sign-in-with-oidc)).
+
+1. Under **MCP access tokens**, give the token a name ("Claude Desktop on my laptop"),
+   an **Access** level (Read, Write or Outward) and an expiry, and press **Create
+   token**. Copy it then: it is shown once. **Revoke** ends it. Outward actions still
+   wait for a human's approval in ScadBuddy, whatever the token allows.
+2. **Claude Code**, with ScadBuddy's plugin, which brings its skills and subagents as
+   well as the server ([claude-plugin.md](ai/claude-plugin.md)):
+
+   ```text
+   /plugin marketplace add eh-homelab/ScadBuddy
+   /plugin install scadbuddy@scadbuddy
+   ```
+
+   It asks for `scadbuddy_url` (your ScadBuddy's HTTPS address, no trailing slash) and
+   `scadbuddy_token` (the token). To add the server alone, without the plugin
+   ([Claude Code MCP docs](https://code.claude.com/docs/en/mcp)):
+
+   ```bash
+   claude mcp add --transport http scadbuddy https://scadbuddy.example/mcp \
+     --header "Authorization: Bearer sbmcp_…"
+   ```
+
+3. **Claude Desktop.** Its custom connectors take only a URL and sign in with OAuth
+   ([Anthropic help](https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp)),
+   so they work only with MCP sign-in (OIDC) on: add `https://scadbuddy.example/mcp`
+   as a custom connector. With a token instead, add the server to
+   `claude_desktop_config.json`
+   ([connecting local servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers))
+   through [`mcp-remote`](https://github.com/geelen/mcp-remote), which sends the header:
+
+   ```json
+   {
+     "mcpServers": {
+       "scadbuddy": {
+         "command": "npx",
+         "args": ["mcp-remote", "https://scadbuddy.example/mcp",
+                  "--header", "Authorization: Bearer ${SCADBUDDY_TOKEN}"],
+         "env": { "SCADBUDDY_TOKEN": "sbmcp_…" }
+       }
+     }
+   }
+   ```
+
+   Neither Desktop route has been tried against a ScadBuddy yet (**unverified**).
+
+A session an MCP client starts shows in **Sessions** like any other, and you can take
+it over ([agent-sessions.md](ai/agent-sessions.md)).
+
+### Pairing a browser tab
+
+The panel's own chats always drive the tab you chat from. An MCP client that wants to
+use your tab has to ask, and every open ScadBuddy tab then shows **Agent pairing**:
+"*name* asks to use this tab". Once paired it could see the page and change it as you
+can, but never press Print, Send, Delete or Save. Type the code the client gave you
+into **Pairing code** in the tab it should use, and press **Allow** (or **Deny**). The
+code works once, for 5 minutes. The pairing lasts until you press **Disconnect**, 8
+hours pass, or the tab reloads
+([browser-bridge.md](ai/browser-bridge.md#pairing-spec-85)).
+
+### The headless browser
+
+A session with no tab of yours (one started over MCP, say) can still look at
+ScadBuddy's pages in a headless browser inside the agent container, once you tick
+**AI headless browser** (off by default). It opens only ScadBuddy itself, unless the
+operator allows more sites, and each of those waits for your approval once per
+session. Anything it would send, print or delete waits as an ordinary approval card,
+and it can never change Settings ([headless-browser.md](ai/headless-browser.md)).
+
+### Plugins
+
+**Settings → Assistant → Assistant plugins** adds to what the assistant can do
+([operating.md §9](ai/operating.md#9-plugin-packages-297),
+[security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin and the headless
+browser are built in, each with **Enable**/**Disable**.
+
+- **Plugin packages** (skills, agents and hooks). Give a **Git repository** or a
+  **Marketplace entry** and press **Fetch and review**. Nothing loads yet: the package
+  is pinned to the exact commit and content hash it fetched, and you tick that you
+  reviewed them and press **Approve this pin**, then **Enable**. Anything that would
+  start a process or run code inside the assistant is refused by the vetting rules and
+  listed; the only way past is to approve loading the package as it is, which runs its
+  code with the assistant service's own access. A newer commit is **Fetch re-pin**,
+  approved the same way.
+- **Plugin endpoints** (remote MCP servers). Give a **Name**, the **MCP endpoint URL**
+  and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
+  **Test connection** lists its tools, each with a tier (outward, which asks first, by
+  default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never
+  sees the endpoint's address or secret.
