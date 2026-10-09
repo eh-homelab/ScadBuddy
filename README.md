@@ -910,6 +910,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. With the headless browser's agent-actor marker, or through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
   | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
   | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
+  | `GET/PUT /api/v1/ai/settings/printer-camera` | `{enabled}`: whether `get_printer_camera` may run (on by default); while off, every call to it is refused; audited (#1911) |
+  | `GET/PUT /api/v1/ai/settings/model` | `{model}`: the Claude model (an alias such as `opus`, or a full id) every turn and the connection test use from the next one on, `null` for Claude Code's default; audited (#1917) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`

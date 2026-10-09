@@ -11,6 +11,7 @@ import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untr
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
+import type { SwitchedOff } from './switches.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -88,6 +89,8 @@ export type ToolServices = {
   waitForTab?: WaitForTab | undefined
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
+  /** Tools Settings turned off (switches.ts, #1911): a call is refused before its handler runs. Every tool is on without it. */
+  switchedOff?: SwitchedOff | undefined
 }
 
 export type ToolContext = ToolServices & {
@@ -411,6 +414,8 @@ async function runJudgedByResult(
       `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
     )
   }
+  const off = await ctx.switchedOff?.(tool.name)
+  if (off) return refused(off)
   try {
     if (tool.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
