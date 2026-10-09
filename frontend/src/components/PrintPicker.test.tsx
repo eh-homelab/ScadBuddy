@@ -19,6 +19,7 @@ function renderPicker(
     onClose?: () => void
     onRan?: (result: PrintRunResult) => void
     onPrinterModel?: (model: string | null) => void
+    printSettings?: Record<string, string>
   } = {},
 ) {
   return renderPage(
@@ -28,6 +29,7 @@ function renderPicker(
       onClose={props.onClose ?? vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
+      printSettings={props.printSettings}
     />,
   )
 }
@@ -3007,5 +3009,46 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+  })
+})
+
+describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
+  const SETTINGS = { enable_prime_tower: '1', enable_support: '0', ironing_type: 'top' }
+
+  it('lists them read-only in Advanced, by readable name', async () => {
+    renderPicker({ printSettings: SETTINGS })
+    await loaded()
+    expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
+
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    expect(within(list).getByText('Prime tower').nextElementSibling).toHaveTextContent('On')
+    expect(within(list).getByText('Supports').nextElementSibling).toHaveTextContent('Off')
+    // A key with no readable name shows as itself.
+    expect(within(list).getByText('ironing_type').nextElementSibling).toHaveTextContent('top')
+    expect(within(list).queryByRole('textbox')).toBeNull()
+    expect(within(list).queryByRole('combobox')).toBeNull()
+  })
+
+  it('shows nothing for a template with none', async () => {
+    renderPicker({ printSettings: {} })
+    await loaded()
+    await showAdvanced()
+    expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
+  })
+
+  it('shows nothing for a library file, which has no ScadBuddy template', async () => {
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+        printSettings={SETTINGS}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
   })
 })

@@ -53,6 +53,7 @@ import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
+import { SlicerDefaults } from './print/SlicerDefaults'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
@@ -122,9 +123,22 @@ interface Props {
     /** #665 — a "Create project" in this picker is in flight. */
     onCreating?: (creating: boolean) => void
   }
+  /**
+   * #1294 — the model's own slicer defaults (`print_settings`), shown read-only for an
+   * output. A library file has none of ScadBuddy's.
+   */
+  printSettings?: Record<string, string> | undefined
 }
 
-export function PrintPicker({ open, source: given, onClose, onRan, onPrinterModel, project }: Props) {
+export function PrintPicker({
+  open,
+  source: given,
+  onClose,
+  onRan,
+  onPrinterModel,
+  project,
+  printSettings,
+}: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
   const [arranged, setArranged] = useState<Output | null>(null)
   const [arrangeGoal, setArrangeGoal] = useState<ArrangeGoal>('fewest_swaps')
@@ -827,6 +841,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                   )}
 
                   <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
+
+                  {given?.kind === 'output' && <SlicerDefaults settings={printSettings} />}
 
                   <PrintOptionsDisclosure
                     subject={subject}
