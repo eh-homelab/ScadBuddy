@@ -54,6 +54,16 @@
   - The segment runner reads the turn's images and the append from the workflow's `segment_context` Query, not from the prompt.
   - The engine inherits the worker's environment, so the runner empties the worker's own `SCADBUDDY_*`, `OTEL_*` and `TEMPORAL_*` variables for it (the database URL carries a password).
   - Continue-as-new between turns is the plugin's `should_continue_as_new()`. It is not forced in tests: the server's suggestion cannot be.
+- **Ruling 16, what PR 3 settled while building.**
+  - **The turn's blobs.** `DurableTurns.send` puts the turn's images in `ai_session_blobs` itself (`SessionBlobs.put`, under the `<sha256>.<ext>` names `AttachmentStore.claim` gives), before the Update. The segment runner may read them before the chat route's `claim` runs, and an inline image (`sessions_send` over `/mcp`) has no attachment at all. The route's `claim` after the send then only deletes the staging rows.
+  - **The claim.** Besides Ruling 7's status guard, a durable claim checks the owner and the lineage's budget, as a classic claim does, so a refusal reads the same (`whyNotClaimed`). A refused Update (`busy`) or one not accepted within 10 s (`unavailable`) gives the claim back and writes `session.status idle`; the `user.turn` already written stays.
+  - **A closed workflow.** The update-with-start uses `REJECT_DUPLICATE`: a session whose workflow ended (failed, terminated) has lost its conversation, so it is refused `closed` rather than restarted empty under the same session.
+  - **`unavailable`.** A new `SessionError` code (HTTP 503) for a durable session this service cannot reach: no Temporal or no KEK at start or send, an Update not accepted in time, a handoff whose `cancel_input` went unanswered.
+  - **Interrupt.** `cancel_input` going unanswered does not stop the interrupt: the Signal is recorded without a worker and ends the parked calls itself. False when the row shows no running turn, or the session has no workflow yet.
+  - **Handoff.** A durable session that never ran a turn has no workflow: its handoff passes (nothing is parked).
+  - **Fork.** A fork's child is always `classic` (it copies the SDK transcript, which only a classic session has), whatever `session_mode` says. A durable parent is refused before the transcript is read.
+  - **`done`.** Follows the event log only when read, from the turn's own `session.status running` to the first settled status: `interrupted` and `turn_failed` errors map to their outcomes, `error_max_budget_usd` to that result subtype.
+  - **The scripted runner.** `SCADBUDDY_DURABLE_SCRIPTED=1` (exactly `1`) makes the worker's segment runner the plugin's `ScriptedClaude` with an echo policy (`session/scripted.py`), for `agent/test/durable.e2e.test.ts` only. It calls no tool.
 
 ## Global Constraints
 
@@ -108,5 +118,5 @@
 
 ## What 5d and 5e need from 5c
 
-- 5d: `session_mode` is read at insert (`SessionManager.insert`), and `StartOptions.mode` exists but is not exposed. 5d adds the routes, the picker, the badge, and `mode` on the three create paths.
+- 5d: `session_mode` is read at start (`SessionManager.start`, `modeSetting`), and `StartOptions.mode` exists but is not exposed. `SessionRecord.mode` is read but no route view carries it yet. 5d adds the routes, the picker, the badge, and `mode` on the three create paths. Open: nothing reaps a durable session whose row says `running` after its workflow ended without `finish_turn` (the classic reaper reads the lease, which durable turns do not take).
 - 5e: the image needs `SCADBUDDY_DURABLE_TOOLS_JSON` (copy `agent/dist/tools.json`), `SCADBUDDY_DURABLE_CWD=/srv/agent`, `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, the KEK files, the database URL and `SCADBUDDY_DURABLE_SKILLS_DIR` (the plugin's skills). The agent container now also needs the KEK for the codec, which it already mounts.
