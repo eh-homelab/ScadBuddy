@@ -65,6 +65,8 @@ function harness(script: Script) {
   const refusals: { failure: FailureEvidence; probe?: ProbeVerdict['verdict'] }[] = []
   /** The order of `onRefused` calls and yielded results. */
   const order: string[] = []
+  /** How many messages the caller had seen when each fallback attempt started (`onAttempt`). */
+  const attempts: number[] = []
   const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(r)
     const out = script(r, runs.length - 1)
@@ -83,6 +85,7 @@ function harness(script: Script) {
     probes,
     refusals,
     order,
+    attempts,
     async collect(
       candidates: PooledCredential[],
       base: Partial<HarnessRun> = {},
@@ -111,6 +114,7 @@ function harness(script: Script) {
               refusals.push({ failure, ...judged })
               order.push('onRefused')
             },
+            onAttempt: () => attempts.push(messages.length),
           },
         )) {
           messages.push(m)
@@ -258,6 +262,22 @@ describe('runWithFallback (#1093)', () => {
     // Claude Code's own retries were passed on; the attempt was not stopped at them.
     expect(kinds(messages)).toEqual(['system/init', 'system/api_retry', 'system/api_retry', 'result/success'])
     expect(h.reports[0]).toEqual({ id: 'a', outcome: { class: 'transient', reason: 'API Error: 529 Overloaded' }, next: 'b' })
+  })
+
+  // #1666: the session manager forgets the requests an earlier attempt left open (unpricedSpend.ts).
+  it('says when a fallback attempt starts, after every message of the attempt before it', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? [init(), text('partial'), apiError('API Error: 529 Overloaded', 'server_error'), errorResult(529, 'API Error: 529 Overloaded')]
+        : n === 1
+          ? [init(), apiError('API Error: 529 Overloaded', 'server_error'), errorResult(529, 'API Error: 529 Overloaded')]
+          : [init(), success('ok')],
+    )
+    const { error } = await h.collect([A, B, C])
+    expect(error).toBeUndefined()
+    expect(h.runs).toHaveLength(3)
+    // The first attempt's init and text, then nothing more of the second's (its init is not passed on).
+    expect(h.attempts).toEqual([2, 2])
   })
 
   it('does not fall back when the failure is not the credential’s: a bad request, or a turn limit', async () => {
@@ -555,6 +575,20 @@ describe('runWithFallback (#1093)', () => {
     await h.collect([A, B])
     expect(h.runs[1]).toMatchObject({ prompt: 'Make a box', sessionId: SESSION })
     expect(h.runs[1]?.resume).toBeUndefined()
+  })
+
+  it('resumes without the memory hooks’ UserPromptSubmit, which fired for the user’s message already (#1896)', async () => {
+    const hook = () => Promise.resolve({})
+    const memoryHooks = { UserPromptSubmit: [{ hooks: [hook] }], Stop: [{ hooks: [hook] }] }
+    const fresh = harness((_r, n) => (n === 0 ? [retry(401, 'authentication_failed')] : [init(), success('ok')]))
+    await fresh.collect([A, B], { memoryHooks })
+    // Never reported a session: the message runs again as it was, with its hooks.
+    expect(fresh.runs[1]?.memoryHooks).toBe(memoryHooks)
+    const resumed = harness((_r, n) => (n === 0 ? [init(), retry(401, 'authentication_failed')] : [init(), success('ok')]))
+    await resumed.collect([A, B], { memoryHooks })
+    expect(resumed.runs[0]?.memoryHooks).toBe(memoryHooks)
+    expect(resumed.runs[1]).toMatchObject({ prompt: CONTINUE_PROMPT, memoryHooks: { Stop: memoryHooks.Stop } })
+    expect(resumed.runs[1]?.memoryHooks).not.toHaveProperty('UserPromptSubmit')
   })
 
   it('stops everything when the caller aborts, and never falls back', async () => {

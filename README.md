@@ -41,8 +41,9 @@ multi-colour rules, connecting Bambuddy and each feature.
   nozzle flow, the full process list and a per-slot filament preset override. Also lets
   you set copies, a project, and print options.
 - **Library**: print any file already in Bambuddy's library through the same print
-  picker, printed exactly as its author left it — never replated, recolored or
-  uploaded again. Advanced also lists STLs, which print as one plate, and sliced
+  picker, printed as an output is: a copy laid out for the nozzle side, flow and
+  spools chosen, filed in the project's folder; an author's plates and placement are
+  kept. Advanced also lists STLs, which print as one plate, and sliced
   `.gcode.3mf` files, which print from Bambuddy directly.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
@@ -749,9 +750,12 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     re-pointed at the agent sends its own name in both `Host` and `Origin`,
     which is not on the list.
 - **Where the headless browser may go** (`agent/src/harness/browserOrigins.ts`,
-  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It always opens the
-  backend (`SCADBUDDY_BACKEND_URL`), and a URL on `SCADBUDDY_PUBLIC_URL` or
-  `SCADBUDDY_ALLOWED_ORIGINS` is rewritten onto it. **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It opens ScadBuddy's
+  own origins as they are: `SCADBUDDY_PUBLIC_URL` (and the stored `public_url`
+  setting) and `SCADBUDDY_ALLOWED_ORIGINS`, through the ingress, so the agent pod
+  must reach at least one of them without an interactive login (#983). Only with
+  none configured does it open the backend (`SCADBUDDY_BACKEND_URL`) instead.
+  **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
   (comma-separated origins, or `*` for any) lets it open other origins too, each only
   after a human approves it once per session in the ScadBuddy UI. Unset, it opens
   nothing else. `*` plus that approval is the intended setting for full use; it also
@@ -889,7 +893,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   another replica does not reset it); the socket answers an `error` frame with
   code `rate_limited`. Approvals
   and the agent's questions are answered through
-  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815);
+  `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815),
+  which works while the panel's socket is down;
   `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
   still work. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at

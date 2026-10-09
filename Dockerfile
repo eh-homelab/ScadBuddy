@@ -247,7 +247,8 @@ COPY --from=agent-deps /src/agent/node_modules ./node_modules
 # which is what a headless launch without a `channel` uses
 # (agent/src/harness/headlessBrowser.ts `playwrightConfig`); measured on
 # 0.0.82: 603 MB for it and its libraries, against 740 MB for full Chromium.
-# Bump with @playwright/mcp in agent/package.json.
+# The pin moved to 0.0.83 without re-measuring this; re-check the size when
+# the image is next built. Bump with @playwright/mcp in agent/package.json.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium \
     && rm -rf /var/lib/apt/lists/*
@@ -291,6 +292,55 @@ CMD ["node", "--import", "./dist/telemetry.js", "dist/main.js"]
 # backend's, so the exit status is the signal.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+
+# ── agent-durable: durable agent sessions on Temporal (spec 2026-10-01 §6.3a) ──
+# A sidecar in the ScadBuddy pod beside `agent`, trusted like it (#1030). Python
+# because the Claude Agent SDK's Temporal plugin is Python (ai-integrations#33,
+# git-pinned in agent-durable/uv.lock). Plain psycopg against apt's libpq5, as
+# the backend image does, so libpq fixes arrive with the OS.
+FROM python:3.12-slim-bookworm AS agent-durable
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini libpq5 git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/
+
+RUN groupadd --gid 10001 scadbuddy \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/agent --shell /usr/sbin/nologin scadbuddy \
+    && install -d -o 10001 -g 10001 /srv/agent
+
+WORKDIR /app/agent-durable
+ENV UV_PROJECT_ENVIRONMENT=/app/agent-durable/.venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+COPY agent-durable/pyproject.toml agent-durable/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY agent-durable/src ./src
+RUN uv sync --frozen --no-dev
+
+# ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
+COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
+
+# Fails the build when the bundled Claude Code is missing for this platform or
+# is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin).
+RUN .venv/bin/python -m scadbuddy_durable.check_cli_version
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV PATH=/app/agent-durable/.venv/bin:$PATH \
+    HOME=/srv/agent \
+    CLAUDE_CONFIG_DIR=/srv/agent/claude \
+    SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+USER 10001:10001
+EXPOSE 8082
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python", "-m", "scadbuddy_durable"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8082/healthz', timeout=4).status == 200 else 1)"]
 
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to

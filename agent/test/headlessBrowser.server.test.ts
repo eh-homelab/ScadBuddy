@@ -204,13 +204,42 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
     expect(third.hits).toEqual([])
   }, 60_000)
 
-  it('turns a navigation to an alias of the backend into one to the backend', async () => {
-    // `scadbuddy.invalid` never resolves (RFC 2606): only the rewrite can land.
-    const { call, sessionId } = await connect(ui.origin, randomUUID(), { publicUrl: 'http://scadbuddy.invalid' })
-    const alias = await call('browser_navigate', { url: 'http://scadbuddy.invalid/m/box?via=alias' })
+  it("opens ScadBuddy's public origin as it is, with the marker, and no longer the backend's (#983)", async () => {
+    // The same server under another origin: the backend is 127.0.0.1, the public URL localhost.
+    const publicOrigin = ui.origin.replace('127.0.0.1', 'localhost')
+    const { call, sessionId } = await connect(ui.origin, randomUUID(), { publicUrl: publicOrigin })
+    const opened = await call('browser_navigate', { url: `${publicOrigin}/m/box?via=public` })
     await call('browser_wait_for', { time: 1 })
-    expect(alias.isError).toBe(false)
-    expect(ui.hits.map((h) => [h.url, marker(h)])).toContainEqual(['/m/box?via=alias', sessionId])
+    expect(opened.isError).toBe(false)
+    const hit = ui.hits.find((h) => h.url === '/m/box?via=public')
+    expect(hit?.headers.host).toBe(new URL(publicOrigin).host)
+    expect(marker(hit!)).toBe(sessionId)
+    // The page's own request to the public origin carries the marker too.
+    const snapshot = await call('browser_snapshot')
+    await call('browser_click', { element: 'Print', target: refOf(snapshot.text, 'button', 'Print') })
+    await call('browser_wait_for', { text: 'print 403' })
+    expect(ui.hits.filter((h) => h.url === '/api/v1/prints').map((h) => [h.headers.host, marker(h)])).toEqual([
+      [new URL(publicOrigin).host, sessionId],
+    ])
+    // Nothing reaches a path the ingress routes to the agent (review of #1934): a page's
+    // POST that would answer the session's own approval, a socket, a redirect, a
+    // direct navigation, nor an encoded or dotted spelling of one.
+    await call('browser_click', { element: 'Approve', target: '#approve' })
+    await call('browser_wait_for', { text: 'approve blocked' })
+    await call('browser_click', { element: 'Agent socket', target: '#agent-socket' })
+    await call('browser_wait_for', { text: 'agent socket closed' })
+    for (const url of ['/redirect-agent', '/api/v1/ai/status', '/api/v1/%61i/status', '/m/%2e%2e/api/v1/ai/status', '/mcp']) {
+      const refused = await call('browser_navigate', { url: `${publicOrigin}${url}` })
+      if (url !== '/redirect-agent') expect(refused.text, url).toContain('Blocked')
+    }
+    await call('browser_wait_for', { time: 1 })
+    const agentHits = ui.hits.filter((h) => /^\/(api\/v1\/(ai|%61i)|mcp|m\/%2e)/i.test(h.url))
+    expect(agentHits).toEqual([])
+    // The backend's own origin is not a place any more.
+    const before = ui.hits.length
+    const backend = await call('browser_navigate', { url: `${ui.origin}/m/box?via=backend` })
+    expect(backend.text).toContain('Blocked')
+    expect(ui.hits.length).toBe(before)
   }, 60_000)
 
   it('refuses a direct navigation off the origin, and a redirect off it, but follows one on it', async () => {

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { binary } from './binary.js'
-import { command } from './command.js'
+import { staleBase } from './authoring.js'
+import { command, commandAnswer, isRunning } from './command.js'
 import { ok } from './call.js'
 import { commit, decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'
@@ -21,6 +22,7 @@ export const catalogueTools: Tool[] = [
     source:
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models'],
+    title: () => 'List templates',
     handler: async (args, { backend }) =>
       json(page(await ok(backend.GET('/api/v1/models'), 'list models'), args, (m) => m.slug, 'list_models')),
   }),
@@ -33,6 +35,7 @@ export const catalogueTools: Tool[] = [
     source:
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models/{slug}'],
+    title: ({ slug }) => `Read template → ${slug}`,
     handler: async ({ slug }, { backend }) =>
       json(await ok(backend.GET('/api/v1/models/{slug}', { params: { path: { slug } } }), `get model ${slug}`)),
   }),
@@ -87,6 +90,7 @@ export const catalogueTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models'],
+    title: ({ name }) => `Create template → ${name}`,
     handler: async (body, ctx) =>
       json(await command(ctx, `create model ${body.name}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers }))),
   }),
@@ -167,20 +171,31 @@ export const catalogueTools: Tool[] = [
       source: z.string().max(1_000_000),
       message: z.string().max(200).optional().describe('What the revision is called in the history'),
       force: z.boolean().default(false),
-      base: commit.optional().describe('Refuse (409, naming the current revision) unless the model is still here'),
+      base: commit
+        .optional()
+        .describe('Refuse as a conflict naming the `current` revision unless the model is still here'),
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/source'],
-    handler: async ({ slug, source, message, force, base }, ctx) =>
-      json(
-        await command(ctx, `update source of ${slug}`, (headers) =>
-          ctx.backend.PUT('/api/v1/models/{slug}/source', {
-            params: { path: { slug } },
-            body: { source, message: message ?? null, force, base: base ?? null },
-            headers,
-          }),
-        ),
-      ),
+    title: ({ slug, message }) => `Edit source → ${slug}${message ? `: ${message}` : ''}`,
+    handler: async ({ slug, source, message, force, base }, ctx) => {
+      const answered = await commandAnswer(ctx, `update source of ${slug}`, (headers) =>
+        ctx.backend.PUT('/api/v1/models/{slug}/source', {
+          params: { path: { slug } },
+          body: { source, message: message ?? null, force, base: base ?? null },
+          headers,
+        }),
+      )
+      if (isRunning(answered)) return json(answered)
+      const stale = staleBase(
+        answered,
+        base,
+        'Nothing was written: the model changed after you read it. Call get_source (and get_model ' +
+          'for its version) again, redo the change against that, and pass `current` as `base`.',
+      )
+      if (stale !== null) return stale
+      return json(await ok(Promise.resolve(answered), `update source of ${slug}`))
+    },
   }),
 
   defineTool({

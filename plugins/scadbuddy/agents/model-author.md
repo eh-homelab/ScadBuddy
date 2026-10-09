@@ -54,10 +54,13 @@ session the user is in; without it, return the question to the session instead.
      an axis the change does not move: `top` for a change in X or Y (layout,
      spacing, hole positions), `front` or `left`/`right` for a change in Z
      (heights, raised text). A change in more than one axis needs more than one
-     view; `iso` alone shows that something changed, not by how much. The view
-     directions are in the `customize` skill, section 4, from
-     `backend/scadbuddy/render/thumbnail.py`.
-   - the colours, with `get_render_colours`, from the same view.
+     view; `iso` alone shows that something changed, not by how much. A feature
+     no named view shows (on an angled face, under a lip, on the back-left)
+     takes a camera: `azimuth` (0 front, 90 right), `elevation`, and `zoom` with
+     a `target` in model mm to come in close; check before and after from the
+     same camera. The view directions and the camera are in the `customize`
+     skill, section 4, from `backend/scadbuddy/render/thumbnail.py`.
+   - the colours, with `get_render_colours`, from the same view and camera.
    - the printability of the change against the `authoring` skill's section 9
      (hole and fit clearance, wall thickness for the nozzle, overhangs, bridges),
      and its section 10 (cutters that overlap, no leftover `!`, `*`, `#` or `%`).

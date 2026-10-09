@@ -16,7 +16,9 @@ import {
 import { PROBE_FALLBACK_MODEL } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { createMemoryHooks, HindsightClient, type MemoryActivity } from '../src/memory/hindsight.js'
 import { displayUpdates, type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { startFakeHindsight } from './support/fakeHindsight.js'
 
 // #1093 end to end: runWithFallback over the real SDK and its bundled Claude
 // Code binary, against one fake Anthropic endpoint that answers each
@@ -105,6 +107,42 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(texts).toContain(CONTINUE_PROMPT)
     expect(JSON.stringify(messages)).not.toContain(TOKEN_A)
     expect(JSON.stringify(messages)).not.toMatch(/Not logged in|API Error/)
+  }, 60_000)
+
+  it('recalls memory once for the user’s message when the turn falls back and resumes (#1896)', async () => {
+    const hindsight = await startFakeHindsight()
+    try {
+      hindsight.memories = ['The user prints boxes in PETG.']
+      const activity: MemoryActivity[] = []
+      const memory = createMemoryHooks({
+        client: new HindsightClient({ apiBase: `http://hindsight.invalid:${hindsight.port}`, bankId: 'b', address: '127.0.0.1' }),
+        secrets: [TOKEN_A, TOKEN_B],
+        log: () => {},
+        // As the session manager sets it: the user's words, whatever the attempt's prompt.
+        hookConfig: { autoRetain: false, recallQuery: 'Make a box' },
+        onActivity: (a) => {
+          activity.push(a)
+        },
+      })
+      forA = () => ({ error: { status: 401, type: 'authentication_error', message: 'invalid token' } })
+      forB = () => ({ text: 'Box made.' })
+      const { result, reports } = await turn({ memoryHooks: memory.hooks })
+      await memory.settled()
+      expect(result).toMatchObject({ subtype: 'success', is_error: false, result: 'Box made.' })
+      expect(reports.map((r) => [r.id, r.outcome.class])).toEqual([
+        ['a', 'permanent'],
+        ['b', 'ok'],
+      ])
+      // One recall for the one user message: the resumed attempt's continuation is not a new message.
+      expect(hindsight.recalls()).toHaveLength(1)
+      expect(activity.filter((a) => a.action === 'recall')).toHaveLength(1)
+      // The resumed request carries the memories once, from the first attempt's transcript.
+      const sent = JSON.stringify(callsWith(TOKEN_B).at(-1)?.body?.messages)
+      expect(sent).toContain(CONTINUE_PROMPT)
+      expect(sent.split('The user prints boxes in PETG.').length - 1).toBe(1)
+    } finally {
+      await hindsight.close()
+    }
   }, 60_000)
 
   it('cools a rate-limited key down until the time the endpoint names', async () => {

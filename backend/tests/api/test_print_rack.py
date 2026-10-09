@@ -27,7 +27,13 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
-from tests.api.test_print_library import library_3mf, library_file, one_color, run_library
+from tests.api.test_print_library import (
+    flow_copy_routes,
+    library_3mf,
+    library_file,
+    one_color,
+    run_library,
+)
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -205,6 +211,25 @@ def test_the_check_records_the_racks_hotends_as_seen(client: TestClient, model: 
     assert usage[serial(1)].first_seen_at is None  # the left hotend is not a rack hotend
 
 
+@respx.mock
+def test_the_check_lists_each_positions_open_picks(client: TestClient, model: str) -> None:
+    """#1079: the dialog can say why a hotend with fewer settled prints was passed over."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+    asyncio.run(
+        rack_usage(client).record_picks(
+            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17))]
+        )
+    )
+
+    options = check(client, output_id)["rack"]["options"]
+
+    assert {option["position"]: option["pending"] for option in options}[2] == 1
+    assert {option["pending"] for option in options if option["position"] != 2} == {0}
+
+
 def assert_seen(client: TestClient) -> None:
     usage = asyncio.run(rack_usage(client).usage([serial(17), serial(0)]))
     assert usage[serial(17)].first_seen_at is not None
@@ -347,6 +372,7 @@ def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> No
     by output id), so a pick row would never be credited."""
     configure(client)
     one_color(89)
+    flow_copy_routes()
     library_file(89)
     run_routes()
     invented_rack_route()
@@ -745,11 +771,11 @@ def test_a_run_that_picked_from_the_rack_drops_the_rack_sides_high_flow_warning(
 
 
 @respx.mock
-def test_a_library_files_rack_pick_drops_only_the_rack_sides_high_flow_warning(
+def test_a_library_files_rack_pick_drops_the_rack_sides_high_flow_warning(
     client: TestClient,
 ) -> None:
-    """A library file prints as its author left it (#313): it is offered no side, so the
-    left's warning stands beside the rack pick that drops the right's (#1238)."""
+    """As an output's (#1752, B3, B4): its copy states the side offered, the right alone
+    (#834), and the rack pick drops the right's warning (#1238), so none is left."""
     configure(client)
     one_color(89)
     library_file(89)
@@ -763,7 +789,7 @@ def test_a_library_files_rack_pick_drops_only_the_rack_sides_high_flow_warning(
 
     assert check.status_code == 200, check.text
     assert check.json()["rack"]["position"] in (2, 4, 6)
-    assert _high_flow_sides(check.json()["warnings"]) == {"left"}
+    assert _high_flow_sides(check.json()["warnings"]) == set()
 
 
 def _library_high_flow(**extra: Any) -> dict[str, Any]:

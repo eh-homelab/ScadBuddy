@@ -17,6 +17,12 @@ const LIBRARY_PRINT_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/print/library/{file_id}/objects',
+    reason:
+      "The Arrange dialog's list of a library file's objects, with a count each (#1863). The arrange " +
+      'tool names a whole file (`library_file_id`, part omitted), which places every object at its own count.',
+  },
+  {
     operation: 'GET /api/v1/models/{slug}/ui/{path}',
     reason:
       "Serves a template's own UI module and assets to the browser (#425). An agent reads the `ui` " +
@@ -64,16 +70,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
   {
-    operation: 'POST /api/v1/outputs/arrange',
-    reason:
-      "Arrange needs objects, a printer and spools chosen in the History or Print dialog; the agent's print " +
-      'tools do not pick spools yet.',
-  },
-  {
     operation: 'POST /api/v1/outputs/{output_id}/backfill',
     reason:
       'Re-renders an output saved before Arrange so Arrange can use it (#902); the History and Print ' +
-      'dialogs ask the user first. The agent has no Arrange tool (above), so it has nothing to backfill for.',
+      'dialogs ask the user first, so the arrange tool names such outputs and leaves the re-render to the user.',
   },
   {
     operation: 'POST /api/v1/models/{slug}/inputs/migrate',

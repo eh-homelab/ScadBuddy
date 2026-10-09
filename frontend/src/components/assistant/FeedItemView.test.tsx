@@ -127,10 +127,12 @@ describe('the tool card', () => {
       />,
     )
 
-  it('in basic mode shows what ran and how it ended, without its arguments', () => {
+  it('in basic mode shows what ran and how it ended, without its arguments or raw result (#782)', () => {
     card(false)
     const tool = screen.getByTestId('agent-tool')
-    expect(tool).toHaveTextContent('Set 1 parameter')
+    expect(tool).toHaveTextContent('Set parameters')
+    expect(tool).toHaveTextContent('Done')
+    expect(tool).not.toHaveTextContent('Set 1 parameter')
     expect(screen.queryByTestId('agent-tool-arguments')).toBeNull()
     expect(tool.querySelector('details')).not.toHaveAttribute('open')
   })
@@ -138,8 +140,9 @@ describe('the tool card', () => {
   it('in advanced mode shows its arguments and sources, open', () => {
     card(true)
     const args = screen.getByTestId('agent-tool-arguments')
-    expect(args).toHaveAttribute('open')
+    expect(args).toBeVisible()
     expect(args).toHaveTextContent('"width": 40')
+    expect(screen.getByTestId('agent-tool-result')).toHaveTextContent('Set 1 parameter')
     expect(screen.getByRole('link', { name: 'Customizer docs' })).toBeVisible()
   })
 })
@@ -434,5 +437,40 @@ describe('the tab-disconnected card (#815)', () => {
     render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
     expect(screen.getByRole('status')).toHaveTextContent('The tab is back. The assistant re-reads the page before it changes anything.')
     expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
+  })
+})
+
+describe('who asked (#1109)', () => {
+  const question: FeedItem = {
+    kind: 'question',
+    id: 'q1',
+    tool: 't2',
+    questions: [
+      {
+        question: 'Paste your key?',
+        header: 'Key',
+        multiSelect: false,
+        options: [
+          { label: 'Yes', description: '' },
+          { label: 'No', description: '' },
+        ],
+      },
+    ],
+    state: 'pending',
+  }
+  const ask = (askedBy?: string) =>
+    render(<FeedItemView item={question} askedBy={askedBy} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+
+  it("names the subagent that asked, and says nothing for the session's own agent", () => {
+    const named = ask('pkg:helper')
+    expect(screen.getByTestId('agent-question-asked-by')).toHaveTextContent(
+      'Asked by the subagent pkg:helper, not the assistant itself.',
+    )
+    named.unmount()
+    const unnamed = ask('')
+    expect(screen.getByTestId('agent-question-asked-by')).toHaveTextContent('Asked by a subagent, not the assistant itself.')
+    unnamed.unmount()
+    ask()
+    expect(screen.queryByTestId('agent-question-asked-by')).not.toBeInTheDocument()
   })
 })

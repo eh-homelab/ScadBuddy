@@ -18,7 +18,7 @@ plugin's [`authoring` skill](../../plugins/scadbuddy/skills/authoring/SKILL.md).
 | Check | `check_source` | read | `POST /api/v1/models/check` |
 | Edit | `apply_patch`, or `update_source` for a rewrite | write | `POST /api/v1/models/{slug}/source/patch`, `PUT /api/v1/models/{slug}/source` |
 | Render | `render_model`, `get_render_diagnostics` | write, read | `POST /api/v1/models/{slug}/render`, `GET /api/v1/models/{slug}/diagnostics` |
-| Look | `get_render_view` (7 views), `analyze_geometry` | read | `GET /api/v1/jobs/{job_id}/views/{view}.png`, `GET /api/v1/outputs/{output_id}/geometry` |
+| Look | `get_render_view` (7 named views, or any camera), `analyze_geometry` | read | `GET /api/v1/jobs/{job_id}/views/{view}.png`, `GET /api/v1/outputs/{output_id}/geometry` |
 | Back out | `restore_version` | write | `POST /api/v1/models/{slug}/versions/{commit}/restore` |
 
 Every edit, restore and create is one commit in the model's history

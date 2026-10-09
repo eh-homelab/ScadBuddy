@@ -45,6 +45,16 @@ function mountOf(module: unknown): Mount | undefined {
   return typeof mount === 'function' ? (mount as Mount) : undefined
 }
 
+/** A template's cleanup, wherever it runs: a throw is the template's fault, logged, never the page's. */
+function runCleanup(module: string, cleanup: MountResult): void {
+  if (typeof cleanup !== 'function') return
+  try {
+    cleanup()
+  } catch (cause) {
+    console.error(`${module}: its cleanup threw`, cause)
+  }
+}
+
 function theme(): 'light' | 'dark' {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
@@ -115,15 +125,13 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
           ])
         } catch (cause) {
           // The page has moved on to the form: a mount that finishes after all is undone.
-          mounting.then((late) => {
-            if (typeof late === 'function') late()
-          }, () => {})
+          mounting.then((late) => runCleanup(ui.module, late), () => {})
           throw cause
         } finally {
           clearTimeout(timer)
         }
         if (active) cleanup = result
-        else if (typeof result === 'function') result()
+        else runCleanup(ui.module, result)
       } catch (cause) {
         if (active) fail(cause instanceof Error ? cause.message : String(cause))
       }
@@ -132,11 +140,7 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
       active = false
       created.dispose()
       handle.current = null
-      try {
-        if (typeof cleanup === 'function') cleanup()
-      } catch (cause) {
-        console.error(`${ui.module}: its cleanup threw`, cause)
-      }
+      runCleanup(ui.module, cleanup)
       root.replaceChildren()
       provideRegistry(el, undefined)
       setElements([])

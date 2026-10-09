@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
-import { NoUsableCredentialError } from '../src/harness/fallback.js'
+import { CONTINUE_PROMPT, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
@@ -517,6 +517,74 @@ describe.skipIf(!TEST_DATABASE_URL)(
       }
     })
 
+    it('audits one recall per user message when the turn falls back to another credential (#1896)', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        fake.memories = ['The user prints in PETG.']
+        const paths = await tempPaths()
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/bank1/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+        const audit = new AuditLog({ sql: db.sql })
+        const pooled = (id: string, secret: string) => ({
+          id,
+          epoch: 0,
+          label: `credential ${id}`,
+          credential: { kind: 'anthropic_api_key' as const, secret },
+        })
+        const runs: HarnessRun[] = []
+        // Claude Code fires UserPromptSubmit for every query's prompt, the continuation's too;
+        // the first credential is refused after its init, so the second resumes.
+        const runner = (run: HarnessRun): AsyncIterable<SDKMessage> => {
+          runs.push(run)
+          const attempt = runs.length
+          const session_id = run.sessionId ?? run.resume ?? 'unknown'
+          return (async function* () {
+            const signal = new AbortController().signal
+            for (const matcher of run.memoryHooks?.UserPromptSubmit ?? []) {
+              await matcher.hooks[0]!(
+                { session_id, transcript_path: '/nonexistent', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: run.prompt as string },
+                undefined,
+                { signal },
+              )
+            }
+            yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+            if (attempt === 1) {
+              yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
+              return
+            }
+            yield { type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] }, parent_tool_use_id: null, session_id } as unknown as SDKMessage
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', num_turns: 1, total_cost_usd: 0.01, session_id } as unknown as SDKMessage
+          })()
+        }
+        const m = manager({
+          sql: db.sql,
+          paths,
+          run: runner,
+          remotePlugins,
+          audit,
+          memory: { hookConfig: { autoRetain: false } },
+          credentials: {
+            candidates: () => Promise.resolve([pooled('a', 'sk-ant-key-aaaa'), pooled('b', 'sk-ant-key-bbbb')]),
+            reporter: () => () => Promise.resolve(),
+          },
+          probe: () => Promise.resolve({ verdict: 'refused', reason: 'HTTP 401 again' }),
+        })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
+        expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+        expect(runs.map((r) => r.prompt)).toEqual(['Make a box', CONTINUE_PROMPT])
+        await expect.poll(async () => (await audit.list({ sessionId: session.id, kind: 'memory' })).entries.length).toBe(1)
+        const { entries } = await audit.list({ sessionId: session.id, kind: 'memory' })
+        expect(entries.map((e) => [e.action, e.turn_id])).toEqual([['recall', turn!.turnId]])
+        expect(fake.recalls()).toHaveLength(1)
+      } finally {
+        await fake.close()
+      }
+    })
+
     it('writes an audit row and a panel event per automatic recall and retain, a retain after the turn ended included', async () => {
       const fake = await startFakeHindsight()
       try {
@@ -675,6 +743,28 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const bare = manager({ sql: db.sql, paths, run: runner, settings })
       await (await bare.send(session.id, agentA, 'once more')).done
       expect(runs[2]!.headlessBrowser).toBeUndefined()
+    })
+
+    it("reads the backend's public_url for each browser turn, and runs without it when the read fails (#983)", async () => {
+      const paths = await tempPaths()
+      const settings = new SettingsStore(db.sql)
+      await settings.set(SETTING_HEADLESS_BROWSER, true)
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      let live: () => Promise<string | undefined> = () => Promise.resolve('https://scadbuddy.internal.example')
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: runner,
+        settings,
+        headlessBrowser: { backendUrl: 'http://127.0.0.1:8000', livePublicUrl: () => live() },
+      })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
+      await turn!.done
+      expect(runs[0]!.headlessBrowser?.livePublicUrl).toBe('https://scadbuddy.internal.example')
+      live = () => Promise.reject(new Error('backend down'))
+      await (await m.send(session.id, agentA, 'again')).done
+      expect(runs[1]!.headlessBrowser).toBeDefined()
+      expect(runs[1]!.headlessBrowser?.livePublicUrl).toBeUndefined()
     })
 
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {

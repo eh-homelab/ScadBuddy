@@ -160,7 +160,7 @@ as unset (`present()`).
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
-| `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` | unset → the backend (and its aliases) only | `parseBrowserAllowedOrigins()` in [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts) | Origins beyond the backend's that the headless browser may open, each only after a human approves it once per session: a comma-separated list of `http(s)` origins, or `*` for any. A path, a non-origin or `*` mixed with origins is a `ConfigError` at start. See [headless-browser.md](headless-browser.md), "Beyond the backend". |
+| `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` | unset → ScadBuddy's own origins only | `parseBrowserAllowedOrigins()` in [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts) | Origins beyond ScadBuddy's own (its public URL and `SCADBUDDY_ALLOWED_ORIGINS`, or the backend's when neither is set) that the headless browser may open, each only after a human approves it once per session: a comma-separated list of `http(s)` origins, or `*` for any. A path, a non-origin or `*` mixed with origins is a `ConfigError` at start. See [headless-browser.md](headless-browser.md), "Beyond the backend". |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -373,8 +373,9 @@ routes in `registerMcpTokenRoutes()` in
 [`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
 stored in `ai_mcp_tokens` (§7). The Settings section renders only where
 `useAiAvailability()` ([`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts))
-reports AI available, which today is the msw-mocked build: nothing routes
-`/api/v1/ai/*` to the sidecar yet. Until then, the routes below are the interface.
+reports AI available: the ingress routes `/api/v1/ai/*` to the sidecar **and** a Claude
+credential is saved (`GET /api/v1/ai/status` answers `configured`). The credential
+section itself always shows, so it can be saved first.
 
 | Route | Guarded | What it does |
 |---|---|---|
@@ -593,7 +594,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); and `mcp_oidc`, the
+  ([§12](#12-the-http-request-tool-827)); `image_long_edge`, the long edge in pixels the
+  assistant panel scales an attached image to (default 1568, the Messages API's
+  standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
+  later), which Settings → Assistant images writes through
+  `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `model` and `approval_expiry_seconds` have no
   route yet.
@@ -696,6 +702,15 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
   and every URL a package declares, go through the same egress check as the gateway
   (see [security.md](security.md#plugin-packages)).
+- **Built-in plugins.** The two plugins in the image are listed first by
+  `GET /api/v1/ai/plugin-packages`, with `built_in: true`
+  ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
+  `scadbuddy`, ScadBuddy's own plugin (on unless the `ai_settings` key
+  `scadbuddy_plugin_enabled` is `false`), and `playwright`, the headless browser (its
+  switch is `headless_browser_enabled`, [headless-browser.md](headless-browser.md)).
+  `PATCH` with `{ enabled }` sets that key; approve, re-pin and `DELETE` answer 409. An
+  install whose package names one answers 409 with `built_in: true` instead of
+  refusing it, and Settings shows that as a notice.
 
 ### The routes
 

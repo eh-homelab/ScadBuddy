@@ -35,6 +35,9 @@ const tiers: Record<string, RiskTier> = { mcp__stub__print: 'outward', mcp__stub
 
 type Frame = Record<string, unknown>
 
+const PNG_1X1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
+const JPEG_HEAD = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]).toString('base64')
+
 describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
@@ -170,6 +173,84 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     panel.close()
     watcher.close()
   }, 90_000)
+
+  it('sends pasted images to the model as image blocks, and shows their previews in the transcript (#1866)', async () => {
+    script = () => ({ text: 'A keychain.' })
+    const m = await sessions()
+    agent = await startLiveAgent(m)
+    const panel = await openPanelSocket(agent)
+    const { clientMessage } = await frontendClientMessages()
+    await panel.until(is('sessions.snapshot'))
+
+    // A full image well past the old 256 KiB frame cap: a screenshot's size.
+    const png = Buffer.concat([PNG_1X1, Buffer.alloc(600 * 1024, 7)]).toString('base64')
+    const preview = { mediaType: 'image/jpeg', data: JPEG_HEAD }
+    panel.send(
+      clientMessage({
+        type: 'user.message',
+        text: 'What is in this picture?',
+        context: { route: '/' },
+        images: [{ mediaType: 'image/png', data: png, preview }],
+      }),
+    )
+    const frames = await panel.until(is('session.result'))
+    expect(frames.find(is('error'))).toBeUndefined()
+
+    // The model got the image as an image block, before the words and the page context.
+    // Claude Code re-encodes an image before it sends it (measured on 2.1.289: this PNG
+    // went out as a JPEG), so the block is checked for its shape, not its bytes.
+    const content = fake.messageCalls()[0]?.body?.messages?.at(-1)?.content as Record<string, unknown>[]
+    const images = content.filter((b) => b.type === 'image')
+    expect(images).toEqual([
+      {
+        type: 'image',
+        source: { type: 'base64', media_type: expect.stringMatching(/^image\/(png|jpeg|gif|webp)$/), data: expect.any(String) },
+      },
+    ])
+    const words = content.findIndex((b) => b.type === 'text' && String(b.text).startsWith('What is in this picture?'))
+    expect(words).toBeGreaterThan(content.indexOf(images[0]!))
+    expect(String(content[words]?.text)).toContain('<page_context>')
+
+    // The transcript shows the preview, never the full image.
+    const turn = frames.find(is('user.turn'))
+    expect(turn).toMatchObject({ text: 'What is in this picture?', images: [preview] })
+    expect(JSON.stringify(frames)).not.toContain(png)
+    await expectPanelAccepts(frames)
+
+    // A watcher that attaches later gets the same, from the log.
+    const sessionId = turn!.sessionId as string
+    const watcher = await openPanelSocket(agent)
+    await watcher.until(is('sessions.snapshot'))
+    watcher.send(clientMessage({ type: 'session.attach', sessionId }))
+    const replay = await watcher.until(is('session.result'))
+    expect(replay.find(is('user.turn'))).toMatchObject({ images: [preview] })
+
+    panel.close()
+    watcher.close()
+  }, 90_000)
+
+  it('refuses an image whose bytes are not the type it names, and runs no turn (#1866)', async () => {
+    script = () => ({ text: 'should not run' })
+    const m = await sessions()
+    agent = await startLiveAgent(m)
+    const panel = await openPanelSocket(agent)
+    const { clientMessage } = await frontendClientMessages()
+    await panel.until(is('sessions.snapshot'))
+    const notPng = Buffer.from('<html>hello</html>').toString('base64')
+    panel.send(
+      clientMessage({
+        type: 'user.message',
+        text: 'look',
+        context: { route: '/' },
+        images: [{ mediaType: 'image/png', data: notPng, preview: { mediaType: 'image/jpeg', data: JPEG_HEAD } }],
+      }),
+    )
+    const [refused] = (await panel.until(is('error'))).filter(is('error'))
+    expect(refused).toMatchObject({ code: 'invalid' })
+    expect(JSON.stringify(refused)).not.toContain(notPng)
+    expect(fake.messageCalls()).toHaveLength(0)
+    panel.close()
+  }, 30_000)
 
   it('keeps the session picker current: a session started elsewhere appears without a reconnect', async () => {
     script = () => ({ text: 'hi' })

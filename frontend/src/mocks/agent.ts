@@ -31,6 +31,7 @@ import {
   type SessionStatus,
   type SessionSummary,
 } from '../agent/chat/protocol'
+import { PREVIEW_IMAGE } from './features/assistantBlobs'
 
 type Body<E> = E extends ServerEvent ? Omit<E, 'v'> : never
 type EventBody = Body<ServerEvent>
@@ -161,6 +162,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
 
   const firstTurn = (s: MockSession): Array<() => void> => {
     const writeId = nextId('tool')
+    const viewId = nextId('tool')
     const sendId = nextId('tool')
     const approvalId = nextId('approval')
     return [
@@ -177,6 +179,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           name: 'mcp__scadbuddy__set_parameters',
           input: { slug: 'name-keychain', params: { text_size: 14 } },
           risk: 'write',
+          title: 'Set text_size → 14 mm',
         }),
       () =>
         emit({
@@ -194,6 +197,26 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           ],
           version: { slug: 'name-keychain', revision: 'a1b2c3d' },
         }),
+      // #782: a call in a row with the last, whose result is an image.
+      () =>
+        emit({
+          type: 'tool.call',
+          sessionId: s.sessionId,
+          id: viewId,
+          name: 'mcp__scadbuddy__get_render_view',
+          input: { job_id: 'job-1', view: 'iso', size: 512 },
+          risk: 'read',
+          title: 'Look at the render (iso)',
+        }),
+      () =>
+        emit({
+          type: 'tool.result',
+          sessionId: s.sessionId,
+          id: viewId,
+          ok: true,
+          summary: '{"view":"iso","size":512}',
+          images: [PREVIEW_IMAGE],
+        }),
       ...say(s, 'It still fits the A1 mini plate. Sending it needs your go-ahead.'),
       () =>
         emit({
@@ -203,6 +226,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           name: 'mcp__scadbuddy__print_output',
           input: { slug: 'name-keychain', project: 'Keychains', copies: 2 },
           risk: 'outward',
+          title: 'Print name-keychain × 2',
         }),
       () => {
         s.pending = { id: approvalId, toolCallId: sendId }
@@ -373,7 +397,15 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           sessions.set(s.sessionId, s)
           emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title, budgetUsd })
         }
-        emit({ type: 'user.turn', sessionId: s.sessionId, turnId: nextId('turn'), text: msg.text, author: BROWSER_USER })
+        emit({
+          type: 'user.turn',
+          sessionId: s.sessionId,
+          turnId: nextId('turn'),
+          text: msg.text,
+          author: BROWSER_USER,
+          // #1866 — the agent keeps only the previews in the transcript.
+          ...(msg.images?.length ? { images: msg.images.map((image) => image.preview) } : {}),
+        })
         setStatus(s, 'running')
         play(s, isNew ? (/draft/i.test(msg.text) ? questionTurn(s) : firstTurn(s)) : followUp(s, msg.text))
         return

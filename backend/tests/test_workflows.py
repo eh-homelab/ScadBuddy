@@ -6,11 +6,15 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
 from temporalio import activity, workflow
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.enums.v1 import UpdateWorkflowExecutionLifecycleStage
+from temporalio.api.update.v1 import UpdateRef, WaitPolicy
+from temporalio.api.workflowservice.v1 import PollWorkflowExecutionUpdateRequest
 from temporalio.bridge.proto.workflow_activation import WorkflowActivation
 from temporalio.bridge.proto.workflow_completion import WorkflowActivationCompletion
 from temporalio.client import (
@@ -21,6 +25,7 @@ from temporalio.client import (
     WorkflowUpdateFailedError,
 )
 from temporalio.exceptions import ApplicationError, CancelledError, FailureError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     UnsandboxedWorkflowRunner,
     Worker,
@@ -229,6 +234,22 @@ def _job(revision: str | None = REVISION, **params: int) -> Job:
     )
 
 
+def _activities(acts: FakeActivities) -> list[Any]:
+    return [
+        acts.cached_piece,
+        acts.prepare,
+        acts.render_main,
+        acts.render_solids,
+        acts.finish_piece,
+        acts.project,
+        acts.load_pipeline,
+        acts.pack,
+        acts.write_output,
+        acts.render_accept,
+        acts.render_claims,
+    ]
+
+
 def _worker(
     client: Client,
     queue: str,
@@ -243,22 +264,10 @@ def _worker(
         max_concurrent_activities=max_concurrent_activities,
         workflows=[TemplatePipeline, RenderPiece],
         workflow_runner=runner or SandboxedWorkflowRunner(),
-        activities=[
-            acts.cached_piece,
-            acts.prepare,
-            acts.render_main,
-            acts.render_solids,
-            acts.finish_piece,
-            acts.project,
-            acts.load_pipeline,
-            acts.pack,
-            acts.write_output,
-            acts.render_accept,
-            acts.render_claims,
-        ],
+        activities=_activities(acts),
     )
     if runner is not None:
-        # A held activation (`_HoldsItsSignal`) is not a deadlock. `debug_mode`
+        # A held activation (`_HoldsItsCommand`) is not a deadlock. `debug_mode`
         # would also turn the detector off, but it runs activations on the event
         # loop, which a held one would then block, test and all.
         assert worker._workflow_worker is not None
@@ -266,15 +275,18 @@ def _worker(
     return worker
 
 
-class _HoldsItsSignal(WorkflowRunner):
-    """The default runner, except that ``workflow_id``'s first activation that signals
-    another workflow hands its completion back to the server, signal command and all,
-    only once ``release`` is set. What the test does meanwhile reaches the workflow
-    while that signal is in flight (#1590)."""
+class _HoldsItsCommand(WorkflowRunner):
+    """The default runner, except that ``workflow_id``'s first activation that issues
+    ``command`` (signalling another workflow, by default) hands its completion back to
+    the server, command and all, only once ``release`` is set. What the test does
+    meanwhile reaches the workflow while that command is in flight (#1590)."""
 
-    def __init__(self, workflow_id: str) -> None:
+    def __init__(
+        self, workflow_id: str, command: str = "signal_external_workflow_execution"
+    ) -> None:
         self.inner = SandboxedWorkflowRunner()
         self.workflow_id = workflow_id
+        self.command = command
         self.signalling = threading.Event()
         self.release = threading.Event()
 
@@ -295,7 +307,7 @@ class _HoldsItsSignal(WorkflowRunner):
                 completion = instance.activate(act)
                 commands = completion.successful.commands
                 if not runner.signalling.is_set() and any(
-                    c.HasField("signal_external_workflow_execution") for c in commands
+                    cast(Any, c).HasField(runner.command) for c in commands
                 ):
                     runner.signalling.set()
                     runner.release.wait(30)
@@ -305,6 +317,28 @@ class _HoldsItsSignal(WorkflowRunner):
                 return getattr(instance, name)
 
         return cast(WorkflowInstance, Held())
+
+
+async def _until_admitted(client: Client, workflow_id: str, update_id: str) -> None:
+    """Until the server has admitted ``update_id`` on ``workflow_id``: it reaches the
+    workflow in its next task, whatever that task also carries."""
+    request = PollWorkflowExecutionUpdateRequest(
+        namespace=client.namespace,
+        update_ref=UpdateRef(
+            workflow_execution=WorkflowExecution(workflow_id=workflow_id), update_id=update_id
+        ),
+        wait_policy=WaitPolicy(
+            lifecycle_stage=UpdateWorkflowExecutionLifecycleStage.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_ADMITTED
+        ),
+    )
+    while True:
+        try:
+            await client.workflow_service.poll_workflow_execution_update(request)
+            return
+        except RPCError as error:
+            if error.status != RPCStatusCode.NOT_FOUND:
+                raise
+        await asyncio.sleep(0.05)
 
 
 async def _until_its_signal_is_answered(handle: WorkflowHandle[Any, Any]) -> None:
@@ -559,7 +593,7 @@ async def test_a_job_cancelled_while_its_signal_to_the_piece_is_in_flight_is_can
         gate = asyncio.Event()
         acts = FakeActivities(block_solids=gate)
         a, b = _job(width=6), _job(width=6)
-        runner = _HoldsItsSignal(f"render-{b.id}")
+        runner = _HoldsItsCommand(f"render-{b.id}")
         async with _worker(client, queue, acts, runner):
             ha = await client.start_workflow(
                 TemplatePipeline.run, a, id=f"render-{a.id}", task_queue=queue
@@ -990,3 +1024,144 @@ async def test_a_release_right_after_the_start_cancels_the_job() -> None:
         last = [p for p in acts.projections if p.state][-1]
         assert last.state == "cancelled" and last.failure is not None
         assert last.failure.error == CANCELLED_ERROR
+
+
+class _HeldLoad(FakeActivities):
+    """`load_pipeline` past the first ``free`` calls waits for ``loaded``."""
+
+    def __init__(self, *, free: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.free = free
+        self.loading = asyncio.Event()
+        self.loaded = asyncio.Event()
+
+    @activity.defn(name="load_pipeline")
+    async def load_pipeline(self, req: LoadRequest) -> LoadedPipeline:
+        self.free -= 1
+        if self.free < 0:
+            self.loading.set()
+            await self.loaded.wait()
+        return await FakeWorld().load_pipeline(req)
+
+
+def _workflows_only(client: Client, queue: str, acts: FakeActivities) -> Worker:
+    """Workflow tasks and their local activities only: `_activities_only` runs the rest,
+    so this one can stop while an activity is held."""
+    return Worker(
+        client,
+        task_queue=queue,
+        workflows=[TemplatePipeline, RenderPiece],
+        activities=_activities(acts),
+        no_remote_activities=True,
+    )
+
+
+def _activities_only(client: Client, queue: str, acts: FakeActivities) -> Worker:
+    return Worker(
+        client, task_queue=queue, activities=_activities(acts), max_concurrent_activities=100
+    )
+
+
+async def _until_loaded(handle: WorkflowHandle[Any, Any]) -> None:
+    """Until ``handle``'s history records its `load_pipeline` complete."""
+    while True:
+        scheduled = {
+            e.event_id
+            async for e in handle.fetch_history_events()
+            if e.HasField("activity_task_scheduled_event_attributes")
+            and e.activity_task_scheduled_event_attributes.activity_type.name == "load_pipeline"
+        }
+        if [
+            e
+            async for e in handle.fetch_history_events()
+            if e.HasField("activity_task_completed_event_attributes")
+            and e.activity_task_completed_event_attributes.scheduled_event_id in scheduled
+        ]:
+            return
+        await asyncio.sleep(0.05)
+
+
+async def _release_with_its_piece(
+    client: Client, queue: str, acts: _HeldLoad, workflow_id: str
+) -> ReleaseAnswer:
+    """The last release reaching ``workflow_id`` in the same task as its loaded
+    pipeline, which goes on to start (or join) its piece in that task, as in CI run
+    37598763836: with no workflow worker, the release is admitted and `load_pipeline`
+    completes; the next worker's first task carries both. Answered once the job is
+    cancelled; the bound only stops a hang."""
+    handle = client.get_workflow_handle(workflow_id)
+    update_id = uuid.uuid4().hex
+    release = asyncio.create_task(
+        handle.execute_update(
+            RELEASE_UPDATE,
+            "superseded",
+            id=update_id,
+            result_type=ReleaseAnswer,
+            rpc_timeout=timedelta(seconds=RELEASE_HANG_BOUND),
+        )
+    )
+    await _until_admitted(client, workflow_id, update_id)
+    acts.loaded.set()
+    await _until_loaded(handle)
+    async with _workflows_only(client, queue, acts):
+        return await asyncio.wait_for(release, timeout=RELEASE_HANG_BOUND)
+
+
+#: How long a release may take before the test calls it hung: the job's piece is held
+#: for good, so a release that waits on it never answers.
+RELEASE_HANG_BOUND = 60.0
+
+
+async def test_a_release_while_the_jobs_piece_starts_cancels_the_job() -> None:
+    """The release lands in the task that starts the job's piece child: temporalio
+    shields that start from the cancel, as it does a signal (#1590), so the job went on
+    and waited on the piece to its end; it is cancelled, the piece left to run (CI run
+    37598763836)."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = _HeldLoad(free=0, block_main=gate)
+        job = _job(width=uuid.uuid4().int % 10**9)
+        wid = f"render-{job.id}"
+        async with _activities_only(client, queue, acts):
+            try:
+                async with _workflows_only(client, queue, acts):
+                    await start_render(client, queue, start_of(job), id=wid)
+                    await acts.loading.wait()
+                answer = await _release_with_its_piece(client, queue, acts, wid)
+                piece_held = not gate.is_set()
+            finally:
+                gate.set()
+        assert answer.cancelled is not None and answer.cancelled.state == "cancelled"
+        assert piece_held
+        last = [p for p in acts.projections if p.job_id == job.id and p.state][-1]
+        assert last.state == "cancelled"
+
+
+async def test_a_release_while_the_job_joins_anothers_piece_cancels_the_job() -> None:
+    """The same for a job whose piece another job already runs: its start is refused
+    and it signals `wait_for_me` to join, which #1590's guard checked only for the
+    workflow's own cancel."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = _HeldLoad(free=1, block_main=gate)
+        width = uuid.uuid4().int % 10**9
+        a, b = _job(width=width), _job(width=width)
+        wid = f"render-{b.id}"
+        async with _activities_only(client, queue, acts):
+            try:
+                async with _workflows_only(client, queue, acts):
+                    await start_render(client, queue, start_of(a), id=f"render-{a.id}")
+                    while "render_main" not in acts.calls:
+                        await asyncio.sleep(0.05)
+                    await start_render(client, queue, start_of(b), id=wid)
+                    await acts.loading.wait()
+                answer = await _release_with_its_piece(client, queue, acts, wid)
+                piece_held = not gate.is_set()
+            finally:
+                gate.set()
+        assert answer.cancelled is not None and answer.cancelled.state == "cancelled"
+        assert piece_held
+        last = [p for p in acts.projections if p.job_id == b.id and p.state][-1]
+        assert last.state == "cancelled"

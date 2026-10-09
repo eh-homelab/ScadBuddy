@@ -54,6 +54,9 @@ export type AttentionView =
    */
   | { reason: 'done'; summary: string }
 
+/** An image a tool returned, as the event names it (#782): `<sha256>.<ext>`, one of the session's blobs. */
+export type ImageRef = { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }
+
 export type SessionSummary = {
   sessionId: string
   title: string
@@ -70,12 +73,37 @@ export type ServerEvent = V &
     /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
     | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
-    | { type: 'user.turn'; sessionId: string; turnId: string; text: string; author: Owner }
+    /** `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones. */
+    | {
+        type: 'user.turn'
+        sessionId: string
+        turnId: string
+        text: string
+        author: Owner
+        images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }[]
+      }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }
-    /** `parent`: a subagent's call (#1108), the id of the session's `Agent` call that spawned it. */
-    | { type: 'tool.call'; sessionId: string; id: string; name: string; input: Record<string, unknown>; risk: Risk; parent?: string }
-    | { type: 'tool.result'; sessionId: string; id: string; ok: boolean; summary: string }
+    /**
+     * `parent`: a subagent's call (#1108), the id of the session's `Agent` call that spawned it.
+     * `title`: what the call does, in words (#782): the registry tool's own (tools/registry.ts
+     * `ToolSpec.title`); absent for a tool outside the registry, which the panel names itself.
+     */
+    | {
+        type: 'tool.call'
+        sessionId: string
+        id: string
+        name: string
+        input: Record<string, unknown>
+        risk: Risk
+        parent?: string
+        title?: string
+      }
+    /**
+     * `images`: the images the result carried (#782), each served by
+     * `GET /api/v1/ai/sessions/:id/blobs/:name` (sessions/blobs.ts); the bytes are never in the event.
+     */
+    | { type: 'tool.result'; sessionId: string; id: string; ok: boolean; summary: string; images?: ImageRef[] }
     /** `tool` is the tool.call id the approval gates; only outward calls wait (spec §8.2). */
     | { type: 'approval.required'; sessionId: string; id: string; tool: string; summary: string; risk: 'outward' }
     /**

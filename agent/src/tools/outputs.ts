@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { command } from './command.js'
 import { binary } from './binary.js'
-import { outputId, slug, VIEW, VIEW_SIZE } from './common.js'
+import { CAMERA, cameraQuery, outputId, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
 import { compositeKey, page, PAGED, pageInput } from './pagination.js'
 
@@ -134,20 +134,20 @@ export const outputTools: Tool[] = [
     name: 'get_output_view',
     description:
       "A saved output's preview mesh drawn from a named view (iso, front, back, left, right, top, bottom) as " +
-      'a shaded PNG.',
-    input: z.object({ output_id: outputId, view: VIEW, size: VIEW_SIZE }),
+      'a shaded PNG. The camera arguments are get_render_view\'s.',
+    input: z.object({ output_id: outputId, view: VIEW, size: VIEW_SIZE, ...CAMERA }),
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}/views/{view}.png'],
-    handler: async ({ output_id, view, size }, ctx) =>
+    handler: async ({ output_id, view, size, ...camera }, ctx) =>
       binary(
         ctx.backend.GET('/api/v1/outputs/{output_id}/views/{view}.png', {
-          params: { path: { output_id, view }, query: { size } },
+          params: { path: { output_id, view }, query: { size, ...cameraQuery(camera) } },
           parseAs: 'stream',
         }),
         `draw ${view} view of ${output_id}`,
         ctx,
         {
-          path: `/api/v1/outputs/${output_id}/views/${view}.png${size ? `?size=${size}` : ''}`,
+          path: withQuery(`/api/v1/outputs/${output_id}/views/${view}.png`, { size, ...cameraQuery(camera) }),
           name: `${output_id}-${view}.png`,
           fallbackType: 'image/png',
         },
@@ -162,6 +162,7 @@ export const outputTools: Tool[] = [
     input: z.object({ output_id: outputId, plate: z.number().int().min(1).optional() }),
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}/thumbnail', 'GET /api/v1/outputs/{output_id}/plates/{index}/thumbnail'],
+    title: ({ output_id, plate }) => `Get the picture of output ${output_id}${plate ? `, plate ${plate}` : ''}`,
     handler: async ({ output_id, plate }, ctx) =>
       plate === undefined
         ? binary(

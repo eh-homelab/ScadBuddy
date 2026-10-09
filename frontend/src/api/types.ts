@@ -160,12 +160,17 @@ export type RackOption = Schemas['RackOption']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
+/** #907, #1862 — Bambu's print sequence, a per-print process override. */
+export type PrintSequence = NonNullable<Schemas['PrintRunRequest']['print_sequence']>
 export type OutputPlate = Schemas['OutputPlate']
 
 /** #313 — the Library page's listing, and one row of it. */
 export type LibraryListing = Schemas['LibraryListing']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
+/** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
+export type LibraryFileObjects = Schemas['LibraryFileObjects']
+export type LibraryFileObject = Schemas['LibraryFileObject']
 
 /**
  * #89 — run tracking.
@@ -272,6 +277,17 @@ export interface HttpRequestSetting {
 export interface SessionLimits {
   budget_usd: number
   max_turns: number
+}
+
+/**
+ * The long edge, in pixels, the assistant panel scales an attached image to before
+ * sending it (`GET/PUT /api/v1/ai/settings/images`, agent `src/routes/imageSettings.ts`).
+ * `min` and `max` are the bounds the agent accepts; the PUT sends `long_edge` only.
+ */
+export interface ImageSettings {
+  long_edge: number
+  min: number
+  max: number
 }
 
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */

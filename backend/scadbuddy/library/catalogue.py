@@ -235,6 +235,8 @@ class InvalidModelMetaError(ValueError):
         self.slug = slug
 
 
+#: A template's own interface: the directory its `ui` module and files live in.
+UI_DIR = "ui"
 #: `ui/` plus a relative path whose segments never start with a dot, ending `.js`
 #: or `.mjs`: no `..`, no hidden file, nothing outside the template's `ui/`.
 UI_MODULE_PATTERN = r"^ui/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.m?js$"
@@ -631,6 +633,9 @@ class Catalogue:
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: Each template's `ui_version` and the HEAD it was read at: the walk it takes
+        #: is made once per commit, not on every record of the template (#1469).
+        self._ui_versions: dict[str, tuple[str, str | None]] = {}
 
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
@@ -711,14 +716,26 @@ class Catalogue:
             return None
 
     def ui_version(self, slug: str) -> str | None:
-        """The last commit that touched ``slug``'s ``ui/`` directory (#846)."""
+        """The last commit that touched ``slug``'s ``ui/`` directory (#846); none when
+        that commit deleted it (#1469)."""
         if self.history is None or not self.history.available:
             return None
+        ui = f"{model_path(slug)}/{UI_DIR}"
         try:
-            return self.history.last_commit(f"{model_path(slug)}/ui")
+            head = self.history.head()
+            if head is None:
+                return None
+            cached = self._ui_versions.get(slug)
+            if cached is not None and cached[0] == head:
+                return cached[1]
+            commit = self.history.last_commit(ui)
+            if commit is not None and self.history.tree(commit, ui) is None:
+                commit = None
         except (GitError, OSError):
             logger.exception("could not read the interface's revision", extra={"slug": slug})
             return None
+        self._ui_versions[slug] = (head, commit)
+        return commit
 
     def versions(self) -> dict[str, str]:
         """Every model's revision in one git call, for listing the catalogue."""
@@ -2044,6 +2061,7 @@ class Catalogue:
         *,
         message: str | None = None,
         max_files: int | None = None,
+        expected_version: str | None = None,
     ) -> ModelRecord:
         """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
         as one revision. ``name`` is a bare ``.scad`` file name other than the model's
@@ -2057,6 +2075,13 @@ class Catalogue:
         ``max_files``, counted and written under a lock of the catalogue's own (and
         the history's write lock, when there is one), so two new files at once cannot
         both pass (PR #752 review).
+
+        ``expected_version`` is as :meth:`write_source`'s (#813): unless the model is
+        still at it, :class:`StaleVersionError` with nothing written, checked under the
+        history's write lock. Without a history there is no revision to check, so
+        :class:`GitUnavailableError`. Such a write is also only ever kept WITH its
+        revision, as :meth:`_write_edit`'s: when the commit fails, the file is put back
+        under the same lock and the error raised.
         """
         if name == SOURCE_NAME:
             # The route refuses it with a 409 first; this keeps any other caller off
@@ -2064,8 +2089,22 @@ class Catalogue:
             raise ValueError(f"{SOURCE_NAME} is written by write_source, not write_file")
         self._require(slug)
         path = self.paths.model_dir(slug) / name
+        history = self.history
+
+        if expected_version is not None and (history is None or not history.available):
+            raise GitUnavailableError("model history is unavailable, so no base can be checked")
+        written = False
+        # What a based write replaced, None when the file was new: what `undo` puts back.
+        previous: bytes | None = None
 
         def change() -> None:
+            nonlocal written, previous
+            if expected_version is not None:
+                assert history is not None  # checked above
+                current = history.last_commit(model_path(slug))
+                if current is None or not current.startswith(expected_version):
+                    raise StaleVersionError(slug, expected_version, current)
+                previous = path.read_bytes() if path.is_file() else None
             if content is None:
                 if not path.is_file():
                     raise SidecarNotFoundError(name)
@@ -2080,10 +2119,34 @@ class Catalogue:
                         write_atomic(path, content.encode())
                     except FileNotFoundError:
                         raise ModelNotFoundError(slug) from None
+            written = True
             self.paths.model_schema_cache(slug).unlink(missing_ok=True)
 
+        def undo() -> None:
+            nonlocal written
+            if not written:
+                return
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_atomic(path, previous)
+            written = False
+
         verb = "Remove" if content is None else "Edit"
-        self._commit_change(message or f"{verb} {slug}/{name}", change, slug)
+        message = message or f"{verb} {slug}/{name}"
+        if expected_version is None:
+            self._commit_change(message, change, slug)
+            return self.record(slug)
+        # A base check against a revision that never moved would pass a second write
+        # over this one unseen, so a failed commit is not logged and kept (review of
+        # #741, `_write_edit`; review of #1069 for this one). `change` still counts the
+        # files under `_source_files_lock`, so `max_files` holds on this path too.
+        assert history is not None  # checked above
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if written:
+                self.notify_change(slug)
         return self.record(slug)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────

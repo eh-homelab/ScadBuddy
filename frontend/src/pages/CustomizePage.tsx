@@ -50,8 +50,8 @@ import { saveOutput } from '../lib/saveOutput'
 import { findParamRow } from '../template-ui/elements'
 import type { HostDeps } from '../template-ui/host'
 import { TemplateUi } from '../template-ui/TemplateUi'
-import type { TemplateUiFailure, UiDeclaration } from '../template-ui/types'
-import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
+import type { GenerateResult, TemplateUiFailure, UiDeclaration } from '../template-ui/types'
+import { boundByPlate, fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
 import { useSubscription } from '../lib/realtime'
@@ -335,7 +335,10 @@ export function CustomizePage() {
   const settled = debounced === values
   // #921 — a number outside its declared range is flagged on its field; the render
   // would only answer 422, so none is started and Generate waits until it is fixed.
-  const unrenderable = schema ? outOfRange(schema, values) : undefined
+  // #81 — a `// plate` parameter's range is what fits the plate in view. Only the form
+  // and this check see it: the page's other uses of `schema` key effects on it.
+  const formSchema = useMemo(() => (schema ? boundByPlate(schema, plate) : undefined), [schema, plate])
+  const unrenderable = formSchema ? outOfRange(formSchema, values) : undefined
   const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
   // with no parameters, whose defaults still render (#941).
@@ -472,7 +475,7 @@ export function CustomizePage() {
     return current
   }, [live])
   // The Host's Generate in flight, with the template it is for.
-  const generating = useRef<{ key: string; run: Promise<{ jobId: string; outputId: string }> } | null>(null)
+  const generating = useRef<{ key: string; run: Promise<GenerateResult> } | null>(null)
   const hostDeps: HostDeps = useMemo(() => {
     const key = `${slug}\n${uiVersion ?? ''}`
     return {
@@ -495,7 +498,7 @@ export function CustomizePage() {
       generate: () => {
         if (generating.current?.key === key) return generating.current.run
         setUiGenerate({ generating: true, error: null })
-        const run = (async () => {
+        const run = (async (): Promise<GenerateResult> => {
           await waitFor(() => (live.current.ready ? true : undefined), {
             timeout: 120_000,
             what: 'the preview render of the current inputs',
@@ -511,6 +514,8 @@ export function CustomizePage() {
             () => live.current.output?.id === created.id || !sameJson(savedExtra, live.current.extra),
             'the saved output',
           )
+          // Left behind: said so, so a template does not take it for what is on screen (#1471).
+          if (live.current.output?.id !== created.id) return { jobId: done.id, outputId: created.id, superseded: true }
           return { jobId: done.id, outputId: created.id }
         })()
         generating.current = { key, run }
@@ -1171,7 +1176,7 @@ export function CustomizePage() {
             </div>
           ) : (
             <ParameterPanel
-              schema={schema}
+              schema={formSchema ?? schema}
               slug={slug}
               version={version}
               values={values}

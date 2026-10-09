@@ -7,7 +7,7 @@ actions always need a human approval (§8.2). So the backend enforces it itself:
 request from the headless context to the backend carries the **agent-actor marker**,
 an ``X-ScadBuddy-Agent-Session`` header added by the agent's request guard
 (``agent/src/harness/headlessBrowser.ts`` ``AGENT_ACTOR_HEADER``,
-``redirectGuardSource``; it is sent to the backend's origin only, never to the other
+``redirectGuardSource``; it is sent to ScadBuddy's own origins only, never to the other
 origins a session may be allowed to open), and this gate lets such a request through
 only when it cannot change anything outward:
 
@@ -46,12 +46,19 @@ Anything else, including a database that is unset, unreachable or has no ``ai_*`
 tables, is refused: the gate fails closed. ``agent/test/headlessGrants.pg.test.ts``
 runs :data:`GRANT_SQL` against the agent's real schema.
 
+Since #983 the headless browser opens ScadBuddy's public origins rather than the backend's
+loopback address, so the marker arrives through whatever ingress fronts the backend;
+nothing here depends on the client's address.
+
 The marker is not authentication. A request without it is exactly as trusted as today
 (§4.3); forging one can only get a request refused. Measured on the pinned
-``@playwright/mcp`` 0.0.82 (``agent/test/headlessBrowser.server.test.ts``): the header
-reaches every request the page makes to the backend and none to another origin, and a
-page ``fetch`` that sets the same header itself arrives with the session's value, not
-its own.
+``@playwright/mcp`` 0.0.83 with chromium-headless-shell 1247
+(``agent/test/headlessBrowser.server.test.ts``): the header reaches every request the
+page makes to ScadBuddy's origins (the backend's, or the public one since #983) and
+none to another origin, and a page ``fetch`` that sets the same header itself arrives
+with the session's value, not its own. The agent refuses every request that carries
+it (``agent/src/app.ts``), and the browser never reaches the agent's paths on the public
+origin (``isAgentPath`` in ``agent/src/harness/browserOrigins.ts``).
 """
 
 from __future__ import annotations
@@ -101,6 +108,7 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "POST /api/v1/models/{slug}/presets/{preset_id}/duplicate",
     "POST /api/v1/models/{slug}/assets",
     "POST /api/v1/models/{slug}/outputs",
+    "POST /api/v1/outputs/arrange",
     "POST /api/v1/models/{slug}/versions/{commit}/restore",
     "POST /api/v1/models/{slug}/upstream/merge",
     "POST /api/v1/models/{slug}/upstream/dismiss",

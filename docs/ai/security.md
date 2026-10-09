@@ -317,7 +317,10 @@ the UI approval". As built:
   ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), both as
   the browser user. `authorize` refuses a principal deciding its own request even with
   an approval grant, so an MCP client cannot approve what it prepared (covered in
-  `agent/test/mcpConfirm.pg.test.ts`).
+  `agent/test/mcpConfirm.pg.test.ts`). The respond route does not need the chat socket:
+  a panel whose socket is down still decides and answers, behind the same origin gate,
+  and its card settles on the route's answer alone; the socket's `approval.resolved` /
+  `question.resolved` frames only confirm it (#1479, `frontend/src/agent/chat/useAgentChat.test.ts`).
 - **Confirm.** `confirm_action` ([`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts))
   takes the `pending_action_id` and the same `arguments` again, because the table has
   only the hash. It answers `pending_approval` while the row is undecided. It runs the
@@ -572,6 +575,19 @@ approvals as the session's
 package-style subagent that asks for `Bash` and does not get it). The code is in
 [`agent/src/plugins/packages/`](../../agent/src/plugins/packages/), and
 [operating.md](operating.md#9-plugin-packages-297) describes the flow.
+
+**A subagent's question says who asked (#1109).** Every gated session has
+`mcp__scadbuddy_questions__ask_user` (#1102), so any subagent, an enabled package's
+too, can put a question card in the panel. That adds no capability: only the user
+answers, a question runs nothing, and a package skill could already make the session's
+agent ask, or put text in the chat. But a card looks more official than chat text, so
+a subagent's card says "Asked by the subagent `<type>`, not the assistant itself". The
+panel reads it from the feed: the question's `tool.call` carries its `Agent` call as
+`parent` (#1108), and that call's input names the `subagent_type` (just "a subagent"
+when the input was cut to a preview). We chose labelling over refusing `ask_user` to
+package agents, which would also take questions away from ScadBuddy's own subagents.
+The code is `askedBy()` in
+[`frontend/src/agent/chat/state.ts`](../../frontend/src/agent/chat/state.ts).
 
 **Approval (spec §8.2).** Installing is an outward settings write. An install or re-pin
 only fetches, vets and stores the pin with its review. Nothing loads until the admin
@@ -892,6 +908,22 @@ they are stored:
 
 Full payloads stay only in the SDK transcript (`ai_session_entries`), which is never
 sent to watchers.
+
+## Images in the chat (#1866)
+
+The panel's `user.message` may carry up to four images
+([`agent/src/sessions/images.ts`](../../agent/src/sessions/images.ts)): PNG, JPEG, GIF
+or WebP, at most 5 MiB of base64 each and 8 MiB together, each with a preview of at
+most 64 KiB (PNG, JPEG or WebP). A frame is refused as `invalid` when an image's bytes
+do not start with its type's signature, and the refusal never quotes them. The model
+gets the full images as `image` blocks in the turn's user message; Claude Code
+re-encodes them and keeps a copy under its own temp directory in the agent's state, as
+it does for any pasted image. The `user.turn` event keeps only the previews, and an MCP
+transcript (`sessions_get`) only their count. Nothing logs or traces the bytes.
+
+The chat socket takes frames up to 9 MiB (`CHAT_FRAME_MAX`) and holds at most 18 MiB of
+unhandled frames per connection (`MAX_QUEUED_BYTES`), past which a frame is `busy`; the
+tab socket keeps its 256 KiB cap (`BRIDGE_FRAME_MAX`).
 
 ## Audit log (#258)
 

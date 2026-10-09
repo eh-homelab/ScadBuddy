@@ -4,6 +4,7 @@ import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
 import type { AuditRepo } from './audit/log.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import type { CredentialRepo } from './credentials.js'
+import { AGENT_ACTOR_HEADER } from './harness/headlessBrowser.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
@@ -144,6 +145,16 @@ export function createApp(deps: AppDeps): AgentApp {
     } catch {
       // An immutable response (a WebSocket upgrade's): it goes without.
     }
+  })
+
+  // The headless browser's requests carry the agent-actor marker
+  // (harness/headlessBrowser.ts). Since #983 it opens ScadBuddy's public origin, where
+  // the ingress routes /api/v1/ai/* and /mcp here; its request guard keeps it off those
+  // paths, and this refuses any that get through, whatever the method, so a page can
+  // never answer the session's own parked approvals (review of #1934).
+  app.use('*', async (c, next) => {
+    if (c.req.header(AGENT_ACTOR_HEADER) === undefined) return next()
+    return c.json({ detail: 'The headless browser may not use the assistant API.' }, 403)
   })
 
   // Liveness: always 200 while the process serves HTTP. A missing or

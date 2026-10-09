@@ -3,9 +3,11 @@ import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { Output } from '../api/types'
+import type { LibraryEntry, Output } from '../api/types'
+import { fromFiles, fromOutputs } from '../lib/arrange'
 import * as fixtures from '../mocks/fixtures'
-import { lastArrangeRequest, problem } from '../mocks/handlers'
+import { libraryFiles } from '../mocks/features/library'
+import { addMockOutput, lastArrangeRequest, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { ArrangeDialog } from './ArrangeDialog'
@@ -13,11 +15,153 @@ import { ArrangeDialog } from './ArrangeDialog'
 const first = fixtures.outputs[0] as Output
 const second: Output = { ...first, id: 'o-2', name: 'second', manifest: [] }
 
+describe('ArrangeDialog: sources of any kind (#1864)', () => {
+  /** An output of a second template, with one object of its own. */
+  const bin: Output = {
+    ...first,
+    id: '9'.repeat(32),
+    slug: 'gridfinity-bin',
+    name: 'Bin',
+    manifest: [{ ...first.manifest![0]!, part: 'piece-bin', slug: 'gridfinity-bin', bom_piece: 'bin', count: 1 }],
+  }
+  /** The bag clip, uploaded by ScadBuddy as a copy of `first` (the mock's library). */
+  const clip = { ...(libraryFiles.find((f) => f.id === 89) as LibraryEntry), output_id: first.id }
+  const wand = { ...(libraryFiles.find((f) => f.id === 67) as LibraryEntry), output_id: null }
+
+  it('arranges two templates and a library file, filed under the template chosen', async () => {
+    addMockOutput(bin)
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog
+        open
+        sources={[...fromOutputs([bin]), ...fromFiles([clip, wand])]}
+        onClose={vi.fn()}
+        onArranged={onArranged}
+      />,
+    )
+    // The clip arranges through the output it is a copy of; the wand, which ScadBuddy did
+    // not make, through the objects read from its 3MF (#1863).
+    expect(await screen.findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
+    expect(screen.getByLabelText('Copies of bin — Bin')).toHaveValue(1)
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const star = screen.getByLabelText(`Copies of Star — ${wand.filename}`)
+    expect(star).toHaveValue(2)
+    await user.clear(star)
+    await user.type(star, '5')
+    const filing = screen.getByLabelText('File under')
+    expect(filing).toHaveValue('gridfinity-bin')
+    await user.selectOptions(filing, 'name-keychain')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()).toMatchObject({
+      slug: 'name-keychain',
+      objects: [
+        { output_id: bin.id, part: 'piece-bin', count: 1 },
+        { output_id: first.id, part: 'piece-wall', count: 2 },
+        { library_file_id: wand.id, part: 'lib1-67-0', count: 1 },
+        { library_file_id: wand.id, part: 'lib1-67-1', count: 5 },
+      ],
+    })
+    expect(onArranged).toHaveBeenCalledWith(
+      expect.objectContaining({ output: expect.objectContaining({ slug: 'name-keychain' }) }),
+    )
+  })
+
+  it('says why a file ScadBuddy made is left out when its output cannot be read', async () => {
+    const gone = { ...clip, output_id: '8'.repeat(32) }
+    server.use(
+      http.get(`/api/v1/outputs/${gone.output_id}`, () => problem(404, 'Not Found', 'no such output')),
+    )
+    renderPage(<ArrangeDialog open sources={fromFiles([gone])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    expect(await screen.findByText(/could not read what it made them from: .*: no such output\./)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Arrange' })).toBeDisabled()
+  })
+
+  it('reads a failed output again when it is opened again', async () => {
+    const flaky = { ...clip, output_id: '7'.repeat(32) }
+    let reads = 0
+    server.use(
+      http.get(`/api/v1/outputs/${flaky.output_id}`, () => {
+        reads += 1
+        return reads === 1 ? problem(503, 'Service Unavailable', 'try again') : HttpResponse.json({ ...first, id: flaky.output_id })
+      }),
+    )
+    const dialog = (open: boolean) => (
+      <ArrangeDialog open={open} sources={fromFiles([flaky])} onClose={vi.fn()} onArranged={vi.fn()} />
+    )
+    const { rerender } = renderPage(dialog(true))
+    expect(await screen.findByText(/try again\./)).toBeVisible()
+    rerender(dialog(false))
+    rerender(dialog(true))
+    expect(await screen.findByLabelText('Copies of wall — Reagan')).toBeVisible()
+  })
+
+  it('lists an output once when its library file is added too', async () => {
+    renderPage(
+      <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([clip])]} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    expect(screen.getAllByLabelText('Copies of wall — Reagan')).toHaveLength(1)
+    expect(screen.queryByLabelText('File under')).not.toBeInTheDocument()
+  })
+
+  it('adds library files and outputs of another model before the run', async () => {
+    addMockOutput(bin)
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Add from a model' }))
+    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
+    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    await user.click(screen.getByRole('button', { name: 'Add (1)' }))
+    expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
+
+    await user.click(screen.getByRole('button', { name: 'Add files' }))
+    await user.selectOptions(await screen.findByLabelText('Library folder'), '1')
+    await user.click(await screen.findByRole('checkbox', { name: /Clara's Wand/ }))
+    await user.click(screen.getByRole('button', { name: 'Add (1)' }))
+    expect(await screen.findByLabelText("Copies of Wand — Clara's Wand.3mf")).toBeVisible()
+  })
+
+  it('leaves out a library file whose objects cannot be read, saying why (#1863)', async () => {
+    const sliced = libraryFiles.find((f) => f.id === 104) as LibraryEntry
+    renderPage(
+      <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([sliced])]} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    expect(await screen.findByText(/^Left out: .*: it is sliced already/)).toHaveTextContent(sliced.filename)
+    expect(screen.getByRole('button', { name: 'Arrange' })).toBeEnabled()
+  })
+
+  it('files library files alone under any template picked (#1863)', async () => {
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const filing = await screen.findByLabelText('File under')
+    expect(within(filing).getAllByRole('option').map((o) => o.textContent)).toEqual(
+      fixtures.models.map((m) => m.slug),
+    )
+    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()).toMatchObject({
+      slug: 'gridfinity-bin',
+      objects: [
+        { library_file_id: wand.id, part: 'lib1-67-0', count: 1 },
+        { library_file_id: wand.id, part: 'lib1-67-1', count: 2 },
+      ],
+    })
+    expect(onArranged).toHaveBeenCalledWith(
+      expect.objectContaining({ output: expect.objectContaining({ slug: 'gridfinity-bin' }) }),
+    )
+  })
+})
+
 describe('ArrangeDialog', () => {
   it('lists every object with its count and sends the build list', async () => {
     const onArranged = vi.fn()
     const { user } = renderPage(
-      <ArrangeDialog open slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={onArranged} />,
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
     )
     const count = screen.getByLabelText('Copies of wall — Reagan')
     expect(count).toHaveValue(2)
@@ -38,7 +182,7 @@ describe('ArrangeDialog', () => {
 
   it('says which outputs need a re-render', () => {
     renderPage(
-      <ArrangeDialog open slug="name-keychain" outputs={[second]} onClose={vi.fn()} onArranged={vi.fn()} />,
+      <ArrangeDialog open sources={fromOutputs([second])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     expect(screen.getByRole('status')).toHaveTextContent(
       'second was saved before Arrange existed; re-render to get its layout.',
@@ -67,7 +211,7 @@ describe('ArrangeDialog', () => {
     )
     const onArranged = vi.fn()
     const { user } = renderPage(
-      <ArrangeDialog open slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={onArranged} />,
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
     )
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     expect(await screen.findByRole('alert')).toHaveTextContent("group 'big' does not fit on one plate")
@@ -77,7 +221,7 @@ describe('ArrangeDialog', () => {
   it('names several outputs that cannot be arranged in one sentence', () => {
     const third: Output = { ...first, id: 'o-3', name: 'third', manifest: [] }
     renderPage(
-      <ArrangeDialog open slug="name-keychain" outputs={[second, third]} onClose={vi.fn()} onArranged={vi.fn()} />,
+      <ArrangeDialog open sources={fromOutputs([second, third])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     expect(screen.getByRole('status')).toHaveTextContent(
       'second and third were saved before Arrange existed; re-render to get their layout.',
@@ -92,7 +236,7 @@ describe('ArrangeDialog', () => {
       const backfill = vi.spyOn(api, 'backfillOutput')
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const { user } = renderPage(
-        <ArrangeDialog open slug="name-keychain" outputs={[first, nova]} onClose={vi.fn()} onArranged={vi.fn()} />,
+        <ArrangeDialog open sources={fromOutputs([first, nova])} onClose={vi.fn()} onArranged={vi.fn()} />,
       )
       await user.click(screen.getByRole('button', { name: 'Arrange' }))
       const prompt = screen.getByRole('group', { name: 'Re-render first' })
@@ -110,8 +254,7 @@ describe('ArrangeDialog', () => {
       const { user } = renderPage(
         <ArrangeDialog
           open
-          slug="name-keychain"
-          outputs={[first, nova, workshop]}
+          sources={fromOutputs([first, nova, workshop])}
           onClose={vi.fn()}
           onArranged={onArranged}
         />,
@@ -139,7 +282,7 @@ describe('ArrangeDialog', () => {
       )
       const onArranged = vi.fn()
       const { user } = renderPage(
-        <ArrangeDialog open slug="name-keychain" outputs={[nova, workshop]} onClose={vi.fn()} onArranged={onArranged} />,
+        <ArrangeDialog open sources={fromOutputs([nova, workshop])} onClose={vi.fn()} onArranged={onArranged} />,
       )
       await user.click(screen.getByRole('button', { name: 'Arrange' }))
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
@@ -165,7 +308,7 @@ describe('ArrangeDialog', () => {
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const onArranged = vi.fn()
       const { user } = renderPage(
-        <ArrangeDialog open slug="name-keychain" outputs={[nova]} onClose={vi.fn()} onArranged={onArranged} />,
+        <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
       )
       await user.click(screen.getByRole('button', { name: 'Arrange' }))
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
@@ -184,7 +327,7 @@ describe('ArrangeDialog', () => {
       )
       const onArranged = vi.fn()
       const { user } = renderPage(
-        <ArrangeDialog open slug="name-keychain" outputs={[first, nova]} onClose={vi.fn()} onArranged={onArranged} />,
+        <ArrangeDialog open sources={fromOutputs([first, nova])} onClose={vi.fn()} onArranged={onArranged} />,
       )
       await user.click(screen.getByRole('button', { name: 'Arrange' }))
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
@@ -209,8 +352,7 @@ describe('ArrangeDialog', () => {
             <button onClick={() => setOpen(true)}>Open it</button>
             <ArrangeDialog
               open={open}
-              slug="name-keychain"
-              outputs={[nova]}
+              sources={fromOutputs([nova])}
               onClose={() => setOpen(false)}
               onArranged={vi.fn()}
             />
@@ -235,7 +377,7 @@ describe('ArrangeDialog', () => {
       // The list was read before the output lost its objects, or another tab saw it.
       const stale: Output = { ...nova, manifest: first.manifest }
       const { user } = renderPage(
-        <ArrangeDialog open slug="name-keychain" outputs={[stale]} onClose={vi.fn()} onArranged={vi.fn()} />,
+        <ArrangeDialog open sources={fromOutputs([stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
       )
       await user.click(screen.getByRole('button', { name: 'Arrange' }))
       expect(await screen.findByRole('group', { name: 'Re-render first' })).toHaveTextContent(
@@ -259,7 +401,7 @@ describe('ArrangeDialog', () => {
       const reread = vi.spyOn(api, 'getOutput')
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const dialog = (open: boolean) => (
-        <ArrangeDialog open={open} slug="name-keychain" outputs={[nova]} onClose={vi.fn()} onArranged={vi.fn()} />
+        <ArrangeDialog open={open} sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={vi.fn()} />
       )
       const { user, rerender } = renderPage(dialog(true))
       await user.click(screen.getByRole('button', { name: 'Arrange' }))
@@ -284,7 +426,7 @@ describe('ArrangeDialog', () => {
       ),
     )
     const { user } = renderPage(
-      <ArrangeDialog open slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={vi.fn()} />,
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     const progress = await screen.findByText('Arranging…')
@@ -309,7 +451,7 @@ describe('ArrangeDialog', () => {
     const onArranged = vi.fn()
     // `rerender` swaps the whole tree, router included; the dialog needs none.
     const dialog = (open: boolean) => (
-      <ArrangeDialog open={open} slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={onArranged} />
+      <ArrangeDialog open={open} sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />
     )
     const { user, rerender } = renderPage(dialog(true))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
@@ -328,7 +470,7 @@ describe('ArrangeDialog', () => {
     )
     const onArranged = vi.fn()
     const dialog = (open: boolean) => (
-      <ArrangeDialog open={open} slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={onArranged} />
+      <ArrangeDialog open={open} sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />
     )
     const { user, rerender } = renderPage(dialog(true))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))

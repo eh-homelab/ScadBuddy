@@ -44,6 +44,10 @@ def client(tmp_path: Path) -> TestClient:
     def three_mf() -> Response:
         return Response(b"PK\x03\x04" + b"\0" * 50_000, media_type="model/3mf")
 
+    @app.get("/api/v1/extra.bin")
+    def extra() -> Response:
+        return Response(b"x" * 50_000, media_type="application/octet-stream")
+
     @app.get("/api/v1/events")
     def events() -> StreamingResponse:
         async def body() -> AsyncIterator[bytes]:
@@ -102,7 +106,7 @@ def test_small_response_is_not_gzipped(client: TestClient) -> None:
     assert "content-encoding" not in response.headers
 
 
-@pytest.mark.parametrize("path", ["/api/v1/download.3mf", "/api/v1/events"])
+@pytest.mark.parametrize("path", ["/api/v1/download.3mf", "/api/v1/extra.bin", "/api/v1/events"])
 def test_compressed_or_streamed_types_pass_through(client: TestClient, path: str) -> None:
     response = client.get(path, headers=GZIP)
     assert "content-encoding" not in response.headers

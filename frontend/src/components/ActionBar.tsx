@@ -280,9 +280,18 @@ export function ActionBar({
         () => live.current.output?.id === created.id || !sameJson(savedExtra, live.current.extra),
         'the saved output',
       )
-      return {
+      const result = {
         output: { id: created.id, name: created.name ?? null, slug: created.slug },
         filed: filed && { project_id: filed.project_id, library_file_id: filed.library_file_id, created: filed.created },
+      }
+      if (live.current.output?.id === created.id) return result
+      // Saved, but the page has moved on: open_print_dialog would refuse it (#1471).
+      return {
+        ...result,
+        superseded: true,
+        note:
+          'The template UI state changed while this output saved, so it is not the one on screen. ' +
+          'Generate again once the inputs are settled before opening the print or send dialog.',
       }
     },
     open_print_dialog: async ({ kind }) => {

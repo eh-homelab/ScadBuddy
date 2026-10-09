@@ -72,7 +72,7 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
         update={"image_revision": deps.revision, "openscad_version": deps.openscad_version}
     )
     for name in req.files:
-        if not re.match(FILE_NAME_PATTERN, name):
+        if not re.fullmatch(FILE_NAME_PATTERN, name):
             raise _refuse(f"output file name {name!r}: use letters, digits, '.', '_' or '-'")
         if name in _RESERVED:
             raise _refuse(f"output file name {name!r} is reserved for the output's own files")
@@ -165,6 +165,7 @@ def manifest_of(req: OutputRequest) -> list[ManifestObject]:
                 plates=part.plates,
                 bom_piece=named.get(part.piece_key) or (earlier.bom_piece if earlier else None),
                 source_output=earlier.source_output if earlier else None,
+                library_file_id=earlier.library_file_id if earlier else None,
                 notes=list(part.notes),
             )
         )

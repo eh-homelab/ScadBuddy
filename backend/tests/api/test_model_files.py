@@ -12,6 +12,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.model_files import MAX_SOURCE_FILES
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import TooManySourceFilesError
+from scadbuddy.library.history import GitError
 from scadbuddy.render.provenance import source_version
 from tests.support.operations import press
 
@@ -194,3 +195,63 @@ def test_a_file_deleted_while_the_list_is_read_is_left_out(
 
     assert response.status_code == 200, response.text
     assert [f["name"] for f in response.json()] == ["model.scad"]
+
+
+def test_a_sibling_write_against_a_stale_base_is_a_conflict_and_writes_nothing(
+    client: TestClient, paths: DataPaths
+) -> None:
+    base = upload(client)["version"]
+    moved = put(client, "parts.scad", PARTS).json()["version"]
+
+    stale = client.put(
+        f"/api/v1/models/{SLUG}/files/parts.scad",
+        json={"content": "module bar(w) {}\n", "base": base},
+        headers=press(),
+    )
+
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["current"] == moved
+    assert stale.json()["base"] == base
+    assert (paths.model_dir(SLUG) / "parts.scad").read_text() == PARTS
+
+    fresh = client.put(
+        f"/api/v1/models/{SLUG}/files/parts.scad",
+        json={"content": "module bar(w) {}\n", "base": moved[:7]},
+        headers=press(),
+    )
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["version"] != moved
+
+
+def test_a_based_sibling_write_whose_commit_fails_is_undone_and_refused(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As `PUT /source` (review of #741): written without its revision, the base would
+    # still check out and a second write against it would land over this one unseen.
+    upload(client)
+    based = put(client, "parts.scad", PARTS).json()["version"]
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    history = state.catalogue.history
+    assert history is not None
+
+    def fail(*_args: object) -> str | None:
+        raise GitError("commit failed", "fatal: unable to write")
+
+    monkeypatch.setattr(history, "_commit_locked", fail)
+    changed = client.put(
+        f"/api/v1/models/{SLUG}/files/parts.scad",
+        json={"content": "module bar(w) {}\n", "base": based},
+        headers=press(),
+    )
+    created = client.put(
+        f"/api/v1/models/{SLUG}/files/new.scad",
+        json={"content": "module n() {}\n", "base": based},
+        headers=press(),
+    )
+
+    assert changed.status_code == 500, changed.text
+    assert created.status_code == 500, created.text
+    assert (paths.model_dir(SLUG) / "parts.scad").read_text() == PARTS
+    assert not (paths.model_dir(SLUG) / "new.scad").exists()
+    monkeypatch.undo()
+    assert client.get(f"/api/v1/models/{SLUG}").json()["version"] == based

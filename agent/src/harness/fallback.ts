@@ -45,6 +45,14 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness 
 // Claude Code reported in its init message, when there was one; a query that
 // never got that far runs again as it was.
 //
+// A CONTINUATION IS NOT A USER MESSAGE (#1896). CONTINUE_PROMPT is submitted
+// like a prompt, so Claude Code fires `UserPromptSubmit` for it, and the
+// memory hooks' recall (memory/hindsight.ts) ran again: one Hindsight recall
+// and one more `<hindsight_memories>` block per fallback, on top of the one the
+// resumed transcript already holds from the first attempt. So a resumed
+// attempt runs without the memory hooks' `UserPromptSubmit`
+// (`continuationRun`); its other hooks (retain at Stop) stay.
+//
 // What the caller sees: the failed attempt's messages up to the failure
 // (text and tool calls that did happen), never its synthetic error message
 // or its error result; only the first init message; and one result, whose
@@ -151,6 +159,24 @@ export type FallbackOptions = {
    * for a turn the caller stopped.
    */
   onRefused?: (failure: FailureEvidence, judged: { probe?: ProbeVerdict['verdict'] }) => void
+  /**
+   * Called as each attempt after the first starts, once the caller has seen
+   * every message of the attempts before it. The caller cannot tell otherwise:
+   * only the first attempt's init message is passed on. The session manager
+   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666).
+   */
+  onAttempt?: () => void
+}
+
+/**
+ * A resumed attempt's run: no memory hook on `UserPromptSubmit`, since its
+ * prompt is CONTINUE_PROMPT and the user's message, with what was recalled
+ * for it, is already in the transcript it resumes (#1896).
+ */
+function continuationRun(run: Omit<HarnessRun, 'credential'>): Omit<HarnessRun, 'credential'> {
+  if (!run.memoryHooks?.UserPromptSubmit) return run
+  const { UserPromptSubmit: _submit, ...memoryHooks } = run.memoryHooks
+  return { ...run, memoryHooks }
 }
 
 function linked(signal: AbortSignal | undefined): AbortController {
@@ -271,12 +297,15 @@ export async function* runWithFallback(
   let sawInit = false
   /** Whether this attempt resumes a session, so its total carries what came before. */
   let resumed = base.resume !== undefined
+  /** Whether this attempt continues an earlier attempt's session with CONTINUE_PROMPT. */
+  let continuing = false
 
   for (let i = 0; i < candidates.length; i++) {
+    if (i > 0) options.onAttempt?.()
     const current = candidates[i] as PooledCredential
     const next = candidates[i + 1]
     const controller = linked(base.signal)
-    const { resume: _resume, sessionId: _sessionId, ...rest } = base
+    const { resume: _resume, sessionId: _sessionId, ...rest } = continuing ? continuationRun(base) : base
     const run: HarnessRun = {
       ...rest,
       ...session,
@@ -478,6 +507,7 @@ export async function* runWithFallback(
       session = { resume: sessionSeen }
       prompt = CONTINUE_PROMPT
       resumed = true
+      continuing = true
     }
   }
   }

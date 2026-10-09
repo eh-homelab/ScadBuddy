@@ -7,14 +7,16 @@ import { diffFiles, hashTree, PackageContentError } from '../src/plugins/package
 import {
   loadPackagesForRun,
   marketplaceTarget,
+  BuiltInPluginError,
   PackageInstaller,
   PackageRefusedError,
 } from '../src/plugins/packages/install.js'
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
-import { frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
+import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
+import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 
 // Plugin packages (#297, src/plugins/packages/): source validation, the
@@ -193,11 +195,12 @@ describe('vetting a package', () => {
     expect(v.problems.join('\n')).toMatch(problem)
   })
 
-  it('lists every refusal in the review, uncapped, though the problem list is capped', () => {
+  it('lists every refusal in the review, uncapped, though a refusal is capped', () => {
     const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
     const v = vetPackage(tree({ ...GREETER, ...many }))
-    expect(v.problems).toHaveLength(51)
-    expect(v.problems.at(-1)).toMatch(/^and \d+ more$/)
+    expect(v.problems).toHaveLength(60)
+    expect(capProblems(v.problems)).toHaveLength(51)
+    expect(capProblems(v.problems).at(-1)).toMatch(/^and \d+ more$/)
     expect(v.review?.refused).toHaveLength(60)
     expect(v.review?.refused?.some((p) => /more$/.test(p))).toBe(false)
   })
@@ -461,6 +464,71 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     await expect(plainHttp.prepare(validateSource({ kind: 'git', url: 'http://git.test/greeter.git' }))).rejects.toThrow(
       /https/,
     )
+  })
+
+  it('reviews each built-in plugin from its own files', () => {
+    // A symlink or layout change in agent/plugins would quietly empty the review.
+    for (const b of BUILT_INS) {
+      const v = vetPackage(b.dir, b.name)
+      expect(v.fatal, b.name).toEqual([])
+      expect(v.review?.name).toBe(b.name)
+    }
+    const own = vetPackage(BUILT_INS[0]!.dir, BUILT_INS[0]!.name).review!
+    expect(own.skills).toEqual(['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'])
+    expect(own.agents).toEqual(['scadbuddy:model-author', 'scadbuddy:print-analyst'])
+  })
+
+  it('answers that a built-in plugin is built in, not that it is refused', async () => {
+    const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
+    // plugins/scadbuddy, for Claude Code outside ScadBuddy: its placeholder URL
+    // would fail the egress check, but the name answers first.
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.claude-plugin/plugin.json': JSON.stringify({
+        name: 'scadbuddy',
+        userConfig: { scadbuddy_url: { type: 'string', title: 'ScadBuddy URL' } },
+      }),
+      '.mcp.json': JSON.stringify({
+        mcpServers: { scadbuddy: { type: 'http', url: '${user_config.scadbuddy_url}/mcp' } },
+      }),
+    })
+    const own = await installer.prepare(source).catch((e: unknown) => e)
+    expect(own).toBeInstanceOf(BuiltInPluginError)
+    expect((own as Error).message).toMatch(/ScadBuddy's own plugin is built in.*nothing to install/)
+
+    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'playwright' }) })
+    const browser = await installer.prepare(source).catch((e: unknown) => e)
+    expect(browser).toBeInstanceOf(BuiltInPluginError)
+    expect((browser as Error).message).toMatch(/Playwright plugin is built in as the headless browser/)
+  })
+
+  it('lists a fatal problem before the cap cuts the allowable ones', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({
+      ...GREETER,
+      ...many,
+      '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'not a url' } } }),
+    })
+    const err = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem": not a url is not a valid URL/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
+  })
+
+  it('lists a fatal problem first when a load is refused, too', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({ ...GREETER, ...many })
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    // The MCP server's host now resolves to a refused address: fatal at load.
+    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver({ 'mcp.example': ['169.254.169.254'] }) })
+    const err = await later.materialise(pin).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem".*169\.254\.169\.254/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
   })
 
   it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {

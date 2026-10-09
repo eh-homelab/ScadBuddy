@@ -6,7 +6,7 @@ import logging
 import pkgutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Final
 
@@ -316,16 +316,40 @@ async def _backfill_store_logged(state: AppState, *, uploads: bool, fonts: bool 
 HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 
 
+#: How long a sweep the worker's stop cancels may still run (#1708): cancelling its task
+#: would leave its thread running on the stores the lifespan closes next.
+SWEEP_SHUTDOWN_JOIN = 10.0
+
+
 async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
     """Run ``work`` in the current activity, heartbeating until it ends (review #1095
-    2): a worker lost mid-sweep is then noticed within the heartbeat timeout."""
+    2): a worker lost mid-sweep is then noticed within the heartbeat timeout. One the
+    worker's stop cancels first gets `SWEEP_SHUTDOWN_JOIN` to end by itself (#1708),
+    so its thread is not left running while the lifespan closes its stores."""
     running = asyncio.create_task(work)
     try:
         while not (await asyncio.wait({running}, timeout=HEARTBEAT_EVERY))[0]:
             activity.heartbeat()
+    except asyncio.CancelledError:
+        if activity.is_worker_shutdown():
+            await _join_at_shutdown(running)
+        raise
     finally:
         running.cancel()
     return await running
+
+
+async def _join_at_shutdown(running: asyncio.Task[Any]) -> None:
+    """Wait up to `SWEEP_SHUTDOWN_JOIN` for a sweep the stop cancelled to end, under
+    that cancel. Its own outcome is left to its logging; the activity is cancelled."""
+    done, _ = await asyncio.wait({running}, timeout=SWEEP_SHUTDOWN_JOIN)
+    if not done:
+        logger.warning(
+            "a library activity was still running when the worker stopped; cancelled it",
+            extra={"activity": activity.info().activity_type},
+        )
+    elif not running.cancelled():
+        running.exception()  # retrieved: the sweep logged it
 
 
 def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -335,11 +359,8 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[0])
     async def prune_jobs() -> None:
-        try:
-            await state.render.prune()
-        except Exception:
-            logger.exception("could not prune settled render jobs")
-            raise
+        # Its settle can describe many runs on a slow Temporal (#1707): heartbeat.
+        await _heartbeating(_prune_jobs_logged(state))
 
     @activity.defn(name=SWEEPS[1])
     async def sweep_assets() -> None:
@@ -356,11 +377,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[4])
     async def sweep_claims() -> None:
-        try:
-            await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
-        except Exception:
-            logger.exception("could not sweep operation claims")
-            raise
+        await _heartbeating(_sweep_claims_logged(state))
 
     @activity.defn(name=BACKFILL_SWEEP)
     async def sweep_backfills() -> None:
@@ -382,6 +399,22 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_backfills,
         reap_output_holds,
     ]
+
+
+async def _prune_jobs_logged(state: AppState) -> None:
+    try:
+        await state.render.prune()
+    except Exception:
+        logger.exception("could not prune settled render jobs")
+        raise
+
+
+async def _sweep_claims_logged(state: AppState) -> None:
+    try:
+        await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
+    except Exception:
+        logger.exception("could not sweep operation claims")
+        raise
 
 
 async def _reap_output_holds_logged(state: AppState) -> None:
@@ -698,7 +731,11 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     try:
         while not stop.is_set():
             worker = library_worker(
-                client, queue, activities, workflows=[PreviewBackfill, OperationWorkflow]
+                client,
+                queue,
+                activities,
+                workflows=[PreviewBackfill, OperationWorkflow],
+                graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
@@ -792,12 +829,14 @@ async def _end_lost_runs_until(
             await asyncio.wait_for(stop.wait(), LOST_RUN_INTERVAL)
 
 
-async def _stop_queue_worker(task: asyncio.Task[None] | None, name: str) -> None:
+async def _stop_queue_worker(
+    task: asyncio.Task[None] | None, name: str, timeout: float | None = None
+) -> None:
     """Wait for the ``name`` queue's worker task (print, library) to stop."""
     if task is None:
         return
     try:
-        await asyncio.wait_for(task, PRINT_WORKER_STOP_TIMEOUT)
+        await asyncio.wait_for(task, PRINT_WORKER_STOP_TIMEOUT if timeout is None else timeout)
     except TimeoutError:
         logger.warning("the %s worker did not stop in time; cancelled it", name)
     except Exception:
@@ -806,6 +845,10 @@ async def _stop_queue_worker(task: asyncio.Task[None] | None, name: str) -> None
 
 #: The worker's own graceful shutdown (30 s) and a margin.
 PRINT_WORKER_STOP_TIMEOUT = 40.0
+#: What the library worker's stop gives a running sweep before cancelling it.
+LIBRARY_GRACEFUL_SHUTDOWN = timedelta(seconds=30)
+#: Its graceful shutdown, then a cancelled sweep's join (#1708), and a margin.
+LIBRARY_WORKER_STOP_TIMEOUT = LIBRARY_GRACEFUL_SHUTDOWN.total_seconds() + SWEEP_SHUTDOWN_JOIN + 10.0
 
 
 @asynccontextmanager
@@ -874,7 +917,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
-    unfollow_backfills: Callable[[], None] | None = None
+    unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -937,9 +980,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if state.previews is not None:
             await state.previews.aclose()
         stop_library.set()
-        await _stop_queue_worker(library, "library")
+        await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
-            unfollow_backfills()
+            await unfollow_backfills()
         for background in (backfill, attach_now):
             if background is not None:
                 background.cancel()

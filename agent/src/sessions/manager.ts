@@ -5,6 +5,7 @@ import {
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
   type SDKResultMessage,
+  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
@@ -75,11 +76,14 @@ import {
   type ServerEvent,
   type SessionStatus,
 } from './protocol.js'
-import { scrubForLog, SdkEventMapper, ShownCalls } from './sdkEvents.js'
+import { SessionBlobs, type StoredBlob } from './blobs.js'
+import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
+import { previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
+import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -457,6 +461,8 @@ export type StartOptions = {
   prompt?: string
   /** With `prompt`: see SendOptions.context. */
   context?: string
+  /** With `prompt`: see SendOptions.images. */
+  images?: readonly UserImage[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
 }
@@ -469,6 +475,12 @@ export type SendOptions = {
    * route (routes/chat.ts `renderPageContext`).
    */
   context?: string
+  /**
+   * Images the user sent with the message (#1866, images.ts): the model gets
+   * them as image blocks before the text; the `user.turn` event shows their
+   * previews.
+   */
+  images?: readonly UserImage[]
   /**
    * The sender's tiers (spec §8.1), for the turn's in-process tools: an MCP
    * token's, as `/mcp` authenticated it for this send (tools/sessions.ts).
@@ -508,6 +520,8 @@ export type SessionManagerDeps = {
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
+  /** Each registry call's title for the panel (#782, tools/harness.ts `titleOf`). */
+  titleOf?: TitleResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
   mcpServers?: (
     session: SessionRecord,
@@ -543,15 +557,19 @@ export type SessionManagerDeps = {
   /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
-   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA;
-   * `publicUrl` and `uiOrigins` (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS)
-   * are rewritten onto it; `browserAllowedOrigins`
+   * by default. `publicUrl`, `livePublicUrl` and `uiOrigins`
+   * (SCADBUDDY_PUBLIC_URL, the backend's stored `public_url`, read once per
+   * turn, and SCADBUDDY_ALLOWED_ORIGINS) are ScadBuddy's own origins, which it
+   * opens as they are (#983); `backendUrl` (SCADBUDDY_BACKEND_URL) is the one
+   * it opens when none is configured; `browserAllowedOrigins`
    * (SCADBUDDY_BROWSER_ALLOWED_ORIGINS) is what else a human may let it open,
    * once per origin per session (harness/browserOrigins.ts, `ai_browser_origins`).
    */
   headlessBrowser?: {
     backendUrl: string
     publicUrl?: string
+    /** The backend's `public_url` setting now; a failed read leaves it out for the turn. */
+    livePublicUrl?: () => Promise<string | undefined>
     uiOrigins?: string
     browserAllowedOrigins?: string
     /** Tests only: a Chromium other than the pinned one. */
@@ -777,11 +795,14 @@ export class SessionManager {
   private draining = false
   /** What sessions touched (#931), read by `resources`. */
   private readonly touched: SessionResources
+  /** The images tool results carried (#782), read by `blob`. */
+  private readonly blobs: SessionBlobs
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
     this.touched = new SessionResources(deps.sql)
+    this.blobs = new SessionBlobs(deps.sql)
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -828,6 +849,18 @@ export class SessionManager {
   async resources(id: string, principal: Owner): Promise<TouchedRecord[]> {
     await this.get(id, principal)
     return this.touched.list(id)
+  }
+
+  /**
+   * One of the images the session's tool results carried (#782, blobs.ts), by
+   * its name; not_found for a session the principal may not see, a name that is
+   * not a blob's, or one that is not this session's.
+   */
+  async blob(id: string, name: string, principal: Owner): Promise<StoredBlob> {
+    await this.get(id, principal)
+    const blob = await this.blobs.get(id, name)
+    if (!blob) throw new SessionError('not_found', `no image ${name} in session ${id}`)
+    return blob
   }
 
   /** Newest first. */
@@ -954,6 +987,7 @@ export class SessionManager {
     if (!prompt) return { session }
     const turn = await this.send(id, principal, prompt, {
       ...(options.context ? { context: options.context } : {}),
+      ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
     return { session: await this.get(id, principal), turn }
@@ -981,6 +1015,7 @@ export class SessionManager {
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
     return this.startTurn(claimed(claim), turnId, prompt, principal, {
       ...(options.context ? { context: options.context } : {}),
+      ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
   }
@@ -1057,7 +1092,7 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string; context?: string; tiers?: readonly Tier[] } = {},
+    options: { keepResumeTurn?: string; context?: string; images?: readonly UserImage[]; tiers?: readonly Tier[] } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
@@ -1070,13 +1105,21 @@ export class SessionManager {
       options.keepResumeTurn === undefined ? {} : { keepResumeTurn: options.keepResumeTurn },
     )
     await this.events.append(id, [
-      event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author }),
+      event({
+        type: 'user.turn',
+        sessionId: id,
+        turnId,
+        text: prompt,
+        author,
+        ...(options.images?.length ? { images: previewsOf(options.images) } : {}),
+      }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
     const controller = new AbortController()
     const local: LocalTurn = { controller, settling: false }
     this.active.set(id, local)
-    const query = options.context ? `${prompt}\n\n${options.context}` : prompt
+    const text = options.context ? `${prompt}\n\n${options.context}` : prompt
+    const query = options.images?.length ? userPrompt(text, options.images) : text
     const done = this.runTurn(session, turnId, query, local, prompt, options.tiers ? { tiers: options.tiers } : {})
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
@@ -1116,7 +1159,7 @@ export class SessionManager {
   private async runTurn(
     session: ClaimedSession,
     turnId: string,
-    prompt: string,
+    prompt: string | AsyncIterable<SDKUserMessage>,
     local: LocalTurn,
     /** The user's words without the page context: what memory is recalled against. */
     userText: string,
@@ -1136,7 +1179,7 @@ export class SessionManager {
     const asksUser = session.owner.kind === 'browser'
     const shownTierOf: TierResolver = (name, input) =>
       asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
-    const mapper = new SdkEventMapper(id, shownTierOf)
+    const mapper = new SdkEventMapper(id, shownTierOf, this.deps.titleOf)
     const shownCalls = new ShownCalls()
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
     // whatever started it (the browser's traceparent from the chat frame, an
@@ -1205,7 +1248,19 @@ export class SessionManager {
       }
       const show = async (message: SDKMessage) => {
         await pluginCheck?.(message)
-        const events = mapper.map(message)
+        let events = mapper.map(message)
+        // A result's images are stored before the event that names them is
+        // logged (#782), so no watcher sees a name it cannot load. If they cannot
+        // be, the event goes without them: the call is still shown.
+        const images = mapper.takeImages()
+        if (images.length) {
+          try {
+            await this.blobs.put(id, images)
+          } catch (err) {
+            this.deps.stderr?.(`session ${id}: could not store a tool result's images: ${err instanceof Error ? err.message : String(err)}\n`)
+            events = events.map((e) => (e.type === 'tool.result' && e.images ? withoutImages(e) : e))
+          }
+        }
         const logged = log(events)
         shownCalls.logging(events, logged)
         await logged
@@ -1231,7 +1286,11 @@ export class SessionManager {
         // forwarder adds them), but a plugin could echo one in a tool result.
         secrets.push(...(forwarded?.secrets ?? []))
         const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-        const ownPlugin = this.deps.ownPlugin
+        // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
+        const ownPlugin =
+          this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
+            ? this.deps.ownPlugin
+            : undefined
         const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
         eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
         // A plugin left out of this turn is said so in the session, not only in the log.
@@ -1316,6 +1375,8 @@ export class SessionManager {
           this.deps.headlessBrowser?.sandbox && browserSetting === true
             ? await this.deps.headlessBrowser.sandbox()
             : false
+        const livePublicUrl =
+          hb?.livePublicUrl && browserSetting === true ? await hb.livePublicUrl().catch(() => undefined) : undefined
         const browser =
           hb && browserSetting === true
             ? {
@@ -1323,6 +1384,7 @@ export class SessionManager {
                 sessionId: id,
                 backendUrl: hb.backendUrl,
                 ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
+                ...(livePublicUrl ? { livePublicUrl } : {}),
                 ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
                 ...(hb.browserAllowedOrigins
                   ? {
@@ -1426,6 +1488,7 @@ export class SessionManager {
           onRefused: (evidence, judged) => {
             refused = { evidence, ...judged }
           },
+          onAttempt: () => unpriced.newAttempt(),
         })
         for await (const message of turn) {
           unpriced.observe(message)
@@ -1980,6 +2043,8 @@ export class SessionManager {
         }
       }
     }
+    // The images those results name (#782), before the events that name them.
+    await this.blobs.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',
@@ -2029,16 +2094,16 @@ export class SessionManager {
     }
     // One statement on the lineage's root, so two raises add up and the owner cannot change
     // in between; the owner checked is this session's, which need not be the root's.
-    const [hit] = await this.deps.sql.unsafe<{ id: string }[]>(
+    const [hit] = await this.deps.sql.unsafe<{ id: string; budget_usd: number }[]>(
       `UPDATE ai_sessions r SET budget_usd = round((r.budget_usd + $2)::numeric, 2)::double precision, updated_at = now()
          FROM ai_sessions s
         WHERE s.id = $1 AND s.owner_kind = $3 AND s.owner_id = $4 AND r.id = coalesce(s.budget_root_id, s.id)
           AND round((r.budget_usd + $2)::numeric, 2) <= $5
-       RETURNING s.id`,
+       RETURNING s.id, r.budget_usd`,
       [id, add, principal.kind, principal.id, MAX_SESSION_BUDGET_USD],
     )
     const row = hit ? await this.row(id) : undefined
-    if (!row) {
+    if (!hit || !row) {
       const now = (await this.row(id)) ?? session
       throw sameOwner(principal, now.owner)
         ? new SessionError(
@@ -2048,6 +2113,9 @@ export class SessionManager {
         : new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
     }
     const raised = row
+    // The before and after this raise made, from its own UPDATE: the read above may
+    // already show a later raise (#1650).
+    const after = hit.budget_usd
     await this.deps.audit?.record({
       kind: 'settings',
       action: 'session_budget_usd',
@@ -2056,7 +2124,7 @@ export class SessionManager {
       clientIp: context.clientIp,
       sessionId: id,
       outcome: 'ok',
-      detail: `${usd(raised.budgetUsd - add)} + ${usd(add)} = ${usd(raised.budgetUsd)} (${usd(raised.costUsd)} spent)`,
+      detail: `${usd(after - add)} + ${usd(add)} = ${usd(after)} (${usd(raised.costUsd)} spent)`,
       startedAt,
       finishedAt: new Date(),
     })
@@ -2168,4 +2236,10 @@ export class SessionManager {
     timer.unref()
     return () => clearInterval(timer)
   }
+}
+
+/** A tool.result without its images, for when they could not be stored (#782). */
+function withoutImages(e: Extract<ServerEvent, { type: 'tool.result' }>): ServerEvent {
+  const { images: _images, ...rest } = e
+  return rest
 }

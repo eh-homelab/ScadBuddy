@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
-import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
+import { clientMessage, parseServerEvent, type ClientMessage, type PageContext, type UserImage } from './protocol'
 import { TAB_ID } from '../tabId'
-import { answerBody, decisionBody, respond, type RespondError } from '../respond'
-import { messageTraceparent } from '../../lib/traceAction'
+import { answerBody, decisionBody, respond, type RespondBody, type RespondError } from '../respond'
+import { messageTraceparent, traceAction } from '../../lib/traceAction'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
@@ -22,6 +22,14 @@ function closed(err: RespondError): { closed?: string } {
   return { closed: err.reason ?? 'it is no longer waiting for a response' }
 }
 
+/**
+ * A response as the user action `assistant.respond` (#1384): its POST is the span's
+ * child, so it carries the span's `traceparent` as other API calls do, where the socket
+ * frame it replaced carried `messageTraceparent()`.
+ */
+const tracedRespond = (requestId: string, body: RespondBody) =>
+  traceAction('assistant.respond', { 'scadbuddy.respond_kind': body.kind }, () => respond(requestId, body))
+
 const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
 const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
 const QUEUED_STOP = 'The assistant is unreachable; your stop goes first when it reconnects.'
@@ -30,7 +38,8 @@ const QUEUED_TAKE_OVER = 'The assistant is unreachable; your take-over will be s
 export interface AgentChat {
   state: ChatState
   /** Sends a user turn to the active session, or starts a new one. */
-  send: (text: string, context: PageContext) => void
+  /** `images`: pasted, dropped or attached images for the model (#1866, `images.ts`). */
+  send: (text: string, context: PageContext, images?: UserImage[]) => void
   /** Answers an approval. Nothing outward proceeds until this is called (§8.2). */
   decide: (sessionId: string, approvalId: string, approve: boolean) => void
   /** #940 — answers the agent's question: one answer per question, in order. */
@@ -102,7 +111,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     }
   }, [factory])
 
-  const send = useCallback((text: string, context: PageContext) => {
+  const send = useCallback((text: string, context: PageContext, images?: UserImage[]) => {
     const trimmed = text.trim()
     if (!trimmed || !transport.current) return
     const activeId = latest.current.activeId
@@ -114,6 +123,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         ...(activeId ? { sessionId: activeId } : {}),
         text: trimmed,
         context,
+        ...(images?.length ? { images } : {}),
         ...(traceparent ? { traceparent } : {}),
       }),
     )
@@ -142,7 +152,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     // Shown as `sent` until the server's approval.resolved confirms it; a refused one
     // goes back to pending, buttons live, with the agent's reason (#815).
     dispatch({ type: 'decided', sessionId, approvalId })
-    respond(`approval:${approvalId}`, decisionBody(approve))
+    tracedRespond(`approval:${approvalId}`, decisionBody(approve))
       .then(
         (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
         (err: RespondError) =>
@@ -155,7 +165,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     const item = claim(sessionId, 'question', questionId)
     if (item?.kind !== 'question') return
     dispatch({ type: 'answered', sessionId, questionId })
-    respond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined))
+    tracedRespond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined))
       .then(
         (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
         (err: RespondError) =>

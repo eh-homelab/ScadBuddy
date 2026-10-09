@@ -27,6 +27,12 @@ export type Reply =
    * default); no message_delta, so the output's usage is never reported.
    */
   | { stall: string; usage?: { input_tokens: number; output_tokens?: number } }
+  /**
+   * Start a streamed text reply like `stall`, then end the stream with an SSE
+   * `error` event (e.g. `overloaded_error`) instead of message_stop: a request
+   * the endpoint cut off itself (#1661).
+   */
+  | { stall: string; usage?: { input_tokens: number; output_tokens?: number }; streamError: { type: string; message: string } }
 
 /** Every finished reply's usage: message_start's input, message_delta's output. */
 export const REPLY_TOKENS = { input: 10, output: 5 }
@@ -191,6 +197,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
         if ('stall' in answer) {
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
           res.write(stalledStart(model, answer))
+          if ('streamError' in answer) res.end(sse('error', { type: 'error', error: answer.streamError }))
           return
         }
         if ('error' in answer) {

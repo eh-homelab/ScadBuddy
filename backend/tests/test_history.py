@@ -734,6 +734,45 @@ def test_every_catalogue_action_is_exactly_one_commit(catalogue: Catalogue) -> N
     assert messages == ["Update keychain metadata", "Edit keychain source", "Add keychain"]
 
 
+def _with_ui(catalogue: Catalogue, slug: str, body: str) -> str | None:
+    assert catalogue.history is not None
+    target = catalogue.paths.model_dir(slug) / "ui" / "index.js"
+    target.parent.mkdir(exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return catalogue.history.commit(f"Edit {slug} ui", slug)
+
+
+def test_ui_version_is_none_without_history(tmp_path: Path) -> None:
+    paths = DataPaths(tmp_path / "data")
+    paths.ensure()
+    catalogue = Catalogue(paths, None, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    assert catalogue.ui_version("keychain") is None
+
+
+def test_ui_version_is_none_when_git_fails(catalogue: Catalogue) -> None:
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    assert _with_ui(catalogue, "keychain", "// one\n") is not None
+    with patch.object(ModelHistory, "last_commit", side_effect=GitError("boom", "")):
+        assert catalogue.ui_version("keychain") is None
+
+
+def test_ui_version_walks_the_history_once_per_head(catalogue: Catalogue) -> None:
+    """#1469: every record of a UI template asks for it; the walk is made once per
+    commit, not once per request."""
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    one = _with_ui(catalogue, "keychain", "// one\n")
+    with patch.object(
+        ModelHistory, "last_commit", autospec=True, wraps=ModelHistory.last_commit
+    ) as walk:
+        assert catalogue.ui_version("keychain") == one
+        assert catalogue.ui_version("keychain") == one
+        assert walk.call_count == 1
+        two = _with_ui(catalogue, "keychain", "// two\n")
+        assert catalogue.ui_version("keychain") == two
+        assert walk.call_count == 2
+
+
 def test_a_record_carries_the_revision_it_is_at(catalogue: Catalogue) -> None:
     record = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
     assert record.version is not None

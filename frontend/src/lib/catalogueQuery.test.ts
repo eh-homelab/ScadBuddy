@@ -66,6 +66,7 @@ describe('filterModels', () => {
       'ui-broken',
       'ui-demo',
       'builtin:keychain-template',
+      'builtin:dollhouse-kit',
     ])
   })
 
@@ -98,6 +99,7 @@ describe('filterModels', () => {
     expect(slugs(filterModels(models, query({ origin: 'builtin' })))).toEqual([
       'builtin:maze-puzzle',
       'builtin:keychain-template',
+      'builtin:dollhouse-kit',
     ])
     expect(slugs(filterModels(models, query({ origin: 'mine' })))).not.toContain(
       'builtin:keychain-template',
@@ -108,6 +110,7 @@ describe('filterModels', () => {
     expect(slugs(filterModels(models, query({ sort: 'name' })))).toEqual([
       'builtin:maze-puzzle',
       'creme-coaster',
+      'builtin:dollhouse-kit',
       'gridfinity-bin',
       'builtin:keychain-template',
       'name-keychain',
@@ -127,7 +130,7 @@ describe('tagCounts', () => {
   it('counts each tag once per model, most used first, then by name', () => {
     const extra = { ...(models[0] as ModelSummary), slug: 'x', tags: ['kitchen', 'kitchen'] }
     expect(tagCounts([...models, extra])).toEqual([
-      { tag: 'custom-ui', count: 3 },
+      { tag: 'custom-ui', count: 4 },
       { tag: 'keychain', count: 2 },
       { tag: 'kitchen', count: 2 },
       { tag: 'gridfinity', count: 1 },

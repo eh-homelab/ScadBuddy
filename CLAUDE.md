@@ -113,6 +113,23 @@ against the fake endpoint in `pnpm test`; `pnpm evals` runs them live with the
 credential saved in Settings (or `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, CI only; the
 manual `ai-evals.yml` workflow) and skips cleanly without one.
 
+Durable sessions (`agent-durable/`, Python 3.12, uv; the `agent-durable` CI job, #1056):
+
+```bash
+cd agent-durable
+../.github/scripts/agent-durable-pin.sh .   # the ai-integrations#33 pin still resolves (uv lock --check alone cannot tell)
+uv run --frozen ruff check . && uv run --frozen ruff format --check .
+uv run --frozen mypy
+uv run --frozen pytest            # requires_postgres tests need SCADBUDDY_TEST_DATABASE_URL
+docker build --target agent-durable -t scadbuddy-agent-durable:dev .   # checks the bundled Claude Code
+```
+
+`agent/test/fixtures/secret-vectors.json` is written by `agent/test/secretVectors.test.ts`
+(`UPDATE_SECRET_VECTORS=1`) and opened by `agent-durable/tests`: a change to
+`agent/src/secrets.ts`'s format or `credentials.ts`'s AAD needs new vectors, and the port must open them.
+The plugin pin moves only in its own PR, which carries the diff of `python/claude_agent_sdk`
+between the two SHAs; `agent-durable-pin.yml` checks weekly that it still resolves (`.github/scripts/agent-durable-pin.sh`).
+
 Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.ts` and
 `agent/src/api/schema.d.ts` are gitignored and never committed. In frontend and agent,
 `pnpm gen:api` (`scripts/gen-api.mjs`) exports the spec with uv, then writes the
@@ -435,6 +452,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   §4, "Architecture") describes the backend container; the
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
   09-27 template-pipelines spec makes Postgres and Temporal required.
+- `agent-durable/` — durable agent sessions (#1056, spec 2026-10-01 §6), Python on
+  `temporalio-claude-agent-sdk` (ai-integrations#33, git-pinned by SHA in `uv.lock`, never
+  vendored), shipped as the Dockerfile's `agent-durable` target, a sidecar trusted like
+  `agent`. `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (open
+  only; the agent alone writes it); `check_cli_version.py` is the build's bundled-CLI
+  check (Python `claude-agent-sdk` pinned exactly; it bundles a Claude Code of its own,
+  not the TypeScript SDK's). Phase 5a serves `/healthz` on 8082 only; the worker is 5c.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
   `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in

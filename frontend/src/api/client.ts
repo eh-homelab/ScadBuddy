@@ -20,6 +20,7 @@ import type {
   FontFamily,
   HeadlessBrowserSetting,
   HttpRequestSetting,
+  ImageSettings,
   AiSessionView,
   SessionLimits,
   SessionResource,
@@ -27,6 +28,7 @@ import type {
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  LibraryFileObjects,
   LibraryListing,
   LibraryPinRequest,
   InstalledLibrary,
@@ -154,8 +156,14 @@ export class ApiError extends Error {
 }
 
 
+/**
+ * How long a `GET /settings` in flight is shared. A read that has not answered by then
+ * may never (fetch has no timeout): later callers start their own instead of joining
+ * it, so one hung request cannot wedge every reader of the settings (#1856).
+ */
+export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
-let settingsInFlight: Promise<Settings> | undefined
+let settingsInFlight: { read: Promise<Settings>; started: number } | undefined
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -1269,6 +1277,9 @@ export const api = {
 
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
+  /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
+  getLibraryObjects: (fileId: number) => request<LibraryFileObjects>(`/print/library/${fileId}/objects`),
+
   getLibraryChoices: (fileId: number, printerId?: number | null) => {
     const search = new URLSearchParams()
     if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
@@ -1397,16 +1408,21 @@ export const api = {
    * #1039 — callers that ask at once share one request: the shell's unit and link
    * loaders and the page all read it on the same load. Nothing is kept once it
    * answers, so a later call always reads afresh, and a save stops later callers
-   * joining a read that started before it. Each caller gets its own copy.
+   * joining a read that started before it, as does one that has hung past
+   * `SETTINGS_SHARE_MS` (#1856). Each caller gets its own copy.
    */
   getSettings: (): Promise<Settings> => {
-    if (!settingsInFlight) {
-      const read = request<Settings>('/settings').finally(() => {
-        if (settingsInFlight === read) settingsInFlight = undefined
-      })
-      settingsInFlight = read
+    const now = Date.now()
+    if (!settingsInFlight || now - settingsInFlight.started >= SETTINGS_SHARE_MS) {
+      const shared = {
+        read: request<Settings>('/settings').finally(() => {
+          if (settingsInFlight === shared) settingsInFlight = undefined
+        }),
+        started: now,
+      }
+      settingsInFlight = shared
     }
-    return settingsInFlight.then((settings) => structuredClone(settings))
+    return settingsInFlight.read.then((settings) => structuredClone(settings))
   },
 
   putSettings: (body: SettingsUpdate) => {
@@ -1466,6 +1482,15 @@ export const api = {
     request<HttpRequestSetting>('/ai/settings/http-request', {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
+    }),
+
+  /** The long edge the assistant panel scales attached images to, served by the agent service. */
+  getImageSettings: () => request<ImageSettings>('/ai/settings/images'),
+
+  putImageSettings: (longEdge: number) =>
+    request<ImageSettings>('/ai/settings/images', {
+      method: 'PUT',
+      body: JSON.stringify({ long_edge: longEdge }),
     }),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */

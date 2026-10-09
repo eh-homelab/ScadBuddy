@@ -123,8 +123,11 @@ export async function loadKek(file: string | undefined, variable = 'SCADBUDDY_SE
   }
 }
 
-function seal(key: Buffer, plaintext: Buffer, context: string): Buffer {
-  const iv = randomBytes(IV_BYTES)
+/** Where `seal` takes its IV and `sealSecret` its data key: `randomBytes`, except in the vectors. */
+export type RandomSource = (size: number) => Buffer
+
+function seal(key: Buffer, plaintext: Buffer, context: string, random: RandomSource = randomBytes): Buffer {
+  const iv = random(IV_BYTES)
   const cipher = createCipheriv('aes-256-gcm', key, iv)
   cipher.setAAD(aadFor(SEAL_VERSION, context))
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
@@ -169,13 +172,18 @@ export type Envelope = {
   kekId: string
 }
 
-export function sealSecret(kek: Kek, plaintext: string, aad: string): Envelope {
-  const dek = randomBytes(KEK_BYTES)
+/**
+ * `random` exists for agent/test/secretVectors.test.ts, which seals with fixed bytes
+ * so the vectors the Python port opens are reproducible. Never pass it elsewhere:
+ * a repeated IV under one key breaks GCM.
+ */
+export function sealSecret(kek: Kek, plaintext: string, aad: string, random: RandomSource = randomBytes): Envelope {
+  const dek = random(KEK_BYTES)
   const bytes = Buffer.from(plaintext, 'utf8')
   try {
     return {
-      secretSealed: seal(dek, bytes, aad),
-      dekSealed: seal(kek.key, dek, `dek:${aad}`),
+      secretSealed: seal(dek, bytes, aad, random),
+      dekSealed: seal(kek.key, dek, `dek:${aad}`, random),
       kekId: kek.id,
     }
   } finally {

@@ -117,6 +117,21 @@ function revision(input: Record<string, unknown>, result: unknown): Touch[] {
   return [{ type: 'revision', id: after, action: 'created', model: slug, before: str(input.base), after }]
 }
 
+/**
+ * A file tool's write (tools/files.ts, #813): its answer names the new commit as
+ * `revision` and its parent as `previous`, not a ModelRecord. `unchanged` committed
+ * nothing. A write still running past the follow window names no revision yet, so the
+ * model is recorded as changed, as `revision` records it.
+ */
+function fileWrite(input: Record<string, unknown>, result: unknown): Touch[] {
+  if (field(result, 'status') === 'unchanged') return []
+  const slug = str(field(result, 'slug')) ?? str(input.slug)
+  const after = str(field(result, 'revision'))
+  if (!slug) return []
+  if (!after) return [{ type: 'model', id: slug, action: 'modified', model: slug }]
+  return [{ type: 'revision', id: after, action: 'created', model: slug, before: str(field(result, 'previous')), after }]
+}
+
 /** A model the call made: the ModelRecord's slug and version. */
 function modelCreated(result: unknown, from?: string | null): Touch[] {
   const slug = str(field(result, 'slug'))
@@ -190,6 +205,9 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   apply_patch: revision,
   write_source_file: revision,
   delete_source_file: revision,
+  edit_file: fileWrite,
+  multi_edit: fileWrite,
+  write_file: fileWrite,
   // `commit` is the revision restored FROM, not the new commit's parent, so it is not `before`.
   restore_version: revision,
   // A merge is a revision (its answer wraps the ModelRecord); dismiss and detach change the model.
@@ -238,6 +256,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     ]
   },
   save_output: (input, result) => output(result, str(input.slug)),
+  // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
+  arrange: (_input, result) => output(field(result, 'output'), str(field(result, 'slug'))),
   delete_output: (input) => {
     const id = str(input.output_id)
     return id ? [{ type: 'output', id, action: 'deleted' }] : []

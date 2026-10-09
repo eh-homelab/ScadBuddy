@@ -1266,14 +1266,16 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
         # Their Parts go with them, or no sweep ever removes them (blob_refs, spec §7).
-        # Best effort, like the records above: the model is gone either way.
-        try:
-            for output_id in output_ids:
+        # Best effort, like the records above: the model is gone either way. Each output
+        # on its own, so one failed release does not leave the rest held (#1782).
+        for output_id in output_ids:
+            try:
                 await asyncio.to_thread(release_parts, state.refs, output_id)
-        except psycopg.Error:
-            logger.exception(
-                "could not release a deleted model's output Parts", extra={"slug": slug}
-            )
+            except psycopg.Error:
+                logger.exception(
+                    "could not release a deleted model's output Parts",
+                    extra={"slug": slug, "id": output_id},
+                )
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 
@@ -1423,7 +1425,7 @@ async def save_source_run(
     )
 
 
-def _stale(slug: str, base: str, current: str | None) -> ApiError:
+def stale_edit(slug: str, base: str, current: str | None) -> ApiError:
     """The 409 of an edit made against a revision the model has moved past (#252).
     ``current`` is an extension member (RFC 9457 §3.2), so a client can read the new
     source and rebuild its edit without another round trip to find the revision."""
@@ -1436,7 +1438,7 @@ def _stale(slug: str, base: str, current: str | None) -> ApiError:
     )
 
 
-def _require_base(slug: str, base: str, current: str | None) -> None:
+def require_base(slug: str, base: str, current: str | None) -> None:
     """A cheap early refusal, before the parse check; `write_source` checks again under
     the history's write lock."""
     if current is None:
@@ -1445,7 +1447,7 @@ def _require_base(slug: str, base: str, current: str | None) -> None:
             "model history is unavailable, so the edit's base cannot be checked",
         )
     if not current.startswith(base):
-        raise _stale(slug, base, current)
+        raise stale_edit(slug, base, current)
 
 
 async def _save_source(
@@ -1485,7 +1487,7 @@ async def _save_source(
             expected_version=expected_version,
         )
     except StaleVersionError as error:
-        raise _stale(slug, error.expected, error.current) from None
+        raise stale_edit(slug, error.expected, error.current) from None
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
@@ -1569,7 +1571,7 @@ async def patch_source_run(slug: str, body: SourcePatch, state: AppState) -> Mod
     source as it stands, then saved as `PUT /source` saves."""
     catalogue = state.catalogue
     current = await asyncio.to_thread(catalogue.version, slug)
-    _require_base(slug, body.base, current)
+    require_base(slug, body.base, current)
     try:
         source = await asyncio.to_thread(state.paths.model_source(slug).read_text, encoding="utf-8")
     except FileNotFoundError:

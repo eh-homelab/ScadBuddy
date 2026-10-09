@@ -8,7 +8,7 @@ no I/O and no logging. A serial rides on :class:`Pick` only (spec §7), never on
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -59,6 +59,8 @@ class Usage:
     print_seconds: int = 0
     grams: float = 0.0
     first_seen_at: datetime | None = None
+    #: Picks whose print has not settled yet (#1079): queued, or printing.
+    pending: int = 0
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,8 @@ class RackCandidate:
     material: str | None
     prints: int
     print_seconds: int
+    #: Open picks: prints queued or running on it that have not settled (#1079).
+    pending: int
     #: (material, color, algorithm, algorithm, position): lower is better.
     key: tuple[float, ...]
 
@@ -230,9 +234,19 @@ def _available(
     }
 
 
-def _algorithm_key(algorithm: RackAlgorithm, use: Usage) -> tuple[float, float]:
+def pending_estimate(usage: Mapping[str, Usage], serials: Iterable[str]) -> float:
+    """What one open pick adds to a hotend's ``print_seconds`` for Least used (#1079):
+    the mean settled print over these hotends, 0 before any has settled. So an open
+    pick on an unused rack breaks the tie through ``prints``, and with history it costs
+    one average print."""
+    used = [usage[s] for s in serials if s in usage]
+    prints = sum(use.prints for use in used)
+    return sum(use.print_seconds for use in used) / prints if prints else 0.0
+
+
+def _algorithm_key(algorithm: RackAlgorithm, use: Usage, estimate: float) -> tuple[float, float]:
     if algorithm == "least_used":
-        return float(use.print_seconds), float(use.prints)
+        return use.print_seconds + use.pending * estimate, float(use.prints + use.pending)
     seen = use.first_seen_at
     if algorithm == "oldest_first":
         return (1.0, 0.0) if seen is None else (0.0, seen.timestamp())
@@ -249,6 +263,7 @@ def _rank(
     taken: Set[int],
 ) -> tuple[RackCandidate, ...]:
     want = normalise_colour(group.color)
+    estimate = pending_estimate(usage, (entry.serial_number for entry in positions.values()))
     found: list[RackCandidate] = []
     for position, entry in _available(group, positions, taken).items():
         use = usage.get(entry.serial_number, Usage()) if entry.serial_number else Usage()
@@ -263,10 +278,11 @@ def _rank(
                 material=nozzle_material(entry.nozzle_type),
                 prints=use.prints,
                 print_seconds=use.print_seconds,
+                pending=use.pending,
                 key=(
                     0.0 if hardened(entry.nozzle_type) == group.abrasive else 1.0,
                     0.0 if want is not None and want == have else 1.0,
-                    *_algorithm_key(algorithm, use),
+                    *_algorithm_key(algorithm, use, estimate),
                     float(position),
                 ),
             )

@@ -195,6 +195,39 @@ export const PageContextSchema = z.object({
 })
 export type PageContext = z.infer<typeof PageContextSchema>
 
+/**
+ * #1866 — an image the user sends with a message: base64 for the model, and a small
+ * preview the transcript shows (`user.turn`). The agent checks the bytes, the types and
+ * the caps (agent `src/sessions/images.ts`); the composer stays under them (`images.ts`).
+ */
+export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
+export const ImagePreviewSchema = z.object({
+  mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+  data: z.string().min(1),
+})
+export type ImagePreview = z.infer<typeof ImagePreviewSchema>
+export const UserImageSchema = z.object({
+  mediaType: z.enum(IMAGE_MEDIA_TYPES),
+  data: z.string().min(1),
+  preview: ImagePreviewSchema,
+})
+export type UserImage = z.infer<typeof UserImageSchema>
+
+/**
+ * #782 — an image a tool result carried, by name: the agent keeps the bytes (agent
+ * `src/sessions/blobs.ts`) and serves them on the panel's own origin (`blobUrl`).
+ */
+export const ToolImageSchema = z.object({
+  name: z.string().regex(/^[0-9a-f]{64}\.(png|jpg|gif|webp)$/),
+  mediaType: z.enum(IMAGE_MEDIA_TYPES),
+})
+export type ToolImage = z.infer<typeof ToolImageSchema>
+
+/** Where the agent serves one of a session's tool images (agent `GET /api/v1/ai/sessions/:id/blobs/:name`). */
+export function blobUrl(sessionId: string, name: string): string {
+  return `/api/v1/ai/sessions/${encodeURIComponent(sessionId)}/blobs/${encodeURIComponent(name)}`
+}
+
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1)
 
@@ -226,6 +259,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     turnId: z.string().min(1),
     text: z.string(),
     author: OwnerSchema,
+    /** #1866 — previews of the images sent with the turn. */
+    images: z.array(ImagePreviewSchema).optional(),
   }),
   z.object({
     v,
@@ -250,6 +285,12 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     risk: RiskSchema,
     /** A subagent's call (#1108): the id of the session's `Agent` call that spawned it. */
     parent: z.string().min(1).optional(),
+    /**
+     * #782 — what the call does, in words, as the tool itself declares it (agent
+     * `src/tools/registry.ts` `ToolSpec.title`). Absent for a tool outside ScadBuddy's
+     * registry, which the panel names itself (`labels.ts` `toolTitle`).
+     */
+    title: z.string().min(1).max(200).optional(),
   }),
   z.object({
     v,
@@ -260,6 +301,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     summary: z.string(),
     sources: z.array(SourceSchema).optional(),
     version: VersionLinkSchema.optional(),
+    /** #782 — the images the result carried, each served by the agent's `blobUrl` route. */
+    images: z.array(ToolImageSchema).max(16).optional(),
   }),
   z.object({
     v,
@@ -384,6 +427,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1),
     context: PageContextSchema,
+    /** #1866 — images for the model; an agent that predates them drops them. */
+    images: z.array(UserImageSchema).min(1).optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent

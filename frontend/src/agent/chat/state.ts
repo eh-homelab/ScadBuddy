@@ -1,5 +1,6 @@
 import type {
   Attention,
+  ImagePreview,
   Origin,
   Owner,
   Question,
@@ -8,12 +9,14 @@ import type {
   SessionStatus,
   SessionSummary,
   Source,
+  ToolImage,
   VersionLink,
 } from './protocol'
 
 /** One entry in a session's transcript and action feed, in arrival order. */
 export type FeedItem =
-  | { kind: 'user'; id: string; text: string; author: Owner }
+  /** `images`: previews of the images sent with the turn (#1866). */
+  | { kind: 'user'; id: string; text: string; author: Owner; images?: ImagePreview[] }
   | { kind: 'assistant'; id: string; text: string; done: boolean }
   | {
       kind: 'tool'
@@ -21,7 +24,12 @@ export type FeedItem =
       name: string
       input: Record<string, unknown>
       risk: Risk
-      result?: { ok: boolean; summary: string; sources: Source[]; version?: VersionLink }
+      /** `images`: what the result carried (#782), served by the agent (`blobUrl`). */
+      result?: { ok: boolean; summary: string; sources: Source[]; version?: VersionLink; images?: ToolImage[] }
+      /** A subagent's call (#1108): the session's `Agent` call that spawned it. */
+      parent?: string
+      /** #782 — what the call does, as the tool declares it; `toolTitle` names the rest. */
+      title?: string
     }
   | {
       kind: 'approval'
@@ -63,7 +71,12 @@ export type FeedItem =
       /** #815 — the tab came back, which ended a tab_disconnected attention request. */
       reconnected?: true
     }
-  | { kind: 'error'; id: string; message: string }
+  /**
+   * `about`: the approval or question whose response the respond route did not take
+   * (#815). Its resolve frame, or a later response the route took, drops the error:
+   * a POST that landed but whose answer was lost resolves the card anyway (#1359).
+   */
+  | { kind: 'error'; id: string; message: string; about?: string }
   /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
   | {
       kind: 'memory'
@@ -188,6 +201,20 @@ function push(session: SessionState, item: FeedItem): SessionState {
   return { ...session, items: [...session.items, item] }
 }
 
+/** An error id no item has: the feed can shrink (`dropErrorsAbout`), so its length alone may repeat one. */
+function errorId(session: SessionState): string {
+  let n = session.items.length
+  while (session.items.some((i) => i.id === `error-${n}`)) n += 1
+  return `error-${n}`
+}
+
+/** Without the respond errors about `id`, which a resolution has made stale (#1359). */
+function dropErrorsAbout(session: SessionState, id: string): SessionState {
+  return session.items.some((i) => i.kind === 'error' && i.about === id)
+    ? { ...session, items: session.items.filter((i) => i.kind !== 'error' || i.about !== id) }
+    : session
+}
+
 function applyServer(state: ChatState, event: ServerEvent): ChatState {
   switch (event.type) {
     case 'sessions.snapshot': {
@@ -254,7 +281,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         s.items.some((i) => i.kind === 'user' && i.id === event.turnId)
           ? s
-          : push(s, { kind: 'user', id: event.turnId, text: event.text, author: event.author }),
+          : push(s, {
+              kind: 'user',
+              id: event.turnId,
+              text: event.text,
+              author: event.author,
+              ...(event.images?.length ? { images: event.images } : {}),
+            }),
       )
 
     case 'assistant.text.delta':
@@ -277,7 +310,15 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'tool.call':
       return patchSession(state, event.sessionId, (s) =>
-        push(s, { kind: 'tool', id: event.id, name: event.name, input: event.input, risk: event.risk }),
+        push(s, {
+          kind: 'tool',
+          id: event.id,
+          name: event.name,
+          input: event.input,
+          risk: event.risk,
+          ...(event.parent === undefined ? {} : { parent: event.parent }),
+          ...(event.title === undefined ? {} : { title: event.title }),
+        }),
       )
 
     case 'tool.result':
@@ -291,6 +332,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
                   summary: event.summary,
                   sources: event.sources ?? [],
                   version: event.version,
+                  ...(event.images?.length ? { images: event.images } : {}),
                 },
               }
             : i,
@@ -310,7 +352,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'approval.resolved':
       return patchSession(state, event.sessionId, (s) =>
-        mapItems(s, (i) =>
+        mapItems(dropErrorsAbout(s, event.id), (i) =>
           i.kind === 'approval' && i.id === event.id
             ? {
                 ...withoutReason(i),
@@ -336,7 +378,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'question.resolved':
       return patchSession(state, event.sessionId, (s) =>
-        mapItems(s, (i) =>
+        mapItems(dropErrorsAbout(s, event.id), (i) =>
           i.kind === 'question' && i.id === event.id
             ? event.answered
               ? { ...withoutReason(i), state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
@@ -404,7 +446,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         mapItems(s, (i) => (i.kind === 'question' && i.id === id && i.state === 'sent' ? { ...i, state: 'pending' } : i))
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(event.questionId ? reopen(s, event.questionId) : s, { kind: 'error', id: `error-${s.items.length}`, message }),
+          push(event.questionId ? reopen(s, event.questionId) : s, { kind: 'error', id: errorId(s), message }),
         )
       }
       return { ...state, notice: message, awaitingStart: false }
@@ -489,7 +531,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       )
     case 'responded':
       return patchSession(state, action.sessionId, (s) =>
-        mapItems(s, (i) => {
+        mapItems(dropErrorsAbout(s, action.id), (i) => {
           if ((i.kind !== 'approval' && i.kind !== 'question') || i.id !== action.id || i.state !== 'sent') return i
           if (i.kind === 'approval' && action.outcome !== 'answered') return { ...i, state: action.outcome, by: action.by }
           if (i.kind === 'question' && action.outcome === 'answered') {
@@ -502,7 +544,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       const { closed } = action
       if (closed !== undefined) {
         return patchSession(state, action.sessionId, (s) =>
-          mapItems(s, (i) =>
+          mapItems(dropErrorsAbout(s, action.id), (i) =>
             (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent'
               ? { ...i, state: 'closed', reason: closed }
               : i,
@@ -514,7 +556,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           mapItems(s, (i) =>
             (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent' ? { ...i, state: 'pending' } : i,
           ),
-          { kind: 'error', id: `error-${s.items.length}`, message: action.message },
+          { kind: 'error', id: errorId(s), message: action.message, about: action.id },
         ),
       )
     }
@@ -530,6 +572,20 @@ function withoutReason<T extends { reason?: string }>(item: T): Omit<T, 'reason'
 /** A turn is live: running, or parked on a human (an approval, or a question, #940). */
 function isLive(status: SessionStatus): boolean {
   return status === 'running' || status === 'waiting_approval' || status === 'waiting_input'
+}
+
+/**
+ * #1109 — who asked a question, from the feed: undefined for the session's own agent
+ * (or a call not in the feed), else a subagent's: its `subagent_type` from the `Agent`
+ * call that spawned it (#1108's `parent`), or '' when the feed does not show it (a
+ * truncated input). Any subagent may ask, a package's too, so the card says so.
+ */
+export function askedBy(items: readonly FeedItem[], question: Extract<FeedItem, { kind: 'question' }>): string | undefined {
+  const call = items.find((i) => i.kind === 'tool' && i.id === question.tool)
+  if (call?.kind !== 'tool' || call.parent === undefined) return undefined
+  const agent = items.find((i) => i.kind === 'tool' && i.id === call.parent)
+  const type = agent?.kind === 'tool' ? agent.input.subagent_type : undefined
+  return typeof type === 'string' ? type : ''
 }
 
 /** A session is busy while a turn runs or waits on a human. */

@@ -1354,6 +1354,86 @@ describe('PrintPicker · Options', () => {
   })
 })
 
+describe('PrintPicker · Print sequence (#1862)', () => {
+  const LIBRARY = { kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } } as const
+
+  it('offers Default, By layer and By object, and sends nothing for Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    const select = screen.getByLabelText('Print sequence')
+    expect(select).toHaveValue('')
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Default (template or process)',
+      'By layer',
+      'By object',
+    ])
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('print_sequence')
+  })
+
+  it('sends the chosen sequence with an output’s run', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ print_sequence: 'by object' })
+  })
+
+  it('sends the chosen sequence with a library file’s run', async () => {
+    const { bodies, urls } = watch('POST', '/run')
+    const { user } = renderPage(
+      <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by layer')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(urls[0]).toContain('/print/library/89/run')
+    expect(bodies[0]).toMatchObject({ print_sequence: 'by layer' })
+  })
+
+  it('does not carry over to another source', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user, rerender } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
+
+    rerender(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
+    await waitFor(() => expect(screen.getByLabelText('Print sequence')).toHaveValue(''))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('print_sequence')
+  })
+
+  it('is not remembered: a reopened dialog is back on Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderReopenable()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+    await loaded()
+    if (!screen.queryByLabelText('Print sequence')) await showAdvanced()
+    expect(screen.getByLabelText('Print sequence')).toHaveValue('')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('print_sequence')
+  })
+})
+
 describe('PrintPicker · Projects', () => {
   it('files the print under the chosen project once the queue entries are known', async () => {
     const { bodies } = watch('POST', '/project')

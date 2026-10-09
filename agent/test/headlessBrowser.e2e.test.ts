@@ -22,8 +22,8 @@ import { type PageServer, startOtherOrigin, startUi, testChromium } from './supp
 // (test/support/browserPages.ts `testChromium`) or without the bundled binary.
 
 const TOKEN = 'gw-headless-browser-token-777788889999'
-/** SCADBUDDY_PUBLIC_URL for the run; never resolves (RFC 2606), so only the rewrite can land. */
-const ALIAS = 'http://scadbuddy.invalid'
+/** SCADBUDDY_PUBLIC_URL for the run: the stand-in UI under another origin (localhost, not 127.0.0.1). */
+const publicOf = (ui: PageServer) => ui.origin.replace('127.0.0.1', 'localhost')
 const chromium = testChromium()
 let cliMissing: string | undefined
 try {
@@ -100,7 +100,7 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
 
     // The scripted model: one step per tool result so far.
     const steps: ((results: string[]) => Reply)[] = [
-      () => ({ toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${ui.origin}/` } } }),
+      () => ({ toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${publicOf(ui)}/` } } }),
       () => ({ toolUse: { name: `${TOOL_PREFIX}browser_snapshot`, input: {} } }),
       (r) => {
         serverEnv = serverEnvs(configFile)
@@ -125,8 +125,8 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
       () => ({ toolUse: { name: `${TOOL_PREFIX}browser_take_screenshot`, input: { filename: '../../escape.png' } } }),
       () => ({ toolUse: { name: `${TOOL_PREFIX}browser_evaluate`, input: { function: '() => document.cookie' } } }),
       () => ({ toolUse: { name: `${TOOL_PREFIX}browser_run_code_unsafe`, input: { code: 'process.exit(1)' } } }),
-      // ScadBuddy's public URL, rewritten onto the backend by canUseTool.
-      () => ({ toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${ALIAS}/m/box?via=alias` } } }),
+      // The backend's own origin, which a configured public URL replaces (#983).
+      () => ({ toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${ui.origin}/m/box?via=backend` } } }),
       () => ({ text: 'Done.' }),
     ]
     fake = await startFakeAnthropic((r) => {
@@ -149,7 +149,7 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
         cwd,
         sessionId,
         maxTurns: 20,
-        headlessBrowser: { sessionId, backendUrl: ui.origin, publicUrl: ALIAS, dir: browserDir, ...chromium },
+        headlessBrowser: { sessionId, backendUrl: ui.origin, publicUrl: publicOf(ui), dir: browserDir, ...chromium },
         onDecision: (name, d) => decisions.push([name, d.decision, d.tier]),
         stderr: (l) => stderr.push(l),
       })) {
@@ -232,18 +232,19 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
     expect(results()[9]).toMatch(/No such tool available|not available/i)
   })
 
-  it('runs a navigation to the public URL with the URL rewritten onto the backend', () => {
-    // The tool ran with canUseTool's `updatedInput`, not the model's input:
-    // the server's own record of the call names the backend URL.
-    expect(results()[10]).toContain(`await page.goto('${ui.origin}/m/box?via=alias')`)
-    expect(results()[10]).not.toContain(ALIAS)
+  it('opens the public URL as it is, and refuses the backend’s own origin, naming the URL to use (#983)', () => {
+    // The server's own record of the call names the public URL, unchanged.
+    expect(results()[0]).toContain(`await page.goto('${publicOf(ui)}/')`)
     expect(decisions).toContainEqual([`${TOOL_PREFIX}browser_navigate`, 'allow', 'read'])
+    expect(results()[10]).toContain(`open "${publicOf(ui)}/m/box?via=backend" instead`)
+    expect(ui.hits.map((h) => h.url)).not.toContain('/m/box?via=backend')
   })
 
-  it('marks every request the page made with the session', () => {
+  it('marks every request the page made with the session, all on the public origin', () => {
     const marked = ui.hits.map((h) => h.headers[AGENT_ACTOR_HEADER.toLowerCase()])
     expect(marked.length).toBeGreaterThan(0)
     expect(new Set(marked)).toEqual(new Set([sessionId]))
+    expect(new Set(ui.hits.map((h) => h.headers.host))).toEqual(new Set([new URL(publicOf(ui)).host]))
   })
 
   it('starts the server without the credential in its environment', () => {

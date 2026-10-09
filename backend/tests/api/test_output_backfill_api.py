@@ -268,7 +268,10 @@ def test_a_post_long_after_the_rerender_finished_unattached_queues_a_new_one(
     ("raised", "code"),
     [
         (ApiError(404, "no library 'gone' for template 'pasted'"), None),
-        (ApiError(409, "no snapshot of pasted@abc and no history"), "snapshot_unavailable"),
+        (
+            ApiError(409, "no snapshot of pasted@abc and no history", code="snapshot_unavailable"),
+            "snapshot_unavailable",
+        ),
     ],
 )
 def test_a_render_that_cannot_start_is_a_422_that_says_why(
@@ -294,6 +297,22 @@ def test_a_render_that_cannot_start_is_a_422_that_says_why(
     assert "no longer in the template's history" not in body["detail"]
     assert body.get("code") == code
     assert _state(app).outputs.backfill(output_id) is None  # nothing queued
+
+
+def test_only_the_snapshot_409_is_relabelled(
+    client: TestClient, app: FastAPI, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1849: the relabel keys on the snapshot's ``code``, not on the status, so another
+    409 the render answers is never passed off as "no snapshot"."""
+    output_id = legacy_output(client, app)
+
+    async def refuse(*args: object, **kwargs: object) -> None:
+        raise ApiError(409, "some other conflict", code="something_else")
+
+    monkeypatch.setattr(outputs_api, "render_model", refuse)
+    refused = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "something_else"
 
 
 def test_a_post_whose_pending_job_does_not_validate_queues_a_new_one(

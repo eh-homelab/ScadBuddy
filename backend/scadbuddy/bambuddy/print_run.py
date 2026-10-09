@@ -174,6 +174,9 @@ class RackOption(BaseModel):
     material: str | None = None
     prints: int = 0
     print_seconds: int = 0
+    #: Prints queued or running on it that have not settled yet (#1079): Least used
+    #: counts each as one more print.
+    pending: int = 0
 
 
 class RackSentPick(BaseModel):
@@ -293,7 +296,7 @@ async def filament_options_for_output(
     """:func:`filament_options` for an output ScadBuddy rendered."""
     return await filament_options(
         client,
-        OutputSource(store, uploads, meta, settings),
+        OutputSource(store=store, meta=meta, uploads=uploads, settings=settings),
         printer_id=printer_id,
         plate_id=plate_id,
         all_plates=all_plates,
@@ -563,7 +566,7 @@ async def check_print(
         )
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
-    laid_out = await source.lays_out(client, request.choices.nozzles)
+    laid_out = await source.states_nozzles(client)
     rack_view, rack_notes = await rack_preview(
         client,
         request,
@@ -614,6 +617,7 @@ def _rack_option(candidate: RackCandidate) -> RackOption:
         material=candidate.material,
         prints=candidate.prints,
         print_seconds=candidate.print_seconds,
+        pending=candidate.pending,
     )
 
 
@@ -729,12 +733,17 @@ async def check_for_output(
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered."""
     return await check_print(
-        client, OutputSource(store, uploads, meta, settings), settings, request, rack=rack
+        client,
+        OutputSource(store=store, meta=meta, uploads=uploads, settings=settings),
+        settings,
+        request,
+        rack=rack,
     )
 
 
 async def check_for_library(
     client: BambuddyClient,
+    uploads: BambuddyUploadStore,
     settings: StoredSettings,
     file_id: int,
     request: PrintRunRequest,
@@ -744,7 +753,7 @@ async def check_for_library(
     """:func:`check_print` for a file already in Bambuddy's library."""
     return await check_print(
         client,
-        await LibrarySource.load(client, file_id, settings=settings),
+        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
         settings,
         request,
         rack=rack,
@@ -820,11 +829,12 @@ async def prepare_run(
         raise RunRefusalError(" ".join(error.message for error in refused))
     printer_status = await _read_status(client, printer_id)
     await record_seen(rack, printer_id, printer_status)
-    if refuse_manual_pick:
+    if refuse_manual_pick and request.rack_position is not None:
+        # Only a manual pick needs the file judged, which reads its 3MF (#1752).
         _check_manual_pick(
             request,
             printer_status,
-            laid_out=await source.lays_out(client, request.choices.nozzles),
+            laid_out=await source.states_nozzles(client),
         )
     return PreparedRun(
         plate_ids=plate_ids,
@@ -1048,7 +1058,7 @@ async def plan_run(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
     hardware += high_flow_warnings(
-        printer_status, choices.nozzles, laid_out=await source.lays_out(client, choices.nozzles)
+        printer_status, choices.nozzles, laid_out=await source.states_nozzles(client)
     )
     warnings: list[FilamentWarning] = []
     for _, options, resolved, _ in planned:
@@ -1204,6 +1214,8 @@ def _queued(
 
 async def filament_options_for_library(
     client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    settings: StoredSettings,
     file_id: int,
     *,
     printer_id: int | None = None,
@@ -1213,7 +1225,7 @@ async def filament_options_for_library(
     """:func:`filament_options` for a file already in Bambuddy's library (#313)."""
     return await filament_options(
         client,
-        await LibrarySource.load(client, file_id),
+        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
         printer_id=printer_id,
         plate_id=plate_id,
         all_plates=all_plates,

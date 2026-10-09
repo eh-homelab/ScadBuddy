@@ -77,15 +77,21 @@ def _unit(vector: Sequence[float] | np.ndarray) -> np.ndarray:
     return array / np.linalg.norm(array)
 
 
-def _basis(forward: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _basis(
+    forward: Sequence[float], vertical_up: Sequence[float] = (0.0, 1.0, 0.0)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Right, up and forward for a camera looking along `forward`.
 
-    World up is Z, except for the top view, which looks straight down it and
-    would make the cross product degenerate; that one takes +Y as up, which puts
-    the model's +Y at the top of the image.
+    World up is Z, except for a view straight down or up it, which would make the
+    cross product degenerate; that one takes `vertical_up` as up: +Y for the named
+    top and bottom views, which puts the model's +Y at the top of the image.
     """
     ahead = _unit(forward)
-    world_up = np.array([0.0, 1.0, 0.0]) if abs(ahead[2]) > 0.999 else np.array([0.0, 0.0, 1.0])
+    world_up = (
+        np.asarray(vertical_up, dtype=np.float64)
+        if abs(ahead[2]) > 0.999
+        else np.array([0.0, 0.0, 1.0])
+    )
     right = _unit(np.cross(ahead, world_up))
     up = np.cross(right, ahead)
     return right, up, ahead
@@ -98,25 +104,34 @@ def _rasterise(
     *,
     shaded: bool,
     colours: Sequence[tuple[int, int, int]],
+    look: _Look | None = None,
 ) -> np.ndarray:
     """A size x size x 4 uint8 RGBA image of `parts`, transparent behind them.
 
     Orthographic rather than perspective on purpose: this image is read as "which
     colour is which part", and perspective on a plate-sized object adds
-    foreshortening without adding information.
+    foreshortening without adding information. `look` frames it on another point
+    than the bounding box's centre, closer in, or with another up for a vertical view.
     """
-    right, up, ahead = _basis(forward)
+    right, up, ahead = _basis(forward) if look is None else _basis(forward, look.vertical_up)
 
     bounds = np.array([part.mesh.bounds for part in parts])
     low = bounds[:, 0, :].min(axis=0)
     high = bounds[:, 1, :].max(axis=0)
     centre = (low + high) / 2
+    if look is not None:
+        centre = np.array(
+            [c if t is None else t for c, t in zip(centre, look.target, strict=True)],
+            dtype=np.float64,
+        )
 
     # Every corner of the model's AABB, projected: what has to fit in the frame
     # is the extent of the PROJECTION, not of the box.
     corners = np.array(np.meshgrid(*zip(low, high, strict=True))).reshape(3, -1).T - centre
     span = float(np.abs(corners @ np.column_stack((right, up))).max()) * 2
     scale = (size * (1 - 2 * MARGIN)) / span if span > 0 else 1.0
+    if look is not None:
+        scale *= look.zoom
 
     light = _unit(np.asarray(LIGHT_DIRECTION) @ np.array([right, up, -ahead]))
 
@@ -348,18 +363,118 @@ VIEW_DIRECTIONS: dict[ViewName, tuple[float, float, float]] = {
 }
 
 
-def render_view(parts: Sequence[ColourPart], view: ViewName, size: int = PLATE_PNG_SIZE) -> bytes:
-    """One named view of ``parts`` as a shaded, antialiased RGBA PNG: the plate
-    cover's rasteriser pointed along :data:`VIEW_DIRECTIONS`, so a client -- or a
-    vision model -- can check the geometry from more than one side."""
-    if not parts:
-        raise ValueError("a view needs at least one colour part")
+# ── an explicit camera (#830) ────────────────────────────────────────────────
+
+#: The named views as angles, in degrees. Azimuth turns around +Z from the front
+#: (0: standing at -Y, looking +Y), counter-clockwise seen from above, so 90 is the
+#: right side (+X), 180 the back and -90 (or 270) the left; elevation is above the
+#: XY plane, 90 straight down from above. A camera that gives only one angle keeps
+#: the named view's other one.
+VIEW_ANGLES: dict[ViewName, tuple[float, float]] = {
+    "iso": (
+        math.degrees(math.atan2(VIEW_POSITION[0], -VIEW_POSITION[1])),
+        math.degrees(math.atan2(VIEW_POSITION[2], math.hypot(VIEW_POSITION[0], VIEW_POSITION[1]))),
+    ),
+    "front": (0.0, 0.0),
+    "back": (180.0, 0.0),
+    "left": (-90.0, 0.0),
+    "right": (90.0, 0.0),
+    "top": (0.0, 90.0),
+    "bottom": (0.0, -90.0),
+}
+
+MAX_AZIMUTH = 360.0
+MAX_ELEVATION = 90.0
+#: How far in a view may come; 1 frames the whole model around the target.
+MAX_ZOOM = 64.0
+
+
+@dataclass(frozen=True)
+class Camera:
+    """Where a view stands and what it frames, beyond its name.
+
+    ``azimuth`` and ``elevation`` replace the named view's angles (:data:`VIEW_ANGLES`);
+    either left out keeps the named view's. ``zoom`` magnifies the fitted frame (2 shows
+    half the width). ``target`` is the point, in model mm, the view centres on, each
+    coordinate left out taken from the bounding box's centre; at zoom 1 the frame
+    still holds the whole model around it. The view is orthographic, so distance
+    from the model changes nothing but the framing, which is ``zoom``.
+    """
+
+    azimuth: float | None = None
+    elevation: float | None = None
+    zoom: float = 1.0
+    target: tuple[float | None, float | None, float | None] = (None, None, None)
+
+    def check(self) -> None:
+        """ValueError naming what is out of range."""
+        if self.azimuth is not None and not -MAX_AZIMUTH <= self.azimuth <= MAX_AZIMUTH:
+            raise ValueError(
+                f"azimuth must be between {-MAX_AZIMUTH:g} and {MAX_AZIMUTH:g} degrees"
+            )
+        if self.elevation is not None and not -MAX_ELEVATION <= self.elevation <= MAX_ELEVATION:
+            raise ValueError(
+                f"elevation must be between {-MAX_ELEVATION:g} and {MAX_ELEVATION:g} degrees"
+            )
+        if not 1.0 <= self.zoom <= MAX_ZOOM:
+            raise ValueError(f"zoom must be between 1 and {MAX_ZOOM:g}")
+        if any(t is not None and not math.isfinite(t) for t in self.target):
+            raise ValueError("the target must be a finite point")
+
+
+@dataclass(frozen=True)
+class _Look:
+    vertical_up: tuple[float, float, float]
+    zoom: float
+    target: tuple[float | None, float | None, float | None]
+
+
+def _snap(value: float) -> float:
+    # cos(90 deg) is 6e-17, not 0: snapped, the axis-aligned angles draw exactly
+    # what the named views do. `+ 0.0` turns -0.0 into 0.0.
+    return (0.0 if abs(value) < 1e-12 else value) + 0.0
+
+
+def _aim(view: ViewName, camera: Camera | None) -> tuple[tuple[float, float, float], _Look | None]:
+    """The direction ``view`` through ``camera`` looks, and how it frames."""
     if view not in VIEW_DIRECTIONS:
         raise ValueError(f"unknown view {view!r}")
+    if camera is None:
+        return VIEW_DIRECTIONS[view], None
+    camera.check()
+    if camera.azimuth is None and camera.elevation is None:
+        return VIEW_DIRECTIONS[view], _Look((0.0, 1.0, 0.0), camera.zoom, camera.target)
+    named_azimuth, named_elevation = VIEW_ANGLES[view]
+    azimuth = math.radians(named_azimuth if camera.azimuth is None else camera.azimuth)
+    elevation = math.radians(named_elevation if camera.elevation is None else camera.elevation)
+    # It stands at `position` from the target and looks back along it; looking
+    # straight down or up, the image's up is away from where it stands.
+    position = (
+        math.sin(azimuth) * math.cos(elevation),
+        -math.cos(azimuth) * math.cos(elevation),
+        math.sin(elevation),
+    )
+    forward = (_snap(-position[0]), _snap(-position[1]), _snap(-position[2]))
+    vertical_up = (_snap(-math.sin(azimuth)), _snap(math.cos(azimuth)), 0.0)
+    return forward, _Look(vertical_up, camera.zoom, camera.target)
+
+
+def render_view(
+    parts: Sequence[ColourPart],
+    view: ViewName,
+    size: int = PLATE_PNG_SIZE,
+    camera: Camera | None = None,
+) -> bytes:
+    """One view of ``parts`` as a shaded, antialiased RGBA PNG: the plate cover's
+    rasteriser pointed along :data:`VIEW_DIRECTIONS`, or ``camera``'s angles, so a
+    client -- or a vision model -- can check the geometry from more than one side."""
+    if not parts:
+        raise ValueError("a view needs at least one colour part")
+    forward, look = _aim(view, camera)
     if not MIN_VIEW_SIZE <= size <= MAX_VIEW_SIZE:
         raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_VIEW_SIZE}")
     image = _rasterise(
-        parts, VIEW_DIRECTIONS[view], size * SUPERSAMPLE, shaded=True, colours=_part_colours(parts)
+        parts, forward, size * SUPERSAMPLE, shaded=True, colours=_part_colours(parts), look=look
     )
     return encode_png(_downsample(image, size))
 
@@ -403,6 +518,7 @@ def render_colour_breakdown(
     order: Sequence[str] = (),
     *,
     deadline: float | None = None,
+    camera: Camera | None = None,
 ) -> ColourBreakdown:
     """One tile per colour, in a near-square grid: the whole model from ``view``, with
     that colour's parts in their colour and every other part in :data:`GHOST_COLOUR`.
@@ -412,11 +528,11 @@ def render_colour_breakdown(
 
     ``deadline`` (a :func:`time.monotonic` value) is checked before each tile, and
     TimeoutError raised past it: a caller's timeout cannot stop the worker thread
-    this runs in, so this stops itself within one tile of it (review of #750)."""
+    this runs in, so this stops itself within one tile of it (review of #750).
+    ``camera`` turns and frames every tile as :func:`render_view`'s does."""
     if not parts:
         raise ValueError("a breakdown needs at least one colour part")
-    if view not in VIEW_DIRECTIONS:
-        raise ValueError(f"unknown view {view!r}")
+    forward, look = _aim(view, camera)
     if not MIN_VIEW_SIZE <= size <= MAX_BREAKDOWN_TILE_SIZE:
         raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_BREAKDOWN_TILE_SIZE}")
     colours = breakdown_colours(parts, order)
@@ -435,9 +551,7 @@ def render_colour_breakdown(
             rgb if part.colour == colour else GHOST_COLOUR
             for part, rgb in zip(parts, actual, strict=True)
         ]
-        lit = _rasterise(
-            parts, VIEW_DIRECTIONS[view], size * SUPERSAMPLE, shaded=True, colours=tinted
-        )
+        lit = _rasterise(parts, forward, size * SUPERSAMPLE, shaded=True, colours=tinted, look=look)
         row, column = divmod(index, columns)
         sheet[row * size : (row + 1) * size, column * size : (column + 1) * size] = _downsample(
             lit, size
