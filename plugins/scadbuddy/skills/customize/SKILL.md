@@ -149,8 +149,25 @@ needs more than one view, for example `top` and `front`. Read measurements from
 the job's `bbox_mm`, not from the picture. This choice of view is judgement; the
 directions are the code's.
 
-`get_render_colours` takes the same `view`, so check a colour change from the
-view that shows the part it moved.
+When no named view shows the feature (a recess on an angled face, a hole drilled
+at an angle, a clip under a lip, anything on the back-left that `iso` hides), give
+a camera instead (`azimuth`, `elevation`, `zoom`, `target_x`/`_y`/`_z` on the same
+routes, #830; the conventions are in the routes' parameter descriptions in
+`backend/openapi.json`):
+
+- `azimuth` is degrees around +Z from the front: 0 stands at −Y (`front`), 90 at
+  +X (`right`), 180 at +Y (`back`), −90 at −X (`left`). `elevation` is degrees
+  above the XY plane, 90 straight down (`top`). An angle left out is the named
+  view's, so `front` with `elevation` 30 looks down at the front from 30°.
+- Stand on the side the feature faces: for a face whose outward normal points
+  toward +X and +Y, azimuth about 135; for a clip under a lip, a negative elevation.
+- `zoom` 2 shows half the width; `target` (model mm, from `bbox_mm` or the
+  source's coordinates) is what it centres on, so a small feature fills the
+  picture instead of a few pixels.
+- To compare a change, draw the same camera at both revisions.
+
+`get_render_colours` takes the same `view` and camera, so check a colour change
+from the angle that shows the part it moved.
 
 ## 5. Check the plate
 

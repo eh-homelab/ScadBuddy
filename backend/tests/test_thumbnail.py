@@ -19,10 +19,13 @@ from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import (
     MAX_BREAKDOWN_COLOURS,
     MAX_VIEW_SIZE,
+    MAX_ZOOM,
     MIN_VIEW_SIZE,
     PLATE_PNG_SIZE,
     PLATE_SMALL_PNG_SIZE,
+    VIEW_ANGLES,
     VIEW_DIRECTIONS,
+    Camera,
     ViewName,
     _downsample,
     breakdown_colours,
@@ -287,6 +290,99 @@ def test_a_view_refuses_what_it_cannot_draw(view: str, size: int) -> None:
 def test_a_view_of_nothing_is_refused() -> None:
     with pytest.raises(ValueError, match="at least one"):
         render_view([], "iso")
+
+
+# ── an explicit camera (#830) ────────────────────────────────────────────────
+
+
+def test_every_view_name_has_angles() -> None:
+    assert set(VIEW_ANGLES) == set(VIEW_DIRECTIONS)
+
+
+@pytest.mark.parametrize("view", [v for v in get_args(ViewName) if v != "iso"])
+def test_a_named_view_is_the_camera_at_its_angles(view: ViewName) -> None:
+    """The axis views are shorthands: the same angles given explicitly draw the same
+    image, so a caller can start from a named view and turn the camera from there."""
+    azimuth, elevation = VIEW_ANGLES[view]
+    camera = Camera(azimuth=azimuth, elevation=elevation)
+
+    assert render_view(_long_in_x(), "iso", 128, camera) == render_view(_long_in_x(), view, 128)
+
+
+@pytest.mark.parametrize(
+    ("azimuth", "wide"), [(0, True), (90, False), (180, True), (-90, False), (270, False)]
+)
+def test_azimuth_turns_around_z_from_the_front(azimuth: float, wide: bool) -> None:
+    """0 is front (standing at -Y), 90 right (+X): a bar along X is wide at 0 and
+    180 and square end-on at 90 and 270 (-90)."""
+    camera = Camera(azimuth=azimuth, elevation=0)
+    width, height = _opaque_extent(read_png(render_view(_long_in_x(), "front", 256, camera)))
+
+    if wide:
+        assert width > 3 * height
+    else:
+        assert abs(width - height) <= 2
+
+
+def test_one_angle_overrides_the_named_view() -> None:
+    """front with elevation 90 is top; the azimuth stays the named view's."""
+    camera = Camera(elevation=90)
+
+    assert render_view(_long_in_x(), "front", 128, camera) == render_view(_long_in_x(), "top", 128)
+
+
+def test_a_camera_between_the_axes_sees_two_faces() -> None:
+    """At azimuth 45 the bar is neither its full length nor end-on."""
+    front = _opaque_extent(read_png(render_view(_long_in_x(), "front", 256)))
+    turned = _opaque_extent(read_png(render_view(_long_in_x(), "front", 256, Camera(azimuth=45))))
+
+    assert turned[0] / turned[1] < front[0] / front[1]
+    assert turned[0] > turned[1]
+
+
+def test_zoom_comes_in_closer_than_the_whole_model() -> None:
+    whole = _opaque_extent(read_png(render_view(_long_in_x(), "front", 256)))
+    closer = _opaque_extent(read_png(render_view(_long_in_x(), "front", 256, Camera(zoom=2))))
+
+    # Twice as tall, and wider than the frame: the bar's ends are cropped.
+    assert abs(closer[1] - 2 * whole[1]) <= 3
+    assert closer[0] == 256
+
+
+def test_the_target_is_what_the_view_centres_on() -> None:
+    """Aimed at the bar's +X end (x = 20), the front view draws the bar to the left
+    of the centre only; a missing coordinate keeps the bounding-box centre's."""
+    camera = Camera(target=(20.0, None, None))
+    image = read_png(render_view(_long_in_x(), "front", 256, camera))
+    rows, cols = np.nonzero(image[..., 3] == 255)
+
+    assert cols.max() <= 128 + 1
+    assert abs((rows.min() + rows.max()) / 2 - 128) <= 2
+
+
+@pytest.mark.parametrize(
+    "camera",
+    [
+        Camera(elevation=90.5),
+        Camera(elevation=-91),
+        Camera(azimuth=360.5),
+        Camera(azimuth=float("nan")),
+        Camera(zoom=0.5),
+        Camera(zoom=MAX_ZOOM + 1),
+        Camera(target=(float("inf"), None, None)),
+    ],
+)
+def test_a_camera_out_of_range_is_refused(camera: Camera) -> None:
+    with pytest.raises(ValueError):
+        render_view(_long_in_x(), "front", 128, camera)
+
+
+def test_the_breakdown_takes_the_same_camera() -> None:
+    camera = Camera(azimuth=90, elevation=0)
+    turned = render_colour_breakdown(_long_in_x(), "iso", 128, camera=camera)
+    named = render_colour_breakdown(_long_in_x(), "right", 128)
+
+    assert turned.png == named.png
 
 
 # ── per-colour breakdown (#252) ──────────────────────────────────────────────
