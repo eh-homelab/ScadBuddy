@@ -660,8 +660,8 @@ set `SCADBUDDY_STORE_BACKEND=local` instead.
 With **`SCADBUDDY_SECRET_KEY_FILE`** set, the backend seals the API keys it stores
 (`bambuddy_api_key`, `bambuddy_render_api_key`, `google_fonts_api_key`) in the
 `settings` table with envelope encryption, in the agent's format and under the same key
-file (see "The agent sidecar" below: 32 random bytes, base64). At start the API seals any
-key still stored in plaintext, once, under the migration lock, and logs
+file (see "The agent sidecar" below: 32 random bytes, base64). At start the API (and the print
+worker, which opens the same store) seals any key still stored in plaintext, once, under the migration lock, and logs
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
@@ -675,6 +675,10 @@ start.
 - Keep a copy of the key. A key sealed under a lost one cannot be opened: enter it again
   in Settings. The file is read once per process, so a changed key takes effect only after
   a restart. Rotating the key is not supported here yet.
+- Rolling back to an image older than #602 once keys are sealed: the old render worker
+  cannot read a sealed key and will not start on the `bambuddy` store, and the old API
+  falls back to its environment. Roll the image and the key mount back together, then
+  enter the keys again in Settings (the old API stores them in plaintext).
 
 ### The agent sidecar (AI, #261)
 
