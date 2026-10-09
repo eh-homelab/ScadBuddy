@@ -3,6 +3,8 @@
  * a session's tool results carried (agent `src/routes/sessions.ts`). The scripted agent
  * (`../agent.ts`) returns one, a render view of the name keychain, in its first turn;
  * any other name is a 404, as the real route answers a name the session never stored.
+ * It also serves the images the user sent (#1891's full-size view), which the attachment
+ * mock stores here as a turn takes them (`storeSentImage`).
  */
 import { HttpResponse, http } from 'msw'
 import type { ToolImage } from '../../agent/chat/protocol'
@@ -17,14 +19,40 @@ export const PREVIEW_IMAGE: ToolImage = {
   mediaType: 'image/png',
 }
 
-const bytes = () => Uint8Array.from(atob(PREVIEW_PNG), (c) => c.charCodeAt(0))
+const bytes = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+
+const EXTENSION: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
+
+/** The images users sent, by the name a `user.turn` gives them. */
+const sent = new Map<string, { mediaType: string; data: string }>()
+
+export function reset(): void {
+  sent.clear()
+}
+
+/**
+ * Keeps a sent image and returns the name it is served under. The real agent names it by
+ * its bytes' sha256; any name of that shape does here.
+ */
+export function storeSentImage(image: { mediaType: string; data: string }): string {
+  const name = `${(sent.size + 1).toString(16).padStart(64, '0')}.${EXTENSION[image.mediaType] ?? 'png'}`
+  sent.set(name, image)
+  return name
+}
 
 export const handlers = [
-  http.get('/api/v1/ai/sessions/:id/blobs/:name', ({ params }) =>
-    params.name === PREVIEW_IMAGE.name
-      ? new HttpResponse(bytes(), {
-          headers: { 'Content-Type': 'image/png', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=31536000, immutable' },
+  http.get('/api/v1/ai/sessions/:id/blobs/:name', ({ params }) => {
+    const image =
+      params.name === PREVIEW_IMAGE.name ? { mediaType: 'image/png', data: PREVIEW_PNG } : sent.get(String(params.name))
+    return image
+      ? new HttpResponse(bytes(image.data), {
+          headers: {
+            'Content-Type': image.mediaType,
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Disposition': 'inline',
+            'Cache-Control': 'private, max-age=31536000, immutable',
+          },
         })
-      : HttpResponse.json({ detail: `no image ${String(params.name)}` }, { status: 404 }),
-  ),
+      : HttpResponse.json({ detail: `no image ${String(params.name)}` }, { status: 404 })
+  }),
 ]

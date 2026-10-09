@@ -18,22 +18,17 @@ const edges = vi.hoisted(() => [] as (number | undefined)[])
 // jsdom has no canvas: the preparation itself is images.test.ts's; here it encodes the name.
 vi.mock('../../agent/chat/images', async (importOriginal) => {
   const actual = await importOriginal<typeof Images>()
-  // Kept for the lightbox as the real one keeps it (#1891).
-  const remembered = (image: Parameters<typeof actual.rememberFullSize>[0]) => {
-    actual.rememberFullSize(image)
-    return image
-  }
   return {
     ...actual,
     prepareImage: (file: File, _codec?: unknown, edge?: number) => {
       edges.push(edge)
       return file.type === 'image/svg+xml'
         ? Promise.reject(new Error(`${file.name} is not a PNG, JPEG, GIF or WebP image.`))
-        : Promise.resolve(remembered({
+        : Promise.resolve({
             mediaType: 'image/png' as const,
             data: btoa(file.name),
             preview: { mediaType: 'image/jpeg' as const, data: btoa(`preview of ${file.name}`) },
-          }))
+          })
     },
   }
 })
@@ -206,7 +201,7 @@ describe('assistant images (#1866)', () => {
     expect(sentMessages()).toHaveLength(0)
   })
 
-  it('opens a sent image full size over the panel, and Esc closes only the image (#1891)', async () => {
+  it('opens a sent image full size from the agent’s store over the panel, and Esc closes only the image (#1891)', async () => {
     const { view, box } = await openComposer()
     paste(box, [png()])
     await screen.findByRole('list', { name: 'Images to send' })
@@ -217,10 +212,16 @@ describe('assistant images (#1866)', () => {
 
     const dialog = screen.getByRole('dialog', { name: 'Image 1 of 1' })
     expect(dialog).toHaveAttribute('aria-modal', 'true')
-    expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, as sent' })).toHaveAttribute(
-      'src',
-      `data:image/png;base64,${btoa('shot.png')}`,
-    )
+    // The turn names the image the agent stored (the msw store serves it); jsdom loads no
+    // images, so the load is the test's to fire.
+    const full = within(dialog).getByAltText('Image 1 of 1, as sent')
+    const src = full.getAttribute('src') ?? ''
+    expect(src).toMatch(/^\/api\/v1\/ai\/sessions\/[^/]+\/blobs\/[0-9a-f]{64}\.png$/)
+    const served = await fetch(new URL(src, window.location.href))
+    expect(served.headers.get('content-type')).toBe('image/png')
+    expect(await served.text()).toBe('shot.png')
+    fireEvent.load(full)
+    expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, as sent' })).toBeVisible()
     expect(within(dialog).getByRole('button', { name: 'Close' })).toHaveFocus()
 
     await view.user.keyboard('{Escape}')

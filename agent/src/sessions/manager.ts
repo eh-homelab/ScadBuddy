@@ -77,13 +77,13 @@ import {
   type ServerEvent,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, type StoredBlob } from './blobs.js'
+import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
 import { SessionEdits } from './edits.js'
 import { forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
-import { previewsOf, userPrompt, type UserImage } from './images.js'
+import { type ImagePreview, previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { DurableGate } from '../gate/durable.js'
@@ -1135,6 +1135,23 @@ export class SessionManager {
     if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
   }
 
+  /**
+   * The `user.turn` event's images: each preview with the name of the full
+   * image, stored before the event is logged (blobs.ts), as a tool result's
+   * are, so the panel's full-size view can load it. If they cannot be stored,
+   * the previews go without names.
+   */
+  private async sentImages(id: string, images: readonly UserImage[]): Promise<(ImagePreview & { name?: string })[]> {
+    const named = images.map((image) => ({ image, blob: sessionImage(image.mediaType, Buffer.from(image.data, 'base64')) }))
+    try {
+      await this.blobs.put(id, named.map((n) => n.blob))
+    } catch (err) {
+      this.deps.stderr?.(`session ${id}: could not store a turn's images: ${err instanceof Error ? err.message : String(err)}\n`)
+      return previewsOf(images)
+    }
+    return named.map(({ image: { preview }, blob }) => ({ mediaType: preview.mediaType, data: preview.data, name: blob.name }))
+  }
+
   private async startTurn(
     session: ClaimedSession,
     turnId: string,
@@ -1159,7 +1176,7 @@ export class SessionManager {
         turnId,
         text: prompt,
         author,
-        ...(options.images?.length ? { images: previewsOf(options.images) } : {}),
+        ...(options.images?.length ? { images: await this.sentImages(id, options.images) } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])

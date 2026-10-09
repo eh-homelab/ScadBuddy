@@ -1,22 +1,33 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { dataUrl, fullSizeOf } from '../../agent/chat/images'
-import type { ImagePreview } from '../../agent/chat/protocol'
+import { dataUrl } from '../../agent/chat/images'
+import { blobUrl, type SentImage } from '../../agent/chat/protocol'
 import { ModalCompanionContext } from '../../lib/modal'
 import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
 
+/** Where the opened image's full size stands: loading, shown, or failed (its preview shown instead). */
+type Load = 'loading' | 'loaded' | 'failed'
+
 /**
- * #1891 — the images a user turn carried, as previews that open large. The agent keeps
- * previews only (#1866); the tab that sent an image still has it (`fullSizeOf`) and
- * shows that, and anywhere else the preview is shown enlarged, saying so.
+ * #1891 — the images a user turn carried, as previews that open large. The agent stores
+ * each full image with the session and the turn names it (`SentImage.name`), so the
+ * lightbox loads it from the agent's blob route, showing the preview until it has. A
+ * turn logged before that, or a load that fails (a deleted session), shows the preview
+ * enlarged, saying so.
  */
-export function SentImages({ images }: { images: ImagePreview[] }) {
+export function SentImages({ images, sessionId = '' }: { images: SentImage[]; sessionId?: string }) {
   const [shown, setShown] = useState<number | null>(null)
+  const [load, setLoad] = useState<Load>('loading')
   const count = images.length
   const name = (index: number) => `Image ${index + 1} of ${count}`
   const image = shown === null ? undefined : images[shown]
-  const full = image && fullSizeOf(image)
+  const fullUrl = image?.name && sessionId ? blobUrl(sessionId, image.name) : undefined
+  const full = fullUrl !== undefined && load !== 'failed'
+  const open = (index: number) => {
+    setLoad('loading')
+    setShown(index)
+  }
   const close = () => setShown(null)
 
   return (
@@ -28,7 +39,7 @@ export function SentImages({ images }: { images: ImagePreview[] }) {
               type="button"
               aria-label={`View image ${index + 1} of ${count} larger`}
               aria-haspopup="dialog"
-              onClick={() => setShown(index)}
+              onClick={() => open(index)}
               className="block min-h-6 min-w-6 cursor-zoom-in rounded-[4px] outline-none focus-visible:ring-2 focus-visible:ring-accent"
             >
               <img
@@ -62,16 +73,33 @@ export function SentImages({ images }: { images: ImagePreview[] }) {
                 description={
                   full
                     ? undefined
-                    : 'Only a preview of this image is kept. The assistant was given the full image; this tab does not have it.'
+                    : fullUrl
+                      ? 'The full image could not be loaded, so this is its preview. The assistant was given the full image.'
+                      : 'Only a preview of this image is kept. The assistant was given the full image.'
                 }
                 onClose={close}
                 footer={<Button onClick={close}>Close</Button>}
               >
-                <img
-                  src={full ?? dataUrl(image)}
-                  alt={`${name(shown)}, ${full ? 'as sent' : 'preview'}`}
-                  className={`mx-auto max-h-[calc(100vh-12rem)] object-contain ${full ? 'max-w-full' : 'w-full max-w-3xl'}`}
-                />
+                {load !== 'loaded' && (
+                  <img
+                    src={dataUrl(image)}
+                    alt={`${name(shown)}, preview`}
+                    className="mx-auto max-h-[calc(100vh-12rem)] w-full max-w-3xl object-contain"
+                  />
+                )}
+                {full && (
+                  // A same-origin URL, so it loads inside Bambuddy's sandboxed frame too.
+                  // Hidden until it has, while the preview stands in for it.
+                  <img
+                    key={fullUrl}
+                    src={fullUrl}
+                    alt={`${name(shown)}, as sent`}
+                    hidden={load !== 'loaded'}
+                    onLoad={() => setLoad('loaded')}
+                    onError={() => setLoad('failed')}
+                    className="mx-auto max-h-[calc(100vh-12rem)] max-w-full object-contain"
+                  />
+                )}
               </Dialog>
             </div>
           </ModalCompanionContext.Provider>,
