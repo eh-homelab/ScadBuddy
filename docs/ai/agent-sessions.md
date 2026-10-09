@@ -20,7 +20,7 @@ so the dot is an underscore.
 |---|---|---|
 | `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1) |
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
-| `sessions_send` | `write` | A user turn in a session the caller owns; refused while a turn runs |
+| `sessions_send` | `write` | A user turn in a session the caller owns, with optional `images` by reference (below); refused while a turn runs |
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
 | `sessions_resources` | `read` | What the session's tool calls touched, oldest first (§4.1); `GET /api/v1/ai/sessions/:id/resources` answers the same to the UI |
 | `sessions_attach` | `read` | Waits up to `wait_seconds` (≤ 300) for events after `after_seq` and returns them once they pause; a progress notification per event |
@@ -36,6 +36,23 @@ so the dot is an underscore.
 answer once the turn has started; otherwise they wait for it, reporting progress every
 5 s, and say how it ended (`turn.finished`, `turn.result`). Either way they return
 `after_seq`, where the turn's events begin, for `sessions_get` or `sessions_attach`.
+
+`sessions_send` takes `images`, up to 4 references to images ScadBuddy already holds
+(#1894, [`agent/src/tools/imageRefs.ts`](../../agent/src/tools/imageRefs.ts)):
+`{ kind: 'output_thumbnail', output_id, plate? }`, `{ kind: 'output_view', output_id, view, size? }`,
+`{ kind: 'model_thumbnail', slug }`, `{ kind: 'model_media', slug, item_id }`,
+`{ kind: 'asset', slug, asset_id }` and `{ kind: 'print_thumbnail', archive_id, plate? }`.
+It never takes inline image data. The agent fetches each one from the backend before it
+starts the turn and checks it as it checks the panel's images (`sessions/images.ts`: PNG,
+JPEG, GIF or WebP by signature, 5 MiB of base64 each, 8 MiB together). The model gets the
+images before the text. A refusal names the reference and the reason, and no turn starts.
+Because the call's input holds only the references, the event log's `tool.call`, the
+`/mcp` audit row and an approval summary record no image bytes, and the request stays far
+under `/mcp`'s 4 MiB body cap. A URL is not a kind: fetching one the caller chose is
+outward (spec §8.2). Bring a web image in with `fetch_asset` (approved, held to the
+Settings allowlist), then send it as an `asset`. The `user.turn` preview is the backend's
+own small copy (a view drawn at 128 px, a media item's thumbnail), or the image itself
+when it is a still of at most 64 KiB, or else a one-pixel grey placeholder.
 
 Tier choices (spec §8.1): starting, sending, forking, interrupting and handing off
 (offering, accepting, withdrawing or declining) change only ScadBuddy's own session state, so they are `write`. Deciding an approval is

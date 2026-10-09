@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import {
   aiPlugins,
@@ -16,6 +16,7 @@ import {
   type PluginPackage,
 } from '../../api/aiPlugins'
 import { safeHttpUrl } from '../../lib/safeUrl'
+import { announceHeadlessBrowser, useHeadlessBrowserChanges } from '../../lib/headlessBrowserSwitch'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
@@ -448,6 +449,9 @@ function BuiltInParts({ review }: { review: PackageReview }) {
   )
 }
 
+/** The built-in whose switch is the headless-browser setting (agent plugins/packages/builtins.ts). */
+const BROWSER_PLUGIN = 'playwright'
+
 function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (pkg: ListedPackage) => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -456,7 +460,9 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
     setBusy(true)
     setError(null)
     try {
-      onChange(await aiPlugins.setPackageEnabled<BuiltInPluginPackage>(pkg.name, !pkg.enabled))
+      const saved = await aiPlugins.setPackageEnabled<BuiltInPluginPackage>(pkg.name, !pkg.enabled)
+      onChange(saved)
+      if (saved.name === BROWSER_PLUGIN) announceHeadlessBrowser(saved.enabled)
     } catch (caught) {
       setError(message(caught))
     } finally {
@@ -700,12 +706,20 @@ function PackageCard({
 export function PluginPackagesPanel() {
   const state = useAsync(() => aiPlugins.listPackages(), [])
   const [approve, setApprove] = useState<ApproveTarget | null>(null)
-  const packages = state.data ?? []
+  const packages = useMemo(() => state.data ?? [], [state.data])
 
   // A built-in and a package stored under its name (before built-ins were listed) share a name.
   const same = (a: ListedPackage, b: ListedPackage) => a.name === b.name && isBuiltIn(a) === isBuiltIn(b)
   const replace = (pkg: ListedPackage) =>
     state.setData(packages.some((p) => same(p, pkg)) ? packages.map((p) => (same(p, pkg) ? pkg : p)) : [...packages, pkg])
+  const { setData } = state
+  useHeadlessBrowserChanges(
+    useCallback(
+      (enabled: boolean) =>
+        setData(packages.map((p) => (isBuiltIn(p) && p.name === BROWSER_PLUGIN ? { ...p, enabled } : p))),
+      [setData, packages],
+    ),
+  )
 
   return (
     <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="plugin-packages-heading">

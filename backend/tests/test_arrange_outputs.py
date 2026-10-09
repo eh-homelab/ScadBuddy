@@ -8,16 +8,21 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import trimesh
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.bambuddy.library_objects import LibraryObjects, piece_key, publish_library_pieces
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
-from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
-from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, write_bambu_3mf
+from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.job_models import ManifestObject
+from scadbuddy.render.objects3mf import read_objects
+from scadbuddy.render.split import ColourPart
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import (
     Layout,
     LayoutPlate,
@@ -235,3 +240,59 @@ async def test_a_colour_planned_twice_in_two_cases_takes_one_slot(tmp_path: Path
     with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
         settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
     assert [c.upper() for c in settings["filament_colour"]] == ["#ABCDEF", own]
+
+
+async def test_a_library_files_object_is_placed_beside_a_rendered_part(tmp_path: Path) -> None:
+    """#1863: an object read from a library 3MF is a piece like a render's, which the
+    writer places and the manifest records with the file it came from."""
+    deps, paths = _deps(tmp_path)
+    part = await _render(deps, "model.scad", {"width": 12})
+    red = trimesh.creation.box(extents=(10, 10, 4))
+    blue = trimesh.creation.box(extents=(6, 6, 9))
+    out = tmp_path / "plain.3mf"
+    write_bambu_3mf(
+        [ColourPart(1, "Red", "#FF0000", red), ColourPart(2, "Blue", "#0000FF", blue)],
+        out,
+        thumbnails=None,
+    )
+    read = read_objects(out.read_bytes())
+    box = bounding_box(read[0].parts)
+    entry = ManifestObject(
+        part=piece_key("ab" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000", "#0000FF"],
+        count=1,
+        library_file_id=88,
+    )
+    await publish_library_pieces(deps.blobs, LibraryObjects(88, "plain.3mf", [entry], read))
+    library = part_of(entry)
+    layout = pack_layout(
+        PackRequest(
+            items=[PackItem(part=part), PackItem(part=library, count=2)],
+            plate=PlateSize(key="default", width=256.0, depth=256.0),
+            allow_own=False,
+        )
+    )
+    req = OutputRequest(
+        job_id="j6",
+        index=0,
+        slug="demo",
+        layout=layout,
+        parts=[part, library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([part.piece_key, library.piece_key]),
+        provenance={entry.part: entry},
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert {"#FF0000", "#0000FF"} <= set(written.result.colors)
+    [_, obj] = written.manifest
+    assert obj.part == entry.part and obj.count == 2 and obj.library_file_id == 88
+    with zipfile.ZipFile(paths.root / written.result.model_3mf) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    assert {"#FF0000", "#0000FF"} <= {c.upper() for c in settings["filament_colour"]}

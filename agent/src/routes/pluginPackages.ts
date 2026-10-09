@@ -267,7 +267,8 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const body = await parseBody(c, PatchBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     // Always the built-in: a package stored under its name never loads, so it has no switch.
-    if (builtInNamed(c.req.param('name')) && deps.builtIns) {
+    if (builtInNamed(c.req.param('name'))) {
+      if (!deps.builtIns) return c.json({ detail: NO_DATABASE }, 503)
       const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
       return c.json(await deps.builtIns.setEnabled(c.req.param('name'), body.enabled, context))
     }

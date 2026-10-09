@@ -299,6 +299,9 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         expect(res.status, `${method} ${url}`).toBe(409)
         expect(await res.json()).toMatchObject({ built_in: true })
       }
+      // Without the settings store a built-in cannot be switched: 503, never a stored row.
+      const noSettings = await app().request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
+      expect(noSettings.status).toBe(503)
     })
 
     it('never loads a package stored under a built-in\'s name, and lets DELETE remove it', async () => {

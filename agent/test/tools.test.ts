@@ -893,14 +893,20 @@ describe('arrange (#1864)', () => {
     server.use(
       http.post(`${BACKEND}/api/v1/outputs/arrange`, () =>
         HttpResponse.json(
-          { title: 'Unprocessable', status: 422, detail: 'x', code: 'library_file_not_arrangeable', library_file_ids: [88] },
+          {
+            title: 'Unprocessable',
+            status: 422,
+            detail: '1 library file(s) cannot be arranged: clip.gcode.3mf: it is sliced already',
+            code: 'library_file_not_arrangeable',
+            library_file_ids: [88],
+          },
           { status: 422 },
         ),
       ),
     )
     const plain = await runTool(tool('arrange'), { objects: [{ library_file_id: 88 }] }, ctx())
     expect(plain.isError).toBe(true)
-    expect(JSON.stringify(plain.content)).toMatch(/88.*not made by ScadBuddy/)
+    expect(JSON.stringify(plain.content)).toMatch(/88 cannot be arranged.*sliced already.*Leave them out/)
   })
 
   it('refuses an object naming no source, or both, before any request', async () => {
