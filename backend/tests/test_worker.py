@@ -912,6 +912,8 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
         local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
     )
     (local.dir_for("k") / "m").write_bytes(b"12345")
+    (tmp_path / "scratch").mkdir()
+    (tmp_path / "scratch" / "left-over").write_bytes(b"x" * 100_000)
     store = StoreBundle(
         "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
     )
@@ -935,6 +937,10 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
     }
     assert samples["scadbuddy_worker_cache_bytes"] == 5
     assert samples["scadbuddy_store_render_key_fallback"] == 1
+    # The whole data directory, as allocated on disk: the piece cache and the scratch
+    # file beside it, which the cache gauge alone would miss (#1785).
+    allocated = sum(p.lstat().st_blocks * 512 for p in tmp_path.rglob("*") if p.is_file())
+    assert samples["scadbuddy_render_data_bytes"] == allocated >= 100_000
 
 
 def test_a_refused_store_closes_the_projection_the_worker_opened(

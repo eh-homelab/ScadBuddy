@@ -7,11 +7,13 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import uvicorn
@@ -447,13 +449,26 @@ class _HealthServer(uvicorn.Server):
         yield
 
 
-async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle) -> None:
-    """The store gauges this process owns: its piece cache and the key it holds. The
+def _allocated_bytes(root: Path) -> int:
+    """Bytes allocated to everything under ``root``, as ``du`` (and so kubelet, measuring
+    an emptyDir) counts them. A file removed while it is walked is skipped."""
+    total = 0
+    for directory, _, files in os.walk(root):
+        for name in files:
+            with contextlib.suppress(FileNotFoundError):
+                total += os.lstat(os.path.join(directory, name)).st_blocks * 512
+    return total
+
+
+async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data_dir: Path) -> None:
+    """The store gauges this process owns: its piece cache, the key it holds, and its
+    whole data directory, which is an emptyDir evicted past its sizeLimit (#1785). The
     store's usage is the API's to export (one database, one set of numbers)."""
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
         metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
+    metrics.render_data_bytes.set(await asyncio.to_thread(_allocated_bytes, data_dir))
 
 
 def _health_app(
@@ -470,7 +485,7 @@ def _health_app(
     async def exposition(_: Request) -> Response:
         if store is not None:
             try:
-                await _refresh_store_metrics(metrics, store)
+                await _refresh_store_metrics(metrics, store, settings.data_dir)
             except Exception:
                 # Like the API's: keep the last values, never fail the scrape.
                 logger.exception("could not read the store's gauges")

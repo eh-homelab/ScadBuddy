@@ -600,7 +600,9 @@ workers restart.
     `du -sh /data/cache /data/fonts /data/libraries` on a running worker. A trim may
     not bring the cache down to its cap while crash-left staging directories are
     counted (follow-up #8), so watch `scadbuddy_worker_cache_bytes` against
-    `SCADBUDDY_WORKER_CACHE_MAX_BYTES`.
+    `SCADBUDDY_WORKER_CACHE_MAX_BYTES`. `scadbuddy_render_data_bytes` is the whole
+    data directory as allocated on disk, which is what kubelet holds an emptyDir's
+    `sizeLimit` against: alert on that one before eviction (#1785).
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
