@@ -359,6 +359,7 @@ export const printTools: Tool[] = [
     risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/outputs/{output_id}/send'],
+    title: ({ output_id }) => `Send output ${output_id} to Bambuddy`,
     summarize: ({ output_id }) => `Send output ${output_id} to Bambuddy's library`,
     handler: async ({ output_id }, ctx) =>
       json(
@@ -414,6 +415,7 @@ export const printTools: Tool[] = [
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
     routes: ['POST /api/v1/print/outputs/{output_id}/run', 'GET /api/v1/print/runs/{run_id}'],
+    title: ({ output_id, copies }) => `Print output ${output_id}${copies && copies > 1 ? ` × ${copies}` : ''}`,
     summarize: (args) => {
       const { output_id, printer_id, copies, plate_id, all_plates, nozzles, tier, process_name } = args
       const defaulted =

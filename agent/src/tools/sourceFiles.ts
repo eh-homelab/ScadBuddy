@@ -81,6 +81,7 @@ export const sourceFileTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/files/{name}'],
+    title: ({ slug, name }) => `Write ${name} → ${slug}`,
     handler: async ({ slug, name, content, message }, ctx) =>
       json(
         await command(ctx, `write ${slug}/${name}`, (headers) =>
