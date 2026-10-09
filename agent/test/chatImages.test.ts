@@ -34,7 +34,9 @@ function pngOfLength(count: number): string {
   return head + 'A'.repeat(count - head.length)
 }
 
-describe('user.message images (#1866)', () => {
+const ID = '0b6f7a1e-3c2d-4e5f-8a9b-0c1d2e3f4a5b'
+
+describe('user.message images (#1866; inline ones from a tab loaded before #1941)', () => {
   it('takes PNG, JPEG, GIF and WebP images, each with a preview', () => {
     const images = [image('image/png', PNG), image('image/jpeg', JPEG), image('image/gif', GIF), image('image/webp', WEBP)]
     const parsed = parseClientFrame(frame(images))
@@ -45,10 +47,23 @@ describe('user.message images (#1866)', () => {
     expect(parseClientFrame(frame(undefined)).ok).toBe(true)
   })
 
-  it('takes what the panel builds', async () => {
-    const { clientMessage } = await frontendClientMessages()
-    const built = clientMessage({ type: 'user.message', text: 'look', context: { route: '/' }, images: [image('image/png', PNG)] })
-    expect(parseClientFrame(JSON.stringify(built)).ok).toBe(true)
+  it('takes what the panel builds: uploads by id (#1941)', async () => {
+    const { clientMessage, parseClientMessage } = await frontendClientMessages()
+    const images = [{ kind: 'attachment', id: ID }]
+    const built = clientMessage({ type: 'user.message', text: 'look', context: { route: '/' }, images })
+    expect(parseClientFrame(JSON.stringify(built))).toMatchObject({ ok: true, value: { images } })
+    // The panel no longer builds inline images.
+    expect(parseClientMessage(frame([image('image/png', PNG)])).ok).toBe(false)
+  })
+
+  it('takes up to IMAGES_MAX attachment ids, and nothing else beside them (#1941)', () => {
+    const ref = (id = ID) => ({ kind: 'attachment', id })
+    expect(parseClientFrame(frame(Array.from({ length: IMAGES_MAX }, () => ref()))).ok).toBe(true)
+    expect(parseClientFrame(frame(Array.from({ length: IMAGES_MAX + 1 }, () => ref()))).ok).toBe(false)
+    expect(parseClientFrame(frame([ref('not-a-uuid')])).ok).toBe(false)
+    expect(parseClientFrame(frame([{ ...ref(), extra: 1 }])).ok).toBe(false)
+    expect(parseClientFrame(frame([ref(), image('image/png', PNG)])).ok).toBe(false)
+    expect(parseClientFrame(frame([{ kind: 'asset', slug: 'keychain', asset_id: 'a'.repeat(64) }])).ok).toBe(false)
   })
 
   it('refuses another type, bytes that are not the type they claim, and data that is not base64', () => {

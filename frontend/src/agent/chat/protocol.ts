@@ -221,6 +221,13 @@ export const UserImageSchema = z.object({
 export type UserImage = z.infer<typeof UserImageSchema>
 
 /**
+ * #1941 — an image the composer uploaded when it was attached (agent `POST
+ * /api/v1/ai/attachments`), sent by its id: no image travels in the socket's frames.
+ */
+export const AttachmentRefSchema = z.object({ kind: z.literal('attachment'), id: z.uuid() })
+export type AttachmentRef = z.infer<typeof AttachmentRefSchema>
+
+/**
  * #782 — an image a tool result carried, by name: the agent keeps the bytes (agent
  * `src/sessions/blobs.ts`) and serves them on the panel's own origin (`blobUrl`).
  */
@@ -434,8 +441,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1),
     context: PageContextSchema,
-    /** #1866 — images for the model; an agent that predates them drops them. */
-    images: z.array(UserImageSchema).min(1).optional(),
+    /** #1941 — uploaded images for the model, by id (#1866 sent them inline). */
+    images: z.array(AttachmentRefSchema).min(1).optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent

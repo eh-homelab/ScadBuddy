@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
 import type { AuditRepo } from './audit/log.js'
+import type { AttachmentStore } from './attachments/store.js'
 import type { UiReachSummary } from './harness/browserReach.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import type { CredentialRepo } from './credentials.js'
@@ -87,6 +88,13 @@ export interface AppDeps {
    * their answers go to the log.
    */
   browserReach?: (() => UiReachSummary) | undefined
+  /**
+   * The panel's image uploads (#1941, attachments/store.ts): POST
+   * /api/v1/ai/attachments stores them (routes/attachments.ts) and the chat
+   * socket resolves the ids a message names (routes/chat.ts). Undefined
+   * exactly when `sessions` is.
+   */
+  attachments?: AttachmentStore | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */

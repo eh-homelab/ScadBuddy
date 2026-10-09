@@ -1,3 +1,4 @@
+import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
 import { getConnInfo } from '@hono/node-server/conninfo'
@@ -318,6 +319,13 @@ if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
 if (sessions) resolveTabWaits(tabs, sessions)
 // The `sessions_*` tools (#300) act on the same manager, over /mcp and in-process.
 if (sessions) toolServices.sessions = sessions
+// The panel's image uploads (#1941, attachments/store.ts): the upload route, the
+// chat socket and sessions_send read them; unsent ones expire and are swept.
+const attachments = sessions && database ? new AttachmentStore(database.sql) : undefined
+if (attachments) toolServices.attachments = attachments
+const stopAttachmentSweep = attachments?.startSweeper(ATTACHMENT_SWEEP_MS, {
+  log: (message) => console.error(message),
+})
 // The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
 const stopSessionWake =
   sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
@@ -441,6 +449,7 @@ const app = createApp({
   },
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
+  ...(attachments ? { attachments } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,
@@ -471,7 +480,8 @@ const app = createApp({
 })
 
 // The chat socket (routes/chat.ts). A frame is one panel message; CHAT_FRAME_MAX
-// covers the largest (images, #1866, and a 32k-character message with its page context).
+// covers the largest (a 32k-character message with its page context). Images are
+// uploaded, not framed (#1941, routes/attachments.ts).
 const wss = new WebSocketServer({ noServer: true, maxPayload: CHAT_FRAME_MAX })
 const stopHeartbeat = startHeartbeat(wss)
 
@@ -496,6 +506,7 @@ async function stop(): Promise<void> {
   stopOrphanSweep?.()
   stopReaper?.()
   stopRetention?.()
+  stopAttachmentSweep?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted

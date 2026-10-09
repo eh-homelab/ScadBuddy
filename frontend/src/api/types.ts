@@ -291,6 +291,16 @@ export interface ImageSettings {
   max: number
 }
 
+/**
+ * #1941 — an image the composer uploaded when it was attached (agent `POST
+ * /api/v1/ai/attachments`, `src/routes/attachments.ts`): the id a message sends, and the
+ * preview the transcript will show. Unsent, it expires after an hour.
+ */
+export interface AttachmentView {
+  id: string
+  preview: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }
+}
+
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
 export interface AiSessionView {
   id: string
