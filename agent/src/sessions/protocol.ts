@@ -114,7 +114,8 @@ export type ServerEvent = V &
     /**
      * `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it.
      * `mode` (plan 5d): how it runs, absent before 5d (classic); `modeFallback`: why a session
-     * whose mode came from the default runs classic instead of durable.
+     * whose mode came from the default runs classic instead of durable,
+     * as the bare reason (each surface words it).
      */
     | {
         type: 'session.started'

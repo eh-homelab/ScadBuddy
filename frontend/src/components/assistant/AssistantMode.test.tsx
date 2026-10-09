@@ -4,6 +4,7 @@ import type { ClientMessage } from '../../agent/chat/protocol'
 import { createMockAgentTransport, type MockAgentOptions, type MockAgentTransport } from '../../mocks/agent'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
+import { setDurableAvailable } from '../../mocks/features/sessionMode'
 import { SESSION_MODE_KEY } from './AssistantChat'
 
 // Plan 5d — the composer's session-mode picker, the header's Durable badge, and the
@@ -64,9 +65,10 @@ describe('session mode', () => {
 
   it('sends the picked mode, remembers it, and shows no badge on a classic session', async () => {
     const { user, box } = await openComposer()
-    await user.click(screen.getByText('Session mode', { selector: 'summary' }))
+    await user.click(await screen.findByText('Session mode: Default (Durable)', { selector: 'summary' }))
     await user.selectOptions(screen.getByRole('combobox', { name: 'Session mode' }), 'classic')
     expect(window.localStorage.getItem(SESSION_MODE_KEY)).toBe('classic')
+    expect(screen.getByText('Session mode: Classic', { selector: 'summary' })).toBeInTheDocument()
     await user.type(box, 'hello{Enter}')
     await waitFor(() => expect(sentMessages()[0]).toMatchObject({ mode: 'classic' }))
     const header = await screen.findByTestId('active-session-header')
@@ -87,15 +89,19 @@ describe('session mode', () => {
     const { user, box } = await openComposer()
     await user.type(box, 'hello{Enter}')
     const note = await screen.findByTestId('session-mode-fallback')
-    expect(note).toHaveTextContent(/Running as Classic/)
+    expect(note).toHaveTextContent(/Running as Classic, since durable sessions cannot start now: no durable/)
     expect(note).toHaveTextContent(/no durable session worker/)
     expect(within(screen.getByTestId('active-session-header')).queryByText('Durable')).not.toBeInTheDocument()
   })
 
-  it('shows the refusal when durable was asked for and cannot run', async () => {
+  it('warns of, and then shows, the refusal when durable was asked for and cannot run', async () => {
     options = { defaultMode: 'durable', durableAvailable: false }
+    setDurableAvailable(false)
     window.localStorage.setItem(SESSION_MODE_KEY, 'durable')
     const { user, box } = await openComposer()
+    expect(screen.getByText('Session mode: Durable', { selector: 'summary' })).toBeInTheDocument()
+    expect(await screen.findByTestId('session-mode-picker-unavailable')).toHaveTextContent(/no durable session worker/)
+    expect(screen.getByRole('option', { name: 'Default (Durable, Classic for now)' })).toBeInTheDocument()
     await user.type(box, 'hello{Enter}')
     expect(await screen.findByRole('alert')).toHaveTextContent(/durable/i)
   })

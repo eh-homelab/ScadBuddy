@@ -1065,7 +1065,7 @@ export class SessionManager {
     const why = await this.durableUnready()
     if (why === undefined) return { mode }
     if (asked) throw new SessionError('unavailable', why)
-    return { mode: 'classic', fallback: `ran as classic: ${why}` }
+    return { mode: 'classic', fallback: why }
   }
 
   /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window. */

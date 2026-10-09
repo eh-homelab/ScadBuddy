@@ -71,7 +71,7 @@ export interface MockAgentOptions {
 }
 
 /** Plan 5d — why the mock's default durable chat ran classic (agent manager.ts `startMode`). */
-export const MOCK_MODE_FALLBACK = 'ran as classic: no durable session worker (agent-durable) polls Temporal\'s "agent" queue'
+export const MOCK_MODE_FALLBACK = 'no durable session worker (agent-durable) polls Temporal\'s "agent" queue'
 
 /** What one scripted turn costs. */
 export const COST_PER_TURN = 0.0184
@@ -490,7 +490,7 @@ export function createMockAgentTransport({
           return
         }
         if (!s && msg.mode === 'durable' && !durableAvailable) {
-          emit({ type: 'error', code: 'unavailable', message: MOCK_MODE_FALLBACK.replace('ran as classic: ', 'durable sessions cannot run now: ') })
+          emit({ type: 'error', code: 'unavailable', message: `durable sessions cannot run now: ${MOCK_MODE_FALLBACK}` })
           return
         }
         if (!s) {

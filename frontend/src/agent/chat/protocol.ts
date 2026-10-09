@@ -280,7 +280,7 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     budgetUsd: z.number().positive().optional(),
     /** Plan 5d — how it runs; absent on sessions started before it (classic). */
     mode: SessionModeSchema.optional(),
-    /** Plan 5d — why a session whose mode came from the default runs classic, not durable. */
+    /** Plan 5d — why a session whose mode came from the default runs classic, not durable (the bare reason). */
     modeFallback: z.string().optional(),
   }),
   z.object({ v, type: z.literal('session.owner'), sessionId, owner: OwnerSchema }),

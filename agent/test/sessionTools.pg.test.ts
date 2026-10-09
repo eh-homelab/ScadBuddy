@@ -262,7 +262,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const a = await agent('write')
       const fell = ok<{ session: { mode: string }; mode_fallback?: string }>(await a.call('sessions_start', { title: 'a' }))
       expect(fell.session.mode).toBe('classic')
-      expect(fell.mode_fallback).toMatch(/^ran as classic: /)
+      expect(fell.mode_fallback).toMatch(/durable sessions need Temporal/)
       const classic = ok<Record<string, unknown>>(await a.call('sessions_start', { title: 'b', mode: 'classic' }))
       expect(classic).toMatchObject({ session: { mode: 'classic' } })
       expect(classic).not.toHaveProperty('mode_fallback')

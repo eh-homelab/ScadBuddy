@@ -127,12 +127,16 @@ export class DurableTurns {
    * Why a new durable session could not run now, or undefined when it could (plan 5d
    * Ruling 2): some agent-durable worker polls the `agent` queue. Until one does, a
    * turn would wait on a queue no one reads, so the manager falls back or refuses at
-   * start instead. Read from Temporal at most once per READY_TTL_MS.
+   * start instead. An answer from Temporal is reused for READY_TTL_MS; no answer is
+   * not kept, so one blip does not refuse every explicit durable start for the window.
+   * Temporal keeps listing a poller for some minutes after its worker has gone, so a
+   * worker that died just now still counts as ready until then.
    */
   async unready(): Promise<string | undefined> {
     const cached = this.#ready
     if (cached && Date.now() - cached.at < READY_TTL_MS) return cached.why
     let why: string | undefined
+    let answered = true
     try {
       const { pollers } = await this.#client.withDeadline(Date.now() + READY_DEADLINE_MS, () =>
         this.#client.workflowService.describeTaskQueue({
@@ -144,8 +148,9 @@ export class DurableTurns {
       if (!pollers?.length) why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
     } catch {
       why = 'Temporal did not answer'
+      answered = false
     }
-    this.#ready = { at: Date.now(), why }
+    this.#ready = answered ? { at: Date.now(), why } : undefined
     return why
   }
 

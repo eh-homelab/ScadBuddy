@@ -629,7 +629,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           {active.modeFallback && (
             // Plan 5d — the default asked for durable, and it could not run.
             <p className="w-full text-[11.5px] text-muted" data-testid="session-mode-fallback">
-              Running as Classic: {active.modeFallback.replace(/^ran as classic: /, '')}
+              Running as Classic, since durable sessions cannot start now: {active.modeFallback}
             </p>
           )}
           {!owned && (

@@ -100,7 +100,7 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     // No Temporal here: the default (durable) runs classic and says so.
     const fell = await start({ title: 'a' })
     expect(fell.status).toBe(201)
-    expect(await fell.json()).toMatchObject({ session: { mode: 'classic' }, mode_fallback: expect.stringMatching(/^ran as classic: /) })
+    expect(await fell.json()).toMatchObject({ session: { mode: 'classic' }, mode_fallback: expect.stringMatching(/durable sessions need Temporal/) })
     const classic = await start({ title: 'b', mode: 'classic' })
     expect(classic.status).toBe(201)
     const body = (await classic.json()) as Record<string, unknown>
