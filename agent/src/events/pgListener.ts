@@ -73,6 +73,8 @@ export class PgEventListener implements EventSource {
   readonly #sql: Sql
   readonly #followers = new Followers()
   readonly #seen = new Set<string>()
+  /** Other channels LISTENed on this connection, and who hears them (`listenAlso`). */
+  readonly #channels = new Map<string, (payload: string) => void>()
   readonly #retryMin: number
   readonly #retryMax: number
   readonly #checkMs: number
@@ -113,6 +115,7 @@ export class PgEventListener implements EventSource {
       onnotice: () => {},
       onnotify: (channel: string, payload: string) => {
         if (channel === PG_CHANNEL) this.#heard(payload)
+        else this.#channels.get(channel)?.(payload)
       },
       onclose: () => this.#dropped(),
       ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
@@ -136,6 +139,20 @@ export class PgEventListener implements EventSource {
 
   follow(listener: EventListener): () => void {
     return this.#followers.follow(listener)
+  }
+
+  /**
+   * Also LISTEN on `channel`, on this connection and with its reconnects
+   * (bridge/relay.ts). Nothing on it is replayed: a NOTIFY sent while the
+   * connection is down is lost, so its user must not depend on every one.
+   */
+  listenAlso(channel: string, onNotify: (payload: string) => void): void {
+    this.#channels.set(channel, onNotify)
+    if (this.#listening) {
+      void this.#sql.unsafe(`LISTEN "${channel}"`).catch((err: unknown) => {
+        this.#log(`event bus: LISTEN ${channel} failed (${(err as Error).message}); it is retried on the next reconnect`)
+      })
+    }
   }
 
   async close(): Promise<void> {
@@ -170,6 +187,7 @@ export class PgEventListener implements EventSource {
     while (!this.#closed) {
       try {
         await this.#sql.unsafe(`LISTEN "${PG_CHANNEL}"`)
+        for (const channel of this.#channels.keys()) await this.#sql.unsafe(`LISTEN "${channel}"`)
         this.#listening = true
         const reconnected = this.#everListened
         if (reconnected) await this.#replayGap()

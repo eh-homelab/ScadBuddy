@@ -1743,7 +1743,7 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })).toEqual({ back: true, why: 'reconnected' })
     expect(await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })).toEqual({
       back: false,
-      message: 'The tab reconnected, but not to this agent replica, so it cannot be reached from here. Carry on without the tab for the rest of this turn.',
+      message: 'The tab reconnected, but it cannot be reached from this agent replica now. Carry on without the tab for the rest of this turn.',
     })
     expect(asked).toHaveLength(1)
     // A tab back here (or a check that failed) leaves later calls free to wait.

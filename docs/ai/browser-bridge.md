@@ -215,8 +215,8 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   not run. After 5 minutes with no reply the call fails with `timed_out`, and the agent
   carries on with what needs no tab; a timeout never approves anything. A call already
   aborted opens no wait. Only once per call: a read retry that still finds no tab fails
-  with the hub's usual `no browser attached: …` error followed by why — "The tab
-  reconnected, but not to this agent replica, so it cannot be reached from here." or
+  with the hub's usual `no browser attached: …` error followed by why — "The session's tab
+  reconnected, but it cannot be reached now: it may have dropped again." or
   "The user said they were back, but no tab is attached here yet." A turn waits for its
   tab at most 3 times (`TAB_WAITS_PER_TURN`), and after "Carry on without the tab", a
   typed reply, a timeout, or a reconnect to another replica it does not ask again that
@@ -318,13 +318,46 @@ agent needs a pairing token that the user accepts **in the tab**, in every auth 
 ## Replicas
 
 The tabs are held by the process their socket reached. A turn runs where its chat socket
-started it, and `/mcp` sessions are already per replica (`mcp/http.ts`), so a call
-reaches the tab only when the tab's bridge socket is on the same replica. Otherwise it
-answers "the paired ScadBuddy tab is not connected (… or is connected to another agent
-replica)". Pairing requests reach every tab whatever the replica: each replica re-reads
-them from Postgres every 3 s (`PAIRINGS_POLL_MS`). Routing a call to another replica's
-tab is follow-up work; one replica, or an ingress that keeps a browser on one replica,
-has no gap.
+started it, and `/mcp` sessions are already per replica (`mcp/http.ts`), so the tab a
+call is for may be connected to another replica. Then the call goes there through
+Postgres (#1916, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts)):
+
+```mermaid
+sequenceDiagram
+  participant A as caller replica
+  participant PG as Postgres
+  participant B as replica holding the tab
+  A->>PG: INSERT request row, NOTIFY scadbuddy_bridge {call, tab, row}
+  PG-->>B: NOTIFY (every replica hears it)
+  B->>PG: DELETE … RETURNING the row (only a replica holding the tab)
+  B->>PG: NOTIFY {ack}
+  PG-->>A: ack
+  B->>B: run the call on the tab, as a local call
+  B->>PG: INSERT answer row, NOTIFY {result, row}
+  PG-->>A: result
+  A->>PG: DELETE … RETURNING the answer row
+```
+
+- **Bodies are rows** in `ai_bridge_messages`, inserted in the transaction that sends
+  the NOTIFY, because a NOTIFY payload is capped at 8000 bytes and a tab's result can be
+  200 000. Taking a row with `DELETE … RETURNING` runs a call once even when a reconnect
+  leaves the tab id briefly on two replicas. Rows nobody took are swept after 10 minutes.
+- **The channel is `scadbuddy_bridge`**, LISTENed on the event bus's connection
+  (`events/pgListener.ts` `listenAlso`), not `scadbuddy_events`: the backend logs every
+  payload on that one it cannot decode.
+- **No replica holds the tab:** nobody acks within 3 s (`ACK_TIMEOUT_MS`), and the call
+  answers the usual "the paired ScadBuddy tab is not connected". The ack is what tells
+  that apart from a slow tab.
+- **Timeouts:** the replica holding the tab applies the call's own timeout and answers
+  `no_answer`, as for a local call; the caller gives up on that replica after the timeout
+  plus 3 s. `browser_status` asks the same way for the tab's route and live tools.
+- **Not covered:** a NOTIFY sent while a replica's listening connection is down is lost,
+  so the call times out. A cancelled call stops waiting but is not withdrawn from the
+  tab, as with a local call. Without a database there is no relay, and only tabs on the
+  same process can be reached.
+
+Pairing requests reach every tab whatever the replica: each replica re-reads them from
+Postgres every 3 s (`PAIRINGS_POLL_MS`).
 
 ## Inside Bambuddy's iframe
 
@@ -354,6 +387,8 @@ reaches an agent.
   with `catalog.ts`, tiers, forwarding, "no browser attached", the timeout, a dropped
   or replaced tab, the harness and `/mcp` projections, `tab.bind`, and pairing by code).
   The Postgres store: [`bridgePairings.pg.test.ts`](../../agent/test/bridgePairings.pg.test.ts).
+  Two replicas on one database:
+  [`bridgeRelay.pg.test.ts`](../../agent/test/bridgeRelay.pg.test.ts).
 - The round trip in Node:
   [`agent/test/bridge.e2e.test.ts`](../../agent/test/bridge.e2e.test.ts) runs the tab's
   own `bridge.ts` and `link.ts` over a real socket against the agent's real server: an

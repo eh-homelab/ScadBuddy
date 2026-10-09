@@ -517,7 +517,7 @@ describe('waiting for the tab (#815)', () => {
     })
     expect(result.isError).toBe(true)
     expect(text(result)).toMatch(
-      /^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but none is attached here now: it may have come back on another agent replica, or dropped again\.$/s,
+      /^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but it cannot be reached now: it may have dropped again\.$/s,
     )
     expect(text(result)).not.toContain(`call ${name} again`)
   })
@@ -532,7 +532,7 @@ describe('waiting for the tab (#815)', () => {
       gate: 'harness',
       waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
     })
-    expect(text(result)).toMatch(/^no browser attached: the paired ScadBuddy tab is not connected .*none is attached here now/s)
+    expect(text(result)).toMatch(/^no browser attached: the paired ScadBuddy tab is not connected .*it cannot be reached now/s)
   })
 
   // #1410: a re-check that fails keeps the not-run guidance instead of an unexpected error.
@@ -639,7 +639,7 @@ describe('waiting for the tab (#815)', () => {
         return Promise.resolve({ back: true, why: 'reconnected' as const })
       },
     })
-    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but none is attached here now/s)
+    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but it cannot be reached now/s)
     expect(waited).toBe(2)
   })
 

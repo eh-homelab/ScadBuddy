@@ -116,7 +116,7 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       let outcome = await call()
       // #815 §2: in a session the user owns, a call that finds no tab waits for
       // it as an attention request. When the tab is back, a read runs once more
-      // (once only: a tab that came back on another replica is still not here).
+      // (once only: a tab that came back and dropped again is not waited for twice).
       // A write or outward call is never re-run: the page may have reloaded or
       // changed while the tab was away, and an outward call's approval was given
       // for the page as it was. The model re-checks the page and calls again.
@@ -181,10 +181,9 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
-  // Neutral (#1410): the tab may have come back on another replica, or dropped again at once.
-  reconnected:
-    'The session\'s tab reconnected, but none is attached here now: it may have come back on another agent ' +
-    'replica, or dropped again.',
+  // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #1916), so it dropped again,
+  // or the replica holding it did not answer.
+  reconnected: 'The session\'s tab reconnected, but it cannot be reached now: it may have dropped again.',
   user_back: 'The user said they were back, but no tab is attached here yet.',
 }
 
