@@ -242,6 +242,31 @@ def test_a_core_3mf_is_coloured_by_its_materials() -> None:
     assert tuple(np.round(joined.extents, 3)) == (100, 100, 100)
 
 
+def test_triangles_are_grouped_by_colour_in_the_order_their_colours_first_come() -> None:
+    """Many materials, interleaved: the grouping is one sort, not a pass per colour."""
+    colours = [f"#{i:06X}" for i in range(0, 3000 * 0x10, 0x10)]
+    bases = "".join(f'<base name="m{i}" displaycolor="{c}"/>' for i, c in enumerate(colours))
+    order = [i // 2 if i % 2 == 0 else len(colours) - 1 - i // 2 for i in range(len(colours))]
+    triangles = "".join(
+        f'<triangle v1="{3 * n}" v2="{3 * n + 1}" v3="{3 * n + 2}" pid="1" p1="{m}"/>'
+        for n, m in enumerate(order)
+    )
+    vertices = "".join(
+        f'<vertex x="{n}" y="{k}" z="{k * n % 7}"/>' for n in range(len(order)) for k in range(3)
+    )
+    root = (
+        f'<model xmlns="{CORE}"><resources><basematerials id="1">{bases}</basematerials>'
+        f'<object id="2" type="model"><mesh><vertices>{vertices}</vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object></resources>"
+        '<build><item objectid="2"/></build></model>'
+    )
+
+    [obj] = read_objects(_zip({"3D/3dmodel.model": root}))
+
+    assert [p.colour for p in obj.parts] == [colours[m] for m in order]
+    assert all(len(p.mesh.faces) == 1 for p in obj.parts)
+
+
 def test_scadbuddys_own_3mf_reads_back_as_one_object_per_plate(tmp_path: Path) -> None:
     red = ColourPart(1, "Color 1", "#FF0000", _box(10, 10, 4))
     blue = ColourPart(2, "Color 2", "#0000FF", _box(6, 6, 9))

@@ -47,8 +47,10 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
     STL_COLOUR,
+    MeshArrays,
     PlateParts,
     _read_capped,
+    parse_model,
 )
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import BoundingBox, bounding_box
@@ -74,8 +76,6 @@ _UNITS = {
 }
 #: Parts that print nothing: settings regions and support hints (Bambu Studio's subtypes).
 _DROPPED = {"modifier_part", "support_blocker", "support_enforcer"}
-#: PrusaSlicer's multi-material painting, as Bambu Studio's is `paint_color`.
-_MMU_SEGMENTATION = "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation"
 #: A component chain deeper than this is not a file any slicer writes.
 _MAX_DEPTH = 8
 #: The most objects one read visits, components included: a few KB of components that
@@ -121,12 +121,19 @@ class _Archive:
         self.archive = archive
         self.names = set(archive.namelist())
         self.models: dict[str, tuple[ET.Element, dict[str, ET.Element], float]] = {}
+        #: Every parsed model's meshes, by ``<mesh>`` element.
+        self.meshes: dict[ET.Element, MeshArrays] = {}
 
     def model(self, name: str) -> tuple[ET.Element, dict[str, ET.Element], float]:
         if name not in self.models:
             if name not in self.names:
                 raise UnreadableObjectsError(f"the 3MF names a model file it lacks ({name})")
-            root = _parse(_read_capped(self.archive, name, MAX_UNCOMPRESSED_BYTES), name)
+            try:
+                parsed = parse_model(self.archive, name)
+            except ET.ParseError:
+                raise UnreadableObjectsError(f"{name} is not readable XML") from None
+            root = parsed.root
+            self.meshes.update(parsed.meshes)
             resources = root.find(f"{_CORE}resources")
             objects = {
                 obj.get("id", ""): obj
@@ -298,41 +305,56 @@ class _Reader:
         matrix: np.ndarray,
         extruder: int | None,
     ) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
-        node = mesh.find(f"{_CORE}vertices")
-        triangles = mesh.find(f"{_CORE}triangles")
-        if node is None or triangles is None or not len(triangles):
+        arrays = self.archive.meshes[mesh]
+        if (
+            mesh.find(f"{_CORE}vertices") is None
+            or mesh.find(f"{_CORE}triangles") is None
+            or not len(arrays.faces)
+        ):
             return
-        self._spend(triangles=len(triangles))
-        points = np.array(
-            [[float(v.get("x", 0)), float(v.get("y", 0)), float(v.get("z", 0))] for v in node],
-            dtype=np.float64,
-        )
+        self._spend(triangles=len(arrays.faces))
+        points = arrays.vertices
         if not np.isfinite(points).all():
             raise UnreadableObjectsError("a vertex of the 3MF is not a finite number")
         points = (np.c_[points, np.ones(len(points))] @ matrix.T)[:, :3]
-        materials = _materials(root) if extruder is None else {}
-        default_pid, default_index = obj.get("pid", ""), int(obj.get("pindex", 0) or 0)
-        buckets: dict[str, list[tuple[int, int, int]]] = {}
-        for triangle in triangles:
-            if triangle.get("paint_color") or triangle.get(_MMU_SEGMENTATION):
-                raise UnreadableObjectsError(
-                    f"object {obj.get('name') or obj.get('id')} is painted in several colours,"
-                    " which Arrange cannot read"
-                )
-            if extruder is not None:
-                colour = self.colour_of(extruder)
-            else:
-                key = (
-                    triangle.get("pid", default_pid),
-                    int(triangle.get("p1", default_index) or 0),
-                )
-                colour = materials.get(key, STL_COLOUR)
-            buckets.setdefault(colour, []).append(
-                (int(triangle.get("v1", 0)), int(triangle.get("v2", 0)), int(triangle.get("v3", 0)))
+        if arrays.painted:
+            raise UnreadableObjectsError(
+                f"object {obj.get('name') or obj.get('id')} is painted in several colours,"
+                " which Arrange cannot read"
             )
+        buckets: dict[str, np.ndarray] = {}
+        if extruder is not None:
+            buckets[self.colour_of(extruder)] = arrays.faces
+        else:
+            materials = _materials(root)
+            default_pid, default_index = obj.get("pid", ""), int(obj.get("pindex", 0) or 0)
+            pids = (*arrays.pids, default_pid)
+            # Each triangle's (pid, p1), a missing one the object's; colours in the order
+            # their first triangle comes.
+            keys = np.stack(
+                [
+                    np.where(arrays.pid < 0, len(arrays.pids), arrays.pid),
+                    np.where(arrays.p1 < 0, default_index, arrays.p1),
+                ],
+                axis=1,
+            )
+            unique, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+            by_key = [materials.get((pids[pid], int(p1)), STL_COLOUR) for pid, p1 in unique]
+            # A dict, not list.index: a hostile file controls both counts.
+            colours = {
+                colour: index
+                for index, colour in enumerate(
+                    dict.fromkeys(by_key[key] for key in np.argsort(first))
+                )
+            }
+            per_triangle = np.array([colours[c] for c in by_key])[inverse.reshape(-1)]
+            order = np.argsort(per_triangle, kind="stable")
+            ends = np.cumsum(np.bincount(per_triangle, minlength=len(colours)))
+            for colour, index in colours.items():
+                start = ends[index - 1] if index else 0
+                buckets[colour] = arrays.faces[order[start : ends[index]]]
         mirrored = np.linalg.det(matrix[:3, :3]) < 0
-        for colour, faces in buckets.items():
-            array = np.array(faces, dtype=np.int64)
+        for colour, array in buckets.items():
             if array.size and (array.min() < 0 or array.max() >= len(points)):
                 raise UnreadableObjectsError("a triangle names a vertex the mesh lacks")
             yield colour, points, array[:, ::-1] if mirrored else array

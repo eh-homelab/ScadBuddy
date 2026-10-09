@@ -8,6 +8,7 @@ import re
 import tempfile
 import uuid
 import zipfile
+from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -664,12 +665,8 @@ def _vertex_bounds(archive: zipfile.ZipFile, names: Sequence[str]) -> np.ndarray
     lows: list[np.ndarray] = []
     highs: list[np.ndarray] = []
     for name in names:
-        root = ET.fromstring(archive.read(name))
-        for node in root.iter(f"{{{CORE_NS}}}vertices"):
-            points = np.array(
-                [[float(v.get("x", 0)), float(v.get("y", 0)), float(v.get("z", 0))] for v in node],
-                dtype=np.float64,
-            )
+        for mesh in parse_model(archive, name).meshes.values():
+            points = mesh.vertices
             if points.size:
                 lows.append(points.min(axis=0))
                 highs.append(points.max(axis=0))
@@ -696,7 +693,7 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
     every build item — the shape of every 3MF written before plates were numbered.
     """
     names = set(archive.namelist())
-    root = ET.fromstring(archive.read(ROOT_MODEL_NAME))
+    root = parse_model(archive, ROOT_MODEL_NAME).root
     components: dict[str, tuple[str, ...]] = {}
     for obj in root.iter(f"{{{CORE_NS}}}object"):
         paths = tuple(
@@ -892,6 +889,140 @@ def _read_capped(archive: zipfile.ZipFile, name: str, cap: int) -> bytes:
             if len(data) > cap:
                 raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
     return bytes(data)
+
+
+_MESH = f"{{{CORE_NS}}}mesh"
+_VERTICES = f"{{{CORE_NS}}}vertices"
+_VERTEX = f"{{{CORE_NS}}}vertex"
+_TRIANGLES = f"{{{CORE_NS}}}triangles"
+_TRIANGLE = f"{{{CORE_NS}}}triangle"
+#: Per-triangle painting: Bambu Studio's, and PrusaSlicer's multi-material one.
+_PAINTED = ("paint_color", "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation")
+
+
+@dataclass(frozen=True)
+class MeshArrays:
+    """A ``<mesh>``'s vertices and triangles, as arrays rather than an element each."""
+
+    #: ``(n, 3)`` float64.
+    vertices: np.ndarray
+    #: ``(m, 3)`` int64: each triangle's ``v1``, ``v2``, ``v3``.
+    faces: np.ndarray
+    #: Each triangle's ``pid`` as an index into `pids`, or -1 when it has none.
+    pid: np.ndarray
+    pids: tuple[str, ...]
+    #: Each triangle's ``p1``, or -1 when it has none.
+    p1: np.ndarray
+    #: Whether any triangle carries per-triangle painting.
+    painted: bool
+
+
+@dataclass(frozen=True)
+class ParsedModel:
+    """A 3MF model file: its tree, in which every ``<mesh>``'s ``<vertices>`` and
+    ``<triangles>`` are left empty, and those meshes' arrays, by ``<mesh>`` element."""
+
+    root: ET.Element
+    meshes: dict[ET.Element, MeshArrays]
+
+
+class _MeshTarget:
+    """An `ET.XMLParser` target building the tree as `ET.TreeBuilder` does, except a
+    mesh's ``<vertex>`` and ``<triangle>`` elements, which go straight into arrays: an
+    element costs some 500 bytes against the 30-odd of XML it is read from, so a model
+    entry at the archive's cap would otherwise take gigabytes (#1949). Arrays cost
+    about what the XML does."""
+
+    def __init__(self) -> None:
+        self.builder = ET.TreeBuilder()
+        self.meshes: dict[ET.Element, MeshArrays] = {}
+        self._open: list[ET.Element] = []
+        #: Depth inside an element read into the arrays, whose content is dropped.
+        self._skipping = 0
+        self._reset()
+
+    def _reset(self) -> None:
+        self._points = array("d")
+        self._faces = array("q")
+        self._pid = array("i")
+        self._pids: dict[str, int] = {}
+        self._p1 = array("q")
+        self._painted = False
+
+    def _within(self, parent: str) -> bool:
+        return len(self._open) >= 2 and self._open[-1].tag == parent and self._open[-2].tag == _MESH
+
+    def start(self, tag: str, attrs: dict[str, str]) -> None:
+        if self._skipping:
+            self._skipping += 1
+        elif tag == _VERTEX and self._within(_VERTICES):
+            self._skipping = 1
+            self._points.extend(
+                (float(attrs.get("x", 0)), float(attrs.get("y", 0)), float(attrs.get("z", 0)))
+            )
+        elif tag == _TRIANGLE and self._within(_TRIANGLES):
+            self._skipping = 1
+            self._faces.extend(
+                (int(attrs.get("v1", 0)), int(attrs.get("v2", 0)), int(attrs.get("v3", 0)))
+            )
+            pid = attrs.get("pid")
+            self._pid.append(-1 if pid is None else self._pids.setdefault(pid, len(self._pids)))
+            p1 = attrs.get("p1")
+            self._p1.append(-1 if p1 is None else int(p1 or 0))
+            self._painted = self._painted or any(attrs.get(name) for name in _PAINTED)
+        else:
+            if tag == _MESH:
+                if any(element.tag == _MESH for element in self._open):
+                    raise ValueError("a <mesh> inside another <mesh>")
+                self._reset()
+            self._open.append(self.builder.start(tag, attrs))
+
+    def end(self, tag: str) -> None:
+        if self._skipping:
+            self._skipping -= 1
+            return
+        element = self.builder.end(tag)
+        self._open.pop()
+        if tag == _MESH:
+            self.meshes[element] = MeshArrays(
+                vertices=np.frombuffer(self._points, dtype=np.float64).reshape(-1, 3),
+                faces=np.frombuffer(self._faces, dtype=np.int64).reshape(-1, 3),
+                pid=np.frombuffer(self._pid, dtype=np.int32),
+                pids=tuple(self._pids),
+                p1=np.frombuffer(self._p1, dtype=np.int64),
+                painted=self._painted,
+            )
+            self._reset()
+
+    def data(self, text: str) -> None:
+        if not self._skipping:
+            self.builder.data(text)
+
+    def close(self) -> ET.Element:
+        return self.builder.close()
+
+
+def parse_model(
+    archive: zipfile.ZipFile, name: str, cap: int = MAX_UNCOMPRESSED_BYTES
+) -> ParsedModel:
+    """Model file ``name``, inflated in chunks and refused past ``cap``, parsed as it
+    inflates, its meshes read into arrays (`_MeshTarget`). ``ET.ParseError`` when it is
+    not XML, ``ValueError`` when a vertex or triangle is not numbers."""
+    target = _MeshTarget()
+    parser = ET.XMLParser(target=target)
+    read = 0
+    with archive.open(name) as entry:
+        while chunk := entry.read(_CHUNK):
+            read += len(chunk)
+            if read > cap:
+                raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
+            try:
+                parser.feed(chunk)
+            except OverflowError:
+                # An index past 64 bits: as unreadable as one that is not a number.
+                raise ValueError(f"{name} has a vertex index out of range") from None
+    root: ET.Element = parser.close()
+    return ParsedModel(root, target.meshes)
 
 
 def state_nozzles(
