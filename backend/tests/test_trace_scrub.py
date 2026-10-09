@@ -402,7 +402,8 @@ async def test_a_failed_workflows_completion_span_survives_the_sandbox(
     # Uncached, so the frames' files are read on the workflow thread.
     trace_scrub._source.cache_clear()
     async with temporal_client() as plain:
-        # Production's client and sandbox (#1810), on the dev server's address.
+        # Production's client and sandbox (#1810), on the dev server's address. Its
+        # target alone carries no TLS or API key: the dev server is plaintext.
         client = await connect(plain.service_client.config.target_host, plain.namespace)
         queue = f"scrub-{uuid.uuid4().hex[:8]}"
         runner = sandboxed_runner()

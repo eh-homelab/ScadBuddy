@@ -43,7 +43,8 @@ from temporalio.client import (
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.worker import Worker
+from temporalio.worker import Worker, WorkflowRunner
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
@@ -152,6 +153,7 @@ def library_worker(
     activities: Sequence[Callable[..., Any]],
     *,
     workflows: Sequence[type] = (),
+    workflow_runner: WorkflowRunner | None = None,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
 ) -> Worker:
     """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
@@ -159,12 +161,15 @@ def library_worker(
     sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5). A sweep longer
     than that (an asset sweep's converge) is then cancelled, and gets
     `main.SWEEP_SHUTDOWN_JOIN` more for its thread to return (#1708), so the lifespan
-    does not close the stores under it."""
+    does not close the stores under it. ``workflow_runner`` is the app's
+    `client.sandboxed_runner` (#2014), passed in: this module runs in the sandbox, so
+    it does not import the client's."""
     return Worker(
         client,
         task_queue=task_queue,
         workflows=[Housekeeping, *workflows],
         activities=activities,
+        workflow_runner=workflow_runner or SandboxedWorkflowRunner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )
 
