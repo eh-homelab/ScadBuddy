@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
+import { announceHeadlessBrowser, useHeadlessBrowserChanges } from '../lib/headlessBrowserSwitch'
 import { useAsync } from '../lib/useAsync'
 import { Spinner } from './ui/Spinner'
 
@@ -18,6 +19,8 @@ export function HeadlessBrowserSetting() {
   const setting = useAsync(() => api.getHeadlessBrowserSetting(), [])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { setData } = setting
+  useHeadlessBrowserChanges(useCallback((next: boolean) => setData({ enabled: next }), [setData]))
 
   if (setting.error || !setting.data) return null
   const enabled = setting.data.enabled
@@ -26,7 +29,9 @@ export function HeadlessBrowserSetting() {
     setSaving(true)
     setError(null)
     try {
-      setting.setData(await api.putHeadlessBrowserSetting(next))
+      const saved = await api.putHeadlessBrowserSetting(next)
+      setting.setData(saved)
+      announceHeadlessBrowser(saved.enabled)
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.detail : 'Could not save the setting')
     } finally {

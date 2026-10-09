@@ -1,7 +1,8 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
+import { announceHeadlessBrowser } from '../../lib/headlessBrowserSwitch'
 import { BUILT_IN_ANSWER, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -37,6 +38,14 @@ describe('PluginPackagesPanel', () => {
     expect(within(browser).getByRole('button', { name: 'Disable' })).toBeInTheDocument()
     // Built-ins are not installed packages.
     expect(screen.getByText('No plugin packages installed.')).toBeInTheDocument()
+  })
+
+  it('follows the headless-browser setting changed in its own section', async () => {
+    renderPage(<PluginPackagesPanel />)
+    const browser = await screen.findByRole('listitem', { name: 'Built-in plugin playwright' })
+    expect(within(browser).getByText('Disabled')).toBeInTheDocument()
+    act(() => announceHeadlessBrowser(true))
+    expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
   })
 
   it('keeps a built-in and a package stored under its name apart', async () => {
