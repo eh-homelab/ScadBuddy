@@ -321,6 +321,9 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         ['playwright', true],
         ['playwright', false],
       ])
+      // PATCH always switches the built-in: the stored row never loads.
+      const patched = await a.request('/api/v1/ai/plugin-packages/playwright', json('PATCH', { enabled: true }))
+      expect(await patched.json()).toMatchObject({ name: 'playwright', built_in: true, enabled: true })
       const del = () => a.request('/api/v1/ai/plugin-packages/playwright', { method: 'DELETE', headers: UI })
       expect((await del()).status).toBe(204)
       expect(await store.list()).toEqual([])

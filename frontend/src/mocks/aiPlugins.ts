@@ -195,6 +195,12 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
   }
 }
 
+/** A package stored under `name` (e.g. a built-in's, as before built-ins were listed), approved and enabled. */
+export function seedStoredPackage(name: string): void {
+  const greeter = packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage
+  state.packages.set(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true })
+}
+
 function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
   return ['recall', 'retain', 'files.list'].map((tool) => {
     const renamed = tool.includes('.')
@@ -392,7 +398,7 @@ export const aiPluginHandlers = [
   }),
 
   http.delete(`${base}/plugin-packages/:name`, ({ params }) => {
-    if (state.builtIns.has(String(params.name))) {
+    if (state.builtIns.has(String(params.name)) && !state.packages.has(String(params.name))) {
       return detail(409, `"${String(params.name)}" is built in: it cannot be removed. Disable it instead.`, { built_in: true })
     }
     if (!state.packages.delete(String(params.name))) return detail(404, 'no such plugin package')

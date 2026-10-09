@@ -214,6 +214,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, PatchBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
+    // Always the built-in: a package stored under its name never loads, so it has no switch.
     if (builtInNamed(c.req.param('name')) && deps.builtIns) {
       const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
       return c.json(await deps.builtIns.setEnabled(c.req.param('name'), body.enabled, context))
@@ -245,7 +246,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
   })
 
   app.delete(`${base}/:name/pending`, async (c) => {
-    const refused = isBuiltIn(c, 're-pinned: it ships with the agent')
+    const refused = isBuiltIn(c, 'given a re-pin to discard: it ships with the agent')
     if (refused) return refused
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)

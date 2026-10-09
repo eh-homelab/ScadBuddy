@@ -489,11 +489,14 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
 
 function PackageCard({
   pkg,
+  shadowed,
   onChange,
   onRemoved,
   onApprove,
 }: {
   pkg: PluginPackage
+  /** Stored under a built-in's name (before built-ins were listed): never loaded, only removable. */
+  shadowed: boolean
   onChange: (pkg: PluginPackage) => void
   onRemoved: (name: string) => void
   onApprove: (target: ApproveTarget) => void
@@ -531,7 +534,13 @@ function PackageCard({
         )}
         {pkg.approved && pkg.allow_refused && <Badge tone="warn">Unvetted code allowed</Badge>}
         {pkg.pending && <Badge tone="warn">Re-pin awaiting approval</Badge>}
+        {shadowed && <Badge tone="warn">Not loaded</Badge>}
       </div>
+      {shadowed && (
+        <p role="note" className="mt-1 text-[12px] text-warn">
+          &ldquo;{pkg.name}&rdquo; is built in, so this installed copy is never loaded. Remove it.
+        </p>
+      )}
       {pkg.review.description && <p className="mt-1 text-[12px] text-muted">{pkg.review.description}</p>}
       <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
         <dt className="text-muted">Source</dt>
@@ -555,12 +564,12 @@ function PackageCard({
       </details>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {!pkg.approved && (
+        {!pkg.approved && !shadowed && (
           <Button size="sm" variant="primary" onClick={() => onApprove({ pkg, pending: false })} {...USER_ONLY}>
             Approve…
           </Button>
         )}
-        {pkg.approved && (
+        {pkg.approved && !shadowed && (
           <Button
             size="sm"
             onClick={() =>
@@ -579,7 +588,7 @@ function PackageCard({
         </Button>
       </div>
 
-      {pkg.pending ? (
+      {shadowed ? null : pkg.pending ? (
         <div className="mt-3 rounded-[6px] border border-accent/40 bg-accent/8 p-3" aria-label="Pending re-pin">
           <p className="text-[12px]">
             Re-pin to <span className="sb-num">{pkg.pending.ref}</span> at{' '}
@@ -678,10 +687,10 @@ export function PluginPackagesPanel() {
   const [approve, setApprove] = useState<ApproveTarget | null>(null)
   const packages = state.data ?? []
 
+  // A built-in and a package stored under its name (before built-ins were listed) share a name.
+  const same = (a: ListedPackage, b: ListedPackage) => a.name === b.name && isBuiltIn(a) === isBuiltIn(b)
   const replace = (pkg: ListedPackage) =>
-    state.setData(
-      packages.some((p) => p.name === pkg.name) ? packages.map((p) => (p.name === pkg.name ? pkg : p)) : [...packages, pkg],
-    )
+    state.setData(packages.some((p) => same(p, pkg)) ? packages.map((p) => (same(p, pkg) ? pkg : p)) : [...packages, pkg])
 
   return (
     <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="plugin-packages-heading">
@@ -710,8 +719,9 @@ export function PluginPackagesPanel() {
                 <PackageCard
                   key={pkg.name}
                   pkg={pkg}
+                  shadowed={packages.some((p) => isBuiltIn(p) && p.name === pkg.name)}
                   onChange={replace}
-                  onRemoved={(name) => state.setData(packages.filter((p) => p.name !== name))}
+                  onRemoved={(name) => state.setData(packages.filter((p) => isBuiltIn(p) || p.name !== name))}
                   onApprove={setApprove}
                 />
               ),

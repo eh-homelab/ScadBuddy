@@ -16,6 +16,7 @@ import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
 import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
+import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 
 // Plugin packages (#297, src/plugins/packages/): source validation, the
@@ -463,6 +464,18 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     await expect(plainHttp.prepare(validateSource({ kind: 'git', url: 'http://git.test/greeter.git' }))).rejects.toThrow(
       /https/,
     )
+  })
+
+  it('reviews each built-in plugin from its own files', () => {
+    // A symlink or layout change in agent/plugins would quietly empty the review.
+    for (const b of BUILT_INS) {
+      const v = vetPackage(b.dir, b.name)
+      expect(v.fatal, b.name).toEqual([])
+      expect(v.review?.name).toBe(b.name)
+    }
+    const own = vetPackage(BUILT_INS[0]!.dir, BUILT_INS[0]!.name).review!
+    expect(own.skills).toEqual(['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'])
+    expect(own.agents).toEqual(['scadbuddy:model-author', 'scadbuddy:print-analyst'])
   })
 
   it('answers that a built-in plugin is built in, not that it is refused', async () => {

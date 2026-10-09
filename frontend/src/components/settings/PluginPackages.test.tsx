@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
-import { BUILT_IN_ANSWER, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
+import { BUILT_IN_ANSWER, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { PluginPackagesPanel } from './PluginPackages'
@@ -37,6 +37,25 @@ describe('PluginPackagesPanel', () => {
     expect(within(browser).getByRole('button', { name: 'Disable' })).toBeInTheDocument()
     // Built-ins are not installed packages.
     expect(screen.getByText('No plugin packages installed.')).toBeInTheDocument()
+  })
+
+  it('keeps a built-in and a package stored under its name apart', async () => {
+    seedStoredPackage('playwright')
+    const { user } = renderPage(<PluginPackagesPanel />)
+    const builtIn = await screen.findByRole('listitem', { name: 'Built-in plugin playwright' })
+    const stored = screen.getByRole('listitem', { name: 'Plugin package playwright' })
+    await user.click(within(builtIn).getByRole('button', { name: 'Enable' }))
+    expect(await within(builtIn).findByRole('button', { name: 'Disable' })).toBeInTheDocument()
+    expect(screen.getByRole('listitem', { name: 'Plugin package playwright' })).toBe(stored)
+    // The stored copy never loads: no switch, no re-pin, only Remove.
+    expect(within(stored).getByText('Not loaded')).toBeInTheDocument()
+    expect(within(stored).queryByRole('button', { name: /Enable|Disable/ })).not.toBeInTheDocument()
+    expect(within(stored).queryByLabelText('Re-pin to branch, tag or commit')).not.toBeInTheDocument()
+
+    await user.click(within(stored).getByRole('button', { name: 'Remove' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Remove package' }))
+    await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Plugin package playwright' })).not.toBeInTheDocument())
+    expect(screen.getByRole('listitem', { name: 'Built-in plugin playwright' })).toBeInTheDocument()
   })
 
   it('answers an install of ScadBuddy\'s own plugin with a notice, not a refusal', async () => {
