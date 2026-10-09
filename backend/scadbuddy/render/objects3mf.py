@@ -340,10 +340,19 @@ class _Reader:
             )
             unique, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
             by_key = [materials.get((pids[pid], int(p1)), STL_COLOUR) for pid, p1 in unique]
-            colours = list(dict.fromkeys(by_key[key] for key in np.argsort(first)))
-            per_triangle = np.array([colours.index(c) for c in by_key])[inverse.reshape(-1)]
-            for index, colour in enumerate(colours):
-                buckets[colour] = arrays.faces[per_triangle == index]
+            # A dict, not list.index: a hostile file controls both counts.
+            colours = {
+                colour: index
+                for index, colour in enumerate(
+                    dict.fromkeys(by_key[key] for key in np.argsort(first))
+                )
+            }
+            per_triangle = np.array([colours[c] for c in by_key])[inverse.reshape(-1)]
+            order = np.argsort(per_triangle, kind="stable")
+            ends = np.cumsum(np.bincount(per_triangle, minlength=len(colours)))
+            for colour, index in colours.items():
+                start = ends[index - 1] if index else 0
+                buckets[colour] = arrays.faces[order[start : ends[index]]]
         mirrored = np.linalg.det(matrix[:3, :3]) < 0
         for colour, array in buckets.items():
             if array.size and (array.min() < 0 or array.max() >= len(points)):
