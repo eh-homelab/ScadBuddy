@@ -168,7 +168,7 @@ def _attach_all(
                     continue  # attached, failed or re-queued since it was listed
                 if _attach(outputs, refs, read_job, output_id, state.job_id):
                     attached += 1
-                if outputs.backfill(output_id) != state:
+                if _changed(outputs, output_id, state):
                     _announce(events, outputs, output_id)
         except ValueError as error:  # a corrupt record.json or manifest: not worth retrying
             logger.exception("could not attach a re-render", extra={"id": output_id})
@@ -181,6 +181,18 @@ def _attach_all(
         except Exception:
             logger.exception("could not attach a re-render; retrying", extra={"id": output_id})
     return attached
+
+
+def _changed(outputs: OutputStore, output_id: str, state: BackfillState) -> bool:
+    """Whether the attach settled the backfill, read under its own ``try`` (#2038): a
+    re-read that fails (a half-written ``backfill.json`` from a concurrent re-queue)
+    must not reach the attach's ``fail_backfill``. It counts as changed, since an
+    announcement only makes a reader read the output again."""
+    try:
+        return outputs.backfill(output_id) != state
+    except Exception:
+        logger.exception("could not re-read a backfill after its attach", extra={"id": output_id})
+        return True
 
 
 def _announce(events: EventBus | None, outputs: OutputStore, output_id: str) -> None:

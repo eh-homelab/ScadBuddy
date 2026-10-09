@@ -43,8 +43,8 @@ export function waitForJob(
  * `relevant` admits (and on the subscription's confirmation, so a change made before
  * it is still seen), and on a `pollMs` timer only while the socket is unavailable.
  * `onRead` sees every read that is not done. An aborted `signal` rejects with its
- * reason; `waitMs` passing rejects with `stillRunning()`; a failed read rejects with
- * its error.
+ * reason; `waitMs` passing rejects with `stillRunning()`, after one read if none has
+ * answered yet (waiting at most `pollMs` more for it); a failed read rejects with its error.
  */
 export function followUntil<T>(
   topic: string,
@@ -69,9 +69,27 @@ export function followUntil<T>(
     let ended = false
     let reading = false
     let again = false
+    /** A read has answered: until one has, the limit reads once before it gives up. */
+    let answered = false
+    let expired = false
     let poll: ReturnType<typeof setTimeout> | undefined
+    /** Bounds that one look: fetch has no timeout, so a read can hang (#2045 review). */
+    let grace: ReturnType<typeof setTimeout> | undefined
+    const giveUp = () => end(() => reject(opts.stillRunning()))
     const limit =
-      opts.waitMs === undefined ? undefined : setTimeout(() => end(() => reject(opts.stillRunning())), opts.waitMs)
+      opts.waitMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            expired = true
+            // A limit that passes before the first read (a caller's budget already
+            // spent) still looks once (#2038), for at most `pollMs` more: the limit
+            // stays a bound however long that read takes.
+            if (answered) giveUp()
+            else {
+              grace = setTimeout(giveUp, opts.pollMs)
+              if (!reading) void read()
+            }
+          }, opts.waitMs)
 
     const onAbort = () => end(() => reject(signal?.reason as Error))
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -86,8 +104,12 @@ export function followUntil<T>(
       try {
         const value = await opts.read()
         if (ended) return
+        answered = true
         if (opts.done(value)) end(() => resolve(value))
-        else opts.onRead?.(value)
+        else {
+          opts.onRead?.(value)
+          if (expired) giveUp()
+        }
       } catch (cause) {
         end(() => reject(cause as Error))
       } finally {
@@ -117,6 +139,7 @@ export function followUntil<T>(
       unfollow()
       clearTimeout(poll)
       clearTimeout(limit)
+      clearTimeout(grace)
       signal?.removeEventListener('abort', onAbort)
       settle()
     }

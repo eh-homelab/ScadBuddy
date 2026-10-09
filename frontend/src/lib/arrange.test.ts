@@ -8,6 +8,7 @@ import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { backfillFailures, backfillOutputs, listNames, MAX_REASON_CHARS, runArrange } from './arrange'
 import { getRealtime } from './realtime'
+import { followUntil } from './waitForJob'
 import { fakeRealtime } from './realtime.fake'
 
 const nova = fixtures.outputs[1] as Output
@@ -195,6 +196,53 @@ describe('backfillOutputs (#902)', () => {
     const { ready, failed } = await backfillOutputs([nova], { pollMs: 10, waitMs: 50 })
     expect(ready).toEqual([])
     expect(backfillFailures(failed)).toBe('Nova is still re-rendering; try Arrange again later.')
+  })
+})
+
+describe('followUntil reads once before its limit (#2038)', () => {
+  it('a limit spent before the first read still reads once', async () => {
+    fakeRealtime({ confirm: false })
+    const read = vi.fn(() => Promise.resolve('ready'))
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: (value) => value === 'ready',
+        stillRunning: () => new Error('still running'),
+        pollMs: 10_000,
+        waitMs: 0,
+      }),
+    ).resolves.toBe('ready')
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives up after that read when it is not done', async () => {
+    fakeRealtime({ confirm: false })
+    const read = vi.fn(() => Promise.resolve('pending'))
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: (value) => value === 'ready',
+        stillRunning: () => new Error('still running'),
+        pollMs: 10_000,
+        waitMs: 0,
+      }),
+    ).rejects.toThrow('still running')
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays a bound when that read never answers (#2045 review)', async () => {
+    fakeRealtime({ confirm: false })
+    // fetch has no timeout: a held request never settles.
+    const read = vi.fn(() => new Promise<string>(() => {}))
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: (value) => value === 'ready',
+        stillRunning: () => new Error('still running'),
+        pollMs: 20,
+        waitMs: 0,
+      }),
+    ).rejects.toThrow('still running')
   })
 })
 
