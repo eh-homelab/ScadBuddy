@@ -86,7 +86,10 @@ export function extrudersIn(
   const extruders = new Map<string, number | null | undefined>()
   for (const name of colorParamNames(schema)) {
     const value = String(values[name] ?? '')
-    if (values[name] !== renderedValues[name] || !HEX.test(value.trim())) {
+    const ran = String(renderedValues[name] ?? '')
+    // #1686 — hex compared as colours: `#e8532f` is the colour the render ran with as
+    // `#E8532F`, not a change.
+    if (!HEX.test(value.trim()) || !HEX.test(ran.trim()) || normalizeHex(value) !== normalizeHex(ran)) {
       extruders.set(name, undefined)
       continue
     }
