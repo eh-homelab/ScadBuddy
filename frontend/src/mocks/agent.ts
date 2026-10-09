@@ -28,15 +28,23 @@ import type { RespondBody } from '../agent/respond'
 import {
   PROTOCOL_VERSION,
   type ClientMessage,
+  type ImagePreview,
   type Owner,
   type ServerEvent,
   type SessionStatus,
   type SessionSummary,
 } from '../agent/chat/protocol'
+import { takeAttachment } from './features/assistantAttachments'
 import { PREVIEW_IMAGE } from './features/assistantBlobs'
 
 type Body<E> = E extends ServerEvent ? Omit<E, 'v'> : never
 type EventBody = Body<ServerEvent>
+
+
+/** The previews of the uploads a message names (#1941); one the mock never took is left out. */
+function uploadedPreviews(refs: { id: string }[]): ImagePreview[] {
+  return refs.map((ref) => takeAttachment(ref.id)).filter((p): p is ImagePreview => p !== undefined)
+}
 
 export const BROWSER_USER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 export const DESKTOP_AGENT: Owner = { kind: 'bearer', id: 'token-desktop', label: 'Claude Desktop' }
@@ -479,8 +487,8 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           turnId: nextId('turn'),
           text: msg.text,
           author: BROWSER_USER,
-          // #1866 — the agent keeps only the previews in the transcript.
-          ...(msg.images?.length ? { images: msg.images.map((image) => image.preview) } : {}),
+          // #1866, #1941 — the agent keeps only the uploads' previews in the transcript.
+          ...(msg.images?.length ? { images: uploadedPreviews(msg.images) } : {}),
         })
         setStatus(s, 'running')
         play(

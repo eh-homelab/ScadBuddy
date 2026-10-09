@@ -29,7 +29,7 @@ import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
-import { sourceApi, sourceKey, type PrintSource } from '../lib/printSource'
+import { optionsSubject, sourceApi, sourceKey, type PrintSource } from '../lib/printSource'
 import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
@@ -169,10 +169,11 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   const askBackfill = target !== undefined && askFor === target.id
 
   /**
-   * The model, for its print-options scope — the same slug its choices are remembered
-   * under (`sourceApi`). A library file has none.
+   * What its own print options are remembered under, as its choices are (#1754): the
+   * model, or the library file. A string, so the effects below see a change of key.
    */
-  const slug = source?.kind === 'output' ? source.output.slug : undefined
+  const subject = optionsSubject(source)
+  const scopeKey = subject?.key
   // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
   const outputId = source?.kind === 'output' ? source.output.id : undefined
   /** What the analyzers judge: the output, or the library file, as any print (#1753). */
@@ -471,13 +472,13 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     return () => {
       live = false
     }
-  }, [open, slug])
+  }, [open, scopeKey])
 
   const rememberedCopies =
     resolveOptions(
       remembered?.global_options,
       printerId === null ? undefined : remembered?.printers?.[String(printerId)],
-      slug === undefined ? undefined : remembered?.models?.[slug],
+      scopeKey === undefined ? undefined : remembered?.models?.[scopeKey],
     ).quantity ?? null
   const effectiveCopies = copies ?? rememberedCopies ?? 1
 
@@ -823,7 +824,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                   <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
 
                   <PrintOptionsDisclosure
-                    slug={slug}
+                    subject={subject}
                     printerId={printerId}
                     value={copies === null ? options : { ...options, quantity: copies }}
                     onChange={({ quantity, ...rest }) => {

@@ -63,6 +63,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
+from scadbuddy.bambuddy.options import library_options_scope
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
 from scadbuddy.core.paths import DataPaths
@@ -276,16 +277,16 @@ def _subject(
 
 
 def _remembered(
-    target: AnalysisTarget, slug: str | None, store: SettingsStore, settings: StoredSettings
+    target: AnalysisTarget, slug: str | None, settings: StoredSettings
 ) -> ModelPrintChoices | None:
     """What the dialog reopens with for this subject: a library file's own (#313), else
-    the template's."""
-    if target.library_file_id is not None:
-        try:
-            return store.library_choices(target.library_file_id)
-        except DATABASE_ERRORS:
-            return None
-    return settings.model_print_choices.get(slug) if slug is not None else None
+    the template's, both in the one store under the subject's options scope (#1754)."""
+    scope = (
+        library_options_scope(target.library_file_id)
+        if target.library_file_id is not None
+        else slug
+    )
+    return settings.model_print_choices.get(scope) if scope is not None else None
 
 
 async def _context(
@@ -299,7 +300,7 @@ async def _context(
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     settings = store.load()
-    remembered = await asyncio.to_thread(_remembered, target, slug, store, settings)
+    remembered = _remembered(target, slug, settings)
     library_file_id: int | None = None
     if meta is not None:
         # Any copy will do: every one is this output's 3MF, and the filament read only
