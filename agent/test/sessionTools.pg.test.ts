@@ -273,6 +273,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(child).toMatchObject({ parent_id: session.id, owner: { kind: 'bearer' } })
       const got = ok<{ transcript: Record<string, unknown>[] }>(await a.call('sessions_get', { session_id: child.id }))
       expect(got.transcript).toContainEqual(expect.objectContaining({ type: 'user.turn', text: 'first' }))
+      // #793: up_to names a reply by its message_id; one the session does not have is refused.
+      expect(errorText(await a.call('sessions_fork', { session_id: session.id, up_to: 'msg_nowhere:0' }))).toMatch(
+        /no finished reply msg_nowhere:0/,
+      )
     })
 
     it('lets only a token with the approval grant decide, and never its own', async () => {

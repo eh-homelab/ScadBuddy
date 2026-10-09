@@ -782,6 +782,23 @@ def test_a_record_carries_the_revision_it_is_at(catalogue: Catalogue) -> None:
     assert edited.version != record.version
 
 
+def test_a_record_names_the_revision_before_it_in_its_own_history(catalogue: Catalogue) -> None:
+    """#1071: what a session changed can be put back only if each revision names its
+    parent, whichever call made it; another model's commits in between do not count."""
+    first = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    assert first.previous_version is None
+    catalogue.create("plate", "sphere(5);\n", ModelMeta(name="Plate"))
+    edited = catalogue.write_source("keychain", "cube(20);\n")
+    assert edited.previous_version == first.version
+    assert catalogue.record("keychain").previous_version == first.version
+
+
+def test_a_listing_leaves_previous_version_out(catalogue: Catalogue) -> None:
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    catalogue.write_source("keychain", "cube(20);\n")
+    assert [record.previous_version for record in catalogue.list_models()] == [None]
+
+
 def test_a_legacy_schema_key_is_retired_from_model_json(catalogue: Catalogue) -> None:
     """Volumes written before the cache moved out of `models/` still carry one.
 

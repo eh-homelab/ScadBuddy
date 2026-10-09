@@ -614,7 +614,8 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
   describe('continuing a spent session in a new chat', () => {
     it('refuses a session with no transcript yet, and another origin', async () => {
       const { session } = await m.start(browser, { origin: 'chat' })
-      expect((await app.request(`/api/v1/ai/sessions/${session.id}/fork`, { method: 'POST', headers: UI })).status).toBe(400)
+      // 409, the session's state, not a bad request (#793).
+      expect((await app.request(`/api/v1/ai/sessions/${session.id}/fork`, { method: 'POST', headers: UI })).status).toBe(409)
       const id = await spentSession()
       const evil = await app.request(`/api/v1/ai/sessions/${id}/fork`, {
         method: 'POST',

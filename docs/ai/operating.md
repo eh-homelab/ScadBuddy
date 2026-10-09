@@ -421,6 +421,13 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
   unreachable database or backend is *reported*, not failed on, so a Postgres blip
   does not restart the container (comment in `createApp()`).
 - The body is `{ status: "ok", ai, database, backend, secret_key, credential }` (type `Health`).
+- With sessions, it also carries `browser_origins`: whether the latest browser turn's
+  probe found one of ScadBuddy's UI origins the headless browser reaches without a login
+  (`reachable`, `none reachable`, or `not checked` before a browser turn has run;
+  [headless-browser.md](headless-browser.md), "Beyond the backend"). Only that, since
+  `/healthz` is unauthenticated: which origin answered what (`ok`, `sign-in`,
+  `unreachable`, with the redirect's origin or the error) is logged as
+  `headless browser: <origin> answers …` whenever an origin's answer changes.
 - `ai` is `"enabled"` only when every prerequisite holds. Otherwise it names the
   **first** one missing, in the order an operator has to fix them (`aiStatus()`):
 
@@ -659,8 +666,9 @@ its $1.00 budget.") and offers:
 
 - **Continue in a new chat**: `POST /api/v1/ai/sessions/:id/fork` copies the transcript
   into a new session with the current Settings budget, owned by the browser user, and
-  the panel switches to it. It counts against the new-session limit (`429`). #793 adds
-  forking from a given message (`up_to`), a socket message and an audit row.
+  the panel switches to it. It counts against the new-session limit (`429`). With
+  `up_to` (a reply's panel message id, #793) it copies the conversation only through
+  that reply. Each fork is a `resource` audit row (action `session_fork`).
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
   (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
   (take one over first), and never past $100. A request with the headless browser's
