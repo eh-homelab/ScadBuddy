@@ -62,6 +62,8 @@ SCAN_BEFORE = timedelta(days=1)
 #: first, and how many at once (#976).
 LIBRARY_LINK_LIMIT = 50
 LIBRARY_LINK_CONCURRENCY = 8
+#: How many library files one call scans by hash at once (#1755).
+LIBRARY_SCAN_CONCURRENCY = 2
 #: How long after it was recorded a library file's queue item is read at most. An
 #: item that never settles (one waiting on a printer that was removed, or skipped and
 #: never resumed) would otherwise cost a read on every list and hold a slot in
@@ -284,7 +286,8 @@ async def link_library_prints(
     next time the list is opened (#1664, #1703). Any other
     failure, a database one included, is logged and leaves the item to the next call
     (#1662). With ``uploads``, an item that 404s has its file scanned by hash, as an
-    output's gone item does (#1755).
+    output's gone item does (#1755), once: the item is gone, so a scan that fails here
+    is tried again only by the file's progress read or its own history.
     """
     try:
         pending = await links.pending_library(LIBRARY_LINK_LIMIT, max_age=LIBRARY_LINK_BACKSTOP)
@@ -292,10 +295,13 @@ async def link_library_prints(
         logger.exception("could not read the library prints to link")
         return
     gate = asyncio.Semaphore(LIBRARY_LINK_CONCURRENCY)
+    # Each scan pages Bambuddy's archive list: many items gone at once scan a few at a time.
+    scans = asyncio.Semaphore(LIBRARY_SCAN_CONCURRENCY)
 
     async def link(queue_item_id: int, file_id: int) -> None:
         if await read(queue_item_id) and uploads is not None:
-            await scan_library_by_hash(client, uploads, links, file_id)
+            async with scans:
+                await scan_library_by_hash(client, uploads, links, file_id)
 
     async def read(queue_item_id: int) -> bool:
         """Link or settle one item; True when Bambuddy no longer has it."""
