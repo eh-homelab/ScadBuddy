@@ -224,7 +224,7 @@ export type UserImage = z.infer<typeof UserImageSchema>
  * #1941 — an image the composer uploaded when it was attached (agent `POST
  * /api/v1/ai/attachments`), sent by its id: no image travels in the socket's frames.
  */
-export const AttachmentRefSchema = z.object({ kind: z.literal('attachment'), id: z.string().min(1) })
+export const AttachmentRefSchema = z.object({ kind: z.literal('attachment'), id: z.uuid() })
 export type AttachmentRef = z.infer<typeof AttachmentRefSchema>
 
 /**

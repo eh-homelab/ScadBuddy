@@ -252,6 +252,25 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
       expect(await db.sql`SELECT 1 FROM ai_attachments WHERE id = ${id}`).toHaveLength(1)
     })
 
+    it('refuses uploads that together pass the 8 MiB total, though each fit alone, and starts nothing', async () => {
+      // Two 4.5 MiB-of-base64 PNGs: each under IMAGE_DATA_MAX, together over IMAGES_DATA_TOTAL_MAX.
+      const big = (fill: number) => Buffer.concat([Buffer.from(PNG, 'base64'), Buffer.alloc(3.375 * 1024 * 1024, fill)]).toString('base64')
+      const ids = []
+      for (const fill of [1, 2]) ids.push((await store.put(browser, { ...image, data: big(fill) })).id)
+      const { out, connection } = await chat({
+        type: 'user.message',
+        text: 'what are these?',
+        context: { route: '/' },
+        images: ids.map((id) => ({ kind: 'attachment', id })),
+      })
+      connection.close()
+      const refused = out.find((e) => e.type === 'error') as { code?: string; message: string } | undefined
+      expect(refused).toMatchObject({ code: 'invalid', message: expect.stringContaining('together') })
+      expect(refused!.message.length).toBeLessThan(500)
+      expect(out.find((e) => e.type === 'session.started')).toBeUndefined()
+      expect(runs).toHaveLength(0)
+    })
+
     it('sends to an existing session, and keeps the attachment when the send is refused', async () => {
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
       await turn!.done

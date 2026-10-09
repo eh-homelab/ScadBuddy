@@ -15,7 +15,7 @@ import {
   renderPageContext,
   type UserMessageImages,
 } from '../sessions/clientProtocol.js'
-import type { UserImage } from '../sessions/images.js'
+import { type UserImage, UserImagesSchema } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
@@ -373,12 +373,20 @@ export class ChatConnection {
   private async resolveAttachments(images: UserMessageImages): Promise<ResolvedAttachment[] | undefined> {
     if (!images || !isAttachmentRefs(images)) return undefined
     if (!this.attachments) throw new SessionError('invalid', 'image uploads need the database: SCADBUDDY_DATABASE_URL is not set')
+    let resolved: ResolvedAttachment[]
     try {
-      return await this.attachments.resolve(this.principal, images)
+      resolved = await this.attachments.resolve(this.principal, images)
     } catch (err) {
       if (err instanceof AttachmentError) throw new SessionError('invalid', err.message)
       throw err
     }
+    // Each upload was checked alone; together they must fit images.ts's caps too (the total).
+    const checked = UserImagesSchema.safeParse(resolved.map((a) => a.image))
+    if (!checked.success) {
+      // images.ts messages name fields and caps only: they never quote the bytes.
+      throw new SessionError('invalid', `images: ${checked.error.issues.map((i) => i.message).join('; ')}`)
+    }
+    return resolved
   }
 
   /**

@@ -438,7 +438,11 @@ export const sessionTools: Tool[] = [
       )
       // The turn has the bytes; the uploads move into the session (attachments/store.ts `claim`).
       // A failed move is not the send's: the turn runs, and the staging rows expire.
-      if (resolved?.attached.length) await ctx.attachments?.claim(session_id, owner, resolved.attached).catch(() => {})
+      if (resolved?.attached.length) {
+        await ctx.attachments?.claim(session_id, owner, resolved.attached).catch((err: unknown) => {
+          console.error(`sessions_send: session ${session_id}: could not move its attachments: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session_id, owner))
       return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: before })

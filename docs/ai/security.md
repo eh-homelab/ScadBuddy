@@ -932,13 +932,17 @@ area per owner (the browser user for the panel). Every query names the owner, so
 another owner's id reads as unknown. A row expires an hour after upload
 (`ATTACHMENT_TTL_MS`) and a sweep deletes expired rows every five minutes. One owner
 holds at most 24 rows and 40 MiB (`OWNER_ROWS_MAX`, `OWNER_BYTES_MAX`); past either,
-an upload is refused with 429, so the route cannot fill the database. The bytes are
-plaintext, as in `ai_session_blobs`.
+an upload is refused with 429, so the route cannot fill the database. Every panel
+upload is the browser user's, so the cap covers all tabs together: drafts abandoned in
+several tabs can hold it for up to the TTL. Removing an image in the composer deletes
+its upload; a message the agent refuses after the composer has cleared leaves its
+uploads to expire. The bytes are plaintext, as in `ai_session_blobs`.
 
 **The turn.** The chat socket, and `sessions_send` for an MCP caller
 (`tools/imageRefs.ts`, where `attachment` is a member of #1906's reference union), read
 the attachments a message names for the principal sending it. An id that is unknown,
-expired or another owner's refuses the message as `invalid` before any turn starts.
+expired or another owner's refuses the message as `invalid` before any turn starts, and
+so do images that together exceed the 8 MiB total (each upload was checked alone).
 The model gets the images as `image` blocks in the turn's user message. Claude Code
 re-encodes them and keeps a copy under its own temp directory in the agent's state, as
 it does for any pasted image. Once the turn has started, the attachments move into the

@@ -6,6 +6,7 @@ import {
   AttachmentRefSchema,
   type AttachmentStore,
   type ResolvedAttachment,
+  unknownAttachment,
 } from '../attachments/store.js'
 import {
   IMAGE_DATA_MAX,
@@ -240,7 +241,7 @@ async function attachmentAt(source: AttachmentSource | undefined, ref: Attachmen
     const [one] = await source.store.resolve(source.owner, [ref])
     return one!
   } catch (err) {
-    if (err instanceof AttachmentError) throw new ToolError(err.message.replace('images[0]', `images[${index}]`), 404)
+    if (err instanceof AttachmentError) throw new ToolError(unknownAttachment(index, ref.id), 404)
     throw err
   }
 }

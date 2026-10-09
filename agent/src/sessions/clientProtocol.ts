@@ -48,6 +48,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      * routes/attachments.ts), or, from a tab loaded before that, the images
      * themselves with their previews (#1866, images.ts). Inline images are
      * accepted for one release more, within CHAT_FRAME_MAX (routes/chat.ts).
+     * TODO(#1959): drop the UserImagesSchema branch.
      */
     images: z.union([AttachmentRefsSchema, UserImagesSchema]).optional(),
   }),

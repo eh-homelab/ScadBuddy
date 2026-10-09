@@ -63,6 +63,11 @@ export class AttachmentError extends Error {
   }
 }
 
+/** Why `images[index]`, attachment `id`, cannot be sent: unknown, expired or another owner's read alike. */
+export function unknownAttachment(index: number, id: string): string {
+  return `images[${index}]: attachment ${id} is unknown or has expired; attach the image again`
+}
+
 export type AttachmentLimits = { ttlMs: number; rowsMax: number; bytesMax: number }
 
 type Row = {
@@ -130,10 +135,7 @@ export class AttachmentStore {
     return refs.map((ref, index) => {
       const row = byId.get(ref.id)
       if (!row) {
-        throw new AttachmentError(
-          'not_found',
-          `images[${index}]: attachment ${ref.id} is unknown or has expired; attach the image again`,
-        )
+        throw new AttachmentError('not_found', unknownAttachment(index, ref.id))
       }
       return {
         id: row.id,
