@@ -18,6 +18,11 @@ export interface McpToken {
   last_used_at: string | null
   revoked_at: string | null
   status: McpTokenStatus
+  /**
+   * May approve or deny any other agent's pending outward action, in any session
+   * (#300; never its own calls or sessions). Outward tokens only.
+   */
+  approval_grant: boolean
 }
 
 export interface McpTokenList {
@@ -32,6 +37,8 @@ export interface McpTokenCreate {
   tier: McpTokenTier
   /** Seconds from now; left out, the token never expires. */
   expires_in?: number
+  /** Only with `tier: 'outward'`; the service answers 400 otherwise. */
+  approval_grant?: boolean
 }
 
 export interface MintedMcpToken {
