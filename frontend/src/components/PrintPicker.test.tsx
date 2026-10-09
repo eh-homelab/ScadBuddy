@@ -1496,6 +1496,38 @@ describe('PrintPicker · Projects', () => {
     expect(screen.getByTestId('print-progress')).toBeInTheDocument()
   })
 
+  it('files the print under the project the run chose when the project list could not be read (#1830)', async () => {
+    // The server remembers project 2 as the last one printed to.
+    await fetch('/api/v1/print/projects/last', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: 2 }),
+    })
+    const runs = watch('POST', '/run')
+    const { bodies } = watch('POST', '/project')
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ detail: 'Bambuddy unreachable' }, { status: 502 }),
+      ),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.queuedSliceProgress, settled: true }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    const print = screen.getByRole('button', { name: /^Print$/ })
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+
+    // #1045: with the list unknown the run leaves the project to the server…
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    expect(runs.bodies[0]).not.toHaveProperty('project_id')
+    // …and the print is filed under the project the run says it used.
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ project_id: 2, queue_item_ids: [4471] })
+  })
+
   it('does not file a print that was sent without a project', async () => {
     const { bodies } = watch('POST', '/project')
     server.use(
