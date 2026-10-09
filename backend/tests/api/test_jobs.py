@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Mapping
@@ -24,6 +25,7 @@ from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
+from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
@@ -33,6 +35,7 @@ from scadbuddy.workflows.commands import (
 )
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
 from tests.support.operations import press
+from tests.support.store import local_content, store_pool
 
 
 def test_render_is_accepted_and_the_job_completes(
@@ -359,6 +362,63 @@ def test_a_render_whose_snapshot_is_still_uploading_is_a_coded_503(
     body = response.json()
     assert body["retry_after"] == 30
     assert body["code"] == "snapshot_pending"
+
+
+class _LastCommit:
+    """A history whose template is at ``revision``: all `SnapshotStore.pin` reads."""
+
+    available = True
+
+    def __init__(self, revision: str) -> None:
+        self.revision = revision
+
+    def last_commit(self, path: str) -> str:
+        return self.revision
+
+
+@pytest.mark.requires_postgres
+def test_a_render_pinned_through_a_real_snapshot_store_is_a_coded_503(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1430: the route's 503 end to end, `submit` → `pin` → a store still uploading,
+    rather than with `submit` patched to raise."""
+    revision = "5" * 40
+    export = paths.model_revision_dir(model, revision)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(5);")
+    with store_pool(pg_conninfo) as pool:
+        content = local_content(tmp_path / "remote", pool)
+        put = content.put
+        gate = asyncio.Event()
+
+        async def uploading(*args: object, **kwargs: object) -> object:
+            await gate.wait()
+            return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+        content.put = uploading  # type: ignore[method-assign,assignment]
+        history: Any = _LastCommit(revision)
+        snapshots = SnapshotStore(content, paths, history=history, pin_timeout=0.1)
+        render = getattr(client.app.state, STATE_ATTR).render  # type: ignore[attr-defined]
+        monkeypatch.setattr(render, "snapshots", snapshots)
+
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+
+        assert response.status_code == 503, response.text
+        assert int(response.headers["retry-after"]) >= 1
+        assert response.json()["code"] == "snapshot_pending"
+
+        async def finish() -> None:
+            # The store the route left behind runs on the app's loop: let it end there.
+            gate.set()
+            await asyncio.gather(*list(snapshots._storing))
+
+        client.portal.call(finish)  # type: ignore[union-attr]
+        assert content.index.get(snapshot_key(model, revision)) is not None
 
 
 class _NoCommit:

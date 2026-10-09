@@ -92,6 +92,7 @@ from scadbuddy.workflows.pipelines import (
     ACCEPT_RETRY,
     KIND,
     MIGRATE_EXECUTION_TIMEOUT,
+    PREVIEW_TRANSFER,
     STATUS,
     SUBJECT,
     RenderPiece,
@@ -905,6 +906,34 @@ async def test_a_preview_on_the_bambuddy_store_pins_the_last_commit_for_the_work
     # The preview pass's store stays off the interactive renders' bound (#1773).
     assert pinning.background == [True]
     assert fake.revisions == ["b" * 40]
+
+
+class _SlowPin(_Pinning):
+    """`SnapshotStore.pin` that takes ``seconds`` to store the snapshot."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__()
+        self.seconds = seconds
+
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
+        await asyncio.sleep(self.seconds)
+        return await super().pin(slug, revision, background=background)
+
+
+async def test_a_previews_pin_counts_against_its_timeout(make_service: ServiceFactory) -> None:
+    """#1430: the timeout counts from the start, the pin included. A pin that spent all
+    of it starts no run (the scheduler tries again later), rather than waiting the
+    whole timeout again on top."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        service.snapshots = _SlowPin(0.3)  # type: ignore[assignment]
+        # The bambuddy store adds `PREVIEW_TRANSFER`; this leaves 0.2 s in all.
+        with pytest.raises(TimeoutError, match="whole preview timeout"):
+            await service.render_preview(SLUG, 0.2 - PREVIEW_TRANSFER.total_seconds())
+        with pytest.raises(RPCError):
+            await client.get_workflow_handle(f"preview-{SLUG}-{'b' * 12}").describe()
+        await service.aclose()
 
 
 class _Revisions(_Pinning):

@@ -227,9 +227,14 @@ class PreviewScheduler:
         while self._due or self._busy:
             await asyncio.sleep(0.01)
 
-    def _schedule(self, slug: str, delay: float) -> None:
+    def _schedule(self, slug: str, delay: float, *, keep_earlier: bool = False) -> None:
+        """Due ``delay`` from now. A request pushes a pending one back (the debounce);
+        with ``keep_earlier`` an earlier due time already set wins."""
         assert self._loop is not None
-        self._due[slug] = self._loop.time() + delay
+        due = self._loop.time() + delay
+        if keep_earlier:
+            due = min(due, self._due.get(slug, due))
+        self._due[slug] = due
         self._wake.set()
 
     async def _run(self) -> None:
@@ -293,7 +298,9 @@ class PreviewScheduler:
                 "a preview waits for its source snapshot; it is tried again",
                 extra={"slug": slug, "retry_after": delay},
             )
-            self._schedule(slug, delay)
+            # No later than a request that landed while this ran: an edit made during
+            # the pin is due after its debounce, not after the backoff (#1433).
+            self._schedule(slug, delay, keep_earlier=True)
             return True
         except Exception as error:
             reason = str(error) or type(error).__name__
