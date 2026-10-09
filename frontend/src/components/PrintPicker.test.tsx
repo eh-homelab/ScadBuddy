@@ -2130,6 +2130,25 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
   })
 
+  it("names a one-plate output's plate, with nothing to choose (#986)", async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true, name: 'Gear + Axle' }])),
+    )
+    renderPicker()
+    await loaded()
+
+    expect(await screen.findByTestId('single-plate')).toHaveTextContent('Plate: Gear + Axle')
+    expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
+  })
+
+  it('says nothing about an unnamed single plate (#986)', async () => {
+    server.use(http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])))
+    renderPicker()
+    await loaded()
+
+    expect(screen.queryByTestId('single-plate')).not.toBeInTheDocument()
+  })
+
   it('labels each plate by its name, with the number only as secondary text (#929)', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>

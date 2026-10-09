@@ -1,4 +1,4 @@
-import type { Job, Param, Plate, PlateFit } from '../api/types'
+import type { Job, OutputPlate, Param, Plate, PlateFit } from '../api/types'
 import { length, type DisplayUnit } from './units'
 
 /**
@@ -107,4 +107,9 @@ export function boundByPlate<S extends { parameters?: Param[] }>(schema: S, plat
       return param.max != null && param.max <= limit ? param : { ...param, max: limit }
     }),
   }
+}
+
+/** #986 — a plate as the dialog names it: what it holds (#929), else its number. */
+export function plateLabel(plates: readonly OutputPlate[], index: number): string {
+  return plates.find((plate) => plate.index === index)?.name ?? `Plate ${index}`
 }

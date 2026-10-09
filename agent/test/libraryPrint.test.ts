@@ -79,15 +79,29 @@ describe('the library routes', () => {
         asked.push(`filaments ${new URL(request.url).search}`)
         return HttpResponse.json({ slots: [] })
       }),
+      http.get(`${LIB}/plates`, () => {
+        asked.push('plates')
+        return HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Lid' },
+          { index: 2, has_thumbnail: false, name: null },
+        ])
+      }),
       http.get(`${LIB}/progress`, () => {
         asked.push('progress')
         return HttpResponse.json({ settled: true })
       }),
     )
-    expect(firstText(await tool('get_print_choices').execute({ library_file_id: FILE, printer_id: 3 }, ctx()))).toEqual({ printer_id: 1 })
+    // #986: the plates come with their names.
+    expect(firstText(await tool('get_print_choices').execute({ library_file_id: FILE, printer_id: 3 }, ctx()))).toEqual({
+      printer_id: 1,
+      plates: [
+        { index: 1, name: 'Lid' },
+        { index: 2, name: null },
+      ],
+    })
     await tool('get_print_filaments').execute({ library_file_id: FILE, plate_id: 2 }, ctx())
     expect(firstText(await tool('get_print_progress').execute({ library_file_id: FILE }, ctx()))).toEqual({ settled: true })
-    expect(asked).toEqual(['choices ?printer_id=3', 'filaments ?plate_id=2', 'progress'])
+    expect(asked.sort()).toEqual(['choices ?printer_id=3', 'filaments ?plate_id=2', 'plates', 'progress'])
   })
 
   it('remembers choices for a library file', async () => {
