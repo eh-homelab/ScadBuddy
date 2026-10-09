@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Database } from '../src/db.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../src/gate/durable.js'
 import { durableRequestId } from '../src/gate/ids.js'
+import { PendingInputSweep, temporalDescriber } from '../src/gate/sweep.js'
 import { RespondRefusal } from '../src/gate/validate.js'
 import { BROWSER_USER } from '../src/routes/approvals.js'
 import { respond, RespondError, sessionPendingInput } from '../src/routes/pendingInput.js'
@@ -130,6 +131,30 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       expect(JSON.stringify(result.content)).toMatch(/approval grant is for approving another/)
       // Still parked: the refusal was the workflow's validator's, nothing was resolved.
       expect(await m.durable!.pendingInput(sessionId)).toHaveLength(1)
+    }, 60_000)
+
+    it("the orphan sweep removes a terminated run's row, and keeps a running one's", async () => {
+      const { m, sessionId } = await durableSession()
+      const live = await park()
+      await db.sql`
+        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
+        VALUES (${live.sessionId}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10, 1, 'durable')`
+      const runOf = async (id: string) => (await env.client.workflow.getHandle(sessionWorkflowId(id)).describe()).runId
+      for (const [id, run] of [
+        [sessionId, await runOf(sessionId)],
+        [live.sessionId, await runOf(live.sessionId)],
+      ] as const) {
+        await db.sql`
+          INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, responders, created_at, expires_at)
+          VALUES (${durableRequestId(id, run, 'toolu_1')}, ${id}, ${sessionWorkflowId(id)}, ${run}, 'approval', 'print_output', '{}',
+                  ${['browser', 'grant']}, now() - interval '1 hour', now() + interval '1 hour')`
+      }
+      await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).terminate('test')
+      const sweep = new PendingInputSweep({ sql: db.sql, events: m.events, describe: temporalDescriber(env.client) })
+      expect(await sweep.sweep()).toBe(1)
+      const left = await db.sql<{ session_id: string }[]>`SELECT session_id FROM ai_pending_input`
+      expect(left.map((r) => r.session_id)).toEqual([live.sessionId])
+      await env.client.workflow.getHandle(sessionWorkflowId(live.sessionId)).terminate('test')
     }, 60_000)
 
     it('a durable id for a classic session, an unknown session or a malformed id is stale', async () => {

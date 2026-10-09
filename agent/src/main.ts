@@ -45,6 +45,7 @@ import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
 import { DurableGate } from './gate/durable.js'
+import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
@@ -352,6 +353,14 @@ const temporalClient = temporal
   : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
+const stopOrphanSweep =
+  sessions && temporalClient
+    ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit }).start(
+        APPROVAL_SWEEP_MS,
+        { onError: (err) => console.error('pending-input orphan sweep failed:', (err as Error).message) },
+      )
+    : undefined
 const commands =
   temporalClient && operationStore
     ? new AgentCommands({
@@ -431,6 +440,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
+  stopOrphanSweep?.()
   stopReaper?.()
   stopRetention?.()
   // Running turns first, while the panel's socket, the paired tab and the pool

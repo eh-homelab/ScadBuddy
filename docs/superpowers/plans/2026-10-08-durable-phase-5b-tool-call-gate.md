@@ -26,6 +26,7 @@
 | the manifest's `hitl` field (`dist/tools.json`) and the durable-only tools `ask_user` / `wait_for_user` | `activity_as_tool(..., needs_approval=hitl is not None)` |
 | the `agent-tools` activity reading the answer from `ai_input_responses` by `request_id`, and the `tool_call` audit row naming its approver through `request_id` | the answer kinds' results, and the approved call's audit |
 | `DurableGate.cancelInput` / `interrupt` (TypeScript client) | 5c wires them into the manager's interrupt, handoff and send paths, beside the workflow's handlers |
+| the activity `gate.describe_call` on `agent-tools` (`{tool, input}` → `{summary, input_hash}`, Ruling 14) | `OpenInput.summary` and `input_hash` for an approval entry |
 | the orphan sweep (`PendingInputSweep`) | nothing: it already runs in the agent service |
 
 ## Rulings (decisions where §6.6 is ambiguous; the spec governs everything else)
@@ -41,6 +42,9 @@
 - **Ruling 9, `requested_by`.** Stored as `jsonb` (`{kind, id, label}`), the entry shape's own field; `responders` as `text[]`; the attention details as `attention jsonb`, which the aggregate read needs for the badge's counts.
 - **Ruling 10, the per-session read.** `GET /api/v1/ai/sessions/{id}/pending-input` is a UI read behind `uiReadProblem`, like the aggregate. Other principals read through the two read-tier tools, which apply the approvals' visibility rules (grant holders see every approval; others their own sessions' entries and their own MCP prepares; answers only for sessions they own).
 - **Ruling 11, the durable read while the worker is down.** The per-session read sends the Query and answers 503 ("the session's worker is not answering") when it does not answer within 5 s. It never falls back to the projection: the spec makes the Query the source of truth.
+- **Ruling 12, `wait_for_user` has no `done` reason.** A `done` summary waits for nothing and is posted, not parked, so it is not a gated call. The durable tool takes `tab_disconnected`, `question` and `blocked` only; a durable `done` summary is 5c's to design if it is wanted.
+- **Ruling 13, the session's status after an orphan.** The sweep cancels a closed run's rows and moves a session still `waiting_*` with nothing else parked to `idle`, not `running` as `resolve_input` does: no run holds the entry any more. If a newer run exists, DurableSession sets its own status at its next transition.
+- **Ruling 14, an approval's summary and hash come from the agent.** Python cannot reproduce the agent's scrubbing or the approvals' HMAC key, so 5b adds the `gate.describe_call` activity on `agent-tools` (`{tool, input}` → `{summary, input_hash}`). `OpenInput` takes both as given.
 
 ## Global Constraints
 
