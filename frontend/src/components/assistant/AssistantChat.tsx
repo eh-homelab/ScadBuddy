@@ -22,7 +22,7 @@ import {
 } from '../../agent/chat/images'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
-import { isDone, type UserImage } from '../../agent/chat/protocol'
+import { isDone, type SessionMode, type UserImage } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
 import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
@@ -32,7 +32,8 @@ import { api, ApiError } from '../../api/client'
 import type { AiSessionView } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
-import { OriginBadge } from './badges'
+import { DurableBadge, OriginBadge } from './badges'
+import { SessionModePicker } from './SessionModePicker'
 import { FeedItemView } from './FeedItemView'
 import { ToolGroup } from './ToolGroup'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
@@ -64,6 +65,7 @@ function patchOf(view: AiSessionView): SessionPatch {
     updatedAt: view.updated_at,
     costUsd: view.cost_usd,
     budgetUsd: view.budget_usd,
+    ...(view.mode ? { mode: view.mode } : {}),
   }
 }
 
@@ -108,6 +110,18 @@ function readAdvanced(): boolean {
     return window.localStorage.getItem(ADVANCED_KEY) === '1'
   } catch {
     return false
+  }
+}
+
+/** Plan 5d — the composer's last picked session mode, remembered per browser (spec §6.1). */
+export const SESSION_MODE_KEY = 'scadbuddy.assistant.mode'
+
+function readSessionMode(): SessionMode | '' {
+  try {
+    const stored = window.localStorage.getItem(SESSION_MODE_KEY)
+    return stored === 'classic' || stored === 'durable' ? stored : ''
+  } catch {
+    return ''
   }
 }
 
@@ -170,6 +184,17 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       }
       return next
     })
+  }
+  // Plan 5d — the mode a new chat asks for; '' sends none, so the agent's default applies.
+  const [sessionMode, setSessionMode] = useState<SessionMode | ''>(readSessionMode)
+  function pickSessionMode(next: SessionMode | '') {
+    setSessionMode(next)
+    try {
+      if (next) window.localStorage.setItem(SESSION_MODE_KEY, next)
+      else window.localStorage.removeItem(SESSION_MODE_KEY)
+    } catch {
+      // Private mode or blocked storage: the choice still holds for this page.
+    }
   }
   const composer = useRef<HTMLTextAreaElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
@@ -348,7 +373,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
     const images = attachedNow.current.map((a) => ({ kind: 'attachment' as const, id: a.id }))
-    chat.send(text, pageContext(pathname, { tools, dialogs, page }), images.length ? images : undefined)
+    chat.send(
+      text,
+      pageContext(pathname, { tools, dialogs, page }),
+      images.length ? images : undefined,
+      sessionMode || undefined,
+    )
     writeDraft('')
     writeAttached([])
     setImageErrors([])
@@ -425,6 +455,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     }
   }
   const hasReply = lastReply !== undefined
+  const durable = active?.mode === 'durable'
   const parent = active?.parentId ? state.sessions[active.parentId] : undefined
 
   const prompts = suggestedPrompts(pathname)
@@ -524,11 +555,15 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       )}
 
       {active && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5 text-[12px]">
+        <div
+          className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5 text-[12px]"
+          data-testid="active-session-header"
+        >
           <span className="min-w-0 flex-1 truncate font-medium" title={active.title} data-testid="active-session-title">
             {active.title}
           </span>
           <OriginBadge origin={active.origin} />
+          {durable && <DurableBadge />}
           <span className="text-faint" data-testid="agent-status">
             {statusLabel(active.status)}
           </span>
@@ -548,11 +583,13 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <Button
             variant="ghost"
             size="sm"
-            disabled={!hasReply}
+            disabled={!hasReply || durable}
             title={
-              hasReply
-                ? 'Copy this chat into a new one and continue there; this one stays as it is'
-                : 'No reply to fork yet: wait for the assistant to answer'
+              durable
+                ? 'A durable session cannot be forked: its conversation is held by its workflow'
+                : hasReply
+                  ? 'Copy this chat into a new one and continue there; this one stays as it is'
+                  : 'No reply to fork yet: wait for the assistant to answer'
             }
             data-agent-user-only=""
             onClick={() => fork(active.id)}
@@ -587,6 +624,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           {forkError && (
             <p role="alert" className="w-full text-warn">
               The chat was not forked: {forkError}
+            </p>
+          )}
+          {active.modeFallback && (
+            // Plan 5d — the default asked for durable, and it could not run.
+            <p className="w-full text-[11.5px] text-muted" data-testid="session-mode-fallback">
+              Running as Classic: {active.modeFallback.replace(/^ran as classic: /, '')}
             </p>
           )}
           {!owned && (
@@ -748,6 +791,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             ))}
           </ul>
         )}
+        {!active && <SessionModePicker value={sessionMode} onChange={pickSessionMode} />}
         <textarea
           id="assistant-composer"
           ref={composer}

@@ -31,6 +31,7 @@ import {
   type ImagePreview,
   type Owner,
   type ServerEvent,
+  type SessionMode,
   type SessionStatus,
   type SessionSummary,
 } from '../agent/chat/protocol'
@@ -56,7 +57,21 @@ export interface MockAgentOptions {
   stepMs?: number
   /** What a new chat may spend in all; each turn costs COST_PER_TURN. */
   budgetUsd?: number
+  /**
+   * Plan 5d — whether a durable session can start (default true). When not, a new chat
+   * that names no mode runs classic and says why, and one asking for durable is refused.
+   */
+  durableAvailable?: boolean
+  /**
+   * Plan 5d — the mode a chat that names none gets. Classic here (the agent's default is
+   * durable) because the mock's scripts are classic sessions: they fork, which a durable
+   * session refuses.
+   */
+  defaultMode?: SessionMode
 }
+
+/** Plan 5d — why the mock's default durable chat ran classic (agent manager.ts `startMode`). */
+export const MOCK_MODE_FALLBACK = 'ran as classic: no durable session worker (agent-durable) polls Temporal\'s "agent" queue'
 
 /** What one scripted turn costs. */
 export const COST_PER_TURN = 0.0184
@@ -114,7 +129,12 @@ function chunks(text: string, size = 14): string[] {
   return out
 }
 
-export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAgentOptions = {}): MockAgentTransport {
+export function createMockAgentTransport({
+  stepMs = 120,
+  budgetUsd = 1,
+  durableAvailable = true,
+  defaultMode = 'classic',
+}: MockAgentOptions = {}): MockAgentTransport {
   let handlers: TransportHandlers | null = null
   const sent: ClientMessage[] = []
   const sessions = new Map<string, MockSession>()
@@ -465,7 +485,18 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           return
         }
         const isNew = !s
+        if (s && msg.mode) {
+          emit({ type: 'error', sessionId: s.sessionId, code: 'invalid', message: `session ${s.sessionId} exists: its mode is set when it starts` })
+          return
+        }
+        if (!s && msg.mode === 'durable' && !durableAvailable) {
+          emit({ type: 'error', code: 'unavailable', message: MOCK_MODE_FALLBACK.replace('ran as classic: ', 'durable sessions cannot run now: ') })
+          return
+        }
         if (!s) {
+          const asked = msg.mode ?? defaultMode
+          const fellBack = !msg.mode && asked === 'durable' && !durableAvailable
+          const mode = fellBack ? 'classic' : asked
           s = {
             sessionId: nextId('chat'),
             title: msg.text.slice(0, 40),
@@ -477,9 +508,19 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
             turns: 0,
             costUsd: 0,
             budgetUsd,
+            mode,
           }
           sessions.set(s.sessionId, s)
-          emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title, budgetUsd })
+          emit({
+            type: 'session.started',
+            sessionId: s.sessionId,
+            origin: 'chat',
+            owner: BROWSER_USER,
+            title: s.title,
+            budgetUsd,
+            mode,
+            ...(fellBack ? { modeFallback: MOCK_MODE_FALLBACK } : {}),
+          })
         }
         emit({
           type: 'user.turn',
@@ -554,7 +595,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
   const snapshot = (): ServerEvent => ({
     v: PROTOCOL_VERSION,
     type: 'sessions.snapshot',
-    sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd }) => ({
+    sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, mode }) => ({
       sessionId,
       title,
       origin,
@@ -564,6 +605,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
       updatedAt: new Date().toISOString(),
       costUsd,
       budgetUsd,
+      ...(mode ? { mode } : {}),
     })),
   })
 
