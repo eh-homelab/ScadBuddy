@@ -621,9 +621,9 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `agent` queue; without them a session whose mode came from this default runs classic
   and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
   and `sessions_start`), while one that asked for `durable` is refused 503
-  (plan `2026-10-09-durable-phase-5d-mode.md`). The worker check reads Temporal's
-  pollers, which it keeps listing for some minutes after a worker has gone: an
-  `agent-durable` that died just now still counts until then;
+  (plan `2026-10-09-durable-phase-5d-mode.md`). The worker check counts only a
+  poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
+  gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `model` and `approval_expiry_seconds` have no

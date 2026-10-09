@@ -59,6 +59,8 @@ describe('session mode', () => {
     expect(within(header).getByText('Durable')).toBeInTheDocument()
     // Its conversation is in the workflow: no fork.
     expect(within(header).getByRole('button', { name: 'Fork' })).toHaveAttribute('title', expect.stringMatching(/cannot be forked/))
+    await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent(/idle|approval/i))
+    expect(screen.queryByRole('button', { name: /Fork from here/ })).not.toBeInTheDocument()
     // Set at the start: the picker is gone once a session is open.
     expect(screen.queryByRole('combobox', { name: 'Session mode' })).not.toBeInTheDocument()
   })

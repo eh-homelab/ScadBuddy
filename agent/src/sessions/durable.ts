@@ -5,6 +5,7 @@ import {
   WorkflowUpdateFailedError,
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
+import { optionalTsToMs } from '@temporalio/common/lib/time.js'
 import type { Sql } from 'postgres'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { type SessionImage, imageOfBlock, SessionBlobs } from './blobs.js'
@@ -43,6 +44,11 @@ export const SEND_MESSAGE_UPDATE = 'send_message'
 const READY_TTL_MS = 15_000
 /** How long "Temporal did not answer" is reused: short, so a blip passes, but an outage costs one deadline per window. */
 const UNANSWERED_TTL_MS = 2_000
+/**
+ * A poller seen longer ago than this is a worker that has gone: Temporal lists pollers
+ * for minutes after, but a live worker re-polls at least once a long-poll (about 60 s).
+ */
+const POLLER_FRESH_MS = 70_000
 /** How long the readiness check waits for Temporal before calling it unreachable. */
 const READY_DEADLINE_MS = 3_000
 /** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW */
@@ -131,8 +137,8 @@ export class DurableTurns {
    * turn would wait on a queue no one reads, so the manager falls back or refuses at
    * start instead. An answer from Temporal is reused for READY_TTL_MS, no answer for
    * UNANSWERED_TTL_MS, so one blip does not refuse explicit durable starts for long.
-   * Temporal keeps listing a poller for some minutes after its worker has gone, so a
-   * worker that died just now still counts as ready until then.
+   * Only a poller seen within POLLER_FRESH_MS counts: Temporal keeps listing one for
+   * minutes after its worker has gone.
    */
   async unready(): Promise<string | undefined> {
     const cached = this.#ready
@@ -147,7 +153,9 @@ export class DurableTurns {
           taskQueueType: WORKFLOW_TASK_QUEUE,
         }),
       )
-      if (!pollers?.length) why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
+      const now = Date.now()
+      const live = (pollers ?? []).filter((p) => now - (optionalTsToMs(p.lastAccessTime) ?? 0) < POLLER_FRESH_MS)
+      if (!live.length) why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
     } catch {
       why = 'Temporal did not answer'
       answered = false

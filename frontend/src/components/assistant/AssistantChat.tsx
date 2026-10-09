@@ -698,7 +698,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                 sessionId={active.id}
                 askedBy={block.item.kind === 'question' ? askedBy(active.items, block.item) : undefined}
                 onForkHere={
-                  forkPoints.has(`${block.item.kind}:${block.item.id}`)
+                  // A durable session refuses a fork (Ruling 7b), from any point.
+                  !durable && forkPoints.has(`${block.item.kind}:${block.item.id}`)
                     ? () => fork(active.id, forkPoints.get(`${block.item.kind}:${block.item.id}`) ?? {})
                     : undefined
                 }
