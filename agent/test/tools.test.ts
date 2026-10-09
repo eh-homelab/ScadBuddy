@@ -7,7 +7,9 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { ACCEPTING_MS, COMMAND_FOLLOW_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
-import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { runTool, TOOL_DEADLINE_MS, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { CALL_TIMEOUT_MS } from '../src/bridge/hub.js'
+import { TAB_WAIT_S } from '../src/sessions/manager.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
 import { validateParams } from '../src/tools/validate.js'
@@ -55,6 +57,60 @@ const SCHEMA = {
 describe('print_output still-accepting budget (#1061)', () => {
   it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
     expect(ACCEPTING_MS).toBe(240_000)
+  })
+})
+
+describe('every call has a deadline (#1918)', () => {
+  it('answers a call whose backend never answers as timed out, and aborts its signal', async () => {
+    let release = () => {}
+    let aborted: AbortSignal | undefined
+    server.use(
+      // get_schema's request does not carry the call's signal: the deadline answers anyway.
+      http.get(`${BACKEND}/api/v1/models/:slug/schema`, () => new Promise<Response>((resolve) => {
+        release = () => resolve(HttpResponse.json({}))
+      })),
+    )
+    const t = tool('get_schema')
+    const slow: Tool = { ...t, execute: (args, c) => ((aborted = c.signal), t.execute(args, c)) }
+    try {
+      const result = await runTool(slow, { slug: 'cable-clip' }, ctx({ toolDeadlineMs: 50 }))
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('get_schema did not answer within 0 s and was stopped')
+      expect(aborted?.aborted).toBe(true)
+    } finally {
+      release()
+    }
+  })
+
+  it('never tells the model a write that timed out did not happen', async () => {
+    let release = () => {}
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/:slug/presets`, () => new Promise<Response>((resolve) => {
+        release = () => resolve(HttpResponse.json({}))
+      })),
+    )
+    try {
+      const result = await runTool(
+        tool('save_preset'),
+        { slug: 'cable-clip', name: 'p', params: {} },
+        ctx({ toolDeadlineMs: 50 }),
+      )
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toMatch(/It may still have taken effect: check whether it did before calling save_preset again\.$/)
+      expect(firstText(result)).not.toContain('was stopped')
+    } finally {
+      release()
+    }
+  })
+
+  it('allows a tool its own designed wait on top', () => {
+    const c = ctx()
+    expect(tool('get_schema').deadlineMs({ slug: 'x' }, c)).toBe(TOOL_DEADLINE_MS)
+    expect(tool('render_model').deadlineMs({ slug: 'x' }, c)).toBe(ACCEPTING_MS + c.renderWaitMs + TOOL_DEADLINE_MS)
+    expect(tool('sessions_send').deadlineMs({ session_id: 's', text: 'hi', wait_seconds: 600 }, c)).toBe(
+      600_000 + TOOL_DEADLINE_MS,
+    )
+    expect(tool('browser_snapshot').deadlineMs({}, c)).toBe(2 * CALL_TIMEOUT_MS + TAB_WAIT_S * 1000 + TOOL_DEADLINE_MS)
   })
 })
 

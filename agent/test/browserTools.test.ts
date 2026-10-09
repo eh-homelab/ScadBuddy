@@ -596,8 +596,10 @@ describe('waiting for the tab (#815)', () => {
     const stop = new AbortController()
     const result = runTool(tool('browser_snapshot'), {}, ctx(hub.forSession('s1'), agent, stop.signal))
     await expect.poll(() => seen.length).toBe(2)
-    expect(seen[1]).toBe(stop.signal)
+    // The call's signal, joined with its deadline (registry.ts withDeadline, #1918).
+    expect(seen[1]?.aborted).toBe(false)
     stop.abort()
+    expect(seen[1]?.aborted).toBe(true)
     expect(text(await result)).toMatch(/the call was cancelled/)
   })
 

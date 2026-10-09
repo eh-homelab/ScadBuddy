@@ -382,6 +382,7 @@ export const sessionTools: Tool[] = [
     routes: [],
     source: TRANSCRIPT_SOURCE,
     summarize: ({ title, prompt }) => `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}`,
+    waitsMs: ({ wait_seconds }) => wait_seconds * 1000,
     handler: async ({ prompt, title, tags, scope, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
       const { session, turn } = await refusals(() =>
@@ -421,6 +422,7 @@ export const sessionTools: Tool[] = [
     source: TRANSCRIPT_SOURCE,
     summarize: ({ session_id, images }) =>
       `send a message${images ? ` with ${images.length} image${images.length === 1 ? '' : 's'}` : ''} to session ${session_id}`,
+    waitsMs: ({ wait_seconds }) => wait_seconds * 1000,
     handler: async ({ session_id, text, images, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
       const owner = ownerOf(ctx.principal)
@@ -509,6 +511,7 @@ export const sessionTools: Tool[] = [
     risk: 'read',
     routes: [],
     source: TRANSCRIPT_SOURCE,
+    waitsMs: ({ wait_seconds }) => wait_seconds * 1000,
     handler: async ({ session_id, after_seq, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
       const owner = ownerOf(ctx.principal)
