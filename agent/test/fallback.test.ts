@@ -577,6 +577,20 @@ describe('runWithFallback (#1093)', () => {
     expect(h.runs[1]?.resume).toBeUndefined()
   })
 
+  it('resumes without the memory hooks’ UserPromptSubmit, which fired for the user’s message already (#1896)', async () => {
+    const hook = () => Promise.resolve({})
+    const memoryHooks = { UserPromptSubmit: [{ hooks: [hook] }], Stop: [{ hooks: [hook] }] }
+    const fresh = harness((_r, n) => (n === 0 ? [retry(401, 'authentication_failed')] : [init(), success('ok')]))
+    await fresh.collect([A, B], { memoryHooks })
+    // Never reported a session: the message runs again as it was, with its hooks.
+    expect(fresh.runs[1]?.memoryHooks).toBe(memoryHooks)
+    const resumed = harness((_r, n) => (n === 0 ? [init(), retry(401, 'authentication_failed')] : [init(), success('ok')]))
+    await resumed.collect([A, B], { memoryHooks })
+    expect(resumed.runs[0]?.memoryHooks).toBe(memoryHooks)
+    expect(resumed.runs[1]).toMatchObject({ prompt: CONTINUE_PROMPT, memoryHooks: { Stop: memoryHooks.Stop } })
+    expect(resumed.runs[1]?.memoryHooks).not.toHaveProperty('UserPromptSubmit')
+  })
+
   it('stops everything when the caller aborts, and never falls back', async () => {
     const stop = new AbortController()
     const h = harness(() => {

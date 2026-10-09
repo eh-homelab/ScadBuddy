@@ -12,9 +12,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from scadbuddy.api.deps import PrintRunsDep, SettingsStoreDep, UploadsDep
-from scadbuddy.api.outputs import OutputPlate
+from scadbuddy.api.outputs import OutputPlate, read_plain_files
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
@@ -69,6 +70,55 @@ async def get_library_plates(file_id: FileIdPath, store: SettingsStoreDep) -> li
         OutputPlate(index=plate.index, has_thumbnail=plate.has_thumbnail, name=plate.name or None)
         for plate in plates.plates
     ]
+
+
+class LibraryFileObject(BaseModel):
+    """One object of a library file, as Arrange reads it from the 3MF (#1863)."""
+
+    #: What `POST /outputs/arrange` names it by, with `library_file_id`.
+    part: str
+    name: str
+    #: How many build items place it this way up.
+    count: int
+    #: Its filaments' colours, `#RRGGBB`.
+    colours: list[str]
+    #: Width, depth and height, mm.
+    size: tuple[float, float, float]
+    notes: list[str]
+
+
+class LibraryFileObjects(BaseModel):
+    file_id: int
+    filename: str
+    objects: list[LibraryFileObject]
+
+
+@router.get(
+    "/{file_id}/objects",
+    response_model=LibraryFileObjects,
+    summary="The objects Arrange reads from a library file",
+)
+async def get_library_objects(file_id: FileIdPath, store: SettingsStoreDep) -> LibraryFileObjects:
+    """Each object the file's 3MF places, with its count (#1863): what the Arrange
+    dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the
+    arrange's own 422 (code `library_file_not_arrangeable`), saying why."""
+    async with client_for(store.load()) as client:
+        found = (await read_plain_files(client, [file_id]))[file_id]
+    return LibraryFileObjects(
+        file_id=file_id,
+        filename=found.filename,
+        objects=[
+            LibraryFileObject(
+                part=obj.part,
+                name=obj.file,
+                count=obj.count,
+                colours=obj.colours,
+                size=obj.bbox.size,
+                notes=obj.notes,
+            )
+            for obj in found.objects
+        ],
+    )
 
 
 @router.get(

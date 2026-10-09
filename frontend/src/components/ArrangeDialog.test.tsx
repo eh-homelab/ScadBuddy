@@ -39,10 +39,15 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
         onArranged={onArranged}
       />,
     )
-    // The clip arranges through the output it is a copy of; the wand is not ScadBuddy's.
+    // The clip arranges through the output it is a copy of; the wand, which ScadBuddy did
+    // not make, through the objects read from its 3MF (#1863).
     expect(await screen.findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
     expect(screen.getByLabelText('Copies of bin — Bin')).toHaveValue(1)
-    expect(screen.getByText(`${wand.filename} was not made by ScadBuddy, so it cannot be arranged yet.`)).toBeVisible()
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const star = screen.getByLabelText(`Copies of Star — ${wand.filename}`)
+    expect(star).toHaveValue(2)
+    await user.clear(star)
+    await user.type(star, '5')
     const filing = screen.getByLabelText('File under')
     expect(filing).toHaveValue('gridfinity-bin')
     await user.selectOptions(filing, 'name-keychain')
@@ -53,6 +58,8 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
       objects: [
         { output_id: bin.id, part: 'piece-bin', count: 1 },
         { output_id: first.id, part: 'piece-wall', count: 2 },
+        { library_file_id: wand.id, part: 'lib1-67-0', count: 1 },
+        { library_file_id: wand.id, part: 'lib1-67-1', count: 5 },
       ],
     })
     expect(onArranged).toHaveBeenCalledWith(
@@ -67,7 +74,6 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
     renderPage(<ArrangeDialog open sources={fromFiles([gone])} onClose={vi.fn()} onArranged={vi.fn()} />)
     expect(await screen.findByText(/could not read what it made them from: .*: no such output\./)).toBeVisible()
-    expect(screen.queryByText(/not made by ScadBuddy/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Arrange' })).toBeDisabled()
   })
 
@@ -113,9 +119,41 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     await user.selectOptions(await screen.findByLabelText('Library folder'), '1')
     await user.click(await screen.findByRole('checkbox', { name: /Clara's Wand/ }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
-    expect(
-      await screen.findByText("Clara's Wand.3mf was not made by ScadBuddy, so it cannot be arranged yet."),
-    ).toBeVisible()
+    expect(await screen.findByLabelText("Copies of Wand — Clara's Wand.3mf")).toBeVisible()
+  })
+
+  it('leaves out a library file whose objects cannot be read, saying why (#1863)', async () => {
+    const sliced = libraryFiles.find((f) => f.id === 104) as LibraryEntry
+    renderPage(
+      <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([sliced])]} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    expect(await screen.findByText(/^Left out: .*: it is sliced already/)).toHaveTextContent(sliced.filename)
+    expect(screen.getByRole('button', { name: 'Arrange' })).toBeEnabled()
+  })
+
+  it('files library files alone under any template picked (#1863)', async () => {
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const filing = await screen.findByLabelText('File under')
+    expect(within(filing).getAllByRole('option').map((o) => o.textContent)).toEqual(
+      fixtures.models.map((m) => m.slug),
+    )
+    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()).toMatchObject({
+      slug: 'gridfinity-bin',
+      objects: [
+        { library_file_id: wand.id, part: 'lib1-67-0', count: 1 },
+        { library_file_id: wand.id, part: 'lib1-67-1', count: 2 },
+      ],
+    })
+    expect(onArranged).toHaveBeenCalledWith(
+      expect.objectContaining({ output: expect.objectContaining({ slug: 'gridfinity-bin' }) }),
+    )
   })
 })
 

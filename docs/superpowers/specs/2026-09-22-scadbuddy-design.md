@@ -794,6 +794,15 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
     declared that way, so presets and outputs saved before the rename still
     render. Before this, a render took any value of the right type and only a
     preset save checked a dropdown's options.
+  - *Printer-bound sizes (#81).* A number parameter in millimetres whose largest
+    sensible value is the plate is declared on a comment line of its own,
+    `// plate <name> = x` (or `y`, `z`); the schema's `plate_max`. The served range
+    is the source's; the customizer narrows the max to the plate in view (X and Y
+    where every extruder reaches, Z the printable height, as `GET /plate/fit`
+    judges them), never under the declared min, and a value past it is flagged on
+    its field and not rendered (#921). Choosing another printer in the print
+    dialog moves the bound with the plate. A template-owned UI's `<sb-param>`
+    keeps the declared range.
   - A test derives the schema of every `models/*/model.scad` and runs its
     defaults, and every shipped `presets.json`, through the same check.
 - The working directory is a temp dir under `jobs/`; OpenSCAD's cwd is the

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import zipfile
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
@@ -42,7 +43,7 @@ from scadbuddy.api.jobs import (
     require_job,
     submit_problems,
 )
-from scadbuddy.api.models import PNG_MAGIC, require_model
+from scadbuddy.api.models import PNG_MAGIC, require_model, require_model_exists
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
@@ -51,9 +52,15 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.download import download_3mf
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.library_objects import (
+    LibraryObjects,
+    NotArrangeableError,
+    publish_library_pieces,
+    read_library_objects,
+)
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
@@ -279,25 +286,26 @@ class NeedsBackfillProblem(BaseModel):
 MAX_ARRANGE_COPIES = 2000
 
 
-#: Arrange's 422 for a library file no output records as a copy (#1864): reading such a
-#: file's objects from its 3MF is #1863, so until then it cannot be arranged.
+#: Arrange's 422 for a library file whose objects cannot be read from its 3MF (#1863): a
+#: sliced file, one past the download cap, one painted or cut by a negative part.
 LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
 
 
 class ArrangeObject(BaseModel):
     """One source's object, or every object of it (#1864). The source is an output, or
-    a Bambuddy library file ScadBuddy uploaded, read through the output it is a copy of
-    (`output_bambuddy_uploads`, #455)."""
+    a Bambuddy library file: one ScadBuddy uploaded is read through the output it is a
+    copy of (`output_bambuddy_uploads`, #455), any other from its 3MF (#1863)."""
 
     #: An output id, as `OutputIdPath` takes it: the store looks it up by directory
     #: glob, so "*" must never reach it.
     output_id: str | None = Field(default=None, pattern=OUTPUT_ID_PATTERN)
     #: A Bambuddy library file id, in place of `output_id`.
     library_file_id: int | None = Field(default=None, ge=1)
-    #: A `manifest` entry's `part`; omitted is every object of the source.
+    #: A `manifest` entry's `part` (a library file's: GET /print/library/{id}/objects);
+    #: omitted is every object of the source.
     part: str | None = None
     #: Copies to place (of each object, with `part` omitted); 0 leaves it out, and
-    #: omitted is the object's own count in its output.
+    #: omitted is the object's own count in its source.
     count: int | None = Field(default=None, ge=0, le=500)
     #: With `goal = keep_together`: objects sharing a group share a plate.
     group: str | None = Field(default=None, max_length=100)
@@ -320,8 +328,8 @@ class ArrangeRequest(BaseModel):
     #: output's colours, then any colour the others add.
     colours: list[str] | None = None
     name: str | None = Field(default=None, max_length=200)
-    #: The template the result is filed under, one of the objects' (#1864); omitted is
-    #: the first object's.
+    #: The template the result is filed under (#1864): one of the outputs', omitted the
+    #: first one's. With library files only, any template, and required.
     slug: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
@@ -340,47 +348,67 @@ def _check_copies(total: int) -> None:
 
 async def resolve_library_files(
     uploads: BambuddyUploadStore, outputs: OutputStore, body: ArrangeRequest
-) -> ArrangeRequest:
-    """``body`` with each library file named by the output it is a copy of (#1864). A
-    file no output records is refused, all of them at once, until #1863 reads one; a
+) -> tuple[ArrangeRequest, list[int]]:
+    """``body`` with each library file ScadBuddy uploaded named by the output it is a
+    copy of (#1864), and the plain files left, which are read from their 3MF (#1863). A
     file whose output has since been deleted is a 404 naming the file."""
     wanted = list(dict.fromkeys(o.library_file_id for o in body.objects if o.library_file_id))
     if not wanted:
-        return body
+        return body, []
     found = await uploads.outputs_for_files(wanted)
-    plain = [file_id for file_id in wanted if file_id not in found]
-    if plain:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"{len(plain)} library file(s) were not made by ScadBuddy, so nothing records"
-            " their objects; arranging such a file is not supported yet",
-            code=LIBRARY_FILE_NOT_ARRANGEABLE,
-            library_file_ids=plain,
-        )
-    for file_id in wanted:
+    for file_id, output_id in found.items():
         try:
-            await asyncio.to_thread(outputs.directory, found[file_id])
+            await asyncio.to_thread(outputs.directory, output_id)
         except OutputNotFoundError:
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
-                f"library file {file_id} is a copy of output {found[file_id]}, which has"
-                " been deleted",
+                f"library file {file_id} is a copy of output {output_id}, which has been deleted",
             ) from None
     objects = [
         o
-        if o.library_file_id is None
+        if o.library_file_id not in found
         else o.model_copy(update={"output_id": found[o.library_file_id], "library_file_id": None})
         for o in body.objects
     ]
-    return body.model_copy(update={"objects": objects})
+    plain = [file_id for file_id in wanted if file_id not in found]
+    return body.model_copy(update={"objects": objects}), plain
+
+
+async def read_plain_files(
+    client: BambuddyClient, file_ids: list[int]
+) -> dict[int, LibraryObjects]:
+    """Each plain library file's objects, read from its 3MF (#1863). Every file that
+    cannot be arranged is refused at once, each with why."""
+    read: dict[int, LibraryObjects] = {}
+    refused: list[NotArrangeableError] = []
+    for file_id in file_ids:
+        try:
+            read[file_id] = await read_library_objects(client, file_id)
+        except NotArrangeableError as error:
+            refused.append(error)
+    if refused:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{len(refused)} library file(s) cannot be arranged: "
+            + "; ".join(str(error) for error in refused),
+            code=LIBRARY_FILE_NOT_ARRANGEABLE,
+            library_file_ids=[error.file_id for error in refused],
+        )
+    return read
 
 
 def arrange_inputs(
-    outputs: OutputStore, body: ArrangeRequest, *, plate_model: str | None
+    outputs: OutputStore,
+    body: ArrangeRequest,
+    *,
+    plate_model: str | None,
+    library: Mapping[int, LibraryObjects] | None = None,
 ) -> tuple[str, ArrangeInputs]:
-    """Resolve the objects against the outputs' manifests, so every refusal happens here
-    rather than on a worker (spec §10). Every object names an output by now
-    (`resolve_library_files`)."""
+    """Resolve the objects against the outputs' manifests, and a plain library file's
+    against its objects as ``library`` read them, so every refusal happens here rather
+    than on a worker (spec §10). Every library file ScadBuddy uploaded names its output
+    by now (`resolve_library_files`)."""
+    library = library or {}
     manifests: dict[str, dict[str, ManifestObject]] = {}
     items: list[PackItem] = []
     provenance: dict[str, ManifestObject] = {}
@@ -389,7 +417,7 @@ def arrange_inputs(
     colours: list[str] = list(body.colours or [])
     slugs: list[str] = []
     # Every output first, so one refusal names all that need a re-render (#902).
-    chosen = list(dict.fromkeys(_output_of(o) for o in body.objects))
+    chosen = list(dict.fromkeys(o.output_id for o in body.objects if o.output_id is not None))
     for output_id in chosen:
         require_output(outputs, output_id)
     unrecorded = [i for i in chosen if not outputs.manifest(i)]
@@ -404,22 +432,31 @@ def arrange_inputs(
             output_ids=unrecorded,
         )
     for obj in body.objects:
-        output_id = _output_of(obj)
-        meta = require_output(outputs, output_id)
-        if meta.slug not in slugs:
-            slugs.append(meta.slug)
-        if output_id not in manifests:
-            manifests[output_id] = {m.part: m for m in outputs.manifest(output_id)}
-            if body.colours is None:
-                colours += [c for c in meta.colors if c not in colours]
-        if obj.part is None:
-            entries = list(manifests[output_id].values())
+        if obj.output_id is not None:
+            source = obj.output_id
+            what = f"output {source}"
+            meta = require_output(outputs, source)
+            if meta.slug not in slugs:
+                slugs.append(meta.slug)
+            if source not in manifests:
+                manifests[source] = {m.part: m for m in outputs.manifest(source)}
+                if body.colours is None:
+                    colours += [c for c in meta.colors if c not in colours]
         else:
-            entry = manifests[output_id].get(obj.part)
+            file_id = obj.library_file_id
+            if file_id is None or file_id not in library:
+                raise ValueError(f"library file {file_id} reaches arrange_inputs unread")
+            source = f"library:{file_id}"
+            what = f"library file {file_id}"
+            manifests.setdefault(source, {m.part: m for m in library[file_id].objects})
+        if obj.part is None:
+            entries = list(manifests[source].values())
+        else:
+            entry = manifests[source].get(obj.part)
             if entry is None:
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    f"output {output_id} has no object {obj.part}",
+                    f"{what} has no object {obj.part}",
                 )
             entries = [entry]
         for entry in entries:
@@ -431,14 +468,16 @@ def arrange_inputs(
                 # plates cannot be one of them, even alone.
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    f"object {entry.part} ({entry.file}) of output {output_id} lays out its"
+                    f"object {entry.part} ({entry.file}) of {what} lays out its"
                     f" own {entry.plates} plates, so it cannot be arranged; print that"
                     " output as it is",
                 )
             items.append(PackItem(part=part_of(entry), count=count, group=obj.group))
             provenance.setdefault(
                 entry.part,
-                entry.model_copy(update={"source_output": entry.source_output or output_id}),
+                entry
+                if obj.output_id is None
+                else entry.model_copy(update={"source_output": entry.source_output or source}),
             )
             if body.colours is None:
                 colours += [c for c in entry.colours if c not in colours]
@@ -450,13 +489,24 @@ def arrange_inputs(
         _check_copies(sum(item.count for item in items))
     except ValueError as too_many:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(too_many)) from None
-    if body.slug is not None and body.slug not in slugs:
+    if not slugs and body.slug is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "a result of library files alone is filed under a template: name one in slug",
+        )
+    if slugs and body.slug is not None and body.slug not in slugs:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the result is filed under one of its objects' templates ({', '.join(slugs)}),"
             f" not {body.slug}",
         )
-    return body.slug or slugs[0], ArrangeInputs(
+    slug = body.slug or slugs[0]
+    # A library file's objects belong to no template until this result files them.
+    provenance = {
+        key: entry.model_copy(update={"slug": slug}) if entry.library_file_id else entry
+        for key, entry in provenance.items()
+    }
+    return slug, ArrangeInputs(
         items=items,
         goal=body.goal,
         plate=plate_size(plate_model),
@@ -467,12 +517,6 @@ def arrange_inputs(
         provenance=provenance,
         sources=chosen,
     )
-
-
-def _output_of(obj: ArrangeObject) -> str:
-    if obj.output_id is None:
-        raise ValueError("a library file reaches arrange_inputs unresolved")
-    return obj.output_id
 
 
 @router.post(
@@ -492,11 +536,13 @@ def _output_of(obj: ArrangeObject) -> str:
             " `output_ids` with POST /outputs/{id}/backfill, then arrange again",
         }
     },
-    description="Lay out objects from saved outputs again for a goal, printer and spool plan"
-    " (spec §7). No re-render. Outputs may come from any template, and a library file"
-    " ScadBuddy uploaded stands for the output it is a copy of; a file it did not make is"
-    " a 422 with code `library_file_not_arrangeable` (#1864). Poll the job with"
-    " GET /jobs/{id}, then save it as an output under the job's `slug`.",
+    description="Lay out objects from saved outputs and Bambuddy library files again for a"
+    " goal, printer and spool plan (spec §7). No re-render. Outputs may come from any"
+    " template; a library file ScadBuddy uploaded stands for the output it is a copy of"
+    " (#1864), and any other 3MF or STL is read from the file itself (#1863; its objects:"
+    " GET /print/library/{file_id}/objects). A file that cannot be read (sliced, too"
+    " large, painted) is a 422 with code `library_file_not_arrangeable`. Poll the job"
+    " with GET /jobs/{id}, then save it as an output under the job's `slug`.",
 )
 async def arrange_outputs(
     body: ArrangeRequest,
@@ -504,20 +550,35 @@ async def arrange_outputs(
     uploads: UploadsDep,
     render: RenderDep,
     store: SettingsStoreDep,
+    catalogue: CatalogueDep,
+    state: StateDep,
 ) -> JobStatus:
-    body = await resolve_library_files(uploads, outputs, body)
+    body, plain = await resolve_library_files(uploads, outputs, body)
     stored = await asyncio.to_thread(store.load)
     printer_id = body.printer_id if body.printer_id is not None else stored.printer_id
     # No printer: the plate the preview falls back to (Settings), else the default plate.
     plate_model = stored.default_plate
-    if printer_id is not None:
+    library: dict[int, LibraryObjects] = {}
+    if printer_id is not None or plain:
         # `printer()` declares Scope.READ_STATUS, and the client's `_send` maps a refusal
         # through bambuddy/errors.py, so a key without it gets a 403 naming the scope.
         async with client_for(stored) as client:
-            plate_model = (await client.printer(printer_id)).model
-    slug, inputs = await asyncio.to_thread(arrange_inputs, outputs, body, plate_model=plate_model)
+            if printer_id is not None:
+                plate_model = (await client.printer(printer_id)).model
+            library = await read_plain_files(client, plain)
+    slug, inputs = await asyncio.to_thread(
+        arrange_inputs, outputs, body, plate_model=plate_model, library=library
+    )
+    if not inputs.sources:
+        await asyncio.to_thread(require_model_exists, catalogue, slug)
+    for found in library.values():
+        await publish_library_pieces(state.store.blobs, found)
     with submit_problems():
         job = await render.arrange(slug, inputs)
+    # The job holds the library pieces from now: the sweep's grace covers only the
+    # moments between their publish and this.
+    for key in dict.fromkeys(e.part for found in library.values() for e in found.objects):
+        await asyncio.to_thread(state.refs.add, key, "job", job.id)
     return _job_status(job, None)
 
 

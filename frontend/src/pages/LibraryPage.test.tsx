@@ -23,7 +23,7 @@ describe('LibraryPage', () => {
     expect(screen.getByText(/1 more under Advanced/)).toBeInTheDocument()
   })
 
-  it('arranges the files ticked, and says which it cannot yet (#1864)', async () => {
+  it('arranges the files ticked, made by ScadBuddy or not (#1864, #1863)', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     const arrange = await screen.findByRole('button', { name: 'Arrange selected (0)' })
     expect(arrange).toBeDisabled()
@@ -42,9 +42,9 @@ describe('LibraryPage', () => {
     await user.click(screen.getByRole('button', { name: 'Arrange selected (2)' }))
     const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
     expect(await within(dialog).findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
-    expect(within(dialog).getByText(/Clara's Wand.3mf was not made by ScadBuddy/)).toBeVisible()
+    expect(await within(dialog).findByLabelText("Copies of Wand — Clara's Wand.3mf")).toHaveValue(1)
     await user.click(within(dialog).getByRole('button', { name: 'Arrange' }))
-    expect(await screen.findByRole('status', { name: 'Arranged' })).toHaveTextContent('Arranged onto 1 plate.')
+    expect(await screen.findByRole('status', { name: 'Arranged' })).toHaveTextContent('Arranged onto 2 plates.')
     expect(screen.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/name-keychain/history')
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
   })

@@ -16,8 +16,12 @@ export const IMAGES_DATA_TOTAL_MAX = 8 * 1024 * 1024
 /** A preview's base64 (agent `PREVIEW_DATA_MAX`). */
 const PREVIEW_DATA_MAX = 64 * 1024
 
-/** The long edge an image is scaled to: larger ones the model is given scaled down anyway. */
-export const IMAGE_EDGE = 1568
+/**
+ * The long edge an image is scaled to when the agent's setting cannot be read (agent
+ * `routes/imageSettings.ts` DEFAULT_IMAGE_LONG_EDGE, `GET /api/v1/ai/settings/images`):
+ * the Messages API's standard-tier edge, which models before Claude 4.7 scale to anyway.
+ */
+export const DEFAULT_IMAGE_EDGE = 1568
 /** The long edge of a preview in the transcript. */
 export const PREVIEW_EDGE = 256
 
@@ -98,11 +102,15 @@ function fit(width: number, height: number, edge: number): [number, number] {
 
 /**
  * `file` as the composer sends it, or an error that says why it cannot be. Images
- * within IMAGE_EDGE and IMAGE_DATA_MAX go as they are (an animated GIF stays animated);
- * larger ones are drawn at IMAGE_EDGE in their own type, or as a JPEG when that is
- * still too large.
+ * within `edge` (the stored setting) and IMAGE_DATA_MAX go as they are (an animated GIF
+ * stays animated); larger ones are drawn at `edge` in their own type, or as a JPEG when
+ * that is still too large.
  */
-export async function prepareImage(file: File, codec: ImageCodec = canvasCodec): Promise<UserImage> {
+export async function prepareImage(
+  file: File,
+  codec: ImageCodec = canvasCodec,
+  edge: number = DEFAULT_IMAGE_EDGE,
+): Promise<UserImage> {
   const type = file.type
   if (!isMediaType(type)) throw new Error(`${file.name} is not a PNG, JPEG, GIF or WebP image.`)
   let image: Awaited<ReturnType<ImageCodec['open']>>
@@ -113,8 +121,8 @@ export async function prepareImage(file: File, codec: ImageCodec = canvasCodec):
   }
   try {
     let full: { mediaType: MediaType; blob: Blob } = { mediaType: type, blob: file }
-    if (Math.max(image.width, image.height) > IMAGE_EDGE || encodedLength(file.size) > IMAGE_DATA_MAX) {
-      const [width, height] = fit(image.width, image.height, IMAGE_EDGE)
+    if (Math.max(image.width, image.height) > edge || encodedLength(file.size) > IMAGE_DATA_MAX) {
+      const [width, height] = fit(image.width, image.height, edge)
       // A GIF is drawn as a PNG: canvases do not encode GIFs.
       const own = type === 'image/gif' ? 'image/png' : type
       let blob = await image.encode(width, height, own, 0.9)

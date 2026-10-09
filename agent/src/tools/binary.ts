@@ -44,9 +44,10 @@ export type BinaryRef = {
   fallbackType: string
 }
 
-type Read = { inline: true; bytes: ArrayBuffer } | { inline: false; size: number | undefined }
+export type Read = { inline: true; bytes: ArrayBuffer } | { inline: false; size: number | undefined }
 
-async function readCapped(stream: ReadableStream<Uint8Array> | null, declared: number | undefined, cap: number): Promise<Read> {
+/** The body, or its size when it is over `cap` bytes; abandoned at the cap, never read whole. */
+export async function readCapped(stream: ReadableStream<Uint8Array> | null, declared: number | undefined, cap: number): Promise<Read> {
   if (declared !== undefined && declared > cap) {
     // Not awaited: a cancel can wait on the peer; the bytes are abandoned either way.
     void stream?.cancel().catch(() => {})
