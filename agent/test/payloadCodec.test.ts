@@ -1,8 +1,10 @@
 import type { Payload } from '@temporalio/common'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { inspect } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import {
   openPayload,
+  PgPayloadKeys,
   payloadKeyContext,
   type PayloadKeys,
   sealPayload,
@@ -142,6 +144,27 @@ describe('SubjectPayloadCodec', () => {
     const data = Buffer.from(sealed!.data!)
     data[data.length - 1]! ^= 1
     await expect(codec.decode([{ ...sealed!, data: new Uint8Array(data) }])).rejects.toThrow(/authentication/)
+  })
+
+  // Security review of 5c (sensitive-data-exposure, main.ts): what main.ts can log of the
+  // codec (an error's message, the keys object itself) never carries a key or payload bytes.
+  it('never puts a key or a payload in an error or an inspected object', async () => {
+    const keys = new FixedKeys(new Map())
+    const codec = new SubjectPayloadCodec(keys)
+    const [sealed] = await codec.encode([plain], { type: 'workflow', namespace: 'default', workflowId: SUBJECT })
+    const key = keys.keys.get(SUBJECT)!
+    const data = Buffer.from(sealed!.data!)
+    data[data.length - 1]! ^= 1
+    const err = (await codec.decode([{ ...sealed!, data: new Uint8Array(data) }]).catch((e: unknown) => e)) as Error
+    const shown = `${err.message} ${String(err.stack)}`
+    for (const secret of [key.toString('base64'), key.toString('hex'), 'the user', b64(sealed!.data).slice(0, 16)]) {
+      expect(shown).not.toContain(secret)
+    }
+    const pg = new PgPayloadKeys({} as never, kek)
+    const inspected = inspect(pg, { showHidden: true, depth: 5 })
+    expect(inspected).not.toContain(kek.key.toString('hex').slice(0, 16))
+    expect(inspected).not.toContain(KEK_B64.slice(0, 16))
+    expect(JSON.stringify(pg)).not.toContain(KEK_B64.slice(0, 16))
   })
 
   it('names the subject form it seals', () => {

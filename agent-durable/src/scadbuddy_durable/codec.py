@@ -105,7 +105,10 @@ class PayloadKeys(Protocol):
 
 
 class PgPayloadKeys:
-    """``ai_payload_keys``, sealed under the KEK; a key stays in memory minutes at most."""
+    """``ai_payload_keys``, sealed under the KEK; a key stays in memory 30 s at most.
+
+    30 s is how long another process can still open a subject after forgetSubject.
+    """
 
     def __init__(
         self,
@@ -113,7 +116,7 @@ class PgPayloadKeys:
         kek: Kek,
         *,
         previous: Kek | None = None,
-        cache_s: float = 300.0,
+        cache_s: float = 30.0,
         cache_max: int = 1000,
     ) -> None:
         self._connect = connect
@@ -144,9 +147,11 @@ class PgPayloadKeys:
                     self._kek.key, os.urandom(KEK_BYTES), payload_key_context(subject)
                 )
                 await conn.execute(
-                    "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id) VALUES (%s, %s, %s)"
+                    # Never for a forgotten subject: its payloads stay unreadable, new ones too.
+                    "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id) SELECT %s, %s, %s"
+                    " WHERE NOT EXISTS (SELECT 1 FROM ai_forgotten_subjects WHERE subject = %s)"
                     " ON CONFLICT (subject) DO NOTHING",
-                    (subject, sealed, self._kek.id),
+                    (subject, sealed, self._kek.id, subject),
                 )
                 # Whoever inserted first, this is the key every encoder of the subject uses.
                 row = await self._row(conn, subject)

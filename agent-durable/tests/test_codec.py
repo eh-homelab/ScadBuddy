@@ -138,7 +138,14 @@ async def test_keys_are_made_once_kept_sealed_and_opened_with_the_previous_key(
     )
     with pytest.raises(SealError):
         await PgPayloadKeys(lambda: _same(agent_db), newer).key_for(SUBJECT, False)
+    # forgetSubject: the tombstone and the deletion. No encoder makes the key again.
+    await agent_db.execute("INSERT INTO ai_forgotten_subjects (subject) VALUES (%s)", (SUBJECT,))
     await agent_db.execute("DELETE FROM ai_payload_keys")
     with pytest.raises(SubjectForgottenError):
         await two.key_for(SUBJECT, False)
+    with pytest.raises(SubjectForgottenError):
+        await two.key_for(SUBJECT, True)
+    cur = await agent_db.execute("SELECT count(*) FROM ai_payload_keys")
+    assert await cur.fetchone() == (0,)
+    assert PgPayloadKeys(lambda: _same(agent_db), kek)._cache_s == 30.0
     assert "\\x" not in repr(one) and str(made) not in repr(one)

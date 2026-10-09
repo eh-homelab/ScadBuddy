@@ -98,13 +98,13 @@ export interface PayloadKeys {
 export type PgPayloadKeysOptions = {
   /** The key mounted as SCADBUDDY_SECRET_KEY_PREVIOUS_FILE, during a rotation. */
   previous?: Kek | undefined
-  /** How long a data key is kept in memory (default 5 minutes). */
+  /** How long a data key is kept in memory (default 30 s): how long another process can still open a forgotten subject. */
   cacheMs?: number
   /** At most this many keys in memory (default 1000). */
   cacheMax?: number
 }
 
-/** `ai_payload_keys`, sealed under the KEK; a key is cached in memory for minutes at most. */
+/** `ai_payload_keys`, sealed under the KEK; a key is cached in memory for 30 s at most. */
 export class PgPayloadKeys implements PayloadKeys {
   readonly #sql: Sql
   readonly #kek: Kek
@@ -117,7 +117,7 @@ export class PgPayloadKeys implements PayloadKeys {
     this.#sql = sql
     this.#kek = kek
     this.#previous = options.previous
-    this.#cacheMs = options.cacheMs ?? 5 * 60_000
+    this.#cacheMs = options.cacheMs ?? 30_000
     this.#cacheMax = options.cacheMax ?? 1000
   }
 
@@ -137,8 +137,11 @@ export class PgPayloadKeys implements PayloadKeys {
       const dek = randomBytes(KEK_BYTES)
       try {
         const sealed = sealBytes(this.#kek.key, dek, payloadKeyContext(subject))
+        // Never for a forgotten subject: its payloads stay unreadable, new ones included.
         await this.#sql`
-          INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id) VALUES (${subject}, ${sealed}, ${this.#kek.id})
+          INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)
+          SELECT ${subject}, ${sealed}, ${this.#kek.id}
+          WHERE NOT EXISTS (SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject})
           ON CONFLICT (subject) DO NOTHING`
       } finally {
         dek.fill(0)

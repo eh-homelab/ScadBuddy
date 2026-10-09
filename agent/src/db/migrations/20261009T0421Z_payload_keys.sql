@@ -12,3 +12,11 @@ CREATE TABLE ai_payload_keys (
   kek_id      text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- Subjects forgetSubject shredded. A key is never made again for one, so an encoder
+-- still running for it (a workflow task, an activity between the key's deletion and
+-- the workflow's termination) fails instead of sealing new payloads under a new key.
+CREATE TABLE ai_forgotten_subjects (
+  subject       text PRIMARY KEY,
+  forgotten_at  timestamptz NOT NULL DEFAULT now()
+);

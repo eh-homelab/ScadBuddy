@@ -353,6 +353,10 @@ const payloadKeys =
     ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
     : undefined
 const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
+// The worker also moves failures' messages into payloads, so the codec seals them (5c Ruling 11).
+const workerDataConverter = dataConverter
+  ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }
+  : undefined
 const temporalWorker =
   temporal && operationStore
     ? AgentWorker.start({
@@ -369,7 +373,7 @@ const temporalWorker =
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
         },
-        ...(dataConverter ? { dataConverter } : {}),
+        ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },

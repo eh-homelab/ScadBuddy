@@ -5,8 +5,11 @@ import { subjectOf } from '../temporal/payloadCodec.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
 // deletion of a durable session or a flow run goes through. In this order:
-//   1. delete the subject's `ai_payload_keys` row: from then on every copy of its
-//      payloads (history, Visibility, Archival) is undecryptable, whatever fails next;
+//   1. delete the subject's `ai_payload_keys` row and record it in
+//      `ai_forgotten_subjects`, so no key is ever made for it again: from then on every
+//      copy of its payloads (history, Visibility, Archival) is undecryptable, whatever
+//      fails next. A process that read the key keeps it in memory 30 s at most
+//      (payloadCodec.ts, codec.py);
 //   2. terminate the workflow if it is open, then DeleteWorkflowExecution;
 //   3. delete our rows, as a session's deletion always did: `ai_sessions`, whose
 //      cascade takes its events, `ai_pending_input`, `ai_input_responses`, blobs,
@@ -39,7 +42,12 @@ function notFound(err: unknown): boolean {
 export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<Forgotten> {
   if (subjectOf(subject) === undefined) throw new Error(`${subject} is not a session-<uuid> or flow-<uuid> subject`)
   deps.keys?.forget(subject)
-  const keys = await deps.sql`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
+  // The tombstone with the deletion: no encoder still running for the subject (a
+  // workflow task or an activity before the termination below) can make it a new key.
+  const keys = await deps.sql.begin(async (tx) => {
+    await tx`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject}) ON CONFLICT (subject) DO NOTHING`
+    return tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
+  })
   let workflow: Forgotten['workflow'] = 'not_reached'
   if (deps.client) {
     const client = deps.client

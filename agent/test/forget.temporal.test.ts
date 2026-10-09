@@ -1,7 +1,8 @@
 import { Client } from '@temporalio/client'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
-import { randomBytes } from 'node:crypto'
+import { ApplicationFailure } from '@temporalio/common'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
@@ -51,7 +52,13 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
       connection: env.nativeConnection,
       taskQueue,
       workflowsPath: fileURLToPath(new URL('./support/codecWorkflows.ts', import.meta.url)),
-      dataConverter,
+      activities: {
+        failWith: async (text: string) => {
+          throw ApplicationFailure.nonRetryable(`the tool failed on: ${text}`, 'ToolError')
+        },
+      },
+      // As main.ts gives the agent-tools worker: failures' messages are sealed too.
+      dataConverter: { ...dataConverter, failureConverterPath: fileURLToPath(new URL('../src/temporal/failureConverter.ts', import.meta.url)) },
     })
     await worker.runUntil(async () => {
       const handle = await client.workflow.start('holdText', { workflowId: subject, taskQueue, args: [WORDS] })
@@ -67,6 +74,18 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
       const bytes = Buffer.from(JSON.stringify(history?.events?.map((e) => e.workflowExecutionStartedEventAttributes?.input)))
       expect(bytes.toString()).not.toContain('red bracket')
       expect(raw).not.toContain(Buffer.from(WORDS).toString('base64').slice(0, 12))
+
+      // A tool's error text is the session's content too: sealed, not a plaintext failure message.
+      const flow = `flow-${randomUUID()}`
+      expect(await client.workflow.execute('failingTool', { workflowId: flow, taskQueue, args: [WORDS] })).toBe(
+        `caught: the tool failed on: ${WORDS}`,
+      )
+      const { history: failed } = await env.client.workflowService.getWorkflowExecutionHistory({
+        namespace: 'default',
+        execution: { workflowId: flow },
+      })
+      expect(JSON.stringify(failed)).not.toContain('red bracket')
+      expect(JSON.stringify(failed)).toContain('Encoded failure')
     })
 
     // A render's workflow is not a subject: its payloads stay as they are.
@@ -85,6 +104,17 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
     expect(await db.sql`SELECT 1 FROM ai_sessions WHERE id = ${session.id}`).toHaveLength(0)
     expect(await db.sql`SELECT 1 FROM ai_session_events WHERE session_id = ${session.id}`).toHaveLength(0)
     await expect(keys.keyFor(subject, false)).rejects.toBeInstanceOf(SubjectForgotten)
+    // An encoder still running for it (before the termination) cannot make it a new key.
+    await expect(new PgPayloadKeys(db.sql, kek).keyFor(subject, true)).rejects.toBeInstanceOf(SubjectForgotten)
+    await expect(
+      new SubjectPayloadCodec(new PgPayloadKeys(db.sql, kek)).encode([{ metadata: {}, data: new Uint8Array([1]) }], {
+        type: 'activity',
+        namespace: 'default',
+        workflowId: subject,
+        isLocal: false,
+      }),
+    ).rejects.toBeInstanceOf(SubjectForgotten)
+    expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
     // Again: nothing left, and nothing fails (the server deletes a history in the background).
     expect(await forgetSubject({ sql: db.sql, client, keys }, subject)).toEqual({ key: false, workflow: expect.stringMatching(/^(deleted|not_found)$/), rows: 0 })
     await expect(forgetSubject({ sql: db.sql }, 'render-x')).rejects.toThrow(/not a session/)
