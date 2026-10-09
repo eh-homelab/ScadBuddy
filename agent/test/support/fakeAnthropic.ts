@@ -163,7 +163,7 @@ function streamEvents(model: string, reply: ContentReply): string {
   ].join('')
 }
 
-export async function startFakeAnthropic(reply: (request: RecordedRequest) => Reply): Promise<FakeAnthropic> {
+export async function startFakeAnthropic(reply: (request: RecordedRequest) => Reply, listenOn = 0): Promise<FakeAnthropic> {
   const requests: RecordedRequest[] = []
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = []
@@ -230,7 +230,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: path } }))
     })
   })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  await new Promise<void>((resolve) => server.listen(listenOn, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   return {
     url: `http://127.0.0.1:${port}`,
