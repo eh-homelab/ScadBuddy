@@ -30,7 +30,9 @@ that tool returns, in the MIME type below. The one difference is paging: the
 `list_*` tools answer one page at a time (#837), and a resource backed by one is
 read to its last page (`allPages()` in
 [`pagination.ts`](../../agent/src/tools/pagination.ts)), so it still holds the
-whole collection, in the shape it had before paging.
+whole collection, in the shape it had before paging. `list_models` and `list_outputs`
+pass `limit` and `after` to the backend, which builds only that page (#843,
+`backendPage()`); the others page over the whole backend answer.
 
 | URI | MIME type | Tool |
 |---|---|---|

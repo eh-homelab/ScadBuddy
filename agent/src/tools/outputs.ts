@@ -4,7 +4,7 @@ import { command } from './command.js'
 import { binary } from './binary.js'
 import { outputId, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
-import { compositeKey, page, PAGED, pageInput } from './pagination.js'
+import { backendPage, compositeKey, page, PAGED, pageInput, totalCount } from './pagination.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
 // images, plate fit, and the 3MF. Routes: backend/scadbuddy/api/{outputs,plates}.py.
@@ -16,14 +16,13 @@ export const outputTools: Tool[] = [
     input: z.object({ slug, ...pageInput }),
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/outputs'],
+    // The backend pages (#843): it builds only this page's output details.
     handler: async ({ slug, ...args }, { backend }) =>
       json(
-        page(
-          await ok(backend.GET('/api/v1/models/{slug}/outputs', { params: { path: { slug } } }), `list outputs of ${slug}`),
-          { slug, ...args },
-          (o) => o.id,
-          'list_outputs',
-        ),
+        await backendPage({ slug, ...args }, (o: { id: string }) => o.id, 'list_outputs', async (query) => {
+          const pending = backend.GET('/api/v1/models/{slug}/outputs', { params: { path: { slug }, query } })
+          return { items: await ok(pending, `list outputs of ${slug}`), total: totalCount((await pending).response) }
+        }),
       ),
   }),
 

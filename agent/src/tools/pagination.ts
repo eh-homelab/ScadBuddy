@@ -5,7 +5,9 @@ import { json, ToolError } from './registry.js'
 // Paging for the list_* tools (#837). Most backend list endpoints return the
 // whole collection, and a large library returned in one tool result fills the
 // turn's context. These tools page in the agent instead, in the backend's own
-// order, the way list_prints pages in the backend.
+// order, the way list_prints pages in the backend. list_models and list_outputs,
+// which grow with use, have the backend page for them (#843, backendPage): it
+// builds only the page asked for, not the whole collection on every page.
 //
 // The cursor is keyset, not an offset: it names the last item a page returned
 // (base64url, so the model treats it as opaque), and the next page starts after
@@ -111,6 +113,19 @@ export type PageOptions = {
  * list (a slug, an id; compositeKey for several fields): it is what the cursor
  * records.
  */
+/** The cursor's item, checked to belong to this listing; undefined for a first page. */
+function resume(args: PageArgs, tool: string, scope: string): { key: string; position: number } | undefined {
+  if (args.cursor === undefined) return undefined
+  const after = decode(args.cursor, tool)
+  if (after.scope !== scope) {
+    throw new ToolError(
+      `${tool}: the cursor belongs to another listing (another tool, or other arguments than this call's); list again without \`cursor\``,
+      400,
+    )
+  }
+  return after
+}
+
 export function page<T>(
   items: readonly T[],
   args: PageArgs,
@@ -118,17 +133,11 @@ export function page<T>(
   tool: string,
   { complete = true }: PageOptions = {},
 ): Page<T> {
-  const { limit, cursor } = args
+  const { limit } = args
   const scope = scopeOf(tool, args)
   let start = 0
-  if (cursor !== undefined) {
-    const after = decode(cursor, tool)
-    if (after.scope !== scope) {
-      throw new ToolError(
-        `${tool}: the cursor belongs to another listing (another tool, or other arguments than this call's); list again without \`cursor\``,
-        400,
-      )
-    }
+  const after = resume(args, tool, scope)
+  if (after !== undefined) {
     const hinted = items[after.position]
     const at = hinted !== undefined && key(hinted) === after.key ? after.position : items.findIndex((item) => key(item) === after.key)
     if (at < 0) throw new StaleCursorError(tool)
@@ -143,6 +152,49 @@ export function page<T>(
     next_cursor: more && last !== undefined ? encode(key(last), start + slice.length - 1, scope) : null,
     total: complete ? items.length : null,
   }
+}
+
+/** A window of a backend list route that pages itself (#843): its items, and the whole list's length. */
+export type BackendWindow<T> = { items: T[]; total: number | null }
+
+/**
+ * One page of a backend list route that takes `limit` and `after` (the key of the
+ * last item before the window; backend api/models.py `page_window`) and answers the
+ * whole list's length in `X-Total-Count`. It asks for one item more than the page,
+ * to know whether another follows. The backend answers 409 for an `after` it no
+ * longer lists, which is a stale cursor here, as in page().
+ */
+export async function backendPage<T>(
+  args: PageArgs,
+  key: (item: T) => string,
+  tool: string,
+  read: (query: { limit: number; after?: string }) => Promise<BackendWindow<T>>,
+): Promise<Page<T>> {
+  const scope = scopeOf(tool, args)
+  const after = resume(args, tool, scope)
+  const size = args.limit ?? DEFAULT_PAGE_SIZE
+  let window: BackendWindow<T>
+  try {
+    window = await read({ limit: size + 1, ...(after === undefined ? {} : { after: after.key }) })
+  } catch (err) {
+    if (err instanceof ToolError && err.status === 409) throw new StaleCursorError(tool)
+    throw err
+  }
+  const slice = window.items.slice(0, size)
+  const last = slice.at(-1)
+  const start = after === undefined ? 0 : after.position + 1
+  return {
+    items: slice,
+    next_cursor: window.items.length > size && last !== undefined ? encode(key(last), start + slice.length - 1, scope) : null,
+    total: window.total,
+  }
+}
+
+/** The whole list's length a paged backend route answered in `X-Total-Count`, or null. */
+export function totalCount(response: Response): number | null {
+  const header = response.headers.get('X-Total-Count')
+  const total = header === null ? NaN : Number(header)
+  return Number.isInteger(total) && total >= 0 ? total : null
 }
 
 /**

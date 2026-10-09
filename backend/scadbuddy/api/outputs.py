@@ -41,7 +41,15 @@ from scadbuddy.api.jobs import (
     require_job,
     submit_problems,
 )
-from scadbuddy.api.models import PNG_MAGIC, require_model
+from scadbuddy.api.models import (
+    PAGED_RESPONSES,
+    PNG_MAGIC,
+    TOTAL_COUNT_HEADER,
+    PageAfter,
+    PageLimit,
+    page_window,
+    require_model,
+)
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
@@ -624,18 +632,29 @@ async def backfill_output(
     return _job_status(job, None)
 
 
-@router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
+@router.get(
+    "/models/{slug}/outputs",
+    response_model=list[OutputDetail],
+    summary="Output history",
+    responses=PAGED_RESPONSES,
+)
 async def list_outputs(
     slug: SlugPath,
     catalogue: CatalogueDep,
     outputs: OutputsDep,
     uploads: UploadsDep,
     state: StateDep,
+    response: Response,
+    limit: PageLimit = None,
+    after: PageAfter = None,
 ) -> list[OutputDetail]:
     """Details, not summaries: the history page shows each output's parameter diff, and
-    a summary list would make it fetch every row again one at a time."""
+    a summary list would make it fetch every row again one at a time. Newest first;
+    `after` is an output id, and only the page's outputs are built into details (#843)."""
     await asyncio.to_thread(require_model, catalogue, slug)
     metas = await asyncio.to_thread(outputs.list_for, slug)
+    response.headers[TOTAL_COUNT_HEADER] = str(len(metas))
+    metas = metas[page_window([meta.id for meta in metas], after, limit, "output")]
     return await _details(outputs, uploads, state.print_runs.store, metas)
 
 
