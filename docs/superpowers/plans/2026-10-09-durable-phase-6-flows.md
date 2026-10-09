@@ -517,7 +517,7 @@ async def test_oversized_script() -> None:
 - [ ] **Step 1: Failing tests.** One worker per test: `Worker(client, task_queue=q, workflows=[ProjectWorkflow], activities=[*FlowActivities(store).all(), flow_entry_timeout], plugins=harness_plugins(FLOW_TOOLS))`. The cases:
   1. A script `await sleep(1); return 7`: the row goes `running` → `succeeded`, `result == "result: 7"`, two steps are recorded in order, and the execution completes (Ruling 8).
   2. `wait_for_human('Swap to pink?')`: the row is `waiting` with `waiting_on == [{call_id, kind: "answer", fn: "wait_for_human", prompt: "Swap to pink?"}]`, and `AgentClient.get_status().pending_callbacks` lists `human_answer`. `provide_callback_result(id, result={"answer": "ok"})` → the row is `succeeded` and `waiting_on == []`.
-  3. `wait_for_human('q', timeout_s=10)` unanswered (time-skipping is not available with the harness's stream, so the test uses `timeout_s=10` and waits): the run is `failed` with `Script error (TimeoutError`, `waiting_on == []`, `pending_callbacks == []`, and a late `flow_answer` is refused (409 in 6c).
+  3. `wait_for_human('q', timeout_s=10)` unanswered (time-skipping is not available with the harness's stream, so the test uses `timeout_s=10` and waits): the run is `failed` with `Script error (TimeoutError`, `waiting_on == []`, `pending_callbacks == []`, and a late `AgentClient.provide_callback_result` for the call raises `CallbackResultError` (`CallbackAlreadyResolved`). 6c's tests cover the route's 409.
   4. A `Script error` (a `raise ValueError`): the row is `failed`, and the result holds the error line.
   5. A result over 4 KiB is stored truncated, with `result_truncated` true.
   6. A second `execute` on the same workflow id with a new `update_id` fails the Update with `AlreadyExecuted`, and the script ran once.
@@ -814,7 +814,8 @@ def projects_worker(
         client,
         task_queue=queue,
         workflows=list(workflows),
-        # flow_entry_timeout: a parked entry's timer (Ruling 11).
+        # flow_entry_timeout: a parked entry's timer (Ruling 11). Always added here,
+        # so a caller never passes it (a name registered twice fails worker start).
         activities=[*activities, flow_entry_timeout],
         plugins=harness_plugins(FLOW_TOOLS),
         workflow_runner=SandboxedWorkflowRunner(
