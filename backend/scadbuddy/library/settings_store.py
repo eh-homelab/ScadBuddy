@@ -10,12 +10,14 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
   presence alone is each field's source (:data:`SettingSource`). Map-valued settings
   (the per-printer and per-model print options) change one key at a time inside that
   row's upsert.
-- ``model_print_choices``: what the print dialog last chose, one row per model.
+- ``model_print_choices``: what the print dialog last chose, one row per options scope
+  (:func:`~scadbuddy.bambuddy.options.options_scope`): a model's slug, or a Bambuddy
+  library file's ``library:<file id>`` (#313, #1754).
 - ``printer_bed_types``: the plate last printed on, one row per printer.
 
-A fourth, ``library_print_choices`` (``migrations/20260928T1522Z_library_print_choices.sql``,
-#313), is the same shape as ``model_print_choices`` but keyed by Bambuddy's own library
-file id, for a library file that has no ScadBuddy slug.
+``library_print_choices`` (#313) held a library file's choices until #1754 copied them
+into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
+it is no longer read or written.
 
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
@@ -56,7 +58,7 @@ from scadbuddy.bambuddy.models import (
     SlotChoice,
     Tier,
 )
-from scadbuddy.bambuddy.options import OptionScope, PrintOptions
+from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
@@ -223,8 +225,9 @@ class StoredSettings(BambuddyIds):
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
 
-    #: Model slug -> what the picker chose, set one model at a time
-    #: (:meth:`SettingsStore.set_model_choices`).
+    #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
+    #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
+    #: :meth:`SettingsStore.set_library_choices`).
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate type last printed on it (#83). Per
     #: printer, not per model: the plate is a property of the machine. Set one printer at
@@ -240,8 +243,9 @@ class StoredSettings(BambuddyIds):
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
     # defaults. The dict keys are strings because JSON has no integer keys: the printer
-    # map is keyed by a stringified Bambuddy printer id, the model map by ScadBuddy's
-    # own model slug.
+    # map is keyed by a stringified Bambuddy printer id, the model map by the print's
+    # options scope: ScadBuddy's own model slug, or a library file's ``library:<file
+    # id>`` (#1754, ``options.options_scope``).
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
@@ -259,6 +263,22 @@ class StoredSettings(BambuddyIds):
             return {}
         known = get_args(RackAlgorithm)
         return {key: algorithm for key, algorithm in value.items() if algorithm in known}
+
+    @field_validator("model_print_choices", mode="before")
+    @classmethod
+    def _readable_choices(cls, value: Any) -> Any:
+        """A row this version cannot read is nothing remembered for its scope, rather
+        than settings that will not load: the migration of ``library_print_choices``
+        (#1754) copies rows verbatim, and the per-file read always tolerated them."""
+        if not isinstance(value, dict):
+            return {}
+        kept: dict[str, ModelPrintChoices] = {}
+        for scope, choices in value.items():
+            try:
+                kept[scope] = ModelPrintChoices.model_validate(choices)
+            except ValidationError:
+                logger.warning("unreadable print choices", extra={"options_scope": scope})
+        return kept
 
     def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
         """The printer's remembered rack algorithm, else Least used (spec §4)."""
@@ -653,18 +673,22 @@ class SettingsStore:
                 " saved first"
             )
 
-    def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
-        """Remember one model's printer and spools; an empty ``choices`` forgets them."""
+    def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
+        """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""
         with self._pool.connection() as conn:
             if choices == ModelPrintChoices():
-                conn.execute("DELETE FROM model_print_choices WHERE model_id = %s", (slug,))
+                conn.execute("DELETE FROM model_print_choices WHERE model_id = %s", (scope,))
             else:
                 conn.execute(
                     "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)"
                     " ON CONFLICT (model_id) DO UPDATE"
                     " SET choices = EXCLUDED.choices, updated_at = now()",
-                    (slug, Jsonb(choices.model_dump(mode="json"))),
+                    (scope, Jsonb(choices.model_dump(mode="json"))),
                 )
+
+    def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
+        """Remember one model's printer and spools; an empty ``choices`` forgets them."""
+        self._put_choices(slug, choices)
         return self._written("model_choices")
 
     def set_printer_bed_type(self, printer_id: int, bed_type: str | None) -> StoredSettings:
@@ -727,10 +751,14 @@ class SettingsStore:
     def library_choices(self, file_id: int) -> ModelPrintChoices:
         """What the dialog last chose for one Bambuddy library file (#313); nothing
         remembered is the empty choice. A row this version cannot read is nothing
-        remembered too, rather than a dialog that will not open."""
+        remembered too, rather than a dialog that will not open.
+
+        In the one store, under the file's options scope (#1754): one row is read,
+        not every setting."""
+        scope = library_options_scope(file_id)
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT choices FROM library_print_choices WHERE file_id = %s", (file_id,)
+                "SELECT choices FROM model_print_choices WHERE model_id = %s", (scope,)
             ).fetchone()
         if row is None:
             return ModelPrintChoices()
@@ -742,16 +770,7 @@ class SettingsStore:
 
     def set_library_choices(self, file_id: int, choices: ModelPrintChoices) -> ModelPrintChoices:
         """Remember one library file's choices; an empty ``choices`` forgets them."""
-        with self._pool.connection() as conn:
-            if choices == ModelPrintChoices():
-                conn.execute("DELETE FROM library_print_choices WHERE file_id = %s", (file_id,))
-            else:
-                conn.execute(
-                    "INSERT INTO library_print_choices (file_id, choices) VALUES (%s, %s)"
-                    " ON CONFLICT (file_id) DO UPDATE"
-                    " SET choices = EXCLUDED.choices, updated_at = now()",
-                    (file_id, Jsonb(choices.model_dump(mode="json"))),
-                )
+        self._put_choices(library_options_scope(file_id), choices)
         # The dialog's remembered choices, as for a model: no new section is needed.
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
@@ -797,7 +816,6 @@ class SettingsStore:
         every scope. The settings themselves are left alone."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM model_print_choices")
-            conn.execute("DELETE FROM library_print_choices")
             conn.execute("DELETE FROM printer_bed_types")
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(REMEMBERED_ROWS),))
         return self._written("remembered")
