@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
+import json
 import logging
 import time
 import types
@@ -832,6 +834,10 @@ def _sealed(kek: Kek | None, name: str, value: object) -> object:
     }
 
 
+#: The sealed values `_opened` has already warned about, by setting and a digest.
+_UNOPENED: set[tuple[str, str]] = set()
+
+
 def _opened(kek: Kek | None, rows: dict[str, Any]) -> dict[str, Any]:
     """``rows`` with each sealed secret opened. One this process cannot open (no key,
     another key, altered bytes) is dropped with a warning, so the field follows the
@@ -853,6 +859,11 @@ def _opened(kek: Kek | None, rows: dict[str, Any]) -> dict[str, Any]:
             )
             out[name] = open_secret(kek, envelope, _aad(name))
         except (SealError, KeyError, TypeError, ValueError) as error:
+            # Once per stored value: this runs on every read of the settings.
+            seen = (name, hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest())
+            if seen in _UNOPENED:
+                continue
+            _UNOPENED.add(seen)
             # A SealError names key ids only; the others are not formatted at all.
             reason = str(error) if isinstance(error, SealError) else "malformed"
             logger.warning(

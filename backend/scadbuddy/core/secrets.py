@@ -104,10 +104,9 @@ def _seal(key: bytes, plaintext: bytes, context: str, random: RandomSource) -> b
 
 
 def _open(key: bytes, sealed: bytes, context: str) -> bytes:
-    version = sealed[0] if sealed else None
-    if len(sealed) < 1 + _IV_BYTES + _TAG_BYTES or version not in _KNOWN_VERSIONS:
+    if len(sealed) < 1 + _IV_BYTES + _TAG_BYTES or sealed[0] not in _KNOWN_VERSIONS:
         raise SealError("sealed value is malformed or of an unknown version")
-    assert version is not None
+    version = sealed[0]
     iv = sealed[1 : 1 + _IV_BYTES]
     tag = sealed[1 + _IV_BYTES : 1 + _IV_BYTES + _TAG_BYTES]
     ciphertext = sealed[1 + _IV_BYTES + _TAG_BYTES :]

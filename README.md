@@ -673,7 +673,8 @@ start.
   `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
   mount it yet: #1900.
 - Keep a copy of the key. A key sealed under a lost one cannot be opened: enter it again
-  in Settings. Rotating the key is not supported here yet.
+  in Settings. The file is read once per process, so a changed key takes effect only after
+  a restart. Rotating the key is not supported here yet.
 
 ### The agent sidecar (AI, #261)
 

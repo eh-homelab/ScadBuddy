@@ -163,6 +163,25 @@ def test_plaintext_rows_are_sealed_at_start_and_only_once(
         again.close()
 
 
+def test_a_plaintext_save_beside_sealed_rows_reads_back_with_the_key(
+    store: SettingsStore, plain: Settings, keyed: Settings
+) -> None:
+    """Mid-rollout (#1900): a process without the key saves while another has sealed."""
+    store.save(SettingsPatch(bambuddy_api_key="full-key-123456"))
+    unkeyed = _open(plain)
+    try:
+        unkeyed.save(SettingsPatch(bambuddy_render_api_key="render-key-123456"))
+    finally:
+        unkeyed.close()
+    rows = _rows(keyed.database_url)
+    assert rows["bambuddy_render_api_key"] == "render-key-123456"
+    assert set(rows["bambuddy_api_key"]) == {"sealed"}
+    loaded = store.load()
+    assert loaded.bambuddy_api_key == "full-key-123456"
+    assert loaded.bambuddy_render_api_key == "render-key-123456"
+    assert load_render_store_settings(store.pool, keyed).api_key == "render-key-123456"
+
+
 def test_without_a_key_file_keys_stay_plaintext_with_one_warning(
     plain: Settings, caplog: pytest.LogCaptureFixture
 ) -> None:
