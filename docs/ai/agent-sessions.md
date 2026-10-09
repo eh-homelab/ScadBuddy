@@ -273,6 +273,31 @@ assistant is off. On a model's page the assistant panel's session picker offers
 **Only sessions that changed {slug}**, which narrows its list to the sessions the same
 route returns for that model, read again each time the picker opens.
 
+### 4.2 Forks and the session switcher in the panel (#792)
+
+Design: `docs/superpowers/specs/2026-10-09-session-switcher-design.md`.
+
+- **Fork** in the open session's bar forks the whole chat
+  (`POST /api/v1/ai/sessions/:id/fork`) and opens the fork. It is disabled until the
+  chat has a reply. A fork's bar reads **Forked from {parent}**, which opens the
+  parent.
+- **Fork from here** on a reply forks up to that reply (`up_to`, the reply's message
+  id; the agent cuts both the SDK transcript and the copied events there,
+  `agent/src/sessions/forkPoint.ts`).
+- **Fork from here** on a user message forks up to the reply before it, and puts the
+  message back in the composer to edit and send. The first message has none.
+- **Budget:** every panel fork is the user's, so it gets a budget of its own. An
+  agent's `sessions_fork` shares its parent's (§1).
+- **Sessions** lists forks under their parent, with each session's status (Out of
+  budget included), spend and last activity, from `sessions.snapshot`'s `parentId`,
+  `updatedAt`, `costUsd` and `budgetUsd`. A fork whose parent is not listed stands on
+  its own, marked "fork".
+- **Rename** and **Done** (`PATCH /api/v1/ai/sessions/:id`,
+  `agent/src/sessions/edits.ts`) are offered on the user's own chats. Another
+  principal's chat is taken over first.
+- **Done ends a chat:** it takes no more messages, and Fork continues it. Done is
+  refused while a turn runs, and on a durable session.
+
 ## 5. Not built yet
 
 - **Skills on start.** The issue's `sessions.start` takes an optional skill
