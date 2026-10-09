@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchivePhotoUpload,
     ArchiveRunList,
+    ArchiveStats,
     AvailableFilament,
     ExternalLink,
     FilamentRequirements,
@@ -92,6 +93,7 @@ Operation = Literal[
     "archives.printer_media",
     "archives.read",
     "archives.runs",
+    "archives.stats",
     "archives.timelapse.info",
     "archives.timelapse.select",
     "archives.timelapse.thumbnails",
@@ -131,6 +133,7 @@ Operation = Literal[
     "projects.list",
     "projects.read",
     "queue.add",
+    "queue.list",
     "queue.read",
     "settings.read",
     "slice.job.status",
@@ -468,16 +471,64 @@ class BambuddyClient:
         not documented, so callers sort; ``limit`` keeps the read small. There is no
         filter by hash: a caller matching ``content_hash`` scans a window."""
         what = "list the archives"
+        response = await self._list_archives(
+            what,
+            printer_id=printer_id,
+            project_id=None,
+            limit=limit,
+            offset=offset,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return [Archive.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def archive_outcomes(
+        self,
+        *,
+        printer_id: int | None = None,
+        project_id: int | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> list[ArchiveDetail]:
+        """:meth:`archives` with each row's outcome (#1912): the list route answers
+        the whole ``ArchiveResponse``, the same schema as :meth:`archive`."""
+        what = "list the archives"
+        response = await self._list_archives(
+            what,
+            printer_id=printer_id,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return [ArchiveDetail.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def _list_archives(
+        self,
+        what: str,
+        *,
+        printer_id: int | None,
+        project_id: int | None,
+        limit: int,
+        offset: int,
+        date_from: date | None,
+        date_to: date | None,
+    ) -> httpx.Response:
         params: dict[str, Any] = {"limit": limit}
         if printer_id is not None:
             params["printer_id"] = printer_id
+        if project_id is not None:
+            params["project_id"] = project_id
         if offset:
             params["offset"] = offset
         if date_from is not None:
             params["date_from"] = date_from.isoformat()
         if date_to is not None:
             params["date_to"] = date_to.isoformat()
-        response = await self._send(
+        return await self._send(
             "GET",
             "/archives/",
             scope=Scope.READ_STATUS,
@@ -485,7 +536,26 @@ class BambuddyClient:
             what=what,
             params=params,
         )
-        return [Archive.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def archive_stats(
+        self, *, date_from: date | None = None, date_to: date | None = None
+    ) -> ArchiveStats:
+        """``GET /api/v1/archives/stats``: totals over every archive, or over those
+        created within the window (both ends inclusive)."""
+        params: dict[str, Any] = {}
+        if date_from is not None:
+            params["date_from"] = date_from.isoformat()
+        if date_to is not None:
+            params["date_to"] = date_to.isoformat()
+        response = await self._send(
+            "GET",
+            "/archives/stats",
+            scope=Scope.READ_STATUS,
+            operation="archives.stats",
+            what="read the print statistics",
+            params=params,
+        )
+        return ArchiveStats.model_validate(response.json())
 
     async def archive(self, archive_id: int) -> ArchiveDetail:
         response = await self._send(
@@ -832,6 +902,28 @@ class BambuddyClient:
             await asyncio.sleep(self.config.slice_poll_interval)
 
     # --- queue ---------------------------------------------------------------
+
+    async def queue(
+        self, *, printer_id: int | None = None, status: str | None = None
+    ) -> list[QueueItem]:
+        """``GET /api/v1/queue/``: every item, finished ones too, unless ``status``
+        narrows it. Reading the queue needs only ``can_read_status`` (``QUEUE_READ``
+        in Bambuddy's ``auth.py``); ``can_queue`` is for changing it."""
+        what = "list the print queue"
+        params: dict[str, Any] = {}
+        if printer_id is not None:
+            params["printer_id"] = printer_id
+        if status is not None:
+            params["status"] = status
+        response = await self._send(
+            "GET",
+            "/queue/",
+            scope=Scope.READ_STATUS,
+            operation="queue.list",
+            what=what,
+            params=params,
+        )
+        return [QueueItem.model_validate(row) for row in self._rows(response, what=what)]
 
     async def queue_item(self, item_id: int) -> QueueItem:
         response = await self._send(
