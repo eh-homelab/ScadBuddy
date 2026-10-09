@@ -69,7 +69,8 @@ export function EditSourcePage() {
   const initial = merge ? merge.merged : upstream.loading ? undefined : loaded.data?.source
   // What the buffer was last set to from `initial`. When `initial` moves ahead (an
   // untouched buffer following a #269 change), the buffer still holds this until the
-  // effect runs, which is not an edit (#1683).
+  // effect runs, which is not an edit (#1683). It only matters for that one render:
+  // once the effect has run, `synced` and the buffer both equal `initial` again.
   const [synced, setSynced] = useState<string | null>(null)
   useEffect(() => {
     if (initial === undefined) return

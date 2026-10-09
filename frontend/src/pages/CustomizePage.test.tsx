@@ -203,6 +203,31 @@ describe('CustomizePage', () => {
     expect(field).not.toHaveTextContent('not in this render')
   })
 
+  // #1685 — a submit refused before it made a job leaves the previous render on show.
+  // Its colours belong to the values it ran with, so the changed colour must not read
+  // "not in this render": the page cannot know yet.
+  it('says nothing about a changed colour whose render was refused before it started', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const field = hex.closest('[data-param]')!
+    await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'the render could not be started' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.tripleClick(hex)
+    await user.paste('#00FF00')
+    expect(await screen.findByRole('alert', {}, { timeout: 4000 })).toHaveTextContent('the render could not be started')
+    expect(field).not.toHaveTextContent('not in this render')
+    expect(field).not.toHaveTextContent(/extruder \d/)
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()

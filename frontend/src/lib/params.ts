@@ -88,7 +88,8 @@ export function extrudersIn(
     const value = String(values[name] ?? '')
     const ran = String(renderedValues[name] ?? '')
     // #1686 — hex compared as colours: `#e8532f` is the colour the render ran with as
-    // `#E8532F`, not a change.
+    // `#E8532F`, not a change. normalizeHex drops alpha on purpose, as the materials
+    // do, so `#E8532F80` is that colour too.
     if (!HEX.test(value.trim()) || !HEX.test(ran.trim()) || normalizeHex(value) !== normalizeHex(ran)) {
       extruders.set(name, undefined)
       continue
