@@ -18,7 +18,7 @@ import { browserTools } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
 import type { TabWait, WaitForTab } from '../src/tools/registry.js'
-import { PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
+import { type Owner, PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
 import { services } from './helpers/mcp.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -444,13 +444,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   const touchedAt = (sessionId: string, id: string, s: number) => db.sql`
     INSERT INTO ai_session_resources (session_id, at, tool, resource_type, resource_id, action, model_slug)
     VALUES (${sessionId}, ${ts(s)}, 'mcp__scadbuddy__save_preset', 'preset', ${id}, 'created', 'sign')`
-  const approvedAt = (sessionId: string, turnId: string, s: number, resumeTurnId: string | null = null) => db.sql`
+  const approvedAt = (sessionId: string, turnId: string, s: number, resumeTurnId: string | null = null, by: Owner = browser) => db.sql`
     INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
                               requested_by_kind, requested_by_id, requested_by_label, created_at, expires_at,
                               decision, decided_by_kind, decided_by_id, decided_by_label, decided_at, usable_until, resume_turn_id)
     VALUES (gen_random_uuid(), ${sessionId}, ${turnId}, 'toolu_out', 'send_to_bambuddy', 'send', 'h', 'outward',
             'browser', 'browser', 'you', ${ts(s - 1)}, ${ts(s + 600)},
-            'approved', 'browser', 'browser', 'you', ${ts(s)}, ${ts(s + 600)}, ${resumeTurnId})`
+            'approved', ${by.kind}, ${by.id}, ${by.label}, ${ts(s)}, ${ts(s + 600)}, ${resumeTurnId})`
   const answeredAt = (sessionId: string, turnId: string, s: number) => db.sql`
     INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, outcome, answers,
                               answered_by_kind, answered_by_id, answered_by_label, resolved_at, created_at)
@@ -512,6 +512,136 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
       '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
     ])
+  })
+
+  // #1415: only the user's own decision, in the panel, is the user coming back.
+  it('an approval a token decided in the same turn does not close its unattended window', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turn = '00000000-0000-4000-8000-0000000000d1'
+    await timedOut(session.id, turn, 10)
+    await approvedAt(session.id, turn, 20, null, agentA)
+    await touchedAt(session.id, 'unattended', 30)
+    const done = await summaryOf(session.id, turn, 0)
+    expect(done.unattended).toBe(true)
+    expect(done.summary).toMatch(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/)
+  })
+
+  // #1416: the same rule across a resume. A token's approval re-runs the call, but nobody in the panel has
+  // replied, so the resumed turn's work is listed as unattended too (and the card is kept until dismissed).
+  it('a turn resumed for an approval a token decided keeps the parked turn\'s window open', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000e1'
+    const b = '00000000-0000-4000-8000-0000000000e2'
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await approvedAt(session.id, a, 40, b, agentA)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)\n- created preset `resumed` of `sign` \(`save_preset`\)$/),
+    ])
+  })
+
+  // #1411: the walk is recursive, not one join deep.
+  it('a chain resumed twice (A -> B -> C) carries the first turn\'s unattended touches into the last', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000f1'
+    const b = '00000000-0000-4000-8000-0000000000f2'
+    const c = '00000000-0000-4000-8000-0000000000f3'
+    // A times out, works unattended and parks; the user approves at 40 and B is resumed for it.
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await approvedAt(session.id, a, 40, b)
+    // B works while the user is there and parks on a second approval; the user approves at 60 and C is resumed.
+    await touchedAt(session.id, 'attended', 50)
+    await approvedAt(session.id, b, 60, c)
+    await touchedAt(session.id, 'resumed', 70)
+    const done = await summaryOf(session.id, c, 61)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+  })
+
+  it('a resumed turn whose chain timed nothing out lists only its own touches', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-000000000101'
+    const b = '00000000-0000-4000-8000-000000000102'
+    await touchedAt(session.id, 'parked', 5)
+    await approvedAt(session.id, a, 40, b)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(false)
+    expect(done.summary).toBe('**What this turn changed**\n- created preset `resumed` of `sign` (`save_preset`)')
+  })
+
+  /** A session whose turn A timed out a request, worked unattended, and parked an outward call before it was lost. */
+  async function parkedOrphan(m: SessionManager) {
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-000000000201'
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+    const approval = await m.approvals.create({
+      sessionId: session.id,
+      turnId: a,
+      toolUseId: 'toolu_out',
+      tool: 'mcp__stub__print',
+      input: { job: 'box.3mf' },
+      tier: 'outward',
+      requestedBy: browser,
+    })
+    return { session, approval }
+  }
+
+  // #1416: the real path, not a hand-made resume_turn_id: the user approves the orphan, resumeApproved
+  // starts turn B, and B's done summary carries A's unattended record.
+  it("approving a parked turn's orphan resumes a turn whose done summary keeps the parked turn's unattended record", async () => {
+    const resumed = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        await touch(run.sessionId ?? run.resume!, 'resumed')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: resumed, approvalPollMs: 20 })
+    const { session, approval } = await parkedOrphan(m)
+    await m.approvals.decide(browser, approval.id, true)
+    let done: { summary: string; unattended: boolean; turn_id: string } | undefined
+    await expect.poll(async () => {
+      ;[done] = await db.sql<{ summary: string; unattended: boolean; turn_id: string }[]>`
+        SELECT summary, unattended, turn_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+      return done
+    }).toBeDefined()
+    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('idle')
+    expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
+    const [bound] = await db.sql<{ resume_turn_id: string }[]>`SELECT resume_turn_id FROM ai_approvals WHERE id = ${approval.id}`
+    expect(done!.turn_id).toBe(bound!.resume_turn_id)
+    expect(done!.unattended).toBe(true)
+    expect(done!.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+  })
+
+  // #1409: the resumed summary reads touches from the parked turn's first window on, by time. That is sound
+  // only because no other turn can run between the parked turn's end and its resume: a new turn cancels the
+  // orphan, so the approval can no longer be decided and nothing is resumed.
+  it("a turn started before the orphan is decided cancels it, so no resumed turn reports that turn's work", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), approvalPollMs: 20 })
+    const { session, approval } = await parkedOrphan(m)
+    const between = await m.send(session.id, browser, 'never mind, do something else')
+    await between.done
+    await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'conflict' })
+    const [row] = await db.sql`SELECT decision, reason, resume_turn_id FROM ai_approvals WHERE id = ${approval.id}`
+    expect(row).toEqual({ decision: 'cancelled', reason: 'superseded by a new turn', resume_turn_id: null })
+    expect((await events(m, session.id)).filter((e) => e.type === 'user.turn')).toHaveLength(1)
   })
 
   it('undismissed done summaries do not push a request a turn is parked on off the pending list', async () => {
