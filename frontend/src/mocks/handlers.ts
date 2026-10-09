@@ -130,10 +130,11 @@ const state = {
   lastArrange: null as ArrangeRequest | null,
   /** #1864 — the output each library file ScadBuddy uploaded is a copy of. */
   libraryOutputs: new Map(INITIAL_LIBRARY_OUTPUTS),
-  /** #78 — per-model printer and spools, the store's `model_print_choices`. */
+  /**
+   * #78 — per-model printer and spools, the store's `model_print_choices`; a library
+   * file's (#313) under `library:<file id>`, as the store keeps them since #1754.
+   */
   modelChoices: {} as Record<string, ModelPrintChoices>,
-  /** #313 — per library-file choices, the store's `library_print_choices`. */
-  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
@@ -292,7 +293,6 @@ export function resetMockState(): void {
   state.lastArrange = null
   state.libraryOutputs = new Map(INITIAL_LIBRARY_OUTPUTS)
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
@@ -763,7 +763,6 @@ export function forgetMockProjectTarget(projectId: string): void {
 /** #322 — "Forget all": every remembered choice, and none of the settings. */
 export function forgetMockRemembered(): void {
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.printOptions.global_options = {}
@@ -777,13 +776,13 @@ export function forgetMockRemembered(): void {
  * all" (`forgetMockRemembered`) drops it too.
  */
 export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
-  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+  return { ...NO_MODEL_CHOICES, ...state.modelChoices[`library:${fileId}`] }
 }
 
 /** Remembers one library file's choices; the empty choice forgets them, as the store does. */
 export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
-  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
-  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  if (isNoModelChoices(choices)) delete state.modelChoices[`library:${fileId}`]
+  else state.modelChoices[`library:${fileId}`] = { ...NO_MODEL_CHOICES, ...choices }
   return mockLibraryChoices(fileId)
 }
 
@@ -1081,11 +1080,14 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (to !== null && day !== null && day > to) return false
   const slug = query.get('slug')
   if (slug !== null && print.slug !== slug) return false
+  const file = query.get('library_file_id')
+  if (file !== null && print.library_file_id !== Number(file)) return false
   const q = query.get('q')?.toLowerCase()
   if (q) {
     const haystack = [
       print.output_name ?? '',
       print.slug ?? '',
+      print.library_file_name ?? '',
       archive?.print_name ?? '',
       JSON.stringify(print.provenance?.params ?? {}),
     ]
@@ -2880,6 +2882,9 @@ export const handlers = [
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== null && !/^[1-9][0-9]*$/.test(cursor))) {
       return problem(422, 'Unprocessable Content', 'the request did not match the expected shape')
     }
+    if (query.has('slug') && query.has('library_file_id')) {
+      return problem(422, 'Unprocessable Content', "a print is of a template's output or of a library file: filter by one")
+    }
     const matches = fixtures.prints.filter((print) => printMatches(print, query))
     const after = cursor === null ? matches : matches.filter((print) => print.archive_id < Number(cursor))
     const items = after.slice(0, limit).map(printSummary)
@@ -3543,6 +3548,15 @@ export const handlers = [
     } else {
       const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
       if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
+      // #1754: a model's id (`MODEL_ID_PATTERN`), or a library file's `library:<file id>`;
+      // a forget goes through for any key, as on the server.
+      if (
+        body.scope === 'model' &&
+        !empty &&
+        !/^((builtin:)?[a-z0-9][a-z0-9-]{0,99}|library:[1-9]\d*)$/.test(body.key)
+      ) {
+        return problem(422, 'Unprocessable', `${body.key} is neither a model nor a library file`)
+      }
       if (empty) delete map[body.key]
       else map[body.key] = options
     }

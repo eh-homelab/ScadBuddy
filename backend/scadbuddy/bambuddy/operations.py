@@ -20,7 +20,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
-from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import chosen_project
@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.send import (
     resolve_print_options,
     send_output,
 )
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
@@ -177,13 +178,15 @@ def bambuddy_kinds_over(
                 f"no printer is known for archive {archive_id}; queue it from Bambuddy",
             )
         plate_id = archive.plate_id if archive.plate_id is not None else link.plate_id
-        # The model whose remembered print options apply, as for a print from the dialog.
-        # A library file's print (#976) has no output and so no model: global and the
-        # printer's options only.
-        if link.output_id is None:
-            return {"printer_id": printer_id, "plate_id": plate_id, "slug": None}
-        meta = await require(outputs, link.output_id)
-        return {"printer_id": printer_id, "plate_id": plate_id, "slug": meta.slug}
+        # Whose remembered print options apply, as for a print from the dialog: the
+        # output's model, or the library file's own (#976, #1754).
+        subject = PrintSubject.parse(link.subject)
+        slug = None if link.output_id is None else (await require(outputs, link.output_id)).slug
+        return {
+            "printer_id": printer_id,
+            "plate_id": plate_id,
+            "options_scope": options_scope(subject, slug),
+        }
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
@@ -191,8 +194,10 @@ def bambuddy_kinds_over(
         # The remembered options (#1329): global, the printer's, the model's, as a run
         # applies them (#88). One copy, and no project: those are the dialog's own
         # controls, as `enqueue_plate` leaves them.
+        # A check from before #1754 named the model as ``slug``.
+        scope = checked.get("options_scope", checked.get("slug"))
         remembered = resolve_print_options(
-            settings, checked.get("slug"), checked["printer_id"], PrintOptions()
+            settings, scope, checked["printer_id"], PrintOptions()
         ).queue_fields()
         remembered.pop("quantity", None)
         remembered.pop("project_id", None)

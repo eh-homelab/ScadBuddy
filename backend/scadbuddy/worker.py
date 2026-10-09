@@ -680,7 +680,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
 
     async def read_library(subject: PrintSubject) -> PrintProgress | None:
         async with client_for(settings_store.load()) as client:
-            return await library_progress(client, subject, links)
+            return await library_progress(client, subject, links, uploads=uploads)
 
     follower = Follower(
         outputs=outputs,

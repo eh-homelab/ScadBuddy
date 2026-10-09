@@ -14,9 +14,10 @@ Bambuddy library file (#976). The two kinds share both tables (#1750).
 - ``print_links``: each archive a subject's print produced. Two ways a link is found
   (``matched_by``): ``queue_item``, the queue item ScadBuddy created reports
   ``archive_id``; ``content_hash``, once the item is gone, an archive whose
-  ``content_hash`` equals a sliced file of the output's (`linking.link_by_hash`). A
-  library file's sends are linked once their item names an archive
-  (`linking.link_library_prints`). An archive two subjects name is the output's.
+  ``content_hash`` equals a sliced file of the subject's
+  (`linking.link_subject_by_hash`, a library file's since #1755). A library file's
+  sends are linked once their item names an archive (`linking.link_library_prints`).
+  An archive two subjects name is the output's.
 
 Both are created by ``*_print_subjects.sql``, from ``output_bambuddy_prints`` and
 ``library_bambuddy_prints``.
@@ -152,13 +153,13 @@ class PrintLinkStore:
         *,
         limit: int,
         before: int | None = None,
-        output_ids: Sequence[str] | None = None,
+        subjects: Sequence[PrintSubject] | None = None,
     ) -> list[LinkedPrint]:
         """Up to ``limit`` linked archives below ``before``, newest archive first, each
-        once; only those of ``output_ids`` when it is given, which leaves out every
-        library file's. Bambuddy numbers archives as it creates them, so a higher id is
-        a later print."""
-        return await asyncio.to_thread(self._page, limit, before, output_ids)
+        once; only those ``subjects`` own when it is given (a template's outputs, or
+        one library file, #1755). Bambuddy numbers archives as it creates them, so a
+        higher id is a later print."""
+        return await asyncio.to_thread(self._page, limit, before, subjects)
 
     async def linked_queue_items(self, subject: PrintSubject) -> set[int]:
         """The queue items whose archive is already recorded, so a poll can skip them."""
@@ -239,13 +240,9 @@ class PrintLinkStore:
         return _linked_print(dict(row)) if row is not None else None
 
     def _page(
-        self, limit: int, before: int | None, output_ids: Sequence[str] | None
+        self, limit: int, before: int | None, only: Sequence[PrintSubject] | None
     ) -> list[LinkedPrint]:
-        subjects = (
-            [PrintSubject.output(output_id).key for output_id in output_ids]
-            if output_ids is not None
-            else None
-        )
+        subjects = [subject.key for subject in only] if only is not None else None
         with self._require().connection() as conn:
             rows = conn.execute(
                 # Each archive's owner is chosen over all its rows first, as `_linked`

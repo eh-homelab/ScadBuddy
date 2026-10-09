@@ -2,6 +2,8 @@ import { fixedCredentials } from './support/fixedCredentials.js'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { WebSocket } from 'ws'
+import { AttachmentStore } from '../src/attachments/store.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier } from '../src/harness/permissions.js'
@@ -174,23 +176,35 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     watcher.close()
   }, 90_000)
 
-  it('sends pasted images to the model as image blocks, and shows their previews in the transcript (#1866)', async () => {
+  /** Uploads an image as the panel does when it is attached (#1941). */
+  async function upload(live: LiveAgent, image: Record<string, unknown>): Promise<Response> {
+    return fetch(`${live.url}/api/v1/ai/attachments`, {
+      method: 'POST',
+      headers: { origin: live.origin, 'content-type': 'application/json' },
+      body: JSON.stringify(image),
+    })
+  }
+
+  it('sends uploaded images to the model as image blocks, and shows their previews in the transcript (#1866, #1941)', async () => {
     script = () => ({ text: 'A keychain.' })
     const m = await sessions()
-    agent = await startLiveAgent(m)
+    agent = await startLiveAgent(m, { attachments: new AttachmentStore(pools.at(-1)!.sql) })
     const panel = await openPanelSocket(agent)
     const { clientMessage } = await frontendClientMessages()
     await panel.until(is('sessions.snapshot'))
 
-    // A full image well past the old 256 KiB frame cap: a screenshot's size.
+    // A full image well past the chat socket's 256 KiB frame cap: a screenshot's size.
     const png = Buffer.concat([PNG_1X1, Buffer.alloc(600 * 1024, 7)]).toString('base64')
     const preview = { mediaType: 'image/jpeg', data: JPEG_HEAD }
+    const uploaded = await upload(agent, { mediaType: 'image/png', data: png, preview })
+    expect(uploaded.status).toBe(201)
+    const { id } = (await uploaded.json()) as { id: string }
     panel.send(
       clientMessage({
         type: 'user.message',
         text: 'What is in this picture?',
         context: { route: '/' },
-        images: [{ mediaType: 'image/png', data: png, preview }],
+        images: [{ kind: 'attachment', id }],
       }),
     )
     const frames = await panel.until(is('session.result'))
@@ -229,28 +243,57 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     watcher.close()
   }, 90_000)
 
-  it('refuses an image whose bytes are not the type it names, and runs no turn (#1866)', async () => {
+  it('refuses an attachment it does not know, and runs no turn (#1941)', async () => {
     script = () => ({ text: 'should not run' })
     const m = await sessions()
-    agent = await startLiveAgent(m)
+    agent = await startLiveAgent(m, { attachments: new AttachmentStore(pools.at(-1)!.sql) })
     const panel = await openPanelSocket(agent)
     const { clientMessage } = await frontendClientMessages()
     await panel.until(is('sessions.snapshot'))
-    const notPng = Buffer.from('<html>hello</html>').toString('base64')
     panel.send(
       clientMessage({
         type: 'user.message',
         text: 'look',
         context: { route: '/' },
-        images: [{ mediaType: 'image/png', data: notPng, preview: { mediaType: 'image/jpeg', data: JPEG_HEAD } }],
+        images: [{ kind: 'attachment', id: '00000000-0000-4000-8000-000000000000' }],
       }),
     )
     const [refused] = (await panel.until(is('error'))).filter(is('error'))
-    expect(refused).toMatchObject({ code: 'invalid' })
-    expect(JSON.stringify(refused)).not.toContain(notPng)
+    expect(refused).toMatchObject({ code: 'invalid', message: expect.stringContaining('attach the image again') })
     expect(fake.messageCalls()).toHaveLength(0)
     panel.close()
   }, 30_000)
+
+  it('a tab from before #1941: small inline images still go, a frame past 256 KiB closes the socket (1009)', async () => {
+    script = () => ({ text: 'A pixel.' })
+    const m = await sessions()
+    agent = await startLiveAgent(m, { attachments: new AttachmentStore(pools.at(-1)!.sql) })
+    const preview = { mediaType: 'image/jpeg', data: JPEG_HEAD }
+    // What the old panel sent: the image inline, its own frame (not the new panel's builder).
+    const inline = (data: string) => ({
+      v: 1,
+      type: 'user.message',
+      text: 'What is in this picture?',
+      context: { route: '/' },
+      images: [{ mediaType: 'image/png', data, preview }],
+    })
+    const panel = await openPanelSocket(agent)
+    await panel.until(is('sessions.snapshot'))
+    panel.send(inline(PNG_1X1.toString('base64')))
+    const frames = await panel.until(is('session.result'))
+    expect(frames.find(is('user.turn'))).toMatchObject({ images: [preview] })
+    panel.close()
+
+    const big = new WebSocket(`${agent.url.replace(/^http/, 'ws')}/api/v1/ai/chat`, { headers: { origin: agent.origin } })
+    await new Promise<void>((resolve, reject) => {
+      big.once('open', () => resolve())
+      big.once('error', reject)
+    })
+    const closed = new Promise<number>((resolve) => big.once('close', (code) => resolve(code)))
+    big.send(JSON.stringify(inline(Buffer.concat([PNG_1X1, Buffer.alloc(300 * 1024, 7)]).toString('base64'))))
+    expect(await closed).toBe(1009)
+    expect(fake.messageCalls()).toHaveLength(1)
+  }, 60_000)
 
   it('keeps the session picker current: a session started elsewhere appears without a reconnect', async () => {
     script = () => ({ text: 'hi' })

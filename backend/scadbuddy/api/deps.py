@@ -385,7 +385,9 @@ def _build_core(settings: Settings) -> AppState:
         if not print_links.available:
             return None
         async with client_for(settings_store.load()) as client:
-            return await library_progress(client, subject, print_links)
+            return await library_progress(
+                client, subject, print_links, uploads=uploads if pool is not None else None
+            )
 
     return AppState(
         settings=settings,

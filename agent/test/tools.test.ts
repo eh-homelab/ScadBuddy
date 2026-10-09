@@ -796,7 +796,14 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     server.use(...capturedRun({}, { status: 'failed', error: failed, may_have_queued: true }))
     const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
     expect(result.isError).toBe(true)
-    expect(firstText(result)).toContain("may still have been queued: check Bambuddy's queue")
+    // The run's own answer (#1017), so the session records the run that may have queued.
+    expect(firstText(result)).toMatchObject({
+      id: RUN,
+      status: 'failed',
+      may_have_queued: true,
+      error: failed,
+      note: expect.stringContaining("may still have been queued: check Bambuddy's queue"),
+    })
   })
 
   it('hands back a run still slicing when the wait runs out', async () => {
@@ -1005,6 +1012,7 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     const puts: unknown[] = []
     server.use(
       http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json({ slug: 'box', libraries: [] })),
       http.put(`${BACKEND}/api/v1/models/box/libraries/BOSL2`, async ({ request }) => {
         puts.push(await request.json())
         return HttpResponse.json({ slug: 'box' })
@@ -1017,6 +1025,20 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
       { ref: null, url: null },
       { ref: 'v2.1.0', url: null },
     ])
+  })
+
+  it('a pin answers whether the model pinned that name before it, so a re-pin is not recorded as new (#1307)', async () => {
+    let libraries: { name: string }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json({ slug: 'box', libraries })),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })),
+    )
+    const fromUrl = { slug: 'box', name: 'BOSL2', url: 'https://g.example/x.git', ref: 'v1' }
+    expect(firstText(await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({ slug: 'box', pinned_before: false })
+    expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: false })
+    libraries = [{ name: 'MCAD' }, { name: 'BOSL2' }]
+    expect(firstText(await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({ pinned_before: true })
+    expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: true })
   })
 
   it('pin_library refuses a non-catalogue URL and points to the outward tool', async () => {
@@ -1356,6 +1378,19 @@ describe('prints (#308)', () => {
       limit: '10',
       cursor: '35',
     })
+  })
+
+  it("lists one library file's prints (#1755)", async () => {
+    let query: URLSearchParams | undefined
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints`, ({ request }) => {
+        query = new URL(request.url).searchParams
+        return HttpResponse.json({ items: [], next_cursor: null })
+      }),
+    )
+    const result = await runTool(tool('list_prints'), { library_file_id: 89 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(Object.fromEntries(query!)).toEqual({ library_file_id: '89' })
   })
 
   it('gets one print, asking the printer only when told to', async () => {

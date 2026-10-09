@@ -268,6 +268,39 @@ def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
 
 
 @respx.mock
+def test_a_library_print_queues_with_the_options_remembered_for_that_file(
+    client: TestClient,
+) -> None:
+    """B6 (#1754): a library file's own options scope, ``library:<file id>``, is merged
+    over the printer's as a model's is; another file's is not."""
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89)
+    run_routes()
+    slice_routes()
+    queued = queue_route()
+    options = "/api/v1/settings/print-options"
+    for remembered in (
+        {"scope": "printer", "key": "1", "options": {"timelapse": True, "use_ams": False}},
+        {"scope": "model", "key": "library:89", "options": {"timelapse": False}},
+        {"scope": "model", "key": "library:67", "options": {"use_ams": True}},
+    ):
+        assert client.put(options, json=remembered).status_code == 200
+
+    response = run_library(
+        client,
+        89,
+        json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert response.status_code == 200, response.text
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["timelapse"] is False
+    assert sent["use_ams"] is False
+
+
+@respx.mock
 def test_a_file_deleted_in_bambuddy_is_a_404_with_nothing_sliced(client: TestClient) -> None:
     configure(client)
     respx.get(f"{API}/library/files/89").mock(

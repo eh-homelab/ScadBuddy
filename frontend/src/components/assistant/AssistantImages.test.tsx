@@ -91,18 +91,30 @@ describe('assistant images (#1866)', () => {
     expect(edges).toEqual([2000])
   })
 
-  it('takes a pasted image into the composer and sends it with the message', async () => {
+  it('takes a pasted image into the composer, uploads it, and sends its id with the message (#1941)', async () => {
+    const uploaded: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname === '/api/v1/ai/attachments') {
+        void request.clone().json().then((body) => uploaded.push(body))
+      }
+    })
     const { view, box } = await openComposer()
     paste(box, [png()])
     const list = await screen.findByRole('list', { name: 'Images to send' })
     expect(within(list).getByRole('img', { name: 'shot.png' })).toBeInTheDocument()
+    server.events.removeAllListeners('request:start')
+    expect(uploaded).toEqual([
+      { mediaType: 'image/png', data: btoa('shot.png'), preview: { mediaType: 'image/jpeg', data: btoa('preview of shot.png') } },
+    ])
 
     await view.user.type(box, 'What is this?{Enter}')
     await waitFor(() => expect(sentMessages()).toHaveLength(1))
     expect(sentMessages()[0]).toMatchObject({
       text: 'What is this?',
-      images: [{ mediaType: 'image/png', data: btoa('shot.png'), preview: { mediaType: 'image/jpeg' } }],
+      images: [{ kind: 'attachment', id: expect.any(String) }],
     })
+    // No image bytes in the socket's frame.
+    expect(JSON.stringify(sentMessages()[0])).not.toContain(btoa('shot.png'))
     // Sent: the composer is empty again, and the transcript shows the preview.
     expect(queued()).not.toBeInTheDocument()
     const sent = await screen.findByRole('list', { name: 'Images sent' })
@@ -110,6 +122,32 @@ describe('assistant images (#1866)', () => {
       'src',
       `data:image/jpeg;base64,${btoa('preview of shot.png')}`,
     )
+  })
+
+  it('says why an image could not be uploaded, and leaves it out (#1941)', async () => {
+    server.use(
+      http.post('/api/v1/ai/attachments', () =>
+        HttpResponse.json({ detail: 'too many images waiting to be sent' }, { status: 429 }),
+      ),
+    )
+    const { box } = await openComposer()
+    paste(box, [png()])
+    expect(await screen.findByText('shot.png could not be uploaded: too many images waiting to be sent')).toBeInTheDocument()
+    expect(queued()).not.toBeInTheDocument()
+  })
+
+  it('deletes the upload of an image removed before sending (#1941)', async () => {
+    const deleted: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'DELETE') deleted.push(new URL(request.url).pathname)
+    })
+    const { view, box } = await openComposer()
+    paste(box, [png('a.png')])
+    await screen.findByRole('list', { name: 'Images to send' })
+    await view.user.click(screen.getByRole('button', { name: 'Remove a.png' }))
+    await waitFor(() => expect(deleted).toHaveLength(1))
+    server.events.removeAllListeners('request:start')
+    expect(deleted[0]).toMatch(/^\/api\/v1\/ai\/attachments\/[0-9a-f-]{36}$/)
   })
 
   it('leaves a paste that carries text to the text box', async () => {

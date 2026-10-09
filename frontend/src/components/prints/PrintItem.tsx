@@ -4,7 +4,7 @@ import type { PrintSummary } from '../../api/types'
 import { formatDuration, formatValue } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import type { PrintsView } from '../../lib/printsQuery'
-import { printerLabel, printLabel, printPath } from './prints'
+import { libraryPrintsPath, printerLabel, printLabel, printPath } from './prints'
 import { PrintStatus } from './PrintStatus'
 import { DELETED_STATUS } from './status'
 
@@ -51,7 +51,21 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
           </h2>
           <PrintStatus status={print.status} />
         </div>
-        {templateName && <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>}
+        {templateName &&
+          (print.library_file_id !== null ? (
+            // #1755 — every print of the file, above the item's own link.
+            <p className="mt-0.5 truncate text-[12px] text-muted">
+              <Link
+                to={libraryPrintsPath(print.library_file_id)}
+                title="Every print of this file"
+                className={`${raised} hover:text-ink hover:underline`}
+              >
+                {templateName}
+              </Link>
+            </p>
+          ) : (
+            <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>
+          ))}
         <Facts print={print} />
         {print.status === 'printing' && print.output_id !== null && (
           <PrintingNow outputId={print.output_id} named={print.printer_name !== null} />

@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.models import LibraryFile
+from scadbuddy.bambuddy.options import options_scope
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
@@ -86,8 +87,9 @@ class PrintSource(Protocol):
         ...
 
     @property
-    def options_slug(self) -> str | None:
-        """The model whose remembered print options apply (#88); ``None`` for none."""
+    def options_scope(self) -> str | None:
+        """What its remembered print options are kept under (#88, #1754): its subject's
+        :func:`~scadbuddy.bambuddy.options.options_scope`."""
         ...
 
     @property
@@ -404,8 +406,8 @@ class OutputSource(PrintPipeline):
         return list(self.meta.colors)
 
     @property
-    def options_slug(self) -> str | None:
-        return self.meta.slug
+    def options_scope(self) -> str | None:
+        return options_scope(self.subject, self.meta.slug)
 
     @property
     def inbox_name(self) -> str:
@@ -468,7 +470,6 @@ class LibrarySource(PrintPipeline):
     file_id: int
     colours: list[str]
     plates: list[int]
-    options_slug: str | None = None
     #: The file's name and type, which name its copies and say whether it is an STL.
     filename: str = ""
     file_type: str = ""
@@ -515,6 +516,10 @@ class LibrarySource(PrintPipeline):
     @property
     def subject(self) -> PrintSubject:
         return PrintSubject.library(self.file_id)
+
+    @property
+    def options_scope(self) -> str | None:
+        return options_scope(self.subject, None)
 
     @property
     def print_settings(self) -> dict[str, str]:

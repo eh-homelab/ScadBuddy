@@ -13,15 +13,44 @@ request body it is serialised into is never sent to Bambuddy.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.bambuddy.models import CalibrationMode, PreheatOverride
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 
 #: The scopes an override can be remembered at, least to most specific. ``request`` is
-#: not one of them — it is not remembered.
+#: not one of them — it is not remembered. ``model`` is the print's own subject's layer,
+#: keyed by its :func:`options_scope`.
 OptionScope = Literal["global", "printer", "model"]
+
+_MODEL_ID = re.compile(MODEL_ID_PATTERN)
+#: As ``PrintSubject.library`` writes it: no leading zero, so one file has one key.
+_LIBRARY_SCOPE = re.compile(r"library:[1-9][0-9]*")
+
+
+def options_scope(subject: PrintSubject, slug: str | None) -> str | None:
+    """What a print's own options and remembered choices are kept under (#1754): an
+    output's model id, which every output of the model shares, or a library file's
+    subject key ``library:<file id>``. Both live in the one store, the per-model maps
+    (``model_print_options``, ``model_print_choices``); a model id is a slug or
+    ``builtin:<slug>``, never ``library:``, so the two kinds never meet. ``None`` for
+    an output whose model is not known."""
+    return slug if subject.kind == "output" else subject.key
+
+
+def library_options_scope(file_id: int) -> str:
+    return PrintSubject.library(file_id).key
+
+
+def is_options_scope(key: str) -> bool:
+    """Whether ``key`` is one :func:`options_scope` could return."""
+    return (
+        len(key) <= MAX_MODEL_ID_LENGTH and _MODEL_ID.fullmatch(key) is not None
+    ) or _LIBRARY_SCOPE.fullmatch(key) is not None
 
 
 class PrintOptions(BaseModel):
