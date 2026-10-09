@@ -349,7 +349,13 @@ class RenderActivities:
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
     async def materialize(self, slug: str, revision: str | None) -> None:
-        """The revision's snapshot, from the store onto this worker's volume."""
+        """The revision's snapshot, from the store onto this worker's volume.
+
+        Every activity that reads the source calls it, not only `prepare`: the
+        `PrepareResult` names a path under this volume's ``cache/revisions/``, and
+        the next activity may run on another worker (its own emptyDir) or after the
+        prune took the export, which left `render_solids` reading a `model.scad`
+        that was not there (#1884). A populated export costs a touch."""
         d = self.deps
         if d.snapshots is None or revision is None:
             return
@@ -418,6 +424,7 @@ class RenderActivities:
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
         d = self.deps
+        await self.materialize(req.slug, req.revision)
         # It renders into a directory it never fetched: the compare-and-swap baseline is
         # what the index holds now, and the directory is no hit until this publishes.
         # Heartbeated as `_checkout` is: it waits on the key's lock, which another fetch
@@ -456,6 +463,7 @@ class RenderActivities:
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> None:
         d = self.deps
+        await self.materialize(req.slug, req.revision)
         # The main 3MF may have been rendered on another worker.
         baseline = await _checkout(d.blobs, req.piece_key)
         missing = await _ensure_assets(d, req.params)
@@ -492,6 +500,7 @@ class RenderActivities:
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> PieceResult:
         d = self.deps
+        await self.materialize(req.slug, req.revision)
         baseline = await _checkout(d.blobs, req.piece_key)
         source = _prepared(prepared)
         work = d.blobs.dir_for(req.piece_key)
