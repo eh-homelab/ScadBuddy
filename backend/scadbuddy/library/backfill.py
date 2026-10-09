@@ -185,13 +185,21 @@ def _attach_all(
 
 def _announce(events: EventBus | None, outputs: OutputStore, output_id: str) -> None:
     """``output.updated``: the output's backfill was attached, cleared or marked failed,
-    so a reader waiting on it reads it again rather than polling (#1970)."""
+    so a reader waiting on it reads it again rather than polling (#1970).
+
+    Never raises: it runs after the attach is done, so a failure here must not mark
+    that attach failed or stop the pass. The slug comes from the output's directory,
+    as `attach_backfill` names it, not from ``meta.json`` or the database, which can
+    fail where the attach did not."""
     if events is None:
         return
     try:
-        slug = outputs.get(output_id).slug
+        slug = outputs.directory(output_id).parent.name
     except OutputNotFoundError:
         return  # deleted meanwhile: its own output.deleted said so
+    except Exception:
+        logger.exception("could not announce a backfill", extra={"id": output_id})
+        return
     emit(events, OutputEvent(kind="output.updated", output_id=output_id, slug=slug))
 
 

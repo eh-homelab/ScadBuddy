@@ -30,6 +30,7 @@ from scadbuddy.library.backfill import (
     follow_backfills,
 )
 from scadbuddy.library.outputs import (
+    META_NAME,
     OUTPUT_HOLDER,
     BackfillState,
     OutputStore,
@@ -350,6 +351,25 @@ async def test_a_settled_backfill_is_announced_on_the_output(
         attach_backfills(store, BlobRefs(pool), _jobs(job), bus)
         attach_backfills(store, BlobRefs(pool), _jobs(job), bus)  # nothing left: no event
     assert [(e.kind, e.output_id, e.slug) for e in heard] == [("output.updated", old.id, "demo")]
+
+
+@pytest.mark.requires_postgres
+async def test_an_output_that_cannot_be_read_is_still_attached_and_the_pass_goes_on(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2011 review: announcing runs after the attach is done. A ``meta.json`` that no
+    longer validates must not mark that attach failed, nor stop the outputs behind it."""
+    store, _, job, written = await _legacy_output(tmp_path)
+    unreadable, good = _two_legacy(store, job)
+    _in_order(store, monkeypatch, unreadable)
+    (store.directory(unreadable) / META_NAME).write_text("{not json", encoding="utf-8")
+    bus, heard = _output_events()
+    with store_pool(pg_conninfo) as pool:
+        assert attach_backfills(store, BlobRefs(pool), _jobs(job), bus) == 2
+    for output_id in (unreadable, good):
+        assert store.manifest(output_id) == written.manifest
+        assert store.backfill(output_id) is None
+    assert [(e.output_id, e.slug) for e in heard] == [(unreadable, "demo"), (good, "demo")]
 
 
 @pytest.mark.requires_postgres
