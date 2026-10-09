@@ -38,18 +38,18 @@ export function setPendingAnswers(questions: number, attention = 0, done = 0): v
   state.done = done
 }
 
-/** Tests: whether the agent says it listed only some of the `done` summaries (`summaries_truncated`). */
+/** Tests: whether the agent says it listed only some of the undismissed `done` summaries. */
 export function setSummariesTruncated(truncated: boolean): void {
   state.summariesTruncated = truncated
 }
 
 export function reset(): void {
+  state.summariesTruncated = false
   state.approvals = 0
   state.questions = 0
   state.attention = 0
   responses = []
   state.done = 0
-  state.summariesTruncated = false
   ended.clear()
 }
 
@@ -129,6 +129,7 @@ export const handlers = [
     }
     return HttpResponse.json({ id, kind: body.kind, outcome: outcomeOf(body) })
   }),
+  // The agent's PendingInputPage (agent src/routes/pendingInput.ts).
   http.get('/api/v1/ai/pending-input', () =>
     HttpResponse.json({ entries: listed().filter((e) => !ended.has(e.id)), summaries_truncated: state.summariesTruncated }),
   ),

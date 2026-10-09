@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { fetchPendingInput } from '../../agent/attention'
 import { respond, RespondError } from '../../agent/respond'
-import { setPendingAnswers, setPendingApprovals } from './pendingInput'
+import { setPendingAnswers, setPendingApprovals, setSummariesTruncated } from './pendingInput'
 
 // #1479: an entry a test lists with setPendingApprovals / setPendingAnswers can be
 // answered through the mocked respond route, as the agent would answer it.
@@ -10,6 +10,18 @@ async function listedIds(): Promise<string[]> {
   const res = await fetch('/api/v1/ai/pending-input')
   return ((await res.json()) as { entries: { id: string }[] }).entries.map((e) => e.id)
 }
+
+// #1413: the list answers the agent's PendingInputPage, summaries_truncated included.
+describe('the mocked pending-input list', () => {
+  it('answers summaries_truncated as the agent does, false unless a test sets it', async () => {
+    setPendingAnswers(0, 0, 2)
+    const res = await fetch('/api/v1/ai/pending-input')
+    expect(((await res.json()) as { summaries_truncated?: boolean }).summaries_truncated).toBe(false)
+    expect(await fetchPendingInput()).toEqual({ approvals: 0, questions: 0, attention: 0, summaries: 2, summariesTruncated: false })
+    setSummariesTruncated(true)
+    expect(await fetchPendingInput()).toMatchObject({ summaries: 2, summariesTruncated: true })
+  })
+})
 
 describe('the mocked respond route', () => {
   it('answers a listed entry, drops it from the list, and refuses it again with a 409', async () => {

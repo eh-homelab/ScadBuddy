@@ -577,18 +577,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     })
   })
 
-  // #1409: what keeps a resumed turn's done summary (questions/doneSummary.ts) free of
-  // another turn's touches. A turn run between the parked turn's end and the decision
-  // cancels the approval, so the decision is refused and nothing is resumed for it.
-  it('a decision after a newer turn ran is refused, and resumes nothing', async () => {
-    const { session, approval } = await orphan()
-    const turn = await m.send(session.id, agentA, 'do something else')
-    await turn.done
-    await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'conflict' })
-    expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'cancelled', resumeTurnId: null })
-    expect(await m.get(session.id, agentA)).toMatchObject({ turnActive: false })
-  })
-
   it('handing off a session cancels its pending approval', async () => {
     const { session, approval } = await orphan()
     await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))

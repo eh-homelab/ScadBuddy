@@ -9,8 +9,8 @@
  * cites its sources and links the version it made, then an `outward` send that pauses
  * on `approval.required` and goes nowhere until the panel decides it (spec §8.2). A
  * first message that mentions a draft gets a question instead (#940): a draft to
- * approve, which waits on `question.asked` until the panel answers; one that mentions a
- * summary posts a `done` summary, and one that says the tab dropped parks on an attention
+ * approve, which waits on `question.asked` until the panel answers; one that says "post a
+ * summary" posts a `done` summary, and one that says the tab dropped parks on an attention
  * request (#815). The panel answers
  * both over HTTP (`POST /api/v1/ai/pending-input/{id}`, #815: `features/pendingInput.ts`
  * calls `respond` below); the socket's `approval.decision` and `question.answer` still
@@ -286,7 +286,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
   }
 
   /**
-   * #815: an attention request. A first message that mentions a summary posts a `done`
+   * #815: an attention request. A first message that says "post a summary" posts a `done`
    * summary, which waits for nothing, and the turn ends; one that mentions the tab
    * parks on a tab-disconnected card until the panel answers it.
    */
@@ -482,8 +482,8 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
             ? followUp(s, msg.text)
             : /draft/i.test(msg.text)
               ? questionTurn(s)
-              : /summary|tab dropped/i.test(msg.text)
-                ? attentionTurn(s, /summary/i.test(msg.text))
+              : /post a summary|tab dropped/i.test(msg.text)
+                ? attentionTurn(s, /post a summary/i.test(msg.text))
                 : firstTurn(s),
         )
         return

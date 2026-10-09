@@ -812,7 +812,7 @@ export class QuestionService {
               return {
                 value: {
                   ...none,
-                  limited: `The summary was not posted: a turn posts at most ${DONE_POSTS_PER_TURN} done summaries, and the last one is still shown.`,
+                  limited: `The summary was not posted: this turn already posted ${DONE_POSTS_PER_TURN}, the most a turn may.`,
                 },
                 events: [],
               }

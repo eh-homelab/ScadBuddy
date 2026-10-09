@@ -557,6 +557,11 @@ class ModelRecord(ModelMeta):
     #: mounted UI alone. None for a template that declares no ``ui``, in a listing, or
     #: when history is unavailable.
     ui_version: str | None = None
+    #: The revision before ``version`` in this template's own history (#1071): what the
+    #: commit that made it started from, so a client can name or restore the state
+    #: before a change. None for its first revision, in a listing, or when history is
+    #: unavailable.
+    previous_version: str | None = None
     # Where a duplicate stands against its upstream (#157); None for a template
     # that is not one, or when history is unavailable.
     upstream_state: UpstreamState | None = None
@@ -715,6 +720,15 @@ class Catalogue:
             logger.exception("could not read the revision", extra={"slug": slug})
             return None
 
+    def previous_version(self, slug: str) -> str | None:
+        if self.history is None or not self.history.available:
+            return None
+        try:
+            return self.history.previous_commit(model_path(slug))
+        except (GitError, OSError):
+            logger.exception("could not read the previous revision", extra={"slug": slug})
+            return None
+
     def ui_version(self, slug: str) -> str | None:
         """The last commit that touched ``slug``'s ``ui/`` directory (#846); none when
         that commit deleted it (#1469)."""
@@ -857,7 +871,13 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
 
     def record(self, slug: str) -> ModelRecord:
-        return self._record(slug, self.version, self._has_history, ui_version_of=self.ui_version)
+        return self._record(
+            slug,
+            self.version,
+            self._has_history,
+            ui_version_of=self.ui_version,
+            previous_version_of=self.previous_version,
+        )
 
     def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
         if meta.pipeline is None:
@@ -882,6 +902,7 @@ class Catalogue:
         media_of: Callable[[str], list[MediaItem]] | None = None,
         cover_of: Callable[[str], str | None] | None = None,
         ui_version_of: Callable[[str], str | None] | None = None,
+        previous_version_of: Callable[[str], str | None] | None = None,
     ) -> ModelRecord:
         """``version_of`` answers a template's revision -- per call, or from the one
         walk a listing makes -- and is asked for an upstream's as well as this one's.
@@ -938,6 +959,7 @@ class Catalogue:
             ui_version=ui_version_of(slug)
             if ui_version_of is not None and meta.ui is not None
             else None,
+            previous_version=previous_version_of(slug) if previous_version_of is not None else None,
             upstream_state=upstream_state,
             invalid_libraries=invalid_entries(raw.get("libraries")),
         )

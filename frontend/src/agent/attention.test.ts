@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { setPendingAnswers, setPendingApprovals, setSummariesTruncated } from '../mocks/features/pendingInput'
+import { setPendingAnswers, setPendingApprovals } from '../mocks/features/pendingInput'
 import { server } from '../mocks/server'
 import {
   APPROVALS_LIST_MAX,
@@ -41,14 +41,6 @@ describe('fetchPendingInput', () => {
     expect(totalOf(only!)).toBe(0)
     expect(attentionLabel(totalOf(only!))).toBe('')
     expect(summaryLabel(only)).toBe('1 summary')
-  })
-
-  it("reads the mock agent's summaries_truncated, which tests set like the agent's own (#1413)", async () => {
-    setPendingAnswers(0, 0, 2)
-    setSummariesTruncated(true)
-    const cut = await fetchPendingInput()
-    expect(cut).toEqual({ approvals: 0, questions: 0, attention: 0, summaries: 2, summariesTruncated: true })
-    expect(summaryLabel(cut)).toBe('2+ summaries')
   })
 
   it('says when the agent listed only some of the done summaries, and not otherwise', async () => {
