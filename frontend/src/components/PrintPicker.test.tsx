@@ -1662,6 +1662,85 @@ describe('PrintPicker · Projects', () => {
   })
 })
 
+describe('PrintPicker · Default High Flow (#1895)', () => {
+  const STANDARD = [
+    { size: '0.4', flow: 'standard' },
+    { size: '0.4', flow: 'standard' },
+  ] as const
+  const RIGHT_HIGH_FLOW = [
+    { size: '0.4', flow: 'standard' },
+    { size: '0.4', flow: 'high_flow' },
+  ] as const
+
+  /** Each printer's defaults, as the server derives them from its nozzles. */
+  function defaultsByPrinter(byPrinter: Record<number, readonly object[]>, modelChoices: object = {}) {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        const printerId = asked === null ? 1 : Number(asked)
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: printerId,
+          default_nozzles: byPrinter[printerId] ?? STANDARD,
+          model_choices: { printer_id: null, filament_plan: [], ...modelChoices },
+        })
+      }),
+    )
+  }
+
+  it('opens on High Flow where the printer has it, and prints with it', async () => {
+    defaultsByPrinter({ 1: RIGHT_HIGH_FLOW })
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    // Advanced, so the flow is not sent unseen.
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('radio', { name: 'Right High Flow' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Left Standard' })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ choices: { nozzles: RIGHT_HIGH_FLOW } })
+  })
+
+  it('takes the next printer’s defaults while the nozzles are untouched', async () => {
+    defaultsByPrinter({ 1: STANDARD, 2: RIGHT_HIGH_FLOW })
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'false')
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'Right High Flow' })).toBeChecked())
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('keeps what the user chose when the printer changes', async () => {
+    defaultsByPrinter({ 1: STANDARD, 2: RIGHT_HIGH_FLOW })
+    const { urls } = watch('GET', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.click(screen.getByRole('radio', { name: 'Left High Flow' }))
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(urls.at(-1)).toContain('printer_id=2'))
+    await loaded()
+    expect(screen.getByRole('radio', { name: 'Left High Flow' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Right Standard' })).toBeChecked()
+  })
+
+  it('a remembered Standard wins over the printer’s High Flow', async () => {
+    defaultsByPrinter({ 1: RIGHT_HIGH_FLOW }, { printer_id: 1, nozzles: STANDARD, tier: 'standard' })
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'false')
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    expect(screen.getByRole('radio', { name: 'Right Standard' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Left Standard' })).toBeChecked()
+  })
+})
+
 describe('PrintPicker · Remembered choices', () => {
   async function putChoices(body: object) {
     await fetch('/api/v1/print/models/name-keychain/choices', {

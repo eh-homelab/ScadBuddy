@@ -512,9 +512,9 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       { slot_id: 2, spool_id: 11 },
     ],
   }
-  function choicesView(model_choices: Record<string, unknown> = {}) {
+  function choicesView(model_choices: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) {
     return http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, () =>
-      HttpResponse.json({ printer_id: 1, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices }),
+      HttpResponse.json({ printer_id: 1, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices, ...extra }),
     )
   }
   const RUN = 'fedcba9876543210fedcba9876543210'
@@ -772,6 +772,23 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         bed_type: 'Cool Plate',
       },
     })
+  })
+
+  it("fills omitted nozzles with the printer's High Flow defaults, and a remembered choice wins (#1895)", async () => {
+    const highFlow = [
+      { size: '0.4', flow: 'standard' },
+      { size: '0.4', flow: 'high_flow' },
+    ]
+    const defaulted: { body?: unknown } = {}
+    server.use(choicesView({}, { default_nozzles: highFlow }), ...capturedRun(defaulted))
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(defaulted.body).toMatchObject({ choices: { nozzles: highFlow } })
+
+    const remembered: { body?: unknown } = {}
+    const standard = [{ size: '0.4', flow: 'standard' }]
+    server.use(choicesView({ nozzles: standard }, { default_nozzles: highFlow }), ...capturedRun(remembered))
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(remembered.body).toMatchObject({ choices: { nozzles: standard } })
   })
 
   it("prefers the model's remembered nozzles, process and in-stock spools", async () => {
