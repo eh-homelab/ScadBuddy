@@ -22,7 +22,12 @@ from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
-from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
+from scadbuddy.bambuddy.options import (
+    BAMBUDDY_DEFAULTS,
+    OptionScope,
+    PrintOptions,
+    is_options_scope,
+)
 from scadbuddy.bambuddy.send import SidebarLink
 from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.config import StoreBackend
@@ -177,7 +182,9 @@ class PrintOptionsUpdate(BaseModel):
     """
 
     scope: OptionScope
-    #: The printer id or model slug. Absent for the global scope, required otherwise.
+    #: The printer id, or for ``model`` the print's options scope (#1754): a model id,
+    #: or a library file's ``library:<file id>``. Absent for the global scope, required
+    #: otherwise.
     key: str | None = None
     options: PrintOptions
 
@@ -188,6 +195,10 @@ class PrintOptionsUpdate(BaseModel):
                 raise ValueError("the global scope takes no key")
         elif not self.key:
             raise ValueError(f"the {self.scope!r} scope needs a key")
+        elif self.scope == "model" and not is_options_scope(self.key):
+            raise ValueError(
+                f"{self.key!r} is neither a model nor a library file ('library:<file id>')"
+            )
         return self
 
 
@@ -409,7 +420,9 @@ def _remembered(
 )
 async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
-    with an empty body, ``PUT /print/printers/{id}/bed-type`` with a ``null`` plate,
+    with an empty body (a ``library:<file id>`` entry, #1754, through
+    ``PUT /print/library/{file_id}/choices``), ``PUT /print/printers/{id}/bed-type``
+    with a ``null`` plate,
     ``PUT /print/printers/{id}/rack-algorithm`` with a ``null`` algorithm,
     and ``PUT /settings/print-options`` with no options, so the browser never posts a
     whole map back; a project's printer and nozzle go through

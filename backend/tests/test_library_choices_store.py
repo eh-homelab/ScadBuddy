@@ -69,8 +69,7 @@ def test_a_row_that_no_longer_validates_is_nothing_remembered(
 ) -> None:
     with psycopg.connect(pg_conninfo) as conn:
         conn.execute(
-            "INSERT INTO model_print_choices (model_id, choices)"
-            " VALUES ('library:89', %s::jsonb)",
+            "INSERT INTO model_print_choices (model_id, choices) VALUES ('library:89', %s::jsonb)",
             (UNREADABLE,),
         )
 
@@ -103,8 +102,7 @@ def test_an_unreadable_row_does_not_stop_the_settings_loading(
     store.set_model_choices("demo", CHOSEN)
     with psycopg.connect(pg_conninfo) as conn:
         conn.execute(
-            "INSERT INTO model_print_choices (model_id, choices)"
-            " VALUES ('library:89', %s::jsonb)",
+            "INSERT INTO model_print_choices (model_id, choices) VALUES ('library:89', %s::jsonb)",
             (UNREADABLE,),
         )
 
@@ -141,9 +139,9 @@ def test_the_migration_moves_every_library_row_and_is_idempotent(
             """ (4, '{"printer_id": 4}', '2026-02-04')"""
         )
         sql = MIGRATION.read_text()
-        conn.execute(sql)  # type: ignore[call-overload]
+        conn.execute(sql)
         once = _rows(conn)
-        conn.execute(sql)  # type: ignore[call-overload]
+        conn.execute(sql)
         assert _rows(conn) == once
         # The old table keeps its rows, for an image rolled back past #1754.
         assert conn.execute("SELECT count(*) FROM library_print_choices").fetchone() == (4,)
