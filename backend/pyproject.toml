@@ -77,6 +77,11 @@ untyped_calls_exclude = ["trimesh"]
 module = ["temporal_agent_harness", "temporal_agent_harness.*"]
 ignore_missing_imports = true
 
+# Harness tools and agents are declared with its (untyped) decorators.
+[[tool.mypy.overrides]]
+module = ["tests.flows.harness_probe"]
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
