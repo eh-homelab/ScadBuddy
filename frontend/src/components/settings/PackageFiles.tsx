@@ -59,7 +59,7 @@ function FileBrowser({ review, of }: { review: PackageReview; of: PackageFilesOf
             type="button"
             onClick={() => select(path)}
             aria-current={path === selected ? 'true' : undefined}
-            className={`sb-num break-all text-left hover:underline ${path === selected ? 'text-accent' : ''}`}
+            className={`sb-num min-h-6 break-all text-left hover:underline ${path === selected ? 'text-accent' : ''}`}
           >
             {path}
           </button>
