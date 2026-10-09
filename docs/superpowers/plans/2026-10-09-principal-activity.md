@@ -322,7 +322,8 @@ def test_agent_operation_event_decodes_and_goes_nowhere() -> None:
 - Consumes: `ActivityRow`, `ActivityEvent` (Task 1); `TransactionalEvents.publish_in(conn, event)`.
 - Produces:
   - `ActivityIndex(pool, *, events: TransactionalEvents | None, metrics: Metrics | None = None)`
-  - `upsert_in(conn, row: ActivityRow) -> None` — never raises
+  - `upsert_in(conn, row: ActivityRow | Callable[[], ActivityRow], *, attribution: Attribution | None = None) -> None` — never raises; a callable is built inside the guard, and `attribution` is written in the same savepoint
+  - `Attribution(principal: str, session: str | None, via_tool: str | None)` (frozen dataclass in `activity/index.py`)
   - `attribute(activity_id: str, *, principal: str, session: str | None, via_tool: str | None) -> None` (async)
   - `get(activity_id) -> ActivityRow | None` (async)
 
@@ -383,6 +384,7 @@ async def test_upsert_failure_does_not_abort_source(pg_pool: PgPool) -> None:
         conn.execute("CREATE TEMP TABLE src (x int)")
         conn.execute("INSERT INTO src VALUES (1)")
         index.upsert_in(conn, row(status="bogus"))  # violates the CHECK
+        index.upsert_in(conn, lambda: {}["missing"])  # a mapping that raises
         conn.execute("INSERT INTO src VALUES (2)")
         assert conn.execute("SELECT count(*) FROM src").fetchone() == {"count": 2}
 ```
@@ -390,7 +392,10 @@ async def test_upsert_failure_does_not_abort_source(pg_pool: PgPool) -> None:
 `attribute` before any upsert creates a placeholder (`status='queued'`,
 `title=''`, `kind=''`, `source=''`, `source_id=''`) that the first upsert fills; an upsert
 writes every column except `principal`, `session`, `via_tool`, `created_at`, and fills
-`kind`/`title`/`source`/`source_id` over a placeholder's empties. A `status` that is not one
+`kind`/`title`/`source`/`source_id` over a placeholder's empties. Reads never show a
+placeholder (`source <> ''`); the repair sweep treats one as missing and fills it from its
+source, and `prune` drops a placeholder older than the repair window that no source
+filled (Task 8). A `status` that is not one
 of the six fails the CHECK, so `ActivityRow.model_validate` must not be what rejects it in
 that test: build it with `ActivityRow.model_construct(...)` for the bad row.
 
@@ -406,13 +411,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from psycopg import Connection, sql
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.activity.models import FINISHED, ActivityRow
+from scadbuddy.activity.models import FINISHED, ActivityRow, ActivityStatus
 from scadbuddy.core.events import ActivityEvent
 
 logger = logging.getLogger(__name__)
@@ -428,21 +435,40 @@ _COLUMNS = (
 )
 
 
+@dataclass(frozen=True)
+class Attribution:
+    principal: str
+    session: str | None
+    via_tool: str | None
+
+
 class ActivityIndex:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]], *, events: Any, metrics: Any = None) -> None:
         self.pool = pool
         self.events = events
         self.metrics = metrics
 
-    def upsert_in(self, conn: Connection[Any], row: ActivityRow) -> None:
+    def upsert_in(
+        self,
+        conn: Connection[Any],
+        row: ActivityRow | Callable[[], ActivityRow],
+        *,
+        attribution: Attribution | None = None,
+    ) -> None:
         """Write ``row`` in the caller's transaction, under a savepoint: a failure is
-        logged and counted, and the caller's own write still commits (Review Focus 4)."""
-        values = row.model_dump(include=set(_WRITTEN))
-        values["facets"] = json.dumps(values["facets"])
-        values["detail"] = json.dumps(values["detail"])
-        finished = row.status in FINISHED
+        logged and counted, and the caller's own write still commits (Review Focus 4).
+        A callable is built inside the guard, so a read or a mapping that raises cannot
+        abort the source's write either."""
+        activity_id = row.id if isinstance(row, ActivityRow) else None
         try:
             with conn.transaction():
+                if not isinstance(row, ActivityRow):
+                    row = row()
+                activity_id = row.id
+                values = row.model_dump(include=set(_WRITTEN))
+                values["facets"] = json.dumps(values["facets"])
+                values["detail"] = json.dumps(values["detail"])
+                finished = row.status in FINISHED
                 conn.execute(
                     sql.SQL(
                         "INSERT INTO activity (id, {cols}, finished_at) VALUES (%(id)s, {vals}, "
@@ -459,10 +485,17 @@ class ActivityIndex:
                     ),
                     {**values, "id": row.id, "finished": finished},
                 )
+                if attribution is not None:
+                    conn.execute(
+                        "UPDATE activity SET principal = coalesce(principal, %s),"
+                        " session = coalesce(session, %s), via_tool = coalesce(via_tool, %s)"
+                        " WHERE id = %s",
+                        (attribution.principal, attribution.session, attribution.via_tool, row.id),
+                    )
                 if self.events is not None:
                     self.events.publish_in(conn, ActivityEvent(activity_id=row.id))
         except Exception:
-            logger.exception("an activity write failed", extra={"activity_id": row.id})
+            logger.exception("an activity write failed", extra={"activity_id": activity_id})
             if self.metrics is not None:
                 self.metrics.activity_write_failures.inc()
 
@@ -771,8 +804,11 @@ with `Job.model_validate({...})` from the minimum fields `job_models.Job` requir
 
 ```python
         if self.activity is not None:
-            self.activity.upsert_in(conn, row_of(self._read_in(conn, job_id)))
+            self.activity.upsert_in(conn, lambda: row_of(self._read_in(conn, job_id)))
 ```
+
+  Pass a lambda, not the row: the read and the mapping then run inside `upsert_in`'s
+  savepoint, so a `KeyError` in `_STATUS` cannot abort the projection's write.
 
   where `_read_in(conn, job_id)` is `_job(conn.execute(f"SELECT {cols} FROM render_jobs WHERE id = %s", (job_id,)).fetchone())` using the module's `PROJECTION_COLUMNS` (copy the shape of `read`). `ACTIVITY`'s component (Task 6) sets `core.projection.activity = index` when it builds.
 
@@ -798,6 +834,11 @@ async def attribute_request(index: ActivityIndex, activity_id: str, request: Req
   `job = await render.submit(...)`, add
   `await attribute_request(activity.index, f"render:{job.id}", request)` with
   `activity: Annotated[ActivityComponent, component_dep(ACTIVITY)]`.
+  Known race, accepted: two *concurrent* identical renders from different principals
+  both return the same id, and whichever `attribute` commits first is recorded (the
+  `coalesce` keeps it). Sequential joins, the case that happens, keep the starter
+  (`test_coalesced_render_keeps_first_principal`). Making it exact needs `submit` to say
+  whether it started the workflow; that is not worth a change to `RenderService` here.
 
 - [ ] **Step 6: Run** `uv run --frozen pytest tests/test_activity_render.py tests/api/test_activity_attribution.py -v` — PASS.
 - [ ] **Step 7: Commit** `feat(activity): renders write activity; the route records who started one`.
@@ -870,11 +911,11 @@ ACTIVITY_KINDS: tuple[()] = ()
 ```
 
   In `OperationStore`, take `activity: ActivityIndex | None = None` in `__init__`; in
-  `_insert`, inside the transaction where it announces, call `self.activity.upsert_in(conn, row_of(op))`
-  and, when `author` is given, write the attribution columns in the same transaction:
-  `conn.execute("UPDATE activity SET principal = coalesce(principal, %s), session = coalesce(session, %s), via_tool = coalesce(via_tool, %s) WHERE id = %s", ...)`.
-  With no author, set `principal = coalesce(principal, 'browser')`. In `_finish` call
-  `upsert_in` likewise. In `operation_activities.insert`, pass
+  `_insert`, inside the transaction where it announces, call
+  `self.activity.upsert_in(conn, lambda: row_of(op), attribution=Attribution(author.principal or "browser", author.session, author.tool) if author else Attribution("browser", None, None))`:
+  the attribution is written in `upsert_in`'s savepoint, never as a bare `UPDATE` in the
+  store's transaction, so it cannot fail the operation's insert. In `_finish` call
+  `upsert_in(conn, lambda: row_of(op))` likewise. In `operation_activities.insert`, pass
   `author=op.author` (and add `tool: str | None = None` to `OperationAuthor` in
   `operation_models.py`; `api/operations.py` `_author()` builds it with
   `OperationAuthor(**vars(author))`, so `AgentAuthor.tool` from Task 4 flows in unchanged). A pydantic field with a default
@@ -895,8 +936,18 @@ ACTIVITY_KINDS: tuple[()] = ()
 
 **Files:**
 - Create: `backend/scadbuddy/activity/component.py`
-- Modify: `backend/scadbuddy/activity/index.py` (`ingest_agent_operation`)
-- Test: `backend/tests/test_activity_agent_ingest.py`
+- Modify: `backend/scadbuddy/activity/index.py` (`ingest_agent_operation`), `backend/scadbuddy/worker.py` (the worker processes' own stores)
+- Test: `backend/tests/test_activity_agent_ingest.py`, `backend/tests/test_worker.py`
+
+The component wires the API process's stores only. The workers build their own:
+`worker.py` makes a `JobProjection` for the render worker (the `project` activity writes
+`mark_started`/`finish` there), and `build_print_deps` a `PrintRunStore` and an
+`OperationStore` for the `bambuddy` queue. Each gets
+`activity=ActivityIndex(<its pool>, events=<its events>, metrics=<its metrics>)` (the
+`events` there already NOTIFY in the row's transaction, so the API's listeners hear the
+`activity.changed`). Without this, every state change made on a worker is missing until
+the repair sweep. In `tests/test_worker.py`, assert that the stores `build_print_deps`
+returns, and the render worker's projection, carry a non-`None` `activity`.
 
 **Interfaces:**
 - Produces:
@@ -946,20 +997,28 @@ async def test_ingest_without_agent_tables_is_a_no_op(index) -> None:
                 return
             if op is None:
                 return
-            row_id = f"agent_operation:{op['id']}"
-            self.upsert_in(conn, ActivityRow(
-                id=row_id, kind=f"agent.{op['kind']}", subject=op["subject"], status=op["status"],
-                title=f"{op['kind'].replace('_', ' ').capitalize()} {op['subject']}",
-                source="ai_operations", source_id=op["id"], workflow_id=op["workflow_id"],
-                run_id=op["workflow_run_id"],
-                detail={"request": op["request"], "result": op["result"], "error": op["error"]},
-            ))
-            conn.execute(
-                "UPDATE activity SET principal = coalesce(principal, %s), session = coalesce(session, %s),"
-                " via_tool = coalesce(via_tool, %s) WHERE id = %s",
-                (op["principal"] or "browser", op["session"], op["via_tool"], row_id),
+            self.upsert_in(
+                conn,
+                lambda: ActivityRow(
+                    id=f"agent_operation:{op['id']}", kind=f"agent.{op['kind']}",
+                    subject=op["subject"] or "", status=_AGENT_STATUS[op["status"]],
+                    title=f"{op['kind'].replace('_', ' ').capitalize()} {op['subject'] or ''}".strip(),
+                    source="ai_operations", source_id=op["id"], workflow_id=op["workflow_id"],
+                    run_id=op["workflow_run_id"],
+                    detail={"request": op["request"], "result": op["result"], "error": op["error"]},
+                ),
+                attribution=Attribution(op["principal"] or "browser", op["session"], op["via_tool"]),
             )
+
+
+#: `ai_operations.status` (agent `src/operations/`); anything else raises inside
+#: `upsert_in`'s guard, so it is logged and counted, never lost in the listener task.
+_AGENT_STATUS: dict[str, ActivityStatus] = {"running": "running", "succeeded": "succeeded", "failed": "failed"}
 ```
+
+  Check `_AGENT_STATUS` against the statuses the agent's `ai_operations` CHECK allows and
+  add any it has. Add a test that an `ai_operations` row with an unknown status (insert it
+  with the CHECK dropped in the test schema) leaves no row and raises nothing.
 
   `component.py`:
 
@@ -1001,7 +1060,7 @@ def _build(core: Core, components: Components) -> ActivityComponent:
     index = ActivityIndex(core.projection.pool, events=transactional_events(core.events), metrics=core.metrics)
     core.projection.activity = index
     ops.store.activity = index
-    core.print_runs.store.activity = index  # check the real attribute path: grep "class PrintCommands"
+    core.print_runs.store.activity = index  # `PrintCommands.store`, as `api/outputs.py` reads it
     cache: dict[str, object] = {"at": 0.0, "reg": None}
 
     def kinds() -> KindRegistry:
@@ -1123,6 +1182,17 @@ async def test_headless_session_is_pinned_to_its_owner(client, seed_activity, ag
     assert page["items"] == []
 
 
+async def test_headless_session_cannot_read_other_detail(client, seed_activity, agent_tables) -> None:
+    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
+    seed_activity(id="render:a", principal="browser")
+    seed_activity(id="render:b", principal="token:t1")
+    seed_activity(id="render:c", principal="browser", parent_id="render:b")
+    headers = {"X-ScadBuddy-Agent-Session": sid}
+    assert (await client.get("/api/v1/activity/render:a", headers=headers)).status_code == 404
+    own = (await client.get("/api/v1/activity/render:b", headers=headers)).json()
+    assert own["children"] == []
+
+
 async def test_unknown_session_sees_nothing(client, seed_activity) -> None:
     seed_activity(id="render:a", principal="browser")
     page = (await client.get("/api/v1/activity", headers={"X-ScadBuddy-Agent-Session": str(uuid.uuid4())})).json()
@@ -1230,7 +1300,11 @@ def _check_params(request: Request, kinds: KindRegistry, selected: list[str]) ->
   `run_id`, `traceparent`, `source`, `source_id`, `facets` and `detail`'s raw
   `request`/`result`/`error` unless `advanced`; it fills `links` and `detail` from the
   kind (`kind.detail(row)` when declared, else `row.detail`) and `children` from
-  `parent_id = id`. The module must not use `from __future__ import annotations`
+  `parent_id = id`. The detail route pins as `list` does: with
+  `pinned = await pinned_principal(request, activity.index.pool)` set, a row whose
+  `principal != pinned` answers 404 (the same answer as a missing id, so an id learned
+  from the WS topic or guessed reveals nothing), and `children` keeps only rows with
+  `principal = pinned`. The module must not use `from __future__ import annotations`
   (`api/components.py`: FastAPI reads the dependency annotations at runtime).
 
   In `api/operations.py` `run_operation`, on the 202 answer add header
@@ -1251,7 +1325,7 @@ def _check_params(request: Request, kinds: KindRegistry, selected: list[str]) ->
 - Test: `backend/tests/test_activity_sweep.py`, `backend/tests/test_housekeeping_replay.py` (existing replay fixture must still pass)
 
 **Interfaces:**
-- Produces: sweep `housekeeping_activity`; `ACTIVITY_PATCH = "housekeeping-activity"`; stored settings `activity_ttl_seconds`, `activity_repair_window_seconds`, `activity_follow`; `ActivityIndex.prune(ttl: float) -> int`, `ActivityIndex.repair(window: float) -> int`.
+- Produces: sweep `housekeeping_activity`; `ACTIVITY_PATCH = "housekeeping-activity"`; stored settings `activity_ttl_seconds`, `activity_repair_window_seconds`, `activity_follow`; `ActivityIndex.prune(ttl: float, placeholder_ttl: float) -> int`, `ActivityIndex.repair(window: float) -> int`.
 
 - [ ] **Step 1: Failing tests**
 
@@ -1261,8 +1335,28 @@ async def test_prune_deletes_old_finished_only(index, seed_activity, pg_pool) ->
     seed_activity(id="render:open", status="running")
     with pg_pool.connection() as conn:
         conn.execute("UPDATE activity SET finished_at = now() - interval '40 days', created_at = now() - interval '40 days'")
-    assert await index.prune(30 * 86400) == 1
+    assert await index.prune(30 * 86400, 86400) == 1
     assert await index.get("render:open") is not None
+
+
+async def test_prune_drops_stale_placeholders(index, pg_pool) -> None:
+    await index.attribute("render:ghost", principal="browser", session=None, via_tool=None)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE activity SET created_at = now() - interval '2 days' WHERE id = 'render:ghost'")
+        assert await index.prune(30 * 86400, 86400) == 1
+        assert conn.execute("SELECT count(*) FROM activity WHERE id = 'render:ghost'").fetchone() == {"count": 0}
+
+
+async def test_repair_fills_a_placeholder(index, operation_store_without_activity) -> None:
+    # The source's own upsert failed (or never ran) and the route attributed first:
+    # the placeholder must not hide the operation from repair.
+    await index.attribute("operation:o8", principal="token:t1", session=None, via_tool=None)
+    await operation_store_without_activity.insert("o8", kind="model_import", subject="k", operation_key="k8",
+                                                  request={}, workflow_id="w", workflow_run_id="r", retention=None)
+    assert await index.get("operation:o8") is None  # still a placeholder
+    assert await index.repair(86400) >= 1
+    got = await index.get("operation:o8")
+    assert got is not None and got.principal == "token:t1"
 
 
 async def test_repair_restores_a_missed_operation(index, operation_store_without_activity) -> None:
@@ -1274,7 +1368,7 @@ async def test_repair_restores_a_missed_operation(index, operation_store_without
 ```
 
 - [ ] **Step 2: Run** — FAIL.
-- [ ] **Step 3: Implement.** `prune`: `DELETE FROM activity WHERE finished_at < now() - make_interval(secs => %s)`. `repair(window)`: for each source, select rows changed in the window that have no activity row (`LEFT JOIN activity a ON a.id = 'render:' || r.id WHERE a.id IS NULL`), map them with that source's `row_of`, and `upsert_in` each (renders: `render_jobs`; operations: `operations`, principal from `request->'_author'` is not stored, so `browser` unless `operations` has an author column — it does not; leave principal NULL so it shows as "Unknown"); and call `ingest_agent_operation` for `ai_operations` ids in the window with no row (skip on `UndefinedTable`). Add the settings as stored settings, read fresh by the sweep each run through
+- [ ] **Step 3: Implement.** `prune(ttl, placeholder_ttl)`: `DELETE FROM activity WHERE finished_at < now() - make_interval(secs => %(ttl)s) OR (source = '' AND created_at < now() - make_interval(secs => %(placeholder_ttl)s))`; the sweep passes the repair window as `placeholder_ttl`, so a placeholder lives long enough for repair to fill it and no longer. `repair(window)`: for each source, select rows changed in the window that have no activity row *or only a placeholder* (`LEFT JOIN activity a ON a.id = 'render:' || r.id WHERE a.id IS NULL OR a.source = ''`), so a source whose own upsert failed after the route attributed it is still restored, with the placeholder's principal kept (`upsert_in` never writes the attribution columns); map them with that source's `row_of`, and `upsert_in` each (renders: `render_jobs`; operations: `operations`, principal from `request->'_author'` is not stored, so `browser` unless `operations` has an author column — it does not; leave principal NULL so it shows as "Unknown"); and call `ingest_agent_operation` for `ai_operations` ids in the window with no row or a placeholder (skip on `UndefinedTable`). Add the settings as stored settings, read fresh by the sweep each run through
   `settings_store.load()`, the way `operation_retention_seconds` is
   (`library/settings_store.py` `StoredSettings` and `SettingsPatch`, mirrored in
   `api/settings.py`), not as env-seeded `core/settings.py` fields:
