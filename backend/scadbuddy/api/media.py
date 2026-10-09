@@ -28,7 +28,7 @@ from typing import IO, TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
@@ -450,9 +450,10 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
     cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
     `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
     header, before decoding). ``draft`` lets a JPEG decode at a fraction of its size,
-    so a large photo is still cheap enough to shrink. Any error decoding it -- a
-    malformed EXIF block raises ``ValueError`` or ``SyntaxError`` -- is a None too,
-    since serving the file as it is is always safe.
+    so a large photo is still cheap enough to shrink. Any error decoding it is a None
+    too, since serving the file as it is is always safe: Pillow's metadata parser has
+    no single error type, and a malformed EXIF block raises ``ValueError``,
+    ``SyntaxError``, ``TypeError`` or ``struct.error`` among others (#1690).
 
     The box is square, so an EXIF orientation of 5 to 8, which swaps width and height,
     fits it either way round: the image is shrunk before it is turned upright, and the
@@ -469,13 +470,7 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
                 out = io.BytesIO()
                 upright.save(out, "WEBP", quality=80)
                 return out.getvalue()
-    except (
-        UnidentifiedImageError,
-        OSError,
-        Image.DecompressionBombError,
-        ValueError,
-        SyntaxError,
-    ):
+    except Exception:
         return None
 
 
