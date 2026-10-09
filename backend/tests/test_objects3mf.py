@@ -274,3 +274,22 @@ def test_a_written_piece_loads_back_as_a_layout(tmp_path: Path) -> None:
     assert [p.colour for p in layout.plates[0].parts] == ["#FF0000", "#0000FF"]
     assert tuple(round(v, 3) for v in box.size) == (10, 10, 9)
     assert len(layout.plates[0].parts[1].mesh.faces) == len(blue.mesh.faces)
+
+
+def _one_triangle(vertex: str, extra: str = "") -> bytes:
+    root = (
+        f'<model xmlns="{CORE}" xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">'
+        '<resources><object id="1" type="model"><mesh><vertices>'
+        f'<vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/>{vertex}</vertices>'
+        f'<triangles><triangle v1="0" v2="1" v3="2"{extra}/></triangles></mesh></object>'
+        '</resources><build><item objectid="1"/></build></model>'
+    )
+    return _zip({"3D/3dmodel.model": root})
+
+
+def test_a_non_finite_vertex_or_prusa_painting_is_refused() -> None:
+    assert read_objects(_one_triangle('<vertex x="0" y="1" z="0"/>'))
+    with pytest.raises(UnreadableObjectsError, match="finite"):
+        read_objects(_one_triangle('<vertex x="nan" y="1" z="0"/>'))
+    with pytest.raises(UnreadableObjectsError, match="painted"):
+        read_objects(_one_triangle('<vertex x="0" y="1" z="0"/>', ' slic3rpe:mmu_segmentation="4"'))

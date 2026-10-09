@@ -133,6 +133,7 @@ export const customizerTools: Tool[] = [
     input: z.object({ slug, params }),
     risk: 'read',
     routes: [],
+    title: ({ slug }) => `Check parameters → ${slug}`,
     handler: async ({ slug, params }, ctx) => json(validateParams(await fetchSchema(ctx, slug), params)),
   }),
 
@@ -163,6 +164,7 @@ export const customizerTools: Tool[] = [
     source:
       "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
+    title: ({ slug, version }) => `Render ${slug}${version ? ` at ${version.slice(0, 7)}` : ''}`,
     handler: async ({ slug, params, inputs, version, save_output, output_name }, ctx) => {
       // With inputs, inputs.params is what renders (missing: the defaults). A `params`
       // beside them would be dropped, so it is refused rather than validated in vain.
@@ -260,6 +262,7 @@ export const customizerTools: Tool[] = [
     input: z.object({ job_id: jobId }),
     risk: 'read',
     routes: ['GET /api/v1/jobs/{job_id}/preview.glb'],
+    title: () => 'Get the render’s 3D preview',
     handler: async ({ job_id }, ctx) =>
       binary(
         ctx.backend.GET('/api/v1/jobs/{job_id}/preview.glb', { params: { path: { job_id } }, parseAs: 'stream' }),
@@ -281,6 +284,7 @@ export const customizerTools: Tool[] = [
     input: z.object({ job_id: jobId, view: VIEW, size: VIEW_SIZE, ...CAMERA }),
     risk: 'read',
     routes: ['GET /api/v1/jobs/{job_id}/views/{view}.png'],
+    title: ({ view }) => `Look at the render (${view})`,
     handler: async ({ job_id, view, size, ...camera }, ctx) =>
       binary(
         ctx.backend.GET('/api/v1/jobs/{job_id}/views/{view}.png', {
@@ -366,6 +370,7 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets'],
+    title: ({ slug, name }) => `Save preset → ${name} (${slug})`,
     handler: async ({ slug, name, params, description, tags }, ctx) =>
       json(
         await command(ctx, `save preset ${name}`, (headers) =>
@@ -392,6 +397,7 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}/presets/{preset_id}'],
+    title: ({ slug, name }) => `Update preset${name ? ` → ${name}` : ''} (${slug})`,
     handler: async ({ slug, preset_id, name, params, description, tags }, ctx) =>
       json(
         await command(ctx, `update preset ${preset_id}`, (headers) =>

@@ -20,6 +20,8 @@ export type FakeTurn =
       subtype?: 'success' | 'error_max_budget_usd' | 'error_max_turns'
       /** Keeps the stream open after the result until this settles (the SDK's last appends). */
       holdAfterResult?: Promise<void>
+      /** SDK messages yielded before the reply, e.g. a tool call and its result (#782). */
+      before?: SDKMessage[]
     }
   /**
    * Waits until the query is aborted, then throws as the SDK does; or, with
@@ -107,6 +109,7 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         } as unknown as SDKMessage
         return
       }
+      for (const m of turn.before ?? []) yield m
       yield stream({ type: 'message_start', message: { id: msgId } })
       yield stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
       yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: turn.reply } })

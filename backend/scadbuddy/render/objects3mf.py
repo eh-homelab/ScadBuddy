@@ -70,6 +70,8 @@ _UNITS = {
 }
 #: Parts that print nothing: settings regions and support hints (Bambu Studio's subtypes).
 _DROPPED = {"modifier_part", "support_blocker", "support_enforcer"}
+#: PrusaSlicer's multi-material painting, as Bambu Studio's is `paint_color`.
+_MMU_SEGMENTATION = "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation"
 #: A component chain deeper than this is not a file any slicer writes.
 _MAX_DEPTH = 8
 
@@ -278,12 +280,14 @@ class _Reader:
             [[float(v.get("x", 0)), float(v.get("y", 0)), float(v.get("z", 0))] for v in node],
             dtype=np.float64,
         )
+        if not np.isfinite(points).all():
+            raise UnreadableObjectsError("a vertex of the 3MF is not a finite number")
         points = (np.c_[points, np.ones(len(points))] @ matrix.T)[:, :3]
         materials = _materials(root) if extruder is None else {}
         default_pid, default_index = obj.get("pid", ""), int(obj.get("pindex", 0) or 0)
         buckets: dict[str, list[tuple[int, int, int]]] = {}
         for triangle in triangles:
-            if triangle.get("paint_color"):
+            if triangle.get("paint_color") or triangle.get(_MMU_SEGMENTATION):
                 raise UnreadableObjectsError(
                     f"object {obj.get('name') or obj.get('id')} is painted in several colours,"
                     " which Arrange cannot read"

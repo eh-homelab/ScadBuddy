@@ -227,6 +227,9 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'assistant.text.done', sessionId: S, messageId: 'm:0' }),
     event({ type: 'tool.call', sessionId: S, id: 't1', name: 'n', input: {}, risk: 'write' }),
     event({ type: 'tool.result', sessionId: S, id: 't1', ok: true, summary: '' }),
+    // #782: a call's title, and a result's images by name.
+    event({ type: 'tool.call', sessionId: S, id: 't3', name: 'mcp__scadbuddy__render_model', input: { slug: 'x' }, risk: 'write', title: 'Render x' }),
+    event({ type: 'tool.result', sessionId: S, id: 't3', ok: true, summary: 'done', images: [{ name: `${'a'.repeat(64)}.png`, mediaType: 'image/png' }] }),
     event({ type: 'approval.required', sessionId: S, id: 'a1', tool: 't1', summary: 'print box.3mf', risk: 'outward' }),
     event({ type: 'approval.resolved', sessionId: S, id: 'a1', approved: true, decision: 'approved', by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'approval.resolved', sessionId: S, id: 'a2', approved: false, decision: 'expired', reason: 'no decision before it expired' }),

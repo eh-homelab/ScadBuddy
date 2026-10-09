@@ -22,20 +22,33 @@ test.describe('assistant panel (#256)', () => {
     await expect(log.getByText('Make the name bigger and send two to Bambuddy')).toBeVisible()
     await expect(log.getByText(/so it reads from across the room/)).toBeVisible()
 
-    const write = panel.getByTestId('agent-tool').first()
-    await expect(write).toContainText('set_parameters')
+    // #782: the write and the render view are one group: the view's image shows with it closed.
+    const steps = panel.getByRole('button', { name: /2 steps/ })
+    await expect(steps).toHaveAttribute('aria-expanded', 'false')
+    const image = panel.getByRole('img', { name: 'Look at the render (iso)' })
+    await expect(image).toBeVisible()
+    expect(await image.evaluate((img) => (img as unknown as { naturalWidth: number }).naturalWidth)).toBe(192)
+    await steps.click()
+    const write = panel.getByTestId('agent-tool').filter({ hasText: 'Set text_size → 14 mm' })
     await expect(write).toContainText('write')
-    await expect(write).toContainText('Set text_size to 14 mm')
+    await expect(write).toContainText('Done')
     await write.getByText(/^Why\?/).click()
     await expect(write.getByRole('link', { name: 'OpenSCAD customizer parameters' })).toBeVisible()
+    // Arguments and the raw result are behind Details.
+    await expect(write.getByTestId('agent-tool-arguments')).toBeHidden()
+    await write.getByRole('button', { name: 'Details: Set text_size → 14 mm' }).click()
+    await expect(write.getByTestId('agent-tool-arguments')).toContainText('"text_size": 14')
+    await expect(write.getByTestId('agent-tool-result')).toContainText('Set text_size to 14 mm')
 
     const card = panel.getByRole('region', { name: 'Needs your approval' })
     await expect(card).toContainText('Send name-keychain to Bambuddy project "Keychains", 2 copies?')
     await expect(panel.getByTestId('agent-status')).toHaveText('Waiting for approval')
     await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toHaveCount(0)
 
+    const send = panel.getByTestId('agent-tool').filter({ hasText: 'Print name-keychain × 2' })
+    await expect(send.getByTestId('agent-tool-status')).toHaveText('Waiting for approval')
     await card.getByRole('button', { name: 'Approve' }).click()
-    await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toBeVisible()
+    await expect(send.getByTestId('agent-tool-status')).toHaveText('Done')
     await expect(log.getByText('Sent. Two copies are in the queue.')).toBeVisible()
     await expect(card).toContainText('Approved by You.')
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
@@ -103,7 +116,7 @@ test.describe('assistant panel (#256)', () => {
     await expect(card).toContainText('outward')
     await expect(panel.getByTestId('agent-status')).toHaveText('Waiting for approval')
     // The outward call is shown, but no result for it exists while it waits.
-    const send = panel.getByTestId('agent-tool').filter({ hasText: 'print_output' })
+    const send = panel.getByTestId('agent-tool').filter({ hasText: 'Print name-keychain × 2' })
     await expect(send).toContainText('outward')
     await expect(panel.getByText('Denied: nothing was sent.')).toHaveCount(0)
 

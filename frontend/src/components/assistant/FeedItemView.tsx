@@ -1,15 +1,12 @@
 import { useState } from 'react'
-import { Link } from 'react-router'
-import { toolLabel } from '../../agent/chat/labels'
 import { Markdown } from '../../agent/chat/Markdown'
 import { ANSWER_MAX, type Question as AskedQuestion, type DoneAttention, isDone } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
-import { safeHttpUrl } from '../../lib/safeUrl'
 import { Button } from '../ui/Button'
 import { RiskBadge } from './badges'
 import { SentImages } from './SentImages'
+import { ToolCallView } from './ToolGroup'
 
-type Tool = Extract<FeedItem, { kind: 'tool' }>
 type Approval = Extract<FeedItem, { kind: 'approval' }>
 type Memory = Extract<FeedItem, { kind: 'memory' }>
 type QuestionItem = Extract<FeedItem, { kind: 'question' }>
@@ -68,65 +65,6 @@ function MemoryLine({ item, advanced }: { item: Memory; advanced: boolean }) {
         )}
       </div>
     </details>
-  )
-}
-
-/** Basic mode shows what ran, how it ended and its sources, collapsed; Advanced adds its arguments, and opens both. */
-function ToolCard({ item, advanced }: { item: Tool; advanced: boolean }) {
-  const { result } = item
-  return (
-    <div className="rounded-[6px] border border-line bg-surface-2 px-2.5 py-2 text-[12.5px]" data-testid="agent-tool">
-      <div className="flex items-center gap-2">
-        <RiskBadge risk={item.risk} />
-        <span className="min-w-0 truncate font-mono text-[12px]">{toolLabel(item.name)}</span>
-        <span className="ml-auto shrink-0 text-[11px] text-faint">
-          {result ? (result.ok ? 'done' : 'failed') : 'running…'}
-        </span>
-      </div>
-      {advanced && (
-        <details open className="mt-1" data-testid="agent-tool-arguments">
-          <summary className="cursor-pointer text-[11.5px] text-muted">Arguments</summary>
-          <pre className="mt-1 overflow-x-auto font-mono text-[11px] text-muted">
-            {JSON.stringify(item.input, null, 2)}
-          </pre>
-        </details>
-      )}
-      {result && (
-        <div className="mt-1.5 space-y-1">
-          <p className={result.ok ? 'text-ink' : 'text-warn'}>{result.summary}</p>
-          {result.version && (
-            <Link
-              to={`/m/${encodeURIComponent(result.version.slug)}/versions`}
-              className="text-[11.5px] text-accent underline"
-            >
-              Undo from version {result.version.revision.slice(0, 7)}
-            </Link>
-          )}
-          {result.sources.length > 0 && (
-            <details open={advanced}>
-              <summary className="cursor-pointer text-[11.5px] text-muted">Why? {result.sources.length} source{result.sources.length === 1 ? '' : 's'}</summary>
-              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] text-muted">
-                {result.sources.map((source, i) => {
-                  const href = safeHttpUrl(source.url)
-                  return (
-                    <li key={i}>
-                      {href ? (
-                        <a href={href} target="_blank" rel="noreferrer noopener" className="underline">
-                          {source.title}
-                        </a>
-                      ) : (
-                        source.title
-                      )}
-                      {source.ref && <span className="ml-1 font-mono text-faint">{source.ref}</span>}
-                    </li>
-                  )
-                })}
-              </ul>
-            </details>
-          )}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -445,6 +383,7 @@ export function FeedItemView({
   onAnswer,
   advanced = false,
   askedBy,
+  sessionId = '',
 }: {
   item: FeedItem
   onDecide: (approvalId: string, approve: boolean) => void
@@ -454,6 +393,8 @@ export function FeedItemView({
   advanced?: boolean
   /** #1109 — a question's subagent (`askedBy` in chat/state.ts); undefined for the session's own agent. */
   askedBy?: string | undefined
+  /** #782 — the session the item is in, where its tool images are served. */
+  sessionId?: string
 }) {
   switch (item.kind) {
     case 'user':
@@ -479,7 +420,15 @@ export function FeedItemView({
         </div>
       )
     case 'tool':
-      return <ToolCard item={item} advanced={advanced} />
+      // The panel shows calls in groups (ToolGroup); one shown alone has its own status.
+      return (
+        <ToolCallView
+          call={item}
+          status={item.result ? (item.result.ok ? 'done' : 'failed') : 'running'}
+          sessionId={sessionId}
+          advanced={advanced}
+        />
+      )
     case 'approval':
       return <ApprovalCard item={item} onDecide={(approve) => onDecide(item.id, approve)} />
     case 'question':

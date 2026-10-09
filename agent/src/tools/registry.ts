@@ -151,6 +151,14 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   /** A human-readable line for the pending action a gated call creates. */
   summarize?: (args: z.infer<z.ZodObject<S>>) => string
   /**
+   * What a call does, in a few words, for the assistant panel (#782): worded as
+   * the action ("Render cable-clip"), since the panel shows whether it is
+   * running or done beside it. Defaults to the name in words, with the `slug`
+   * argument when there is one (`defaultTitle`). Shown to everyone watching
+   * the session, so never put a secret argument in it.
+   */
+  title?: (args: z.infer<z.ZodObject<S>>) => string
+  /**
    * Where the content this tool returns comes from, for the untrusted-data
    * envelope every text result is wrapped in (safety/untrusted.ts, #258).
    * Say who could have written it, e.g. "the model's README, written by its
@@ -174,6 +182,8 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
+  /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
+  title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
   parse(args: unknown): Record<string, unknown>
   /** Parses `args` and runs the handler, with no tier check or gate: call `runTool` instead. */
@@ -204,6 +214,11 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
+    title(args) {
+      const parsed = spec.input.safeParse(args)
+      if (!parsed.success) return defaultTitle(spec.name, args)
+      return spec.title ? spec.title(parsed.data) : defaultTitle(spec.name, parsed.data)
+    },
     parse(args) {
       return spec.input.parse(args) as Record<string, unknown>
     },
@@ -211,6 +226,18 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       return spec.handler(spec.input.parse(args), ctx)
     },
   }
+}
+
+/**
+ * A tool's title when it declares none (#782): its name in words, and the model
+ * it acts on when it takes a `slug`: `get_readme {slug: 'cable-clip'}` →
+ * "Get readme → cable-clip".
+ */
+export function defaultTitle(name: string, args: unknown): string {
+  const words = name.replace(/_/g, ' ')
+  const phrase = words.charAt(0).toUpperCase() + words.slice(1)
+  const slug = typeof args === 'object' && args !== null ? (args as { slug?: unknown }).slug : undefined
+  return typeof slug === 'string' && slug !== '' ? `${phrase} → ${slug}` : phrase
 }
 
 export class ToolError extends Error {
