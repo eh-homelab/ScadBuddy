@@ -1,6 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { Sql } from 'postgres'
 import type { Risk } from '../tools/registry.js'
+import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { unwrapUntrusted } from '../safety/untrusted.js'
 
 // What a session touched (#931): every resource a session's tool calls
@@ -19,7 +20,8 @@ import { unwrapUntrusted } from '../safety/untrusted.js'
 //
 // Recording never fails the call: a row that cannot be written is reported
 // through `onError` and the call's result goes back unchanged, as the audit
-// log does (audit/log.ts).
+// log does (audit/log.ts). Nor does it hold the call up: past RECORD_WAIT_MS
+// the call goes on and the late write is reported (db/bounded.ts, #1076).
 
 export const RESOURCE_TYPES = [
   'model',
@@ -79,8 +81,25 @@ export type ResourceAction = (typeof RESOURCE_ACTIONS)[number]
 /**
  * One resource one call touched. `model` is the model it belongs to (its own
  * slug for a model), so a session's revisions can be grouped by model and a
- * model's sessions found. `before`/`after` are what it was and became where
- * that has an id: a revision's parent and new commit, a model's version.
+ * model's sessions found. `after` is the version it became, where it has one
+ * (a revision's or model's commit, a render's model version, the last project).
+ *
+ * `before` (column `before_id`) is what the resource came from, and what that
+ * is depends on its type (#1076):
+ *
+ * | type            | tools                                         | `before` is                          |
+ * |-----------------|-----------------------------------------------|--------------------------------------|
+ * | `revision`      | every revision tool, library pins             | the model's previous commit (#1071)  |
+ * | `model`         | duplicate_model, create_from_template         | the model or template copied         |
+ * | `preset`        | duplicate_preset                              | the preset copied                    |
+ * | `library`       | remove_library_checkout                       | the commit the checkout was at       |
+ * | `print_run`     | print_output                                  | the output printed                   |
+ * | `print`         | print_output, file_output_under_project       | the output printed or filed          |
+ * | `print`         | print_again                                   | the print archive printed again      |
+ * | `bambuddy_file` | send_to_bambuddy, file_output_in_project_folder, browser_generate | the output it holds |
+ * | `project`, `print_archive` | file_output_under_project          | the output filed                     |
+ *
+ * Every other row leaves it null.
  */
 export type Touch = {
   type: ResourceType
@@ -104,17 +123,19 @@ function field(value: unknown, key: string): unknown {
 
 /**
  * A call that made a revision of `slug`: the ModelRecord it answers names the
- * new commit. `before` is the parent only where the call names it (`base`,
- * which apply_patch requires and update_source takes); the other revision
- * tools leave it null. With no new commit in the answer the model is recorded
- * as changed, never its slug as a revision id.
+ * new commit, and its parent in the model's own history as `previous_version`
+ * (#1071). Against a backend that predates that field, `before` is the parent
+ * only where the call names it (`base`, which apply_patch requires and
+ * update_source takes), else null. With no new commit in the answer the model
+ * is recorded as changed, never its slug as a revision id.
  */
 function revision(input: Record<string, unknown>, result: unknown): Touch[] {
   const slug = str(field(result, 'slug')) ?? str(input.slug)
   const after = str(field(result, 'version'))
   if (!slug) return []
   if (!after) return [{ type: 'model', id: slug, action: 'modified', model: slug }]
-  return [{ type: 'revision', id: after, action: 'created', model: slug, before: str(input.base), after }]
+  const before = str(field(result, 'previous_version')) ?? str(input.base)
+  return [{ type: 'revision', id: after, action: 'created', model: slug, before, after }]
 }
 
 /**
@@ -258,9 +279,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   save_output: (input, result) => output(result, str(input.slug)),
   // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
   arrange: (_input, result) => output(field(result, 'output'), str(field(result, 'slug'))),
-  delete_output: (input) => {
+  // The answer names the output's model (#1071), read before it was deleted.
+  delete_output: (input, result) => {
     const id = str(input.output_id)
-    return id ? [{ type: 'output', id, action: 'deleted' }] : []
+    return id ? [{ type: 'output', id, action: 'deleted', model: str(field(result, 'slug')) }] : []
   },
   // Prints. `print` is always a Bambuddy queue item id, whichever tool queued it;
   // `print_run` is ScadBuddy's own run (backend bambuddy/runs.py PrintRun.id).
@@ -490,13 +512,21 @@ function bounded(value: string | null | undefined): string | null {
 export class SessionResources implements TouchedSink {
   private readonly sql: Sql
   private readonly onError: ((err: unknown) => void) | undefined
+  private readonly waitMs: number
 
-  constructor(sql: Sql, onError?: (err: unknown) => void) {
+  /** `waitMs`: how long `record` waits for its rows before it lets the call go on (db/bounded.ts). */
+  constructor(sql: Sql, onError?: (err: unknown) => void, options: { waitMs?: number } = {}) {
     this.sql = sql
     this.onError = onError
+    this.waitMs = options.waitMs ?? RECORD_WAIT_MS
   }
 
+  /** Writes the call's rows, waiting for them at most `waitMs` (#1076); never throws. */
   async record(call: TouchedCall): Promise<void> {
+    await waitAtMost(this.insert(call), this.waitMs, "the session's resource rows", (err) => this.onError?.(err))
+  }
+
+  private async insert(call: TouchedCall): Promise<void> {
     try {
       const touches = touchesOf(call.tool, call.input, call.result, call.ok ?? true)
       if (touches.length === 0) return

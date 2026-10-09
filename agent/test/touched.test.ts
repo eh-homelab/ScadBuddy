@@ -20,6 +20,7 @@ import { BACKEND, services } from './helpers/mcp.js'
 
 const C1 = 'a'.repeat(40)
 const C2 = 'b'.repeat(40)
+const O5 = '5'.repeat(32)
 
 function result(data: unknown, tool = 'x') {
   // As the projection sees it: re-encoded as untrusted data (registry.ts runToolWithOutcome).
@@ -84,6 +85,18 @@ describe('extractors', () => {
     }
   })
 
+  // #1071: the backend's ModelRecord names the revision before it, whichever tool made it.
+  it("takes every revision's parent from the record's previous_version, over the call's own base", () => {
+    const record = { slug: 'box', version: C2, previous_version: C1 }
+    const revision = { type: 'revision', id: C2, action: 'created', model: 'box', before: C1, after: C2 }
+    for (const name of ['write_source_file', 'delete_source_file', 'set_readme', 'delete_readme', 'set_model_thumbnail', 'delete_model_thumbnail', 'restore_version']) {
+      expect(touches(name, { slug: 'box', commit: 'c'.repeat(40) }, record)).toEqual([revision])
+    }
+    expect(touches('apply_patch', { slug: 'box', base: 'd'.repeat(40) }, record)).toEqual([revision])
+    expect(touches('update_from_upstream', { slug: 'box', action: 'merge' }, { model: record, taken: [] })).toEqual([revision])
+    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, record)[0]).toEqual(revision)
+  })
+
   it('records a revision tool with no new commit in its answer as a model change, never its slug as a revision', () => {
     expect(touches('update_source', { slug: 'box', base: C1 }, { slug: 'box' })).toEqual([
       { type: 'model', id: 'box', action: 'modified', model: 'box' },
@@ -116,6 +129,16 @@ describe('extractors', () => {
     ])
     expect(touches('delete_model', { slug: 'box' }, { deleted: 'box' }, 'outward')).toEqual([
       { type: 'model', id: 'box', action: 'deleted', model: 'box' },
+    ])
+  })
+
+  // #1071: a deleted output names its model, so a lookup by model finds it.
+  it('records a deleted output with the model its answer names', () => {
+    expect(touches('delete_output', { output_id: 'o1' }, { deleted: 'o1', slug: 'box' }, 'outward')).toEqual([
+      { type: 'output', id: 'o1', action: 'deleted', model: 'box' },
+    ])
+    expect(touches('delete_output', { output_id: 'o1' }, { deleted: 'o1' }, 'outward')).toEqual([
+      { type: 'output', id: 'o1', action: 'deleted', model: null },
     ])
   })
 
@@ -487,6 +510,19 @@ describe('the harness projection', () => {
     expect(run.outcome).toBe('error')
     expect(resultJson(run.result)).toMatchObject({ job_id: 'j6', status: null, error: expect.stringMatching(/interrupted/) })
     expect(rows).toEqual([{ type: 'render_job', id: 'j6', action: 'created', model: 'box', after: null }])
+  })
+
+  it("delete_output reads the output's model before deleting it, and answers it", async () => {
+    backend.use(
+      http.get(`${BACKEND}/api/v1/outputs/${O5}`, () => HttpResponse.json({ id: O5, slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${O5}`, () => new HttpResponse(null, { status: 204 })),
+    )
+    const rows: unknown[] = []
+    // Approved at the harness's seam, as a session's outward call is.
+    const ctx = { ...renderCtx(rows, new AbortController().signal), gate: 'harness' as const }
+    const run = await runToolWithOutcome(ALL_TOOLS.find((t) => t.name === 'delete_output')!, { output_id: O5 }, ctx)
+    expect(resultJson(run.result)).toEqual({ deleted: O5, slug: 'box' })
+    expect(rows).toEqual([{ type: 'output', id: O5, action: 'deleted', model: 'box' }])
   })
 
   it('answers the call unchanged when the sink throws', async () => {

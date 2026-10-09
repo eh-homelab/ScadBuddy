@@ -3,6 +3,7 @@ import type { Sql } from 'postgres'
 import { inputHash, summariseInput } from '../approvals/service.js'
 import type { RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
+import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { redact } from '../secrets.js'
 
 // The audit log of AI actions (#258; spec §8.3 "the audit log records the
@@ -53,7 +54,9 @@ import { redact } from '../secrets.js'
 // the table); `detail` is redacted of the same secrets and capped.
 //
 // Recording never fails the action it records: a write that cannot be logged
-// is reported through `onError` (main.ts logs it) and the action goes on. The
+// is reported through `onError` (main.ts logs it) and the action goes on, and
+// one that has not landed after RECORD_WAIT_MS stops holding it up (db/bounded.ts,
+// #1076): the write carries on, and the wait that ran out is reported. The
 // alternative, refusing to act when the audit table is unwritable, would let a
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
@@ -252,8 +255,10 @@ export type AuditLogDeps = {
    * hash equals its approval's. Random per process when omitted.
    */
   hashKey?: Buffer
-  /** A write that could not be recorded; nothing is thrown. */
+  /** A write that could not be recorded, or did not land within `waitMs`; nothing is thrown. */
   onError?: (err: unknown, entry: AuditEntry) => void
+  /** How long `record` waits for its row before it lets the action go on (db/bounded.ts). */
+  waitMs?: number
 }
 
 export class AuditLog implements AuditRepo {
@@ -275,7 +280,12 @@ export class AuditLog implements AuditRepo {
     return cap(summariseInput(tool, input, secrets), SUMMARY_MAX)
   }
 
+  /** Writes the row, waiting for it at most `waitMs` (#1076); never throws. */
   async record(entry: AuditEntry): Promise<void> {
+    await waitAtMost(this.insert(entry), this.deps.waitMs ?? RECORD_WAIT_MS, 'the audit row', (err) => this.deps.onError?.(err, entry))
+  }
+
+  private async insert(entry: AuditEntry): Promise<void> {
     const started = entry.startedAt ?? null
     const finished = entry.finishedAt ?? null
     const duration = started && finished ? Math.max(0, finished.getTime() - started.getTime()) : null
