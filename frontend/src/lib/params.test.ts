@@ -86,6 +86,21 @@ describe('extrudersIn', () => {
     )
   })
 
+  it('keeps the label when the colour was only retyped in another case or shorthand (#1686)', () => {
+    // The same colour as the render ran with, written differently: not a change.
+    const retyped = {
+      ...values,
+      text_color: String(values['text_color']).toLowerCase(),
+      body_color: String(values['body_color']).toUpperCase(),
+    }
+    expect(extrudersIn(keychainSchema, retyped, ['#E8532F', '#1B6CA8'], values)).toEqual(
+      new Map([
+        ['body_color', 2],
+        ['text_color', 1],
+      ]),
+    )
+  })
+
   it('says nothing about a colour that is not hex, which the render reports resolved', () => {
     // The backend resolves CSS names; the render reports "red" as #FF0000.
     const named = { ...values, body_color: 'red' }
