@@ -366,8 +366,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
   `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
   `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
-  `stop` end the turn; its `done` reason waits for nothing and outlives its turn on the
-  badge until dismissed, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn, shown
+  beside the badge's waiting count (not in it) until dismissed, at most
+  `DONE_POSTS_PER_TURN` a turn, carrying `src/questions/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
   the one read of every parked call, approvals and answers, that the badge counts, and
   `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers

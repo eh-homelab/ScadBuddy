@@ -11,7 +11,7 @@ import { ATTENTION_TOOL, type QuestionGate, type QuestionRequest, type QuestionV
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { loadDoneSummary } from '../src/questions/doneSummary.js'
-import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/questions/service.js'
+import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/questions/service.js'
 import { pendingInput } from '../src/routes/pendingInput.js'
 import { resolveTabWaits, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import { browserTools } from '../src/tools/browser.js'
@@ -734,6 +734,55 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await turn!.done
     expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' AND outcome IS NULL`).toEqual([
       { tool_use_id: 'toolu_done2' },
+    ])
+  })
+
+  // #1383: a handoff cancels the session's waiting rows, not its done summary. The
+  // badge lists only the owner's sessions (#1218), so it is off the browser's list
+  // while another principal owns the session, and back when it is handed back.
+  it('a done summary survives a handoff to another principal, and is listed again once the session is back', async () => {
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    const listed = async () => (await m.questions.listPending(browser)).questions.map((q) => q.attentionReason)
+    expect(await listed()).toEqual(['done'])
+
+    await m.handoff(session.id, browser, agentA)
+    await m.acceptHandoff(session.id, agentA)
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`).toEqual([{ outcome: null }])
+    expect(await listed()).toEqual([])
+
+    // The browser takes the session back itself: it needs no offer.
+    await m.handoff(session.id, browser, browser)
+    expect(await listed()).toEqual(['done'])
+  })
+
+  // #1383: done is outside the rate limit, so a model looping on it is capped per turn,
+  // before it scans the turn's touches or writes anything.
+  it(`refuses a turn's done posts past ${DONE_POSTS_PER_TURN}, and keeps the last one it took`, async () => {
+    const looping = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        for (let i = 0; i <= DONE_POSTS_PER_TURN; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: looping, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(verdicts.slice(0, DONE_POSTS_PER_TURN)).toEqual(Array(DONE_POSTS_PER_TURN).fill({ answered: false, posted: true, message: 'posted' }))
+    expect(verdicts[DONE_POSTS_PER_TURN]).toEqual({
+      answered: false,
+      message: `The summary was not posted: this turn already posted ${DONE_POSTS_PER_TURN}, the most a turn may.`,
+    })
+    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' ORDER BY created_at`).toEqual([
+      ...Array.from({ length: DONE_POSTS_PER_TURN - 1 }, (_, i) => ({ tool_use_id: `toolu_done${i}`, outcome: 'cancelled' })),
+      { tool_use_id: `toolu_done${DONE_POSTS_PER_TURN - 1}`, outcome: null },
     ])
   })
 

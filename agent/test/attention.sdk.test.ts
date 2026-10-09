@@ -152,6 +152,9 @@ describe('request_user_attention handler', () => {
   })
 
   it('a posted done summary is a result, not an error, and tells the model nobody waits on it', async () => {
+    // The gate's `posted` verdict is stubbed here. The real gate's posted path (the row,
+    // its summary, the per-turn cap) is covered only by attention.pg.test.ts, which needs
+    // SCADBUDDY_TEST_DATABASE_URL.
     const { asked, gate } = recording(() => Promise.resolve({ answered: false, posted: true, message: 'posted' }))
     const result = await attentionHandler(gate, ATTENTION_TOOL, { reason: 'done', message: MESSAGE }, extra())
     expect(asked).toMatchObject([{ attention: { reason: 'done' }, questions: [{ header: 'Done' }] }])
