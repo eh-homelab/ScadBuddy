@@ -21,8 +21,11 @@ import { event, type Owner, type SessionStatus } from './protocol.js'
 // - send (Ruling 7): claim the row (`status = 'running'`, no turn_id or lease: the
 //   workflow owns the turn), put the turn's images in ai_session_blobs (the claim
 //   check the segment runner reads by name, Ruling 5), write `user.turn` and
-//   `session.status running`, then update-with-start `send_message`, starting the
-//   workflow on the first message. A refused or unanswered Update gives the claim back.
+//   `session.status running`, then update-with-start `send_message` (update id: the
+//   turn id), starting the workflow on the first message. Only a definite refusal (the
+//   validator's `busy`, a failed Update, an ended workflow) gives the claim back. An
+//   Update not accepted in time keeps it: Temporal may already hold the message, which a
+//   worker delivers later, so the turn is handed back and `done` follows the log.
 //   No `cancel_input` is sent here (Ruling 8): a send is refused `busy` while a turn
 //   runs, and only a running turn has entries.
 // - `done` follows the event log from the turn's own `session.status running` to the
@@ -79,7 +82,7 @@ export type DurableTurnsDeps = {
   events: EventLog
   /** Tests only: a queue other than `agent`. */
   taskQueue?: string
-  /** How long the `send_message` Update may take to be accepted (default 10 s). */
+  /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
   cancelTimeoutMs?: number
@@ -95,6 +98,9 @@ function blobsOf(images: readonly UserImage[]): SessionImage[] {
     return blob
   })
 }
+
+/** The `send_message` Update went unanswered: neither taken nor refused, as far as this service knows. */
+class OutcomeUnknown extends Error {}
 
 export class DurableTurns {
   readonly #client: Client
@@ -118,7 +124,8 @@ export class DurableTurns {
   /**
    * Sends one user turn to the session's workflow. Undefined when the row cannot be
    * claimed (another turn runs, the session is done or spent, another owner): the
-   * manager says why. Refused when the workflow refuses or does not answer.
+   * manager says why. Refused when the workflow refuses the message; a message not
+   * accepted in time keeps the claim and is still a turn (Ruling 16).
    */
   async send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
     const id = session.id
@@ -131,9 +138,11 @@ export class DurableTurns {
       [id, turn.author.kind, turn.author.id],
     )
     if (claimed.count === 0) return undefined
-    let seq: number
+    let seq = 0
     try {
-      await this.#blobs.put(id, blobs)
+      await this.#blobs.put(id, blobs).catch(() => {
+        throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
+      })
       const seqs = await this.#events.append(id, [
         event({
           type: 'user.turn',
@@ -148,13 +157,18 @@ export class DurableTurns {
       seq = seqs.at(-1) ?? 0
       await this.#sendMessage(session, turn, blobs)
     } catch (err) {
+      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
       await this.#giveBack(id)
       throw err
     }
+    return this.#turn(id, turn.turnId, seq)
+  }
+
+  #turn(id: string, turnId: string, seq: number): Turn {
     let done: Promise<TurnOutcome> | undefined
     const outcome = () => this.#outcome(id, seq)
     return {
-      turnId: turn.turnId,
+      turnId,
       // Read only when asked for: a follower per turn nobody waits on would poll for nothing.
       get done() {
         done ??= outcome()
@@ -190,7 +204,8 @@ export class DurableTurns {
       await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
         this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
           SEND_MESSAGE_UPDATE,
-          { args: [message], startWorkflowOperation: operation },
+          // The turn id as the update id: a re-send of the same turn is the same Update.
+          { args: [message], updateId: turn.turnId, startWorkflowOperation: operation },
         ),
       )
     } catch (err) {
@@ -201,11 +216,16 @@ export class DurableTurns {
       if (err instanceof WorkflowExecutionAlreadyStartedError) {
         throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
       }
-      throw new SessionError('unavailable', `session ${session.id}'s worker did not take the message; send it again in a moment`)
+      if (err instanceof WorkflowUpdateFailedError) {
+        throw new SessionError('unavailable', `session ${session.id}'s workflow did not take the message; send it again in a moment`)
+      }
+      // Not accepted in time, or the call itself failed: Temporal may hold the Update
+      // already and deliver it when a worker polls, so this is no refusal.
+      throw new OutcomeUnknown()
     }
   }
 
-  /** Gives back a claim whose message the workflow did not take (Ruling 7). */
+  /** Gives back a claim whose message the workflow refused (Ruling 7). */
   async #giveBack(id: string): Promise<void> {
     const released = await this.#sql`
       UPDATE ai_sessions SET status = 'idle', updated_at = now() WHERE id = ${id} AND status = 'running'`

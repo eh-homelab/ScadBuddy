@@ -2075,22 +2075,26 @@ export class SessionManager {
     const { id } = session
     if (sameOwner(session.owner, to) && session.owner.label === to.label && !session.offer) return session
     // A durable session's parked calls were asked for the previous owner's turn: ended
-    // first, and the handoff refused (retryable) while the workflow does not answer.
-    if (session.mode === 'durable' && !sameOwner(session.owner, to)) {
-      await this.durableOrRefuse().handoff(session, `the session was handed off to ${publicLabel(to)}`)
-    }
-    // Conditional on the owner read above (and, accepting, on the offer still
-    // being the live one to `to`), so two concurrent handoffs cannot both apply.
-    const offerStill = options.accepting
-      ? this.deps.sql`AND pending_owner_kind = ${to.kind} AND pending_owner_id = ${to.id} AND pending_owner_until > now()`
-      : this.deps.sql``
-    const rows = await this.deps.sql`
-      UPDATE ai_sessions
-      SET owner_kind = ${to.kind}, owner_id = ${to.id}, owner_label = ${to.label},
-          pending_owner_kind = NULL, pending_owner_id = NULL, pending_owner_label = NULL,
-          pending_owner_until = NULL, updated_at = now()
-      WHERE id = ${id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id} ${offerStill}`
-    if (rows.count === 0) {
+    // once the owner change below applied, inside its transaction, so a handoff that
+    // lost a race cancels nothing, and one whose `cancel_input` goes unanswered is
+    // refused (retryable) with the owner unchanged.
+    const durable = session.mode === 'durable' && !sameOwner(session.owner, to) ? this.durableOrRefuse() : undefined
+    const count = await this.deps.sql.begin(async (tx) => {
+      // Conditional on the owner read above (and, accepting, on the offer still
+      // being the live one to `to`), so two concurrent handoffs cannot both apply.
+      const offerStill = options.accepting
+        ? tx`AND pending_owner_kind = ${to.kind} AND pending_owner_id = ${to.id} AND pending_owner_until > now()`
+        : tx``
+      const rows = await tx`
+        UPDATE ai_sessions
+        SET owner_kind = ${to.kind}, owner_id = ${to.id}, owner_label = ${to.label},
+            pending_owner_kind = NULL, pending_owner_id = NULL, pending_owner_label = NULL,
+            pending_owner_until = NULL, updated_at = now()
+        WHERE id = ${id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id} ${offerStill}`
+      if (rows.count > 0 && durable) await durable.handoff(session, `the session was handed off to ${publicLabel(to)}`)
+      return rows.count
+    })
+    if (count === 0) {
       throw new SessionError(
         options.accepting ? 'invalid' : 'busy',
         options.accepting
