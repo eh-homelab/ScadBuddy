@@ -284,12 +284,21 @@ Add both to the `Event` union (before `BusResync`).
 
 (import both beside `OperationEvent`).
 
+  `topics_of` alone is not enough: the socket refuses a subscribe whose topic fails
+  `valid_topic` (`_TOPIC`, same file). Add `"activity"` to `COLLECTION_TOPICS` and, in
+  `_TOPIC`'s list, the per-row topic bounded to the real id shapes:
+
+```python
+            # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
+            r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
+```
+
 - [ ] **Step 5: Test the event round trip and the topic**
 
 ```python
 """Activity (spec 2026-10-09): the record, its event and topic."""
 
-from scadbuddy.api.realtime import topics_of
+from scadbuddy.api.realtime import topics_of, valid_topic
 from scadbuddy.core.events import ActivityEvent, AgentOperationEvent, decode_event, encode_event
 
 
@@ -299,6 +308,14 @@ def test_activity_event_round_trips_and_routes() -> None:
     assert topics_of(event) == ["activity", "activity:render:abc"]
 
 
+def test_activity_topics_are_valid() -> None:
+    assert valid_topic("activity")
+    assert valid_topic("activity:render:abc123")
+    assert valid_topic("activity:agent_operation:3f2c9a10-1b2c-4d5e-8f90-123456789abc")
+    assert not valid_topic("activity:nope:x")
+    assert not valid_topic("activity:render:")
+
+
 def test_agent_operation_event_decodes_and_goes_nowhere() -> None:
     payload = '{"id":"e1","at":"2026-10-09T00:00:00Z","kind":"ai_operation.changed","operation_id":"x"}'
     event = decode_event(payload)
@@ -306,7 +323,14 @@ def test_agent_operation_event_decodes_and_goes_nowhere() -> None:
     assert topics_of(event) == []
 ```
 
-- [ ] **Step 6: Run** `cd backend && uv run --frozen pytest tests/test_activity_index.py tests/test_pg_migrations.py -v` — PASS (migrations test needs `SCADBUDDY_TEST_DATABASE_URL`).
+  And a socket test in `backend/tests/api/test_realtime_activity.py`, built on the
+  existing `/api/v1/ws` tests in `tests/api/test_realtime.py` (copy their client, the
+  subscribe frame and the publish helper): subscribe to `activity` and to
+  `activity:render:abc123`, publish `ActivityEvent(activity_id="render:abc123")` on the
+  app's bus, and assert both subscriptions are acknowledged (not refused) and the
+  `activity.changed` frame arrives.
+
+- [ ] **Step 6: Run** `cd backend && uv run --frozen pytest tests/test_activity_index.py tests/test_pg_migrations.py tests/api/test_realtime_activity.py -v` — PASS (migrations test needs `SCADBUDDY_TEST_DATABASE_URL`).
 - [ ] **Step 7: Commit** `feat(activity): the activity record, its event and realtime topic`.
 
 ---
@@ -421,6 +445,8 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.activity.models import FINISHED, ActivityRow, ActivityStatus
 from scadbuddy.core.events import ActivityEvent
+from scadbuddy.core.metrics import Metrics
+from scadbuddy.render.pg_store import TransactionalEvents
 
 logger = logging.getLogger(__name__)
 
@@ -443,7 +469,13 @@ class Attribution:
 
 
 class ActivityIndex:
-    def __init__(self, pool: ConnectionPool[Connection[DictRow]], *, events: Any, metrics: Any = None) -> None:
+    def __init__(
+        self,
+        pool: ConnectionPool[Connection[DictRow]],
+        *,
+        events: TransactionalEvents | None,
+        metrics: Metrics | None = None,
+    ) -> None:
         self.pool = pool
         self.events = events
         self.metrics = metrics
@@ -493,7 +525,9 @@ class ActivityIndex:
                         (attribution.principal, attribution.session, attribution.via_tool, row.id),
                     )
                 if self.events is not None:
-                    self.events.publish_in(conn, ActivityEvent(activity_id=row.id))
+                    found = conn.execute("SELECT principal FROM activity WHERE id = %s", (row.id,)).fetchone()
+                    principal = None if found is None else found["principal"]
+                    self.events.publish_in(conn, ActivityEvent(activity_id=row.id, principal=principal))
         except Exception:
             logger.exception("an activity write failed", extra={"activity_id": activity_id})
             if self.metrics is not None:
@@ -824,7 +858,8 @@ async def attribute_request(index: ActivityIndex, activity_id: str, request: Req
         await index.attribute(activity_id, principal=author.principal, session=author.session, via_tool=author.tool)
     elif session_marker is not None:
         principal = await session_owner(index.pool, session_marker)
-        await index.attribute(activity_id, principal=principal or UNKNOWN_SESSION, session=session_marker, via_tool=None)
+        tool = None if author is None else author.tool
+        await index.attribute(activity_id, principal=principal or UNKNOWN_SESSION, session=session_marker, via_tool=tool)
     else:
         await index.attribute(activity_id, principal="browser", session=None, via_tool=None)
 ```
@@ -917,8 +952,38 @@ ACTIVITY_KINDS: tuple[()] = ()
   store's transaction, so it cannot fail the operation's insert. In `_finish` call
   `upsert_in(conn, lambda: row_of(op))` likewise. In `operation_activities.insert`, pass
   `author=op.author` (and add `tool: str | None = None` to `OperationAuthor` in
-  `operation_models.py`; `api/operations.py` `_author()` builds it with
-  `OperationAuthor(**vars(author))`, so `AgentAuthor.tool` from Task 4 flows in unchanged). A pydantic field with a default
+  `operation_models.py`). In `api/operations.py`, `_author()` must resolve the principal
+  the way `attribute_request` does, or a headless-browser request (`author_from` gives
+  `AgentAuthor(principal=None, session=<marker>)`) falls through to `browser`. Make it
+  async and give it the request and the pool:
+
+```python
+async def _author(request: Request, pool: ConnectionPool[Connection[DictRow]]) -> OperationAuthor | None:
+    author = current_author()
+    if author is None:
+        return None
+    principal = author.principal
+    if principal is None and request.headers.get(AGENT_ACTOR_HEADER) is not None:
+        principal = await session_owner(pool, request.headers[AGENT_ACTOR_HEADER]) or UNKNOWN_SESSION
+    return OperationAuthor(**{**vars(author), "principal": principal})
+```
+
+  and in `run_operation` call `author=await _author(request, ops.store.pool)` (use the
+  pool the store already holds). `AgentAuthor.tool` from Task 4 flows in unchanged.
+  Test in `backend/tests/api/test_activity_attribution.py`:
+
+```python
+async def test_headless_operation_is_its_session_owners(client, agent_tables, activity_index) -> None:
+    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
+    headers = {"X-ScadBuddy-Agent-Session": sid}
+    started = await client.post("/api/v1/fonts/install", json={"family": "Lobster Two"}, headers=headers)
+    op_id = started.json()["id"]
+    page = (await client.get("/api/v1/activity", headers=headers)).json()
+    assert [r["principal"] for r in page["items"] if r["id"] == f"operation:{op_id}"] == ["token:t1"]
+```
+
+  Pick any cheap operation route from `tests/api/test_operations*.py` if font install
+  is not one; the point is a request carrying only the session marker. A pydantic field with a default
   is replay-safe; no `patched()` is needed since the workflow code does not change.
   If `Operation` has no `workflow_id`/`workflow_run_id` fields, read them from the row
   the store already selects.
@@ -1233,7 +1298,7 @@ authenticates, and the backend trusts no tier header."""
 UNKNOWN_SESSION = "session:unknown"
 
 
-async def session_owner(pool, session_id: str) -> str | None:
+async def session_owner(pool: ConnectionPool[Connection[DictRow]], session_id: str) -> str | None:
     canonical = _session_id(session_id)  # api/agent_actor.py: a UUID, or None
     if canonical is None:
         return None
@@ -1252,7 +1317,7 @@ async def session_owner(pool, session_id: str) -> str | None:
     return await asyncio.to_thread(read)
 
 
-async def pinned_principal(request: Request, pool) -> str | None:
+async def pinned_principal(request: Request, pool: ConnectionPool[Connection[DictRow]]) -> str | None:
     marker = request.headers.get(AGENT_ACTOR_HEADER)
     if marker is None:
         return None
@@ -1368,7 +1433,7 @@ async def test_repair_restores_a_missed_operation(index, operation_store_without
 ```
 
 - [ ] **Step 2: Run** — FAIL.
-- [ ] **Step 3: Implement.** `prune(ttl, placeholder_ttl)`: `DELETE FROM activity WHERE finished_at < now() - make_interval(secs => %(ttl)s) OR (source = '' AND created_at < now() - make_interval(secs => %(placeholder_ttl)s))`; the sweep passes the repair window as `placeholder_ttl`, so a placeholder lives long enough for repair to fill it and no longer. `repair(window)`: for each source, select rows changed in the window that have no activity row *or only a placeholder* (`LEFT JOIN activity a ON a.id = 'render:' || r.id WHERE a.id IS NULL OR a.source = ''`), so a source whose own upsert failed after the route attributed it is still restored, with the placeholder's principal kept (`upsert_in` never writes the attribution columns); map them with that source's `row_of`, and `upsert_in` each (renders: `render_jobs`; operations: `operations`, principal from `request->'_author'` is not stored, so `browser` unless `operations` has an author column — it does not; leave principal NULL so it shows as "Unknown"); and call `ingest_agent_operation` for `ai_operations` ids in the window with no row or a placeholder (skip on `UndefinedTable`). Add the settings as stored settings, read fresh by the sweep each run through
+- [ ] **Step 3: Implement.** `prune(ttl, placeholder_ttl)`: `DELETE FROM activity WHERE finished_at < now() - make_interval(secs => %(ttl)s) OR (source = '' AND created_at < now() - make_interval(secs => %(placeholder_ttl)s))`; the sweep passes the repair window as `placeholder_ttl`, so a placeholder lives long enough for repair to fill it and no longer. `repair(window)`: for each source, select rows changed in the window that have no activity row *or only a placeholder* (`LEFT JOIN activity a ON a.id = 'render:' || r.id WHERE a.id IS NULL OR a.source = ''`), so a source whose own upsert failed after the route attributed it is still restored, with the placeholder's principal kept (`upsert_in` never writes the attribution columns); map them with that source's `row_of`, and `upsert_in` each (renders: `render_jobs`; operations: `operations`, principal from `request->'_author'` is not stored, so `browser` unless `operations` has an author column — it does not; leave principal NULL so it shows as "Unknown". Accepted limitation: an operation whose activity write failed *and* that no route attributed comes back as "Unknown"; the route's attribution normally lands first, and repair keeps it); and call `ingest_agent_operation` for `ai_operations` ids in the window with no row or a placeholder (skip on `UndefinedTable`). Add the settings as stored settings, read fresh by the sweep each run through
   `settings_store.load()`, the way `operation_retention_seconds` is
   (`library/settings_store.py` `StoredSettings` and `SettingsPatch`, mirrored in
   `api/settings.py`), not as env-seeded `core/settings.py` fields:
@@ -1939,7 +2004,9 @@ it('ignores principals not followed', async () => { /* seed principal token:t1, 
 ```
 
 - [ ] **Step 2: Run** — FAIL.
-- [ ] **Step 3: Implement.** The bell subscribes to `activity`; on a signal, re-reads
+- [ ] **Step 3: Implement.** The bell subscribes to `activity`; it drops a signal whose
+  `principal` is set and not followed, and debounces the rest (500 ms, trailing) so a
+  burst of render status writes costs one re-read. It then re-reads
   `listActivity` for each followed principal since the last-seen time (kept in
   `localStorage`, `scadbuddy.activity.seen`), counts rows that finished after it, and
   toasts each new one (`role="status"`, auto-dismiss 6 s, link to `/activity?…`). Clicking
