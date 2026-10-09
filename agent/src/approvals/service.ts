@@ -16,6 +16,7 @@ import {
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
 import { approvalEntry, inputRequested, inputResolved } from '../gate/classic.js'
+import { isNotDoneSummary } from '../questions/waiting.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
 import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
@@ -828,7 +829,7 @@ export class ApprovalService {
       UPDATE ai_sessions
       SET status = CASE
             WHEN EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
-                         AND (attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL))
+                         AND ${isNotDoneSummary(this.deps.sql)})
               THEN 'waiting_input'
             WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running'
             ELSE 'idle'
