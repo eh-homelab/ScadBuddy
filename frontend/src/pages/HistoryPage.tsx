@@ -13,6 +13,7 @@ import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { fromOutputs } from '../lib/arrange'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
+import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
@@ -341,6 +342,13 @@ function OutputRow({
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
   const unit = useDisplayUnit()
+  const queuedPlates = output.plates ?? []
+  // #986 — a printed plate by what it holds. Read only for an output printed plate by
+  // plate; an unreadable list leaves the numbers.
+  const plateNames = useAsync(
+    () => (queuedPlates.length > 1 ? api.getOutputPlates(output.id).catch(() => []) : Promise.resolve([])),
+    [output.id, queuedPlates.length > 1],
+  ).data ?? []
   /** An arranged output has no template inputs to reopen in the customizer. */
   const arrangedFrom = (output.arranged_from ?? []).length
   // #975 — what each row's buttons are named after, so a list of them can tell the rows apart.
@@ -371,7 +379,7 @@ function OutputRow({
                   className="ml-2 text-ok"
                   href={bambuddyUrl && `${bambuddyUrl}/queue/${plate.queue_item_id}`}
                 >
-                  plate {plate.plate_id} queued #{plate.queue_item_id}
+                  {plateLabel(plateNames, plate.plate_id)} queued #{plate.queue_item_id}
                 </BambuddyId>
               ))}
             {output.queue_item_id && (output.plates ?? []).length <= 1 && (

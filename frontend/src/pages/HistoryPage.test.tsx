@@ -185,14 +185,21 @@ describe('HistoryPage', () => {
           },
         ]),
       ),
+      // #986: a plate is named by what it holds; one with no name keeps its number.
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Lid' },
+          { index: 2, has_thumbnail: true, name: null },
+        ]),
+      ),
     )
     render()
     const plates = await row('Plates')
-    expect(within(plates).getByRole('link', { name: 'plate 1 queued #71' })).toHaveAttribute(
+    expect(await within(plates).findByRole('link', { name: 'Lid queued #71' })).toHaveAttribute(
       'href',
       'https://bambuddy.internal.nullreference.io/queue/71',
     )
-    expect(within(plates).getByRole('link', { name: 'plate 2 queued #72' })).toHaveAttribute(
+    expect(within(plates).getByRole('link', { name: 'Plate 2 queued #72' })).toHaveAttribute(
       'href',
       'https://bambuddy.internal.nullreference.io/queue/72',
     )
