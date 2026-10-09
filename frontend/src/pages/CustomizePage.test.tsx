@@ -198,8 +198,12 @@ describe('CustomizePage', () => {
     const hex = screen.getByRole('textbox', { name: 'Text hex' })
     const field = hex.closest('[data-param]')!
     await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
-    await user.clear(hex)
-    await user.type(hex, '#00FF00')
+    // One whole valid colour: clear-then-type left '#000000#00FF00', which is not one,
+    // so the field never took a new value and the test passed whatever the label did
+    // (#2033).
+    await user.tripleClick(hex)
+    await user.paste('#00FF00')
+    expect(hex).toHaveValue('#00FF00')
     expect(field).not.toHaveTextContent('not in this render')
   })
 
