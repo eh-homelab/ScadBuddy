@@ -730,6 +730,31 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     ])
   })
 
+  // #1383: a handoff cancels the session's waiting rows, not its done summary. The
+  // badge lists only the owner's sessions (#1218), so it is off the browser's list
+  // while another principal owns the session, and back when it is handed back.
+  it('a done summary survives a handoff to another principal, and is listed again once the session is back', async () => {
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    const listed = async () => (await m.questions.listPending(browser)).questions.map((q) => q.attentionReason)
+    expect(await listed()).toEqual(['done'])
+
+    await m.handoff(session.id, browser, agentA)
+    await m.acceptHandoff(session.id, agentA)
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`).toEqual([{ outcome: null }])
+    expect(await listed()).toEqual([])
+
+    await m.handoff(session.id, browser, browser)
+    expect(await listed()).toEqual(['done'])
+  })
+
   // #1383: done is outside the rate limit, so a model looping on it is capped per turn,
   // before it scans the turn's touches or writes anything.
   it(`refuses a turn's done posts past ${DONE_POSTS_PER_TURN}, and keeps the last one it took`, async () => {
