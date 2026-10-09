@@ -131,8 +131,17 @@ def main(argv: list[str]) -> NoReturn:
 
 
 def command(program: str, *args: str) -> list[str]:
-    """The argv that runs ``program args...`` under the filter."""
-    return [sys.executable, "-I", "-S", str(Path(__file__).resolve()), program, *args]
+    """The argv that runs ``program args...`` under the filter. ``program`` is made
+    absolute here: ``execv`` does no ``PATH`` lookup, and the child runs in another
+    directory, where a relative path (from a relative ``PATH`` entry) would not resolve."""
+    return [
+        sys.executable,
+        "-I",
+        "-S",
+        str(Path(__file__).resolve()),
+        os.path.abspath(program),
+        *args,
+    ]
 
 
 if __name__ == "__main__":
