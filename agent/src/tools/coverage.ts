@@ -172,6 +172,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'PUT /api/v1/print/library/{file_id}/choices',
       'GET /api/v1/print/library/{file_id}/filaments',
       'POST /api/v1/print/library/{file_id}/run',
+      'GET /api/v1/print/library/{file_id}/progress',
+      'POST /api/v1/print/library/{file_id}/project',
     ] as const
   ).map((operation) => ({ operation, reason: LIBRARY_PRINT_LATER })),
   ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(

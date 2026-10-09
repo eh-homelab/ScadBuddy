@@ -139,6 +139,8 @@ class PrintSource(Protocol):
         outcome: QueueOutcome,
         project_id: int | None,
         sent: list[PlateSend],
+        *,
+        run_id: str | None = None,
     ) -> list[PlateSend]: ...
 
     async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
@@ -201,10 +203,11 @@ async def record_sends(
     plate_id: int,
     outcome: QueueOutcome,
     project_id: int | None,
+    run_id: str | None = None,
 ) -> None:
-    """Record one plate's queue items under ``subject`` (#1750), for either source. Best
-    effort: the plate is queued, and failing the run over its record would tell the user
-    it was not (#976)."""
+    """Record one plate's queue items under ``subject`` (#1750), for either source, with
+    the run that queued them (#1751). Best effort: the plate is queued, and failing the
+    run over its record would tell the user it was not (#976)."""
     if sends is None or not sends.available:
         return
     try:
@@ -217,6 +220,7 @@ async def record_sends(
                     printer_id=outcome.printer_id,
                     project_id=project_id,
                     slice_job_id=outcome.slice_job_id,
+                    run_id=run_id,
                 )
                 for item in outcome.queue_item_ids
             ],
@@ -344,6 +348,8 @@ class PrintPipeline:
         outcome: QueueOutcome,
         project_id: int | None,
         sent: list[PlateSend],
+        *,
+        run_id: str | None = None,
     ) -> list[PlateSend]:
         """Record one plate's queue items as soon as it is queued; returns every plate
         so far.
@@ -376,7 +382,7 @@ class PrintPipeline:
                     project_id=project_id,
                     plates=sent,
                 )
-        await record_sends(self.sends, self.subject, plate_id, outcome, project_id)
+        await record_sends(self.sends, self.subject, plate_id, outcome, project_id, run_id)
         return sent
 
     async def remember_project(

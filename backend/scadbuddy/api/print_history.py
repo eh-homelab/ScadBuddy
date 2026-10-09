@@ -132,6 +132,9 @@ class PrintSummary(_Response):
     #: That file's name in Bambuddy's library now (#1755); None for an output's print,
     #: and once the file is gone from Bambuddy or could not be read.
     library_file_name: str | None
+    #: The queue item the print came from, when it was linked by it; None for one
+    #: found by its sliced file's hash (#1751: the history's Waiting row).
+    queue_item_id: int | None = None
     #: The output's name, or a library file's print's name in Bambuddy.
     output_name: str | None
     #: Bambuddy's (``completed``, ``failed``, ``printing``, …), or
@@ -314,6 +317,7 @@ def _summary(
         name = (archive.print_name if archive is not None else None) or link.name
     return PrintSummary(
         archive_id=link.archive_id,
+        queue_item_id=link.queue_item_id,
         output_id=None if meta is None else meta.id,
         slug=None if meta is None else meta.slug,
         library_file_id=link.library_file_id,

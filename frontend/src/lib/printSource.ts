@@ -1,6 +1,7 @@
 import { api } from '../api/client'
 import type { Within } from './traceAction'
 import type {
+  AttachResult,
   ChoicesView,
   FilamentOptions,
   LibraryEntry,
@@ -8,8 +9,10 @@ import type {
   Output,
   OutputPlate,
   PrintCheck,
+  PrintProgress,
   PrintRunRequest,
   PrintRunResult,
+  ProjectAttach,
 } from '../api/types'
 
 /**
@@ -78,6 +81,27 @@ export function optionsSubject(source: PrintSource | undefined): OptionsSubject 
   return source.kind === 'output'
     ? { key: source.output.slug, noun: 'model' }
     : { key: libraryOptionsScope(source.file.id), noun: 'file' }
+}
+
+/**
+ * #1751 — what a print is followed by: an output's id, or a library file's
+ * `library:<file id>`. It is the print's run subject, and `print:<it>` is its realtime topic.
+ */
+export function printSubject(source: PrintSource | undefined): string | undefined {
+  if (!source) return undefined
+  return source.kind === 'output' ? source.output.id : libraryOptionsScope(source.file.id)
+}
+
+/** The progress of a `printSubject`'s print, from the route for its kind. */
+export function readPrintProgress(subject: string): Promise<PrintProgress | null> {
+  const fileId = libraryFileOfScope(subject)
+  return fileId === null ? api.getPrintProgress(subject) : api.getLibraryPrintProgress(fileId)
+}
+
+/** #79, #1751 — file a `printSubject`'s queue entries, and their archives, under a project. */
+export function attachPrintToProject(subject: string, body: ProjectAttach): Promise<AttachResult> {
+  const fileId = libraryFileOfScope(subject)
+  return fileId === null ? api.attachToProject(subject, body) : api.attachLibraryToProject(fileId, body)
 }
 
 /** Looked up at call time, so a test's `vi.spyOn(api, …)` still sees every call. */

@@ -69,3 +69,9 @@ class PrintSubject(BaseModel):
     @property
     def file_id(self) -> int | None:
         return int(self.id) if self.kind == "library" else None
+
+
+def library_slug(subject: PrintSubject) -> str:
+    """The ``slug`` a library file's print run and its ``print.*`` events carry, where an
+    output's carry its model's: ``library-<file id>`` (#742, #1751)."""
+    return f"library-{subject.id}"

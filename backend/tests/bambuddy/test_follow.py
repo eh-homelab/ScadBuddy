@@ -587,11 +587,24 @@ def test_a_library_print_is_followed_until_it_settles_and_runs_the_hooks(
     assert heard == ["library:89"]
 
 
+def test_a_library_print_publishes_each_change_on_its_own_topic(paths: DataPaths) -> None:
+    """#1751: a library file's print is announced as an output's is, under its run
+    subject, so the dialog and the history follow it live."""
+    read = Script(progress("queued"), progress("queued"), progress("done", settled=True))
+    follower, seen = follower_for(paths, Script(None), read_library=read)
+    asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5))
+    events = [event for event in seen if isinstance(event, PrintEvent)]
+    assert [event.kind for event in events] == ["print.progress", "print.progress", "print.settled"]
+    assert {(event.output_id, event.slug) for event in events} == {("library:89", "library-89")}
+
+
 def test_a_library_print_bambuddy_no_longer_has_ends_the_follow(paths: DataPaths) -> None:
-    follower, _ = follower_for(
+    follower, seen = follower_for(
         paths, Script(None), read_library=Script(ApiError(404, "queue item gone"))
     )
     assert asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5)) == "gone"
+    # The failure is announced, so an open dialog re-reads the route and shows it.
+    assert kinds(seen) == ["print.progress"]
 
 
 def test_without_a_library_reader_a_library_follow_ends_at_once(paths: DataPaths) -> None:

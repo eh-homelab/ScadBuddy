@@ -29,7 +29,14 @@ import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
-import { optionsSubject, sourceApi, sourceKey, type PrintSource } from '../lib/printSource'
+import {
+  attachPrintToProject,
+  optionsSubject,
+  printSubject,
+  sourceApi,
+  sourceKey,
+  type PrintSource,
+} from '../lib/printSource'
 import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
@@ -174,8 +181,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
    */
   const subject = optionsSubject(source)
   const scopeKey = subject?.key
-  // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
-  const outputId = source?.kind === 'output' ? source.output.id : undefined
+  /** #1751 — what this dialog's print is followed and filed by: the output, or the library file. */
+  const printed = printSubject(source)
   /** What the analyzers judge: the output, or the library file, as any print (#1753). */
   const analysisTarget: AnalysisTarget | undefined = !source
     ? undefined
@@ -357,7 +364,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
    * #89 — follow only the print this dialog just started, so opening the dialog on an
    * output printed last week does not start polling a run nobody is watching.
    */
-  const { progress, polling } = usePrintProgress(outputId, open && result !== null)
+  const { progress, polling } = usePrintProgress(printed, open && result !== null)
 
   /**
    * #79 — file the finished print under its project, once the progress read (#89) has
@@ -368,20 +375,18 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   useEffect(() => {
     // A run that left the project to the server says where it went (#1045).
     const filedUnder = projectId === undefined ? (result?.project_id ?? null) : projectId
-    if (!outputId || filedUnder === null || !progress?.settled) return
+    if (!printed || filedUnder === null || !progress?.settled) return
     const entries = (progress.copies_detail ?? [])
       .map((copy) => copy.queue_entry_id)
       .filter((id): id is number => typeof id === 'number')
     if (entries.length === 0) return
-    const key = `${outputId}:${filedUnder}:${entries.join(',')}`
+    const key = `${printed}:${filedUnder}:${entries.join(',')}`
     if (attached.current === key) return
     attached.current = key
-    void api
-      .attachToProject(outputId, { project_id: filedUnder, queue_item_ids: entries })
-      .catch(() => {
-        attached.current = null
-      })
-  }, [outputId, projectId, result, progress])
+    void attachPrintToProject(printed, { project_id: filedUnder, queue_item_ids: entries }).catch(() => {
+      attached.current = null
+    })
+  }, [printed, projectId, result, progress])
 
   // One output's options do not survive a change of output — the other half of
   // usePrintChoices' reset on the same `sourceKey` — except to the output a re-arrange

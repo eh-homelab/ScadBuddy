@@ -26,6 +26,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import chosen_project
 from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
+    AttachResult,
     ProjectAttach,
     ProjectRequest,
     attach_results,
@@ -117,17 +118,40 @@ def bambuddy_kinds_over(
             return _json(await ensure_project(client, ProjectRequest.model_validate(request)))
 
     async def attach_check(request: dict[str, Any]) -> dict[str, Any]:
-        await require(outputs, request["output_id"])
+        # An output's request names it; a library file's (#1751) names the file instead.
+        library = request.get("library_file_id") is not None
+        if not library:
+            await require(outputs, request["output_id"])
         body = ProjectAttach.model_validate(request["body"])
         project_id = chosen_project(body, await asyncio.to_thread(settings_store.load))
         if project_id is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "this output has no project, so there is nothing to file it under",
+                f"this {'print' if library else 'output'} has no project, so there is"
+                " nothing to file it under",
             )
         return {"project_id": project_id}
 
+    async def attach_library(file_id: int, body: dict[str, Any], project_id: int) -> AttachResult:
+        """A library file's print filed under its project, as an output's is (#1751):
+        the queue items asked for, else its newest run's. Its archives are linked by its
+        progress read, so none is linked here."""
+        ids: list[int] = body.get("queue_item_ids") or []
+        if not ids and links.available:
+            sends = await links.last_run(PrintSubject.library(file_id))
+            ids = [send.queue_item_id for send in sends]
+        if not ids:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "ScadBuddy has not queued this file, so there is nothing to file under the project",
+            )
+        async with client_for(await asyncio.to_thread(settings_store.load)) as client:
+            return await attach_results(client, project_id, queue_item_ids=ids)
+
     async def attach_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        file_id: int | None = request.get("library_file_id")
+        if file_id is not None:
+            return _json(await attach_library(file_id, request["body"], checked["project_id"]))
         meta = await require(outputs, request["output_id"])
         wanted: list[int] = request["body"].get("queue_item_ids") or []
         ids = wanted or (

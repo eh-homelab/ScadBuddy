@@ -616,16 +616,17 @@ async def get_choices(
         )
 
 
-async def _failed_before_queueing(state: AppState, output_id: str) -> str | None:
-    """Why the output's newest run failed, when it failed before it queued anything
-    (#1049); else ``None``. A run that may have queued recorded what it queued, so its
-    print's own progress says more. Without a database, or with one that does not
-    answer, there are no runs to read, and the progress is read as it was before."""
+async def failed_before_queueing(state: AppState, run_subject: str) -> str | None:
+    """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
+    #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
+    run that may have queued recorded what it queued, so its print's own progress says
+    more. Without a database, or with one that does not answer, there are no runs to
+    read, and the progress is read as it was before."""
     runs = state.print_runs.store
     if not runs.available:
         return None
     try:
-        latest = await runs.latest_for_output(output_id)
+        latest = await runs.latest_for_output(run_subject)
     except DATABASE_ERRORS:
         logger.warning("print runs unreadable; progress read without them")
         return None
@@ -661,7 +662,7 @@ async def get_progress(
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
-    failed = await _failed_before_queueing(state, meta.id)
+    failed = await failed_before_queueing(state, meta.id)
     progress: PrintProgress | None
     async with client_for(store.load()) as client:
         if failed is not None:

@@ -45,7 +45,7 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.output_reader import OutputReader
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
-from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
@@ -149,9 +149,8 @@ class Follower:
         way the waits after that back off from `min_interval`. ``run_subject`` is an output's
         id, or ``library:<file id>`` for a library file's print (#1073)."""
         subject = PrintSubject.from_run_subject(run_subject)
-        if subject.kind == "library":
-            return await self._follow_library(subject, active, heartbeat, read_now=read_now)
-        output_id = subject.id
+        if subject.kind == "library" and self.read_library is None:
+            return "gone"
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
         while True:
@@ -162,40 +161,39 @@ class Follower:
             if self.now() - active > self.max_age:
                 return "quiet"
             try:
-                meta = await self.outputs.get(output_id)
+                key, slug, reading = await self._read(subject)
             except OutputNotFoundError:
                 return "deleted"
             except Exception:
                 # A disk blip or a half-written meta.json: keep following, slowly.
-                logger.exception("could not read the output", extra={"output_id": output_id})
+                logger.exception(
+                    "could not read the print's subject", extra={"subject": subject.key}
+                )
                 interval = self.error_interval
                 continue
             try:
                 # Two Bambuddy calls of up to 30 s each: longer than ``FOLLOW_HEARTBEAT``
                 # (review #1091 1).
-                progress = await self._heartbeating(self.read(meta), active, heartbeat)
+                progress = await self._heartbeating(reading, active, heartbeat)
             except ApiError as error:
                 failure = (error.status, error.detail)
                 if failure != last_failure:
                     last_failure = failure
-                    emit(
-                        self.events,
-                        PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug),
-                    )
+                    emit(self.events, PrintEvent(kind="print.progress", output_id=key, slug=slug))
                 if error.status == 404:
                     return "gone"
                 interval = self.error_interval
                 continue
             except Exception:
                 # Not Bambuddy's answer (a bug, a broken setting): keep following, slowly.
-                logger.exception("a print progress read failed", extra={"output_id": output_id})
+                logger.exception("a print progress read failed", extra={"subject": subject.key})
                 interval = self.error_interval
                 continue
             last_failure = None
-            changed = self.observer.observe(meta, progress)
+            changed = self.observer.observe_subject(key, slug, progress)
             if progress is not None and progress.settled:
                 # After observe, so print.settled is already published (#836). Not on
-                # progress None: an output never printed through slice_queue has no picks.
+                # progress None: a print never queued has no picks.
                 await self._settled(subject, active, heartbeat)
             if progress is None or progress.settled:
                 return "settled"
@@ -203,48 +201,18 @@ class Follower:
                 active = self.now()
             interval = self.min_interval if changed else min(self.max_interval, interval * 2)
 
-    async def _follow_library(
-        self,
-        subject: PrintSubject,
-        active: datetime,
-        heartbeat: Callable[[datetime], None],
-        *,
-        read_now: bool,
-    ) -> Ended:
-        """A library file's print, followed as an output's is (#1073): read until it
-        settles, then the settle hooks. Its progress is not published yet: the library
-        print's progress route and events are #1751."""
-        if self.read_library is None:
-            return "gone"
-        interval = self.min_interval
-        last: str | None = None
-        while True:
-            if read_now:
-                read_now = False
-            else:
-                await self._wait(interval, active, heartbeat)
-            if self.now() - active > self.max_age:
-                return "quiet"
-            try:
-                progress = await self._heartbeating(self.read_library(subject), active, heartbeat)
-            except ApiError as error:
-                if error.status == 404:
-                    return "gone"
-                interval = self.error_interval
-                continue
-            except Exception:
-                logger.exception("a print progress read failed", extra={"subject": subject.key})
-                interval = self.error_interval
-                continue
-            if progress is not None and progress.settled:
-                await self._settled(subject, active, heartbeat)
-            if progress is None or progress.settled:
-                return "settled"
-            fingerprint = progress.model_dump_json()
-            changed, last = fingerprint != last, fingerprint
-            if changed:
-                active = self.now()
-            interval = self.min_interval if changed else min(self.max_interval, interval * 2)
+    async def _read(
+        self, subject: PrintSubject
+    ) -> tuple[str, str, Awaitable[PrintProgress | None]]:
+        """What ``subject``'s print is announced under (its run subject and slug), and
+        its progress read: an output's by its record (`OutputNotFoundError` once it is
+        deleted), a library file's by its subject (#1073, #1751). Where the read comes
+        from is the one difference between them."""
+        if subject.kind == "library":
+            assert self.read_library is not None  # `follow` ends at once without one.
+            return subject.run_subject, library_slug(subject), self.read_library(subject)
+        meta = await self.outputs.get(subject.id)
+        return meta.id, meta.slug, self.read(meta)
 
     async def _settled(
         self, subject: PrintSubject, active: datetime, heartbeat: Callable[[datetime], None]

@@ -11,13 +11,27 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from scadbuddy.api.deps import PathsDep, PrintRunsDep, SettingsStoreDep, UploadsDep
+from scadbuddy.api.deps import (
+    PathsDep,
+    PrintLinksDep,
+    PrintProgressDep,
+    PrintRunsDep,
+    SettingsStoreDep,
+    StateDep,
+    UploadsDep,
+)
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.api.outputs import OutputPlate, read_plain_files
-from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run
+from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
@@ -31,12 +45,16 @@ from scadbuddy.bambuddy.print_run import (
     filament_options_for_library,
 )
 from scadbuddy.bambuddy.print_source import LibrarySource
+from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, library_progress
+from scadbuddy.bambuddy.projects import AttachResult, ProjectAttach
 from scadbuddy.bambuddy.runs import PrintRun
-from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
+from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
 
 router = APIRouter(prefix="/print/library", tags=["print"])
@@ -304,10 +322,75 @@ async def post_library_run(
         runs,
         response,
         subject=PrintSubject.library(file_id),
-        slug=f"library-{file_id}",
+        slug=library_slug(PrintSubject.library(file_id)),
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),
     )
+
+
+@router.get(
+    "/{file_id}/progress",
+    response_model=PrintProgress | None,
+    summary="How the last print of this library file is going",
+)
+async def get_library_progress(
+    file_id: FileIdPath,
+    uploads: UploadsDep,
+    links: PrintLinksDep,
+    store: SettingsStoreDep,
+    observer: PrintProgressDep,
+    follows: FollowsDep,
+    state: StateDep,
+) -> PrintProgress | None:
+    """As ``/print/outputs/{id}/progress`` (#1751): the file's newest run, its queue
+    items read off Bambuddy until it is ``settled``. ``null`` when ScadBuddy never
+    queued the file, or has no database to have recorded it in. A newest run that failed
+    before it queued anything is that failure (``route: "run"``). Changes are published
+    on ``print:library:<file id>``."""
+    subject = PrintSubject.library(file_id)
+    key = subject.run_subject
+    failed = await failed_before_queueing(state, key)
+    progress: PrintProgress | None = None
+    async with client_for(store.load()) as client:
+        if failed is not None:
+            progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
+        elif links.available:
+            progress = await library_progress(client, subject, links, uploads=uploads)
+    observer.observe_subject(key, library_slug(subject), progress)
+    # As an output's: a print someone is looking at that is still moving is followed.
+    if progress is not None and not progress.settled:
+        follows.ensure(key)
+    return progress
+
+
+@router.post(
+    "/{file_id}/project",
+    response_model=AttachResult,
+    summary="File this library file's print under its project",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_attach_project(
+    file_id: FileIdPath,
+    body: ProjectAttach,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> AttachResult | JSONResponse:
+    """As ``/print/outputs/{id}/project`` (#1751): the queue entries named, else those
+    of the file's newest run, and whatever archives they have produced, filed under the
+    project."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["attach_project"],
+        subject=PrintSubject.library(file_id).run_subject,
+        request={
+            "library_file_id": file_id,
+            "body": body.model_dump(mode="json", exclude_unset=True),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, AttachResult)
 
 
 @router.post(

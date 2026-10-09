@@ -148,8 +148,9 @@ class OutputEvent(BaseEvent):
 
 
 class PrintEvent(BaseEvent):
-    """An output's print moved on (``print.progress``), or reached a state nothing
-    changes without another print (``print.settled``)."""
+    """A print moved on (``print.progress``), or reached a state nothing changes without
+    another print (``print.settled``). A library file's print (#1751) is announced as
+    its run is: ``output_id`` is ``library:<file id>``, on ``print:library:<file id>``."""
 
     kind: Literal["print.progress", "print.settled"]
     output_id: str
