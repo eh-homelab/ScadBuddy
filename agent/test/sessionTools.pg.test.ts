@@ -1,3 +1,4 @@
+import { AttachmentStore } from '../src/attachments/store.js'
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
@@ -215,6 +216,45 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ),
       ).toMatch(/images/)
       expect(runs).toHaveLength(1)
+    })
+
+    it('sends an attachment only its uploader owns, and moves it into the session (#1941)', async () => {
+      const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+      const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]).toString('base64')
+      const store = new AttachmentStore(db.sql)
+      const { agent, runs } = await setup(undefined, { attachments: store })
+      const a = await agent('write')
+      const b = await agent('write')
+      const image = { mediaType: 'image/png' as const, data: PNG, preview: { mediaType: 'image/jpeg' as const, data: JPEG } }
+      const mine = await store.put(a.owner, image)
+      const theirs = await store.put(b.owner, image)
+      const browsers = await store.put(BROWSER_USER, image)
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'pics' }))
+
+      for (const id of [theirs.id, browsers.id]) {
+        const refused = errorText(
+          await a.call('sessions_send', { session_id: session.id, text: 'look', images: [{ kind: 'attachment', id }] }),
+        )
+        expect(refused).toMatch(/images\[0\].*unknown or has expired/)
+      }
+      expect(runs).toHaveLength(0)
+
+      const sent = ok<{ turn: { finished: boolean } }>(
+        await a.call('sessions_send', {
+          session_id: session.id,
+          text: 'look',
+          images: [{ kind: 'attachment', id: mine.id }],
+          wait_seconds: 10,
+        }),
+      )
+      expect(sent.turn).toMatchObject({ finished: true })
+      const messages: SDKUserMessage[] = []
+      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
+      const content = messages[0]!.message.content as { type: string; source?: { data: string } }[]
+      expect(content[0]!.source).toMatchObject({ data: PNG })
+      const left = (await db.sql`SELECT id FROM ai_attachments`).map((r) => r.id as string).sort()
+      expect(left).toEqual([theirs.id, browsers.id].sort())
+      expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(1)
     })
 
     it("shows a caller only the sessions it may see; another agent's are 'no session'", async () => {

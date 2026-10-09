@@ -1,3 +1,4 @@
+import type { AttachmentStore } from '../attachments/store.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
@@ -75,6 +76,8 @@ export type ToolServices = {
   renderLimiter?: RenderLimiter
   /** The sessions the `sessions_*` tools act on (tools/sessions.ts, #300); none without a database. */
   sessions?: SessionManager | undefined
+  /** Uploaded images `sessions_send` may name (#1941, attachments/store.ts); none without a database. */
+  attachments?: AttachmentStore | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
   /**
@@ -340,8 +343,9 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
     args,
     {
       ...ctx,
+      // Merged: confirm_action reports the approval and the tool, and the tool it ran may add its own detail.
       report: (r) => {
-        reported = r
+        reported = { ...reported, ...r }
       },
     },
     executed,

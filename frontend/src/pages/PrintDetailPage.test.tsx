@@ -126,6 +126,7 @@ describe('PrintDetailPage (#311)', () => {
           output_id: null,
           slug: null,
           library_file_id: 89,
+          library_file_name: null,
           output_name: 'Bambu Spool Lock',
           params_diff: null,
           provenance: null,
@@ -136,7 +137,9 @@ describe('PrintDetailPage (#311)', () => {
     )
     render(90)
     expect(await screen.findByRole('heading', { name: 'Bambu Spool Lock' })).toBeInTheDocument()
-    expect(screen.getByText('Bambuddy library file')).toBeInTheDocument()
+    // #1755 — with no name for the file (gone from Bambuddy), the breadcrumb says what it
+    // was, and still leads to every print of it.
+    expect(screen.getByRole('link', { name: 'Bambuddy library file' })).toHaveAttribute('href', '/prints?file=89')
     expect(screen.queryByRole('region', { name: 'Provenance' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Customize from this' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'ScadBuddy render' })).not.toBeInTheDocument()

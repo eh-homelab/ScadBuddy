@@ -496,7 +496,10 @@ in Tempo as soon as it parks.
 
 **Attributes** (`scadbuddy.*`): model `slug`, `job_id`, `render_key`,
 `piece_key`, `output_id`; 3MF colour count, triangle count, size in bytes;
-piece cache hit; printer and plate IDs on send and print; for the agent, tool
+piece cache hit; printer and plate IDs on send and print, and on a print
+whether it prints every plate (`all_plates`) and what kind of source it is
+(`print_source`: `output` or `library`; ScadBuddy's own words, never a
+library file's id or name, which are Bambuddy's, #1231); for the agent, tool
 name, tier, outcome, token counts and cost. High cardinality is fine here.
 These are span attributes and never become metric labels.
 

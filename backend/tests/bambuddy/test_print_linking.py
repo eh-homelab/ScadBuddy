@@ -17,6 +17,7 @@ import psycopg
 import pytest
 import respx
 
+from scadbuddy.bambuddy import linking as linking_module
 from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import (
@@ -28,6 +29,8 @@ from scadbuddy.bambuddy.linking import (
     SCAN_BEFORE,
     link_by_hash,
     link_library_prints,
+    link_subject_by_hash,
+    scan_library_by_hash,
 )
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.progress import library_progress, progress_for
@@ -50,8 +53,10 @@ pytestmark = pytest.mark.requires_postgres
 def _no_recent_scans() -> Iterator[None]:
     """Each test starts with no output scanned by hash lately."""
     progress_module._last_hash_scan.clear()
+    linking_module._last_library_scan.clear()
     yield
     progress_module._last_hash_scan.clear()
+    linking_module._last_library_scan.clear()
 
 
 @pytest.fixture
@@ -604,6 +609,93 @@ async def test_a_database_error_reading_the_library_items_links_nothing_and_rais
     await link_library_prints(bambuddy, links)
 
 
+# --- a library file's reprints, by hash (#1755, H3) -------------------------------
+
+LIBRARY = PrintSubject.library(89)
+
+
+async def _library_sliced(uploads: BambuddyUploadStore, sliced_id: int = 81) -> None:
+    """A library print's copy and slice, recorded under its subject as the pipeline
+    records them (`PrintPipeline.record`, #1882)."""
+    await uploads.record(LIBRARY.run_subject, LibraryCopy(id=12, folder_id=2, target_key="H2C"))
+    await uploads.record_sliced(LIBRARY.run_subject, 12, SlicedCopy(id=sliced_id))
+
+
+@respx.mock
+async def test_a_library_files_slice_reprinted_inside_bambuddy_is_linked_by_hash(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """As an output's: every archive of the slice's hash is a print of the file."""
+    await _library_sliced(uploads)
+    respx.get(f"{API}/library/files/81").mock(
+        return_value=httpx.Response(
+            200, json={"id": 81, "filename": "a.gcode.3mf", "file_hash": HASH}
+        )
+    )
+    archives_page(archive_row(17, "other"), archive_row(18, HASH), archive_row(24, HASH))
+
+    found = await link_subject_by_hash(bambuddy, uploads, links, LIBRARY)
+
+    assert sorted(link.archive_id for link in found) == [18, 24]
+    linked = await links.linked(24)
+    assert linked is not None and linked.library_file_id == 89
+    assert linked.matched_by == "content_hash"
+
+
+@respx.mock
+async def test_a_library_file_with_no_slice_recorded_reads_no_archives(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    scan = archives_page(archive_row(18, HASH))
+
+    assert await link_subject_by_hash(bambuddy, uploads, links, LIBRARY) == []
+    assert not scan.called
+
+
+@respx.mock
+async def test_a_library_item_gone_from_bambuddy_has_its_file_scanned_by_hash_once(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """As an output's gone queue item is (`progress._Linker.gone`): the print may have
+    run, and been reprinted, before the item went. At most once per
+    `HASH_SCAN_INTERVAL` per file, however many of its items went."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    await _library_items(links, 51, 52)
+    for item_id in (51, 52):
+        respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "gone"})
+        )
+    scan = archives_page(archive_row(18, HASH))
+
+    await link_library_prints(bambuddy, links, uploads=uploads)
+
+    linked = await links.linked(18)
+    assert linked is not None and linked.library_file_id == 89
+    assert scan.call_count == 1
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+    assert scan.call_count == 1
+
+
+@respx.mock
+async def test_a_library_scan_that_fails_can_be_tried_again_at_once(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """It found nothing, so it does not hold the file's interval."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    scan = respx.get(f"{API}/archives/").mock(
+        side_effect=[httpx.Response(500), httpx.Response(200, json=[archive_row(18, HASH)])]
+    )
+
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+    assert await links.linked(18) is None
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+
+    assert scan.call_count == 2
+    assert await links.linked(18) is not None
+
+
 # --- A library file's print, read as its follow reads it (#1073) ---
 
 
@@ -663,6 +755,24 @@ async def test_a_library_print_bambuddy_dropped_reads_as_done(
     progress = await library_progress(bambuddy, PrintSubject.library(89), links)
     assert progress is not None and progress.settled and progress.stage == "done"
     assert await _pending(links) == set()
+
+
+@respx.mock
+async def test_a_library_print_bambuddy_dropped_is_found_by_hash_as_an_outputs_is(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """#1755: the follow's read looks for the file's archives by hash, as an output's
+    read does once its queue item is gone."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    await _plates(links, 51)
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    archives_page(archive_row(18, HASH))
+
+    await library_progress(bambuddy, LIBRARY, links, uploads=uploads)
+
+    linked = await links.linked(18)
+    assert linked is not None and linked.library_file_id == 89
 
 
 @respx.mock

@@ -296,6 +296,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `model.json`, with a legacy `presets.json` still read), uploads for `// file`
   parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
+- `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
+  launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
+  network sockets), and `component.py`, the per-client session cap (on only with
+  `SCADBUDDY_TRUSTED_PROXIES` set). The bridge itself is `library/lsp.py`.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the

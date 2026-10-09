@@ -6,6 +6,11 @@ export function printPath(archiveId: number): string {
   return `/prints/${archiveId}`
 }
 
+/** #1755 — the history of one Bambuddy library file's prints. */
+export function libraryPrintsPath(fileId: number): string {
+  return `/prints?file=${fileId}`
+}
+
 /** A printer Bambuddy gave no name for. */
 export function printerLabel(id: number): string {
   return `Printer ${id}`

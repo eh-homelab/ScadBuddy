@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
@@ -82,11 +83,16 @@ export interface OpenRequest {
   sessionId: string
 }
 
-/** #1866 — an image waiting in the composer to go with the next message. */
+/**
+ * #1866 — an image waiting in the composer to go with the next message: uploaded when it
+ * was attached (#1941), so the message sends `id`; `image` is kept for the caps and the
+ * thumbnail.
+ */
 interface Attached {
   key: number
   name: string
   image: UserImage
+  id: string
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -112,13 +118,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
   const pageModel = pageContext(pathname).modelSlug ?? null
-  // The model the filter was turned on for: on another model's page it is off.
+  // The model the filter was turned on for. Every page starts unfiltered, a page left and
+  // come back to included (#1340).
   const [filteredModel, setFilteredModel] = useState<string | null>(null)
+  const [filterPage, setFilterPage] = useState(pageModel)
+  if (filterPage !== pageModel) {
+    setFilterPage(pageModel)
+    setFilteredModel(null)
+  }
   const filterBy = pageModel !== null && filteredModel === pageModel ? pageModel : null
-  // Read again each time the picker opens or the filter is turned on, so it is current.
+  const filtering = filterBy !== null && pickerOpen
+  // Read again each time the picker opens or the filter is turned on, and while it is open,
+  // on the model's changes and on every tool result the panel sees, so a session that
+  // changes the model meanwhile is listed (#1340).
   const touching = useAsync(
     async () =>
-      filterBy && pickerOpen
+      filtering
         ? new Set(
             (await api.listAiResourceSessions({ type: 'model', id: filterBy }, PICKER_FILTER_LIMIT)).sessions.map(
               (s) => s.id,
@@ -126,7 +141,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           )
         : null,
     [filterBy, pickerOpen],
+    filtering ? [`model:${filterBy}`] : [],
   )
+  const toolResults = useMemo(
+    () =>
+      Object.values(state.sessions).reduce(
+        (count, s) => count + (s?.items.filter((item) => item.kind === 'tool' && item.result).length ?? 0),
+        0,
+      ),
+    [state.sessions],
+  )
+  const refreshTouching = touching.refresh
+  useEffect(() => {
+    if (filtering) refreshTouching()
+    // Only a new tool result re-reads; opening the picker or the filter reads through `touching`'s deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolResults])
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
@@ -197,9 +227,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     preparingNow.current += taken.length
     setPreparing(preparingNow.current)
     const results = await Promise.allSettled(taken.map((file) => prepareImage(file, undefined, imageEdge)))
-    preparingNow.current -= taken.length
-    setPreparing(preparingNow.current)
-    const added: Attached[] = []
+    const ready: { name: string; image: UserImage }[] = []
     let total = attachedNow.current.reduce((sum, a) => sum + a.image.data.length, 0)
     results.forEach((result, index) => {
       const name = taken[index]?.name ?? 'image'
@@ -209,13 +237,30 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         errors.push(`${name} was not added: this message's images would be too large together.`)
       } else {
         total += result.value.data.length
-        added.push({ key: nextKey.current++, name, image: result.value })
+        ready.push({ name, image: result.value })
+      }
+    })
+    // #1941 — each image goes to the agent now, and the message sends its id.
+    const uploads = await Promise.allSettled(ready.map(({ image }) => api.uploadAttachment(image)))
+    preparingNow.current -= taken.length
+    setPreparing(preparingNow.current)
+    const added: Attached[] = []
+    uploads.forEach((upload, index) => {
+      const { name, image } = ready[index]!
+      if (upload.status === 'rejected') {
+        const why = upload.reason instanceof ApiError ? upload.reason.detail : 'the assistant service did not answer'
+        errors.push(`${name} could not be uploaded: ${why}`)
+      } else {
+        added.push({ key: nextKey.current++, name, image, id: upload.value.id })
       }
     })
     writeAttached([...attachedNow.current, ...added])
     setImageErrors(errors)
   }
   const removeImage = (key: number) => {
+    const removed = attachedNow.current.find((a) => a.key === key)
+    // Best effort: an upload left behind expires on its own.
+    if (removed) api.deleteAttachment(removed.id).catch(() => {})
     writeAttached(attachedNow.current.filter((a) => a.key !== key))
     setImageErrors([])
     composer.current?.focus()
@@ -302,7 +347,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     dictation.cancel()
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
-    const images = attachedNow.current.map((a) => a.image)
+    const images = attachedNow.current.map((a) => ({ kind: 'attachment' as const, id: a.id }))
     chat.send(text, pageContext(pathname, { tools, dialogs, page }), images.length ? images : undefined)
     writeDraft('')
     writeAttached([])

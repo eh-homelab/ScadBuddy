@@ -92,6 +92,13 @@ What the ingress must do:
   therefore stay open under that default. The rule: both intervals must stay under
   the ingress's read and send timeouts. Lowering a timeout below 25 s, or raising
   either constant above it, closes idle assistant sockets and streams.
+- **Request bodies.** An image upload (`POST /api/v1/ai/attachments`, #1941) is JSON of
+  up to about 5.1 MiB (`ATTACHMENT_BODY_MAX`,
+  [`agent/src/routes/attachments.ts`](../../agent/src/routes/attachments.ts)): one
+  image's base64 and its preview. ingress-nginx refuses bodies over its default
+  `proxy-body-size` of 1m with 413, so the agent's paths need at least
+  `nginx.ingress.kubernetes.io/proxy-body-size: 8m`
+  ([ingress-nginx, custom max body size](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#custom-max-body-size)).
 - **Forwarded headers.** The ingress must append `X-Forwarded-Proto` and
   `X-Forwarded-Host`, and its pod range goes in `SCADBUDDY_AGENT_TRUSTED_PROXIES`
   (§6). Otherwise every chat and session write is refused with 403.

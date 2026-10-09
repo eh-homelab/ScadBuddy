@@ -79,17 +79,17 @@ async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
 }
 
 /** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
-function runOutcome(run: PrintRun) {
+function runOutcome(run: PrintRun, ctx: ToolContext) {
   if (run.status === 'failed') {
     const error = run.error
+    const failed = `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}`
+    if (!run.may_have_queued) throw new ToolError(failed)
     // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
-    // another print_output call is a new print (its own request_id), so check first.
-    const queued = run.may_have_queued
-      ? " The print may still have been queued: check Bambuddy's queue before printing again."
-      : ''
-    throw new ToolError(
-      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}${queued}`,
-    )
+    // another print_output call is a new print (its own request_id), so check first. The
+    // answer is the run itself, so the session records it (#1017, sessions/touched.ts).
+    const note = "The print may still have been queued: check Bambuddy's queue before printing again."
+    ctx.report?.({ detail: `${failed}. ${note}` })
+    return { ...json({ ...run, note }), isError: true }
   }
   if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
   return json(run)
@@ -518,7 +518,7 @@ export const printTools: Tool[] = [
           `print ${args.output_id}`,
           " The print may still have started: check Bambuddy's queue before printing again.",
         )
-      return runOutcome(await waitForRun(ctx, started))
+      return runOutcome(await waitForRun(ctx, started), ctx)
     },
   }),
 

@@ -148,8 +148,16 @@ export type Attention = z.infer<typeof AttentionSchema>
 /** A `done` summary's attention block. */
 export type DoneAttention = Extract<Attention, { summary: string }>
 
+/**
+ * #1383 — the one rule for "a `done` summary, not a wait": reason `done` and no timer. An
+ * older replica's timed `done` row is an attention request its turn is parked on. The
+ * agent's own copy is its `src/questions/waiting.ts`.
+ */
+export const isDoneSummary = (reason: string, timed: boolean): boolean => reason === 'done' && !timed
+
 /** Whether `a` is a `done` summary, which is dismissed rather than answered. */
-export const isDone = (a: Attention | undefined): a is DoneAttention => a !== undefined && 'summary' in a
+export const isDone = (a: Attention | undefined): a is DoneAttention =>
+  a !== undefined && isDoneSummary(a.reason, 'onTimeout' in a)
 
 /**
  * #1200 — `GET /api/v1/ai/pending-input`'s body as the badge reads it (agent
@@ -219,6 +227,13 @@ export const UserImageSchema = z.object({
   preview: ImagePreviewSchema,
 })
 export type UserImage = z.infer<typeof UserImageSchema>
+
+/**
+ * #1941 — an image the composer uploaded when it was attached (agent `POST
+ * /api/v1/ai/attachments`), sent by its id: no image travels in the socket's frames.
+ */
+export const AttachmentRefSchema = z.object({ kind: z.literal('attachment'), id: z.uuid() })
+export type AttachmentRef = z.infer<typeof AttachmentRefSchema>
 
 /**
  * #782 — an image a tool result carried, by name: the agent keeps the bytes (agent
@@ -434,8 +449,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1),
     context: PageContextSchema,
-    /** #1866 — images for the model; an agent that predates them drops them. */
-    images: z.array(UserImageSchema).min(1).optional(),
+    /** #1941 — uploaded images for the model, by id (#1866 sent them inline). */
+    images: z.array(AttachmentRefSchema).min(1).optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent

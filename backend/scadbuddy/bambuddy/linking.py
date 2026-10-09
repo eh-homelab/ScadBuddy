@@ -13,14 +13,20 @@ Verified on the live Bambuddy 1.2.5.6 (print-history plan §1, L1-L3 and L8-L10)
   that hash is a print of this output, reprints made inside Bambuddy included. The
   scan reads only the days around the output's sends, so a reprint made long after
   the last one is not found this way.
+
+A Bambuddy library file's print is linked the same way (#1755): its slices are recorded
+under its subject (``library:<file id>``) as an output's are under its id (#1882), so
+the same scan finds its reprints. It runs when one of the file's queue items is gone,
+as an output's does, and when the history is filtered to the file.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Collection
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import psycopg
 from fastapi import status
@@ -56,11 +62,19 @@ SCAN_BEFORE = timedelta(days=1)
 #: first, and how many at once (#976).
 LIBRARY_LINK_LIMIT = 50
 LIBRARY_LINK_CONCURRENCY = 8
+#: How many library files one call scans by hash at once (#1755).
+LIBRARY_SCAN_CONCURRENCY = 2
 #: How long after it was recorded a library file's queue item is read at most. An
 #: item that never settles (one waiting on a printer that was removed, or skipped and
 #: never resumed) would otherwise cost a read on every list and hold a slot in
 #: ``LIBRARY_LINK_LIMIT`` for good; past this it is marked gone (#1703).
 LIBRARY_LINK_BACKSTOP = timedelta(days=180)
+#: How often one library file's archives are scanned by hash at most, as an output's
+#: are (`progress.HASH_SCAN_INTERVAL`): each scan pages Bambuddy's archive list (#1755).
+#: Per process, like the output's: the API and the print worker each keep their own, so
+#: a file can be scanned once by each in one interval.
+LIBRARY_HASH_SCAN_INTERVAL = 600.0
+_last_library_scan: dict[int, float] = {}
 #: The stages a queue item never leaves once it has no archive (#1705). On a
 #: library-file item Bambuddy creates the archive and commits ``archive_id`` before it
 #: uploads the file or sets ``printing``, so a run that got as far as the printer has
@@ -147,19 +161,40 @@ async def link_by_hash(
     links: PrintLinkStore,
     meta: OutputMeta,
 ) -> list[PrintLink]:
-    """Link every archive whose ``content_hash`` is one of the output's sliced files,
-    made from the day before its first upload to ``SCAN_AFTER`` past its last slice.
-    Returns the links it found, new or not.
+    """`link_subject_by_hash` for an output."""
+    return await link_subject_by_hash(
+        client, uploads, links, PrintSubject.output(meta.id), made_at=meta.created_at
+    )
+
+
+async def link_subject_by_hash(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    links: PrintLinkStore,
+    subject: PrintSubject,
+    *,
+    made_at: datetime | None = None,
+) -> list[PrintLink]:
+    """Link every archive whose ``content_hash`` is one of the subject's sliced files,
+    made from the day before its first upload to ``SCAN_AFTER`` past its last slice
+    (around ``made_at`` when no window is recorded). Returns the links it found, new
+    or not.
 
     The window is bounded at both ends so an output made long ago does not have to
     page through every print since (#522 review): Bambuddy's order is not documented,
     and newest first would put the output's own prints past the last page read.
     """
-    hashes = await _slice_hashes(client, uploads, meta.id)
+    # The uploads are keyed as a run is (`PrintPipeline.record`): an output by its id.
+    owner = subject.run_subject
+    hashes = await _slice_hashes(client, uploads, owner)
     if not hashes:
         return []
-    window = await uploads.sent_between(meta.id)
-    first, last = window if window is not None else (meta.created_at, meta.created_at)
+    window = await uploads.sent_between(owner)
+    if window is None:
+        if made_at is None:
+            return []
+        window = (made_at, made_at)
+    first, last = window
     since = (first - SCAN_BEFORE).date()
     until = (last + SCAN_AFTER).date()
     found: list[PrintLink] = []
@@ -182,15 +217,15 @@ async def link_by_hash(
                     plate_id=row.plate_id,
                     printer_id=row.printer_id,
                 )
-                await links.record(PrintSubject.output(meta.id), link)
+                await links.record(subject, link)
                 found.append(link)
         if len(rows) < ARCHIVE_PAGE:
             break
     else:
         logger.warning(
-            "stopped scanning archives for an output's prints",
+            "stopped scanning archives for a subject's prints",
             extra={
-                "output_id": meta.id,
+                "subject": subject.key,
                 "pages": MAX_ARCHIVE_PAGES,
                 "date_from": since.isoformat(),
                 "date_to": until.isoformat(),
@@ -199,7 +234,47 @@ async def link_by_hash(
     return found
 
 
-async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> None:
+def _claim_library_scan(file_id: int, now: float) -> bool:
+    """Claim a library file's hash scan; False when one ran within
+    `LIBRARY_HASH_SCAN_INTERVAL`. Entries past it are dropped here."""
+    last = _last_library_scan.get(file_id)
+    if last is not None and now - last < LIBRARY_HASH_SCAN_INTERVAL:
+        return False
+    for stale in [
+        key for key, at in _last_library_scan.items() if now - at >= LIBRARY_HASH_SCAN_INTERVAL
+    ]:
+        del _last_library_scan[stale]
+    _last_library_scan[file_id] = now
+    return True
+
+
+async def scan_library_by_hash(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    links: PrintLinkStore,
+    file_id: int,
+) -> None:
+    """`link_subject_by_hash` for a library file, at most once per process per
+    `LIBRARY_HASH_SCAN_INTERVAL` (#1755). Best effort, as an output's scan from the
+    progress read is: a failure is logged, never raised."""
+    if not _claim_library_scan(file_id, time.monotonic()):
+        return
+    try:
+        await link_subject_by_hash(client, uploads, links, PrintSubject.library(file_id))
+    except (ApiError, psycopg.Error, DatabaseRequiredError):
+        # A failed scan found nothing, so the next read may try again.
+        _last_library_scan.pop(file_id, None)
+        logger.exception(
+            "could not scan a library file's prints by hash", extra={"library_file_id": file_id}
+        )
+
+
+async def link_library_prints(
+    client: BambuddyClient,
+    links: PrintLinkStore,
+    *,
+    uploads: BambuddyUploadStore | None = None,
+) -> None:
     """Link the archives of the library files' queue items that have one now (#976).
 
     A library-file run has no output, so no progress read follows it the way an
@@ -210,7 +285,9 @@ async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> 
     waits long in the queue, or that nobody lists for a while, is still linked the
     next time the list is opened (#1664, #1703). Any other
     failure, a database one included, is logged and leaves the item to the next call
-    (#1662).
+    (#1662). With ``uploads``, an item that 404s has its file scanned by hash, as an
+    output's gone item does (#1755), once: the item is gone, so a scan that fails here
+    is tried again only by the file's progress read or its own history.
     """
     try:
         pending = await links.pending_library(LIBRARY_LINK_LIMIT, max_age=LIBRARY_LINK_BACKSTOP)
@@ -218,32 +295,41 @@ async def link_library_prints(client: BambuddyClient, links: PrintLinkStore) -> 
         logger.exception("could not read the library prints to link")
         return
     gate = asyncio.Semaphore(LIBRARY_LINK_CONCURRENCY)
+    # Each scan pages Bambuddy's archive list: many items gone at once scan a few at a time.
+    scans = asyncio.Semaphore(LIBRARY_SCAN_CONCURRENCY)
 
-    async def link(queue_item_id: int) -> None:
+    async def link(queue_item_id: int, file_id: int) -> None:
+        if await read(queue_item_id) and uploads is not None:
+            async with scans:
+                await scan_library_by_hash(client, uploads, links, file_id)
+
+    async def read(queue_item_id: int) -> bool:
+        """Link or settle one item; True when Bambuddy no longer has it."""
         async with gate:
             try:
                 item = await client.queue_item(queue_item_id)
             except ApiError as error:
                 if error.status == status.HTTP_404_NOT_FOUND:
                     await links.library_gone(queue_item_id)
-                else:
-                    logger.warning(
-                        "could not read a library print's queue item",
-                        extra={"queue_item_id": queue_item_id, "status": error.status},
-                    )
-                return
+                    return True
+                logger.warning(
+                    "could not read a library print's queue item",
+                    extra={"queue_item_id": queue_item_id, "status": error.status},
+                )
+                return False
             if item.archive_id is not None:
                 await links.link_library(queue_item_id, item.archive_id, item.library_file_name)
             elif stage_of(item.status) in _SETTLED:
                 # Settled before it was dispatched: it will never name an archive.
                 await links.library_gone(queue_item_id)
+            return False
 
-    async def guarded(queue_item_id: int) -> None:
+    async def guarded(queue_item_id: int, file_id: int) -> None:
         try:
-            await link(queue_item_id)
+            await link(queue_item_id, file_id)
         except (psycopg.Error, DatabaseRequiredError):
             logger.exception(
                 "could not record a library print's link", extra={"queue_item_id": queue_item_id}
             )
 
-    await asyncio.gather(*(guarded(row.queue_item_id) for row in pending))
+    await asyncio.gather(*(guarded(row.queue_item_id, row.library_file_id) for row in pending))

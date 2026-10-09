@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -19,11 +21,13 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.editor import nonet
 from scadbuddy.library import lsp_diagnostics
 from scadbuddy.main import create_app
 
 # Publishes one diagnostic per line containing ERR (0-based LSP positions), plus one
-# naming its cwd for a line containing CWD; HANG never publishes; CRASH exits.
+# naming its cwd for a line containing CWD, one saying whether it could open an AF_INET
+# socket for a line containing NET; HANG never publishes; CRASH exits.
 FAKE_LSP = """#!/usr/bin/env python3
 import json, os, pathlib, sys, time
 
@@ -62,6 +66,16 @@ while True:
                 diags.append({"range": {"start": {"line": number, "character": start},
                                         "end": {"line": number, "character": start + 3}},
                               "severity": 1, "message": "syntax error"})
+            if "NET" in line:
+                import socket
+                try:
+                    socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
+                    opened = "inet open"
+                except OSError:
+                    opened = "inet refused"
+                diags.append({"range": {"start": {"line": number, "character": 0},
+                                        "end": {"line": number, "character": 1}},
+                              "severity": 2, "message": opened})
             if "CWD" in line:
                 diags.append({"range": {"start": {"line": number, "character": 0},
                                         "end": {"line": number, "character": 1}},
@@ -126,6 +140,17 @@ def test_a_slug_runs_it_in_the_models_directory(
     assert isinstance(diagnostics, list)
     assert diagnostics[0]["message"] == str(paths.model_dir(model))
     assert diagnostics[0]["severity"] == "warning"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or platform.machine() not in nonet.ARCHES,
+    reason="no seccomp filter for this platform",
+)
+def test_the_server_has_no_network(client: TestClient) -> None:
+    """The same launcher as the editor's socket (#95)."""
+    diagnostics = post(client, "NET\n")["diagnostics"]
+    assert isinstance(diagnostics, list)
+    assert diagnostics[0]["message"] == "inet refused"
 
 
 def test_an_unknown_slug_is_a_404(client: TestClient) -> None:

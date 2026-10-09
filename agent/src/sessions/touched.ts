@@ -192,13 +192,20 @@ function projectFile(result: unknown, output: string | null, project: string | n
 }
 
 /** A library pin: the model's new revision, and the library by name. */
-function libraryPin(action: ResourceAction): Extractor {
+function libraryPin(action: ResourceAction | ((result: unknown) => ResourceAction)): Extractor {
   return (input, result) => {
     const name = str(input.name)
     const model = str(field(result, 'slug')) ?? str(input.slug)
-    return [...revision(input, result), ...(name ? [{ type: 'library' as const, id: name, action, model }] : [])]
+    const done = typeof action === 'function' ? action(result) : action
+    return [...revision(input, result), ...(name ? [{ type: 'library' as const, id: name, action: done, model }] : [])]
   }
 }
+
+/**
+ * A pin replaces one of the same name (#1307): new only when the answer says the model did
+ * not pin it before (tools/libraries.ts `pinAnswer`), else a change, as `bambuddyFile` does.
+ */
+const pinned = libraryPin((result) => (field(result, 'pinned_before') === false ? 'created' : 'modified'))
 
 /** A stored setting, by what it is for. */
 function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
@@ -298,8 +305,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     ]
   },
   // Libraries and fonts.
-  pin_library: libraryPin('created'),
-  pin_library_from_url: libraryPin('created'),
+  pin_library: pinned,
+  pin_library_from_url: pinned,
   repin_library: libraryPin('modified'),
   repin_library_from_pinned_url: libraryPin('modified'),
   unpin_library: libraryPin('deleted'),
@@ -319,7 +326,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const key = str(input.key)
     if (!scope || (scope !== 'global' && !key)) return []
     return setting(scope === 'global' ? 'print_options:global' : `print_options:${scope}:${key}`, {
-      model: scope === 'model' ? key : null,
+      // A library file's own scope (`library:<file id>`, #1754) names no model.
+      model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
   remember_model_print_choices: (input) => {
@@ -424,9 +432,12 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
 /**
  * Tools whose error result still names what they made, so a failed call is
  * recorded too: a render_model whose render failed, or whose save_output did,
- * created its job all the same, and its error result is the job's summary.
+ * created its job all the same, and its error result is the job's summary. A
+ * print_output whose run failed after it tried to queue (`may_have_queued`)
+ * answers the run, so the session shows a print may have gone out (#1017); any
+ * other failed run answers plain text and records nothing.
  */
-export const RECORDED_WHEN_FAILED: ReadonlySet<string> = new Set(['render_model'])
+export const RECORDED_WHEN_FAILED: ReadonlySet<string> = new Set(['render_model', 'print_output'])
 
 /**
  * What a call touched: its extractor's rows, one `unclassified` row for a

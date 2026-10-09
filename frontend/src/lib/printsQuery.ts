@@ -1,8 +1,10 @@
 /**
  * #310 — the print history's filters and view, kept in the URL
- * (`?slug=&status=&printer=&from=&to=&q=&view=cards|list`, plan §2.7) so back/forward
- * and deep links work, as the catalogue's are (#276). On a template's Prints tab the
- * template comes from the route, and `slug` in the URL is ignored.
+ * (`?slug=&status=&printer=&from=&to=&q=&file=&view=cards|list`, plan §2.7) so
+ * back/forward and deep links work, as the catalogue's are (#276). On a template's Prints
+ * tab the template comes from the route, and `slug` in the URL is ignored. `file` is one
+ * Bambuddy library file's prints (#1755); a template leaves it out, since a print is of
+ * one or the other.
  */
 export type PrintsView = 'cards' | 'list'
 
@@ -15,6 +17,8 @@ export type PrintsQuery = {
   from: string
   to: string
   q: string
+  /** A Bambuddy library file id, as text; '' is every print. */
+  file: string
   view: PrintsView
 }
 
@@ -25,11 +29,13 @@ export const DEFAULT_PRINTS_QUERY: PrintsQuery = {
   from: '',
   to: '',
   q: '',
+  file: '',
   view: 'cards',
 }
 
 const DAY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
-/** At most 15 digits: every such id is a safe integer, so `Number()` keeps it exact. */
+/** At most 15 digits: every such id is a safe integer, so `Number()` keeps it exact.
+ * A library file's id is read the same way. */
 const PRINTER = /^[1-9]\d{0,14}$/
 
 function day(value: string | null): string {
@@ -38,6 +44,7 @@ function day(value: string | null): string {
 
 export function parsePrintsQuery(params: URLSearchParams): PrintsQuery {
   const printer = params.get('printer') ?? ''
+  const file = params.get('file') ?? ''
   const view = params.get('view')
   return {
     slug: params.get('slug') ?? '',
@@ -46,6 +53,7 @@ export function parsePrintsQuery(params: URLSearchParams): PrintsQuery {
     from: day(params.get('from')),
     to: day(params.get('to')),
     q: params.get('q') ?? '',
+    file: PRINTER.test(file) ? file : '',
     view: view === 'list' || view === 'cards' ? view : DEFAULT_PRINTS_QUERY.view,
   }
 }
@@ -59,6 +67,7 @@ export function toPrintsParams(query: PrintsQuery): URLSearchParams {
   if (query.from) params.set('from', query.from)
   if (query.to) params.set('to', query.to)
   if (query.q.trim()) params.set('q', query.q)
+  if (query.file) params.set('file', query.file)
   if (query.view !== DEFAULT_PRINTS_QUERY.view) params.set('view', query.view)
   return params
 }
@@ -80,6 +89,7 @@ export interface PrintFilters {
   from?: string
   to?: string
   q?: string
+  library_file_id?: number
 }
 
 export function apiFilters(query: PrintsQuery, fixedSlug?: string): PrintFilters {
@@ -91,6 +101,7 @@ export function apiFilters(query: PrintsQuery, fixedSlug?: string): PrintFilters
   if (query.from) filters.from = query.from
   if (query.to) filters.to = query.to
   if (query.q.trim()) filters.q = query.q.trim()
+  if (query.file && !slug) filters.library_file_id = Number(query.file)
   return filters
 }
 

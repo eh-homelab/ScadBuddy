@@ -37,6 +37,7 @@ from scadbuddy.api.versions import require_history
 from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.paths import model_path
 from scadbuddy.core.problems import ApiError
+from scadbuddy.editor.component import LANGUAGE_SERVER_CLIENTS
 from scadbuddy.library.editor_files import (
     MAX_PATH_LENGTH,
     FilePathError,
@@ -124,22 +125,27 @@ async def _serve(
         logger.warning("openscad-lsp is not on PATH; the editor runs without it")
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         return
-    if _budget_full(state):
+    clients = state.components.get(LANGUAGE_SERVER_CLIENTS)
+    peer = websocket.client.host if websocket.client else None
+    client = clients.client(websocket.headers, peer)
+    if _budget_full(state) or clients.full(client):
         await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
         return
+    # No await from the checks to here (`_budget_full`).
     async with state.language_servers:
-        await websocket.accept()
-        env = env_for(state.config.data_dir)
-        if libraries:
-            # As on a render (`render/runner.py`): exactly the model's own pins.
-            env["OPENSCADPATH"] = os.pathsep.join(
-                str(directory.parent) for directory in libraries.values()
-            )
-        if root is not None:
-            await serve(websocket, binary, root, env, libraries)
-            return
-        with tempfile.TemporaryDirectory(prefix="scadbuddy-lsp-") as scratch:
-            await serve(websocket, binary, Path(scratch), env)
+        with clients.slot(client):
+            await websocket.accept()
+            env = env_for(state.config.data_dir)
+            if libraries:
+                # As on a render (`render/runner.py`): exactly the model's own pins.
+                env["OPENSCADPATH"] = os.pathsep.join(
+                    str(directory.parent) for directory in libraries.values()
+                )
+            if root is not None:
+                await serve(websocket, binary, root, env, libraries)
+                return
+            with tempfile.TemporaryDirectory(prefix="scadbuddy-lsp-") as scratch:
+                await serve(websocket, binary, Path(scratch), env)
 
 
 @router.websocket("/models/{slug}/lsp")
