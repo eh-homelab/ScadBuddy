@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { command, reattach } from './command.js'
+import { ACCEPTING_MS, command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { CAMERA, cameraQuery, decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
@@ -165,6 +165,8 @@ export const customizerTools: Tool[] = [
       "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
     title: ({ slug, version }) => `Render ${slug}${version ? ` at ${version.slice(0, 7)}` : ''}`,
+    // Its own wait for the render, after the backend has accepted it.
+    waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async ({ slug, params, inputs, version, save_output, output_name }, ctx) => {
       // With inputs, inputs.params is what renders (missing: the defaults). A `params`
       // beside them would be dropped, so it is refused rather than validated in vain.

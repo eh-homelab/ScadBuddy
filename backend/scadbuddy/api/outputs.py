@@ -207,10 +207,8 @@ def detail(
 
 
 async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
-    """The outputs whose newest run failed before queueing; none without a database, or
-    with one that does not answer, as ``/progress`` reads them."""
-    if not runs.available:
-        return set()
+    """The outputs whose newest run failed before queueing; none with a database that
+    does not answer, as ``/progress`` reads them."""
     try:
         return await runs.failed_before_queueing([meta.id for meta in metas])
     except DATABASE_ERRORS:

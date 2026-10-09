@@ -3,9 +3,7 @@
 Postgres only: the ``analyzer_decisions`` table, a backend migration file in
 ``backend/scadbuddy/migrations/`` in the ``scadbuddy_migrations`` ledger (not an ``ai_*`` one:
 script analyzers run with AI off, and so must their decisions). There is no file
-fallback. Until the database is required everywhere (#401), a ScadBuddy without
-``SCADBUDDY_DATABASE_URL`` has no store; the routes that persist answer 503 saying
-so, and a run reports that no decisions could be read.
+fallback.
 
 Resolution: of the decisions matching a diagnostic at the scopes a print falls in,
 the narrowest scope wins, and at one scope a decision about this instance wins over

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { PairingError } from '../bridge/pairings.js'
-import type { BrowserStatus, BrowserTarget, HubErrorCode } from '../bridge/hub.js'
+import { type BrowserStatus, type BrowserTarget, CALL_TIMEOUT_MS, type HubErrorCode } from '../bridge/hub.js'
+import { TAB_WAIT_S } from '../sessions/manager.js'
 import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolContext, ToolError } from './registry.js'
 
 // The browser_* tools (#254, spec §5.2 and §8.5): the user's own open
@@ -101,6 +102,12 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
     ...(spec.summarize ? { summarize: spec.summarize } : {}),
     routes: [],
     source: SOURCE,
+    // The call, a wait for the tab to come back, and the call once more (#815 §2).
+    waitsMs: (args) => {
+      const input = args as Record<string, unknown>
+      const call = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : CALL_TIMEOUT_MS
+      return 2 * call + TAB_WAIT_S * 1000
+    },
     handler: async (args, ctx) => {
       const input = args as Record<string, unknown>
       const wait = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : undefined

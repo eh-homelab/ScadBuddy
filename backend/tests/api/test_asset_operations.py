@@ -98,7 +98,7 @@ def test_an_asset_fetch_never_records_the_urls_query(
     )
     assert response.status_code == 201, response.text
     assert "s3cret" not in response.json()["source_url"]
-    pool = _state(app).components.get(OPERATIONS).store._require()
+    pool = _state(app).components.get(OPERATIONS).store._pool
     with pool.connection() as conn:
         rows = conn.execute("SELECT * FROM operations WHERE kind = 'asset_fetch'").fetchall()
     assert len(rows) == 1
@@ -166,7 +166,7 @@ def test_an_asset_fetch_names_the_host_of_a_url_pasted_with_whitespace(
         f"/api/v1/models/{MODEL_SLUG}/assets/fetch", json={"url": f" {url}  "}, headers=press()
     )
     assert response.status_code == 201, response.text
-    pool = _state(app).components.get(OPERATIONS).store._require()
+    pool = _state(app).components.get(OPERATIONS).store._pool
     with pool.connection() as conn:
         rows = conn.execute("SELECT * FROM operations WHERE kind = 'asset_fetch'").fetchall()
     assert rows[0]["subject"] == "openmoji.org"

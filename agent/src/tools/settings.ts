@@ -82,8 +82,8 @@ export const settingsTools: Tool[] = [
     description:
       'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
       'and the print options at each scope. A Bambuddy library file\'s entries are keyed "library:<file id>" ' +
-      '(#1754). Forget one with remember_model_print_choices (a model\'s only), remember_printer_bed_type or ' +
-      'set_print_options; a library file\'s printer and spool choices are forgotten in Settings.',
+      '(#1754). Forget one with remember_model_print_choices (a model\'s by `slug`, a library file\'s by ' +
+      '`library_file_id`, passing nothing else), remember_printer_bed_type or set_print_options.',
     input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings/remembered'],

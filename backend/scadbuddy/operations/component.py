@@ -14,13 +14,11 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Annotated
 
-from fastapi import Depends, status
 from temporalio.client import Client
 
 from scadbuddy.api.components import component_dep
-from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, transactional_events
+from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key, feature_exports
-from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.kinds import (
     KINDS_ATTR,
     KINDS_MODULE,
@@ -66,17 +64,4 @@ def _build(core: Core, components: Components) -> OperationCommands:
 COMPONENT = Component(OPERATIONS, build=_build)
 
 
-def require_operations(
-    ops: Annotated[OperationCommands, component_dep(OPERATIONS)],
-) -> OperationCommands:
-    """The operations, or a 503 naming what is missing: they live only in Postgres."""
-    if not ops.store.available:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "operations are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
-            type_=DATABASE_REQUIRED_PROBLEM,
-        )
-    return ops
-
-
-OperationsDep = Annotated[OperationCommands, Depends(require_operations)]
+OperationsDep = Annotated[OperationCommands, component_dep(OPERATIONS)]

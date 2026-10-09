@@ -349,6 +349,7 @@ export function CustomizePage() {
     busy: renderBusy,
     retry: retryRender,
     settledFor,
+    jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
   // #938 — the colours the latest finished render used and the values it ran with, kept
@@ -358,7 +359,9 @@ export function CustomizePage() {
     { slug: string; colors: string[]; params: ParamValues } | undefined
   >(undefined)
   const doneColors = job?.status === 'done' ? (job.colors ?? undefined) : undefined
-  const doneParams = settledFor ?? NOTHING
+  // The values `job` ran with (#1685): a submit that failed before making a job settles
+  // the new values but leaves the old job, whose colours are not theirs.
+  const doneParams = jobFor ?? NOTHING
   if (doneColors && (doneColors !== rendered?.colors || doneParams !== rendered.params))
     setRendered({ slug, colors: doneColors, params: doneParams })
   const renderedOutput = rendered?.slug === slug ? rendered : undefined

@@ -27,6 +27,7 @@ from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES, set_fake_env
+from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
 
 SOURCE = "width = 10;\ncube(width);\n"
@@ -327,7 +328,9 @@ def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...
 
     presets = create_autospec(PresetStore, instance=True)
     presets.sweep_orphans.side_effect = sweep_presets
-    catalogue = Catalogue(paths, presets=presets, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(
+        paths, presets=presets, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
 
     def fail(*_args: object, **_kwargs: object) -> NoReturn:
         raise OSError("EIO")

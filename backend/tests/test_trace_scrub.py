@@ -18,17 +18,20 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Link, SpanKind, Status, StatusCode
 from temporalio import workflow
-from temporalio.client import Client, WorkflowFailureError
-from temporalio.contrib.opentelemetry import TracingInterceptor
+from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
-from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from scadbuddy.core import trace_scrub
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter, frames_only
 from scadbuddy.render.runner import ParameterValueError
 from tests.support.temporal import temporal_client
+
+# The sandbox re-imports this module for `_Fails`; production's client module is not
+# workflow code, so it is passed through rather than imported inside the sandbox.
+with workflow.unsafe.imports_passed_through():
+    from scadbuddy.workflows.client import connect, sandboxed_runner
 
 SENTINEL = "s3ntinel-9f1c"
 CODE_ROOTS = trace_scrub._CODE_ROOTS
@@ -399,16 +402,10 @@ async def test_a_failed_workflows_completion_span_survives_the_sandbox(
     # Uncached, so the frames' files are read on the workflow thread.
     trace_scrub._source.cache_clear()
     async with temporal_client() as plain:
-        client = Client(
-            plain.service_client,
-            namespace=plain.namespace,
-            data_converter=plain.data_converter,
-            interceptors=[TracingInterceptor()],
-        )
+        # Production's client and sandbox (#1810), on the dev server's address.
+        client = await connect(plain.service_client.config.target_host, plain.namespace)
         queue = f"scrub-{uuid.uuid4().hex[:8]}"
-        runner = SandboxedWorkflowRunner(
-            restrictions=SandboxRestrictions.default.with_passthrough_modules("opentelemetry")
-        )
+        runner = sandboxed_runner()
         async with Worker(client, task_queue=queue, workflows=[_Fails], workflow_runner=runner):
             # Under a span: the sampler drops a parentless client span, and its trace.
             with (

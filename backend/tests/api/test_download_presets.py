@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
@@ -17,6 +18,7 @@ import trimesh
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
+from scadbuddy.bambuddy import download
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.bambu3mf import PRESET_PLACEHOLDER, replate_3mf, write_bambu_3mf
@@ -464,3 +466,42 @@ def test_a_malformed_stored_file_is_an_error_not_a_placeholder_download(
     # Not taken for a file that does not fit: the corrupt file surfaces as an error.
     with pytest.raises(json.JSONDecodeError):
         client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+
+async def _never_answers(request: httpx.Request) -> httpx.Response:
+    await asyncio.Event().wait()
+    raise AssertionError("unreachable")
+
+
+@respx.mock
+def test_a_bambuddy_too_slow_to_name_the_presets_still_refits_the_plate(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1280: a slow Bambuddy degrades as an unreadable one does, within a budget,
+    rather than holding a plain download up for minutes."""
+    monkeypatch.setattr(download, "PRESETS_TIMEOUT", 0.2)
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _bambuddy()
+    respx.get(f"{API}/slicer/presets").mock(side_effect=_never_answers)
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    stored = _stored(paths, model, output_id)
+    _assert_refitted_on_placeholders(response.content, stored, plate_for("H2C"))
+
+
+@respx.mock
+def test_a_bambuddy_too_slow_to_read_the_printer_serves_the_stored_file(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(download, "DOWNLOAD_TIMEOUT", 0.2)
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    respx.route(host="bambuddy.test").mock(side_effect=_never_answers)
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    assert response.content == _stored(paths, model, output_id)

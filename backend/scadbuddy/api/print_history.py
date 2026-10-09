@@ -579,8 +579,6 @@ async def list_prints(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "a print is of a template's output or of a library file: filter by one",
         )
-    if not links.available:
-        return PrintPage(items=[])
     filters = _Filters(
         status=print_status, printer_id=printer_id, date_from=date_from, date_to=date_to, q=q
     )
@@ -667,7 +665,7 @@ async def list_prints(
 
 
 async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
-    linked = await links.linked(archive_id) if links.available else None
+    linked = await links.linked(archive_id)
     if linked is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND,
