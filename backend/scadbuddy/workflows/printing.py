@@ -18,7 +18,7 @@ queued the run never ends ``failed``.
 
 ``print_plan`` uploads the 3MF and retries (``READ_RETRY``): ``ensure_uploaded`` reuses
 the copy ScadBuddy recorded, and a file an attempt uploaded but died before recording is
-found in the folder by its bytes and taken (``upload_output``, #1127), so a retry leaves
+found in the folder by its bytes and taken (``upload_copy``, #1127), so a retry leaves
 no spare library file. The workflow's commands are unchanged.
 """
 

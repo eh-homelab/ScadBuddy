@@ -5,16 +5,18 @@ import json
 import math
 import os
 import re
+import tempfile
 import uuid
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
 import numpy as np
+import trimesh
 
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
@@ -897,11 +899,15 @@ def state_nozzles(
     *,
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
+    filament_colour: Sequence[str] | None = None,
 ) -> bytes:
-    """``payload`` stating the nozzles as :func:`replate_3mf` does, and changed in
-    nothing else: a library file is printed where its author placed it (#313, #484).
-    Only for a file :func:`nozzles_statable` accepts. The same file and nozzles always
-    give the same bytes, so a copy uploaded earlier can be found by its hash.
+    """``payload`` stating the nozzles as :func:`replate_3mf` does, and the spools'
+    ``filament_colour`` (#476), changed in nothing else: an author's file is printed
+    where its author placed it, every plate as they laid it out (#313, #484, #1752).
+    Colours of another count than the file's filaments are not stated, since its parts'
+    extruder numbers index into them. Only for a file :func:`nozzles_statable` accepts.
+    The same file and choices always give the same bytes, so a copy uploaded earlier
+    can be found by its hash.
 
     Each entry is copied through in chunks, counted against
     :data:`MAX_UNCOMPRESSED_BYTES`, so no more than a chunk of it is ever inflated in
@@ -917,6 +923,10 @@ def state_nozzles(
             if name == PROJECT_SETTINGS_NAME:
                 settings = json.loads(_read_capped(archive, name, MAX_SETTINGS_BYTES))
                 _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
+                if filament_colour is not None and len(filament_colour) == len(
+                    settings.get("filament_colour") or []
+                ):
+                    settings["filament_colour"] = list(filament_colour)
                 data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
                 total += len(data)
                 out.writestr(_entry(name), data)
@@ -930,6 +940,62 @@ def state_nozzles(
                         )
                     target.write(chunk)
     return buffer.getvalue()
+
+
+#: Who laid a 3MF out, which decides how a print lays it out for the printer (#1752):
+#: ``scadbuddy`` is re-placed for the printer's plate (:func:`replate_3mf`), ``author``
+#: keeps its placement and states the nozzles (:func:`state_nozzles`), and ``as_is`` is
+#: sliced as it stands.
+Layout = Literal["scadbuddy", "author", "as_is"]
+
+
+def layout_of(payload: bytes) -> Layout:
+    """Who laid ``payload`` out, judged from its bytes alone, whatever they were
+    obtained from (a render, or a file in Bambuddy's library).
+
+    ``scadbuddy``: its settings carry :data:`PRESET_PLACEHOLDER` and its plates read
+    back as this writer lays them out, one assembly per plate. ``author``: any other
+    file :func:`nozzles_statable` accepts, a project Bambu Studio (or ScadBuddy, before
+    someone re-saved it there) laid out, whose placement and plates are the author's.
+    ``as_is``: anything else (sliced, another slicer's, past the caps), which nothing
+    can be stated into. The caps are checked first, so the plates are read back only
+    from a file already bounded."""
+    if not nozzles_statable(payload):
+        return "as_is"
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+            if settings.get("printer_settings_id") != PRESET_PLACEHOLDER:
+                return "author"
+            if not all(each.object_files for each in laid_out_plates(archive)):
+                return "author"
+    except (KeyError, ValueError, ET.ParseError, zipfile.BadZipFile):
+        return "author"
+    return "scadbuddy"
+
+
+#: The colour an STL is wrapped in: it carries none, and a print recolors it for its
+#: spool (#476).
+STL_COLOUR = "#FFFFFF"
+
+
+def stl_3mf(payload: bytes, *, model_name: str = "model") -> bytes:
+    """An STL as ScadBuddy's own 3MF of one plate and one filament (#1752), so a print
+    of it is laid out, stated and recolored as a render's is. Without covers: an STL
+    has none to keep, and drawing one for an untrusted mesh is not worth its time.
+    Raises :class:`ValueError` for bytes that hold no triangles."""
+    mesh = trimesh.load(io.BytesIO(payload), file_type="stl", force="mesh")
+    if not isinstance(mesh, trimesh.Trimesh) or mesh.is_empty:
+        raise ValueError("the STL holds no triangles")
+    with tempfile.TemporaryDirectory() as scratch:
+        out = Path(scratch) / "model.3mf"
+        write_bambu_3mf(
+            [ColourPart(1, "Color 1", STL_COLOUR, mesh)],
+            out,
+            thumbnails=None,
+            model_name=model_name,
+        )
+        return out.read_bytes()
 
 
 def _entry(name: str) -> zipfile.ZipInfo:

@@ -190,7 +190,7 @@ async def choices_for_output(
 ) -> ChoicesView:
     return await choices_for(
         client,
-        OutputSource(store, uploads, meta, settings),
+        OutputSource(store=store, meta=meta, uploads=uploads, settings=settings),
         settings,
         remembered=settings.model_print_choices.get(meta.slug),
         printer_id=printer_id,

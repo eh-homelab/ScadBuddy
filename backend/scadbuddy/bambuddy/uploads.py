@@ -311,9 +311,12 @@ class BambuddyUploadStore:
         if not ids:
             return {}
         with self._require().connection() as conn:
+            # A library print's copy is recorded under its subject, `library:<file id>`
+            # (`send.upload_copy`), which is no output.
             rows = conn.execute(
                 "SELECT DISTINCT ON (library_file_id) library_file_id, output_id"
                 " FROM output_bambuddy_uploads WHERE library_file_id = ANY(%s)"
+                " AND output_id NOT LIKE 'library:%%'"
                 " ORDER BY library_file_id, created_at DESC, output_id",
                 (ids,),
             ).fetchall()

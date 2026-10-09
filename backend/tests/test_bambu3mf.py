@@ -28,6 +28,7 @@ from scadbuddy.render.bambu3mf import (
     PlateParts,
     cover_names,
     laid_out_plates,
+    layout_of,
     nozzles_statable,
     plate_columns,
     plate_origin,
@@ -35,6 +36,7 @@ from scadbuddy.render.bambu3mf import (
     plates_of,
     replate_3mf,
     state_nozzles,
+    stl_3mf,
     write_bambu_3mf,
     write_plates_3mf,
 )
@@ -429,6 +431,96 @@ def test_the_archive_cap_bounds_one_prints_memory_and_fits_real_projects() -> No
 def test_an_archive_over_the_total_cap_is_not_statable(written: Path) -> None:
     payload = _declaring(written.read_bytes(), "3D/3dmodel.model", MAX_UNCOMPRESSED_BYTES + 1)
     assert not nozzles_statable(payload)
+
+
+# --- #1752: whoever laid a 3MF out, a print lays it out the one way ---------------------
+
+
+def _saved_by_an_author(payload: bytes) -> bytes:
+    """``payload`` as Bambu Studio saves a project: its settings name a real printer
+    preset rather than ScadBuddy's placeholder."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    settings["printer_settings_id"] = "Bambu Lab H2C 0.4 nozzle"
+    return _with_entries(
+        payload, {"Metadata/project_settings.config": json.dumps(settings).encode()}
+    )
+
+
+def test_a_3mf_is_laid_out_by_scadbuddy_by_its_author_or_as_it_is(written: Path) -> None:
+    payload = written.read_bytes()
+
+    assert layout_of(payload) == "scadbuddy"
+    assert layout_of(_saved_by_an_author(payload)) == "author"
+    # ScadBuddy's placeholder on a file whose plates do not read back is not ScadBuddy's
+    # to re-place, but its settings can still be stated.
+    assert layout_of(_with_entries(payload, {"3D/3dmodel.model": b"<model/>"})) == "author"
+    assert layout_of(_with_entries(payload, {"Metadata/plate_1.gcode": b"; G28\n"})) == "as_is"
+    assert layout_of(b"solid stl\nendsolid\n") == "as_is"
+
+
+def test_stating_an_authors_file_keeps_every_plate_and_states_the_colours(
+    tmp_path: Path,
+) -> None:
+    """The riskiest part of #1752: an author's multi-plate layout is theirs. Only the
+    settings change, and in them only the nozzles and the filament colours."""
+    payload = _saved_by_an_author(_write_plates(tmp_path / "maze.3mf").read_bytes())
+    flows, stats = ["High Flow", "Standard"], ["High Flow#1", "Standard#0"]
+
+    stated = state_nozzles(
+        payload,
+        nozzle_stats=stats,
+        nozzle_volume_type=flows,
+        filament_colour=["#00FF00", "#0000FF", "#FFFFFF"],
+    )
+
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(stated)) as after,
+    ):
+        assert after.namelist() == before.namelist()
+        for name in before.namelist():
+            if name != "Metadata/project_settings.config":
+                assert after.read(name) == before.read(name), name
+        old = json.loads(before.read("Metadata/project_settings.config"))
+        new = json.loads(after.read("Metadata/project_settings.config"))
+    assert [plate.index for plate in plates_of(io.BytesIO(stated))] == [1, 2]
+    assert new == {
+        **old,
+        "nozzle_volume_type": flows,
+        "extruder_nozzle_stats": stats,
+        "extruder_nozzle_stats_new": stats,
+        "filament_colour": ["#00FF00", "#0000FF", "#FFFFFF"],
+    }
+
+
+def test_colours_of_another_count_are_not_stated(written: Path) -> None:
+    payload = written.read_bytes()
+
+    stated = state_nozzles(payload, filament_colour=["#00FF00"])
+
+    with zipfile.ZipFile(io.BytesIO(stated)) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB"]
+
+
+def test_an_stl_is_wrapped_as_scadbuddys_one_plate_of_one_filament() -> None:
+    stl = trimesh.creation.box(extents=(20, 10, 5)).export(file_type="stl")
+
+    wrapped = stl_3mf(stl, model_name="bracket")
+
+    assert layout_of(wrapped) == "scadbuddy"
+    assert [plate.index for plate in plates_of(io.BytesIO(wrapped))] == [1]
+    with zipfile.ZipFile(io.BytesIO(wrapped)) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert len(settings["filament_colour"]) == 1
+    # Laid out for a printer like any of ScadBuddy's own.
+    replate_3mf(wrapped, plate_for("H2C"), nozzle_diameter="0.4")
+
+
+def test_an_stl_with_no_triangles_is_not_wrapped() -> None:
+    with pytest.raises(ValueError):
+        stl_3mf(b"solid empty\nendsolid empty\n")
 
 
 def test_build_item_centres_the_assembly_on_the_plate_at_z0(written: Path) -> None:

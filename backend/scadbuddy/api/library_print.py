@@ -1,9 +1,9 @@
 """``/api/v1/print/library/…`` — printing a file already in Bambuddy's library (#313).
 
 The same dialog as an output's (``printing.py``): its choices, filament step and run,
-over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`. Nothing is uploaded but a
-copy stating a High Flow choice for the slicer (#484), and nothing is recorded in
-ScadBuddy; the images are proxied so the API key never reaches the browser.
+over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`, which prints a copy laid
+out for the printer as an output's is (#1752) and never changes the file itself; the
+images are proxied so the API key never reaches the browser.
 """
 
 from __future__ import annotations
@@ -118,6 +118,7 @@ async def get_library_plate_thumbnail(
 async def get_library_choices(
     file_id: FileIdPath,
     store: SettingsStoreDep,
+    uploads: UploadsDep,
     rack: RackUsageDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
@@ -126,7 +127,7 @@ async def get_library_choices(
     settings = store.load()
     remembered = store.library_choices(file_id)
     async with client_for(settings) as client:
-        source = await LibrarySource.load(client, file_id)
+        source = await LibrarySource.load(client, file_id, uploads=uploads, settings=settings)
         return await choices_for(
             client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
         )
@@ -152,13 +153,21 @@ def put_library_choices(
 async def get_library_filaments(
     file_id: FileIdPath,
     store: SettingsStoreDep,
+    uploads: UploadsDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
 ) -> FilamentOptions:
-    async with client_for(store.load()) as client:
+    settings = store.load()
+    async with client_for(settings) as client:
         return await filament_options_for_library(
-            client, file_id, printer_id=printer_id, plate_id=plate_id, all_plates=all_plates
+            client,
+            uploads,
+            settings,
+            file_id,
+            printer_id=printer_id,
+            plate_id=plate_id,
+            all_plates=all_plates,
         )
 
 
@@ -203,9 +212,13 @@ async def post_library_run(
     summary="What the run would refuse for the dialog's choices, before Print",
 )
 async def post_library_check(
-    file_id: FileIdPath, body: PrintRunRequest, store: SettingsStoreDep, rack: RackUsageDep
+    file_id: FileIdPath,
+    body: PrintRunRequest,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    rack: RackUsageDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760)."""
     settings = store.load()
     async with client_for(settings) as client:
-        return await check_for_library(client, settings, file_id, body, rack=rack)
+        return await check_for_library(client, uploads, settings, file_id, body, rack=rack)

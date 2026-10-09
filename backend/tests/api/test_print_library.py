@@ -1,4 +1,5 @@
-"""#313 — printing a file already in Bambuddy's library through the Print dialog."""
+"""#313 — printing a file already in Bambuddy's library through the Print dialog, as
+any print is (#1752): only how its 3MF is obtained differs from an output's."""
 
 from __future__ import annotations
 
@@ -7,22 +8,26 @@ import hashlib
 import io
 import json
 import zipfile
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import respx
+import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.bambuddy.uploads import LibraryCopy
-from scadbuddy.render.bambu3mf import MAX_SETTINGS_BYTES
+from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
+from scadbuddy.render.bambu3mf import MAX_SETTINGS_BYTES, layout_of, write_bambu_3mf
+from scadbuddy.render.split import ColourPart
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
 from tests.api.test_send import BASE, _uploaded_3mf, configure
+from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 
@@ -149,6 +154,23 @@ def test_a_file_scadbuddy_uploaded_names_its_output(client: TestClient, app: Fas
 
 
 @respx.mock
+def test_a_library_print_s_copy_names_no_output(client: TestClient, app: FastAPI) -> None:
+    """A library print records its copy under its subject, ``library:<file id>``
+    (`send.upload_copy`), which is no output: Arrange must not read it as one."""
+    configure(client)
+    listing_routes(recording("library-files-root.json"))
+    first = client.get("/api/v1/print/library").json()["files"][0]["id"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(
+        state.uploads.record("library:46", LibraryCopy(id=first, folder_id=None, target_key="k"))
+    )
+
+    files = client.get("/api/v1/print/library").json()["files"]
+
+    assert [row["output_id"] for row in files if row["id"] == first] == [None]
+
+
+@respx.mock
 def test_an_stl_is_listed_under_advanced_with_print(client: TestClient) -> None:
     configure(client)
     listing_routes(recording("library-files-folder.json"))
@@ -161,11 +183,14 @@ def test_an_stl_is_listed_under_advanced_with_print(client: TestClient) -> None:
 
 @respx.mock
 def test_an_stl_slices_as_one_plate(client: TestClient) -> None:
+    """Wrapped in a 3MF of ScadBuddy's own, it is laid out for the printer as a render is."""
     configure(client)
     respx.get(f"{API}/library/files/46/filament-requirements").mock(
         return_value=httpx.Response(200, json=recording("filament-requirements-stl.json"))
     )
-    library_file(46, file_type="stl", plates="library-plates-stl.json")
+    upload = flow_copy_routes()
+    stl = trimesh.creation.box(extents=(20, 10, 5)).export(file_type="stl")
+    library_file(46, file_type="stl", plates="library-plates-stl.json", content=stl)
     run_routes()
     sliced = slice_routes()
     queue_route()
@@ -178,6 +203,9 @@ def test_an_stl_slices_as_one_plate(client: TestClient) -> None:
 
     assert response.status_code == 200, response.text
     assert json.loads(sliced.calls.last.request.content)["plate"] == 1
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
+    assert uploaded_name(upload) == "file-46 (ScadBuddy).3mf"
+    assert layout_of(_uploaded_3mf(upload)) == "scadbuddy"
 
 
 @respx.mock
@@ -206,14 +234,18 @@ def test_a_folder_of_hundreds_of_files_is_one_read(client: TestClient) -> None:
 
 
 @respx.mock
-def test_a_library_file_is_sliced_as_it_stands_and_queued(client: TestClient) -> None:
+def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
+    client: TestClient,
+) -> None:
+    """#1752 (B1, B2): its copy, laid out for the choices, is what is sliced; the
+    user's own file is only read."""
     configure(client)
     one_color(89)
+    upload = flow_copy_routes()
     library_file(89)
     run_routes()
     sliced = slice_routes()
     queued = queue_route()
-    upload = respx.post(f"{API}/library/files")
 
     response = run_library(
         client,
@@ -222,11 +254,17 @@ def test_a_library_file_is_sliced_as_it_stands_and_queued(client: TestClient) ->
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["library_file_id"] == 89
+    assert response.json()["library_file_id"] == 141
     assert response.json()["folder_id"] is None
-    assert "/library/files/89/slice" in str(sliced.calls.last.request.url)
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert json.loads(queued.calls.last.request.content)["printer_id"] == 1
-    assert not upload.called
+    assert upload.call_count == 1
+    assert upload.calls.last.request.url.params["folder_id"] == "2"
+    assert not [
+        call
+        for call in respx.calls
+        if "/library/files/89" in call.request.url.path and call.request.method != "GET"
+    ]
 
 
 @respx.mock
@@ -271,6 +309,7 @@ def test_a_file_with_no_plate_metadata_prints_plate_one(client: TestClient) -> N
     respx.get(f"{API}/library/files/70/filament-requirements").mock(
         return_value=httpx.Response(200, json=recording("filament-requirements-stl.json"))
     )
+    flow_copy_routes()
     library_file(70, plates="library-plates-stl.json")
     run_routes()
     sliced = slice_routes()
@@ -377,6 +416,7 @@ def test_a_library_run_answers_202_before_the_slice_finishes_and_a_retry_is_its_
     retry queue the print twice."""
     configure(client)
     one_color(89)
+    flow_copy_routes()
     library_file(89)
     run_routes()
     gated_slice_routes(gate)
@@ -401,7 +441,7 @@ def test_a_library_run_answers_202_before_the_slice_finishes_and_a_retry_is_its_
     ended = follow_run(client, run["id"])
 
     assert ended["status"] == "succeeded"
-    assert ended["result"]["library_file_id"] == 89
+    assert ended["result"]["library_file_id"] == 141
     assert queued.call_count == 1
 
 
@@ -412,6 +452,7 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     """#976: a library-file run has no output, and its archive was never listed."""
     configure(client)
     one_color(89)
+    flow_copy_routes()
     library_file(89)
     run_routes()
     slice_routes()
@@ -568,8 +609,12 @@ def test_a_library_file_bambuddy_slices_is_sliced_for_the_high_flow_chosen(
         settings = json.loads(archive.read("Metadata/project_settings.config"))
         assert "3D/3dmodel.model" in archive.namelist()
     assert settings["nozzle_volume_type"] == ["High Flow", "High Flow"]
-    assert {key: settings[key] for key in STUB_SETTINGS} == STUB_SETTINGS
-    assert uploaded_name(upload) == "file-89 (High Flow).3mf"
+    # Its author's settings are kept, but for the spool's colour (#476).
+    assert settings["filament_colour"] == ["#688197"]
+    assert {key: settings[key] for key in STUB_SETTINGS if key != "filament_colour"} == {
+        key: value for key, value in STUB_SETTINGS.items() if key != "filament_colour"
+    }
+    assert uploaded_name(upload) == "file-89 (ScadBuddy).3mf"
     assert upload.calls.last.request.url.params["folder_id"] == "2"
     assert not [
         call
@@ -652,9 +697,9 @@ def test_an_already_sliced_library_file_prints_as_it_is_and_warns(
 
 
 @respx.mock
-def test_a_standard_library_print_slices_the_users_own_file(client: TestClient) -> None:
-    """Standard is what the slicer assumes, so there is nothing to state: the file is
-    not even read."""
+def test_a_standard_library_print_is_laid_out_too(client: TestClient) -> None:
+    """B3: Standard is laid out like any other choice, so the slice states the side
+    offered and the flow on both sides rather than leaving them to the slicer."""
     configure(client)
     one_color(89)
     upload = flow_copy_routes()
@@ -673,6 +718,68 @@ def test_a_standard_library_print_slices_the_users_own_file(client: TestClient) 
     )
 
     assert response.status_code == 200, response.text
-    assert "/library/files/89/slice" in str(sliced.calls.last.request.url)
-    assert not upload.called
-    assert not download.called
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["nozzle_volume_type"] == ["Standard", "Standard"]
+    assert "extruder_nozzle_stats" in settings
+    assert download.call_count == 1
+
+
+def scadbuddy_3mf(tmp_path: Path) -> bytes:
+    """A 3MF ScadBuddy rendered, as someone saved one into the library."""
+    out = tmp_path / "critter.3mf"
+    write_bambu_3mf(
+        [ColourPart(1, "Color 1", "#43A047", trimesh.creation.box(extents=(10, 10, 4)))],
+        out,
+        thumbnails=None,
+        model_name="critter",
+    )
+    return out.read_bytes()
+
+
+@respx.mock
+def test_a_library_print_into_a_project_is_filed_there_and_remembered(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """#1752 (B2, R3): the copy is replated for the printer and nozzle chosen, filed in
+    the project's folder (#79) under the file's own name, recorded under the file, and
+    the project remembers what it printed on (#317), exactly as an output's print."""
+    configure(client)
+    one_color(89)
+    respx.get(f"{API}/library/folders/by-project/7").mock(
+        return_value=httpx.Response(200, json=[{"id": 9, "name": "Kids' room", "project_id": 7}])
+    )
+    respx.get(f"{API}/library/files", params={"folder_id": "9"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    upload = flow_copy_routes()
+    library_file(89, content=scadbuddy_3mf(tmp_path))
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={
+            **body(),
+            "project_id": 7,
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["folder_id"] == 9
+    assert upload.calls.last.request.url.params["folder_id"] == "9"
+    assert uploaded_name(upload) == "file-89.3mf"
+    assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["nozzle_diameter"] == ["0.2"]
+    assert settings["filament_colour"] == ["#688197"]
+    uploads = _state(client).uploads
+    assert [copy.id for copy in asyncio.run(uploads.for_output("library:89"))] == [141]
+    assert asyncio.run(uploads.project_target(7)) == ProjectTarget(
+        printer_id=1, nozzle_diameter="0.2"
+    )

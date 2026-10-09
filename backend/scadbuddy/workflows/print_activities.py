@@ -133,22 +133,31 @@ class PrintActivities:
         if spec.kind == "library":
             assert spec.file_id is not None
             return await LibrarySource.load(
-                client, spec.file_id, sends=self.d.links, settings=settings
+                client, spec.file_id, uploads=self.d.uploads, settings=settings, sends=self.d.links
             )
         return await self._output_source(spec, settings)
 
     async def _output_source(self, spec: SourceSpec, settings: StoredSettings) -> OutputSource:
         assert spec.output_id is not None
         return OutputSource(
-            self.d.outputs,
-            self.d.uploads,
-            await require(self.d.outputs, spec.output_id),
-            settings,
+            store=self.d.outputs,
+            meta=await require(self.d.outputs, spec.output_id),
+            uploads=self.d.uploads,
+            settings=settings,
             stem=spec.stem,
             print_settings=spec.print_settings,
             prints=self.d.prints,
             sends=self.d.links,
         )
+
+    async def _recording_source(self, spec: SourceSpec) -> PrintSource:
+        """The source as recording and remembering need it. Neither reads anything of a
+        library file, nor the settings, so nothing is read back from Bambuddy for one: a
+        plate already queued is not failed over a read."""
+        if spec.kind == "library":
+            assert spec.file_id is not None
+            return LibrarySource(spec.file_id, [], [], uploads=self.d.uploads, sends=self.d.links)
+        return await self._output_source(spec, self._settings())
 
     @activity.defn(name="print_check")
     async def check(self, check: CheckInput) -> Checked:
@@ -268,15 +277,7 @@ class PrintActivities:
         #1750), for either source."""
         spec = input.source
         try:
-            if spec.kind == "library":
-                assert spec.file_id is not None
-                # Recording reads nothing of the file, so nothing is read back from
-                # Bambuddy for it: a plate already queued is not failed over a read.
-                source: PrintSource = LibrarySource(
-                    file_id=spec.file_id, colours=[], plates=[], sends=self.d.links
-                )
-            else:
-                source = await self._output_source(spec, self._settings())
+            source = await self._recording_source(spec)
             return await source.record(
                 input.library_file_id,
                 input.plate_id,
@@ -289,20 +290,20 @@ class PrintActivities:
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
-        """What the run queued, for ``print_succeed`` to record, and an output's project
-        printer and nozzle remembered for its next Generate (#317). Every plate is
-        queued, and the workflow retries this without limit (review #1061 1), so all
+        """What the run queued, for ``print_succeed`` to record, and the project's
+        printer and nozzle remembered for its next Generate (#317), whatever printed.
+        Every plate is queued, and the workflow retries this without limit (review #1061 1), so all
         but the settings read is best effort: remembering is bounded by
         ``REMEMBER_BUDGET`` and its failure logged (review #1061 1a), and Bambuddy's
         settings removed meanwhile only leave out the queue link."""
         settings = self._settings()
         planned = input.planned
         spec = input.input.source
-        # A library file's project is not remembered (``LibrarySource.remember_project``).
-        if planned.project_id is not None and spec.kind == "output":
+        if planned.project_id is not None:
             try:
                 async with asyncio.timeout(REMEMBER_BUDGET):
-                    source = await self._output_source(spec, settings)
+                    # Remembering reads nothing of the file (#1752, R3).
+                    source = await self._recording_source(spec)
                     await source.remember_project(
                         planned.project_id,
                         printer_id=planned.printer_id,

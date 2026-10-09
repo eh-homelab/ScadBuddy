@@ -323,10 +323,14 @@ default it shows only unsliced `.3mf` files. The **Advanced** switch, remembered
 browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files —
 shown without **Print**, since a sliced file is printed from Bambuddy directly.
 
-**Print** on a file opens the same print picker an output uses. The file itself is
-never touched: it prints exactly as its author left it, never replated for the
-printer (#105) or recolored for the spools (#476), and never uploaded again. The
-nozzle refusals above still apply, since they read the printer, not the file.
+**Print** on a file opens the same print picker an output uses, and the print goes
+exactly as an output's does (#1752): a copy of the file is laid out for the nozzle side
+and flow chosen, recolored for the spools (#476), and uploaded into the project's
+folder when one is chosen (#79). The file itself is never changed. A 3MF ScadBuddy
+rendered (and an STL, which is wrapped in one) is also replated for the printer
+(#105); a project its author laid out in Bambu Studio keeps every plate and every
+placement, and only its settings state the choices. A file nothing can be stated into
+(a 3MF from another slicer) is sliced as it is, taken as Standard flow.
 
 Choices are remembered per library file, the way an output's are remembered per
 model. There's no ScadBuddy progress panel or History entry for a library print —
