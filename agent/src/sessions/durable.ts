@@ -5,7 +5,6 @@ import {
   WorkflowUpdateFailedError,
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
-import { optionalTsToMs } from '@temporalio/common/lib/time.js'
 import type { Sql } from 'postgres'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { type SessionImage, imageOfBlock, SessionBlobs } from './blobs.js'
@@ -111,6 +110,11 @@ function blobsOf(images: readonly UserImage[]): SessionImage[] {
   })
 }
 
+/** A protobuf Timestamp (`seconds` may be a Long) as epoch ms; 0 when absent. */
+function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
+  return ts ? Number(String(ts.seconds ?? 0)) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6) : 0
+}
+
 export class DurableTurns {
   readonly #client: Client
   readonly #sql: Sql
@@ -154,7 +158,7 @@ export class DurableTurns {
         }),
       )
       const now = Date.now()
-      const live = (pollers ?? []).filter((p) => now - (optionalTsToMs(p.lastAccessTime) ?? 0) < POLLER_FRESH_MS)
+      const live = (pollers ?? []).filter((p) => now - seenAtMs(p.lastAccessTime) < POLLER_FRESH_MS)
       if (!live.length) why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
     } catch {
       why = 'Temporal did not answer'
