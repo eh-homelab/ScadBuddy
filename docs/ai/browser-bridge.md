@@ -30,7 +30,7 @@ outward request, which the backend refuses for it (`AgentActorGate`).
 | [`catalog.ts`](../../frontend/src/agent/catalog.ts) | `TOOLS`: every tool declared once, with its description, zod input schema, risk tier and scope. It is loaded lazily, so zod stays out of the entry chunk. |
 | [`bridge.ts`](../../frontend/src/agent/bridge.ts) | `AgentBridge`: `register()`, `listTools()`, `call()` and `snapshot()`. `call()` validates arguments against the schema and runs the **newest** mounted handler. It always answers a typed result and never throws. |
 | [`useAgentHandlers.ts`](../../frontend/src/agent/useAgentHandlers.ts) | `useAgentHandlers()`: a page registers its handlers for as long as it is mounted. |
-| [`global.ts`](../../frontend/src/agent/global.ts) | The global tools (`navigate`, `snapshot`, and the `click`/`fill` fallbacks). |
+| [`global.ts`](../../frontend/src/agent/global.ts) | The global tools (`navigate`, `snapshot`, `highlight`, and the `click`/`fill` fallbacks). |
 | [`snapshot.ts`](../../frontend/src/agent/snapshot.ts) | `takeSnapshot()`: the route, dialogs, form values, errors, page state and interactive elements. |
 | [`dom.ts`](../../frontend/src/agent/dom.ts) | Role and accessible-name lookup, `USER_ONLY` and `isUserOnly()`, and `setControlValue()`. |
 | [`highlight.ts`](../../frontend/src/agent/highlight.ts) | `touch()`: scrolls to and briefly outlines what the agent touched. The pulse is dropped under `prefers-reduced-motion`. |
@@ -50,7 +50,7 @@ spec §8.1.
 
 | Scope (where it is live) | Tool | Tier |
 |---|---|---|
-| global (any page) | `navigate`, `snapshot` | read |
+| global (any page) | `navigate`, `snapshot`, `highlight` (points, changes nothing) | read |
 | | `click`, `fill` (fallbacks) | write |
 | catalogue (`/`) | `search`, `open_model` | read |
 | customize (`/m/<slug>`) | `get_params`, `render` | read |
@@ -169,7 +169,7 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
 |---|---|---|
 | `browser_status` | read | (the agent's own: attached or not, why not, the route and the live tools) |
 | `browser_pair` | write | (the agent's own: ask the user to pair, [Pairing](#pairing-spec-85)) |
-| `browser_snapshot`, `browser_get_params`, `browser_render`, `browser_get_editor_text`, `browser_get_problems`, `browser_get_form`, `browser_search`, `browser_test_connection` | read | same tier |
+| `browser_snapshot`, `browser_highlight`, `browser_get_params`, `browser_render`, `browser_get_editor_text`, `browser_get_problems`, `browser_get_form`, `browser_search`, `browser_test_connection` | read | same tier |
 | `browser_navigate`, `browser_open_model` | **write** | `read` in the tab |
 | `browser_click`, `browser_fill`, `browser_set_param`, `browser_set_params`, `browser_reset_param`, `browser_generate`, `browser_select_plate`, `browser_replace_range`, `browser_set_field` | write | same tier |
 | `browser_open_print_dialog` | **outward** (gated) | same tier |

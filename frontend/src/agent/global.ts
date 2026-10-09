@@ -45,6 +45,23 @@ function optionValue(select: HTMLSelectElement, label: string, value: string): s
   )
 }
 
+/** The one visible element with this role and name that `click` and `highlight` act on. */
+function findOne(role: string, name: string, index: number | undefined): Element {
+  const matches = findByRole(role, name)
+  if (matches.length === 0) {
+    throw new AgentToolError('invalid_args', `No visible ${role} named "${name}". Take a snapshot to see what is on screen.`)
+  }
+  if (matches.length > 1 && index === undefined) {
+    throw new AgentToolError(
+      'invalid_args',
+      `${matches.length} visible ${role}s are named "${name}"; pass index (0–${matches.length - 1}).`,
+    )
+  }
+  const element = matches[index ?? 0]
+  if (!element) throw new AgentToolError('invalid_args', `index ${index} is out of range (${matches.length} matches).`)
+  return element
+}
+
 /**
  * Where the router's history is now: it moves the moment a navigation is asked for,
  * before React renders it. The browser and memory histories both expose it; `fallback`
@@ -56,9 +73,9 @@ function historyRoute(navigator: object, fallback: string): string {
 }
 
 /**
- * The tools every route has — `navigate`, `snapshot` and the fallbacks `click` and
- * `fill` — registered by the app shell, which is mounted under the router for as long as
- * the app is. It also tells the bridge where the router is.
+ * The tools every route has — `navigate`, `snapshot`, `highlight` and the fallbacks
+ * `click` and `fill` — registered by the app shell, which is mounted under the router
+ * for as long as the app is. It also tells the bridge where the router is.
  */
 export function useGlobalAgentTools() {
   const bridge = useAgentBridge()
@@ -105,23 +122,19 @@ export function useGlobalAgentTools() {
     snapshot: () => bridge.snapshot(),
 
     click: ({ role, name, index }) => {
-      const matches = findByRole(role, name)
-      if (matches.length === 0) {
-        throw new AgentToolError('invalid_args', `No visible ${role} named "${name}". Take a snapshot to see what is on screen.`)
-      }
-      if (matches.length > 1 && index === undefined) {
-        throw new AgentToolError(
-          'invalid_args',
-          `${matches.length} visible ${role}s are named "${name}"; pass index (0–${matches.length - 1}).`,
-        )
-      }
-      const element = matches[index ?? 0]
-      if (!element) throw new AgentToolError('invalid_args', `index ${index} is out of range (${matches.length} matches).`)
+      const element = findOne(role, name, index)
       if (isUserOnly(element)) throw new AgentToolError('refused', USER_ONLY_MESSAGE)
       if (isDisabled(element)) throw new AgentToolError('invalid_args', `The ${role} "${name}" is disabled.`)
       touch(element)
       ;(element as HTMLElement).click()
       return { clicked: { role: roleOf(element), name: nameOf(element) } }
+    },
+
+    // Points only: no click, no focus, so even a user-only confirmation can be shown.
+    highlight: ({ role, name, index }) => {
+      const element = findOne(role, name, index)
+      touch(element)
+      return { highlighted: { role: roleOf(element), name: nameOf(element) } }
     },
 
     fill: ({ label, value }) => {

@@ -42,6 +42,7 @@ export type TabTool =
   | 'navigate'
   | 'snapshot'
   | 'click'
+  | 'highlight'
   | 'fill'
   | 'search'
   | 'open_model'
@@ -295,6 +296,19 @@ export const browserTools: Tool[] = [
       index: z.number().int().min(0).optional().describe('Which match, when several share the name'),
     }),
     risk: 'write',
+  }),
+  forwarded({
+    tool: 'highlight',
+    description:
+      PREFIX +
+      'point at the visible element with this ARIA role and accessible name: it scrolls into view and is ' +
+      'outlined for a moment, so the user can see what you are explaining. Changes nothing.',
+    input: z.object({
+      role: z.string().min(1).describe('ARIA role, e.g. "button", "link", "tab", "checkbox"'),
+      name: z.string().describe('Accessible name, matched exactly (case-insensitive)'),
+      index: z.number().int().min(0).optional().describe('Which match, when several share the name'),
+    }),
+    risk: 'read',
   }),
   forwarded({
     tool: 'fill',
