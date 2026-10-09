@@ -35,7 +35,7 @@
   - `text` becomes `assistant.text.delta` + `assistant.text.done`;
   - `tool_call` becomes `tool.call` (risk from the manifest tier);
   - `tool_result` becomes `tool.result` (`ok` = status `done`, summary = the status, since the plugin's event carries no result);
-  - `error` and `cancelled` become `error` (`turn_failed` / `interrupted`), and with `done` they end the subscriber;
+  - `done`, `error` and `cancelled` end the subscriber and write nothing: `finish_turn` writes the turn's error (`turn_failed`, `interrupted`, `error_max_budget_usd`), since only the workflow knows which it was;
   - `approval_needed`, `prompt`, `retry` and `continued_as_new` are dropped (`approval_needed` per §6.6).
 
   A `text` superseded by a `retry` cannot be withdrawn and stays.
@@ -47,6 +47,13 @@
 - **Ruling 12, `forgetSubject`.** `agent/src/sessions/forget.ts` deletes the `ai_payload_keys` row and records a tombstone in `ai_forgotten_subjects` in one transaction, then terminates and deletes the workflow (each "not found" is fine), then the rows: `ai_sessions` (which cascades to events, pending input, responses, blobs and resources) and `ai_session_entries`. Operators run it as `node dist/forget-subject.js session-<uuid>`. `SessionStore.delete` never runs for a durable session, which has no entries, so it does not call it. No delete route is added (§6.5).
 - **Ruling 13, the mode switch.** `mode` is set at insert from the `ai_settings` key `session_mode` (default `classic`), and nothing else sets it in 5c. Its routes and UI are 5d. A durable start with no Temporal client or no KEK is refused `unavailable`, never run as classic. Fork of a durable session is refused (`invalid`): its conversation is in the workflow.
 - **Ruling 14, `wait_for_user` stays `proceed`-only.** Cancelling a turn (`interrupt`) is tested here. Offering `stop`/`wait` is 5d's call.
+- **Ruling 15, what PR 2 settled while building.** These are the shapes PR 3 sends and relies on:
+  - `SessionStart` carries `system_append`, what a classic turn appends to Claude Code's preset prompt (`manager.ts` `systemPromptAppend`). The runner gives the engine that preset with the append, so both modes prompt alike.
+  - An outward tool's activity runs at most once (`maximum_attempts=1`). Other tools retry a lost worker 3 times, never a `ToolError`.
+  - A malformed answer call is refused to the model through the plugin's `decide(False)`, the only refusal it offers, and never parks.
+  - The segment runner reads the turn's images and the append from the workflow's `segment_context` Query, not from the prompt.
+  - The engine inherits the worker's environment, so the runner empties the worker's own `SCADBUDDY_*`, `OTEL_*` and `TEMPORAL_*` variables for it (the database URL carries a password).
+  - Continue-as-new between turns is the plugin's `should_continue_as_new()`. It is not forced in tests: the server's suggestion cannot be.
 
 ## Global Constraints
 

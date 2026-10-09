@@ -52,6 +52,10 @@ files = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# One loop for the session, so the Temporal dev server (conftest temporal_env) is shared.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 markers = [
     "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
+    "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_DEV_SERVER naming a Temporal CLI",
 ]

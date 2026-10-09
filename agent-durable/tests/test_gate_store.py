@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,27 +23,6 @@ pytestmark = pytest.mark.requires_postgres
 ME = {"kind": "browser", "id": "browser", "label": "You"}
 
 Conn = psycopg.AsyncConnection[Any]
-
-
-@pytest.fixture
-async def connect(agent_db: Conn) -> Callable[[], AbstractAsyncContextManager[Conn]]:
-    """More connections to the fixture's schema."""
-    cur = await agent_db.execute("SHOW search_path")
-    row = await cur.fetchone()
-    assert row is not None
-    path = row[0]
-
-    @asynccontextmanager
-    async def one() -> AsyncIterator[Conn]:
-        url = os.environ["SCADBUDDY_TEST_DATABASE_URL"]
-        conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
-        try:
-            await conn.execute(f"SET search_path TO {path}")
-            yield conn
-        finally:
-            await conn.close()
-
-    return one
 
 
 async def _session(conn: Conn) -> str:
