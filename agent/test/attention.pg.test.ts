@@ -444,13 +444,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   const touchedAt = (sessionId: string, id: string, s: number) => db.sql`
     INSERT INTO ai_session_resources (session_id, at, tool, resource_type, resource_id, action, model_slug)
     VALUES (${sessionId}, ${ts(s)}, 'mcp__scadbuddy__save_preset', 'preset', ${id}, 'created', 'sign')`
-  const approvedAt = (sessionId: string, turnId: string, s: number, resumeTurnId: string | null = null) => db.sql`
+  /** `by`: who decided it; a token (a grant holder over /mcp) is `bearer`. */
+  const approvedAt = (sessionId: string, turnId: string, s: number, resumeTurnId: string | null = null, by: 'browser' | 'bearer' = 'browser') => db.sql`
     INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
                               requested_by_kind, requested_by_id, requested_by_label, created_at, expires_at,
                               decision, decided_by_kind, decided_by_id, decided_by_label, decided_at, usable_until, resume_turn_id)
     VALUES (gen_random_uuid(), ${sessionId}, ${turnId}, 'toolu_out', 'send_to_bambuddy', 'send', 'h', 'outward',
             'browser', 'browser', 'you', ${ts(s - 1)}, ${ts(s + 600)},
-            'approved', 'browser', 'browser', 'you', ${ts(s)}, ${ts(s + 600)}, ${resumeTurnId})`
+            'approved', ${by}, ${by === 'browser' ? 'browser' : 'token-1'}, ${by === 'browser' ? 'you' : 'Claude Desktop'},
+            ${ts(s)}, ${ts(s + 600)}, ${resumeTurnId})`
   const answeredAt = (sessionId: string, turnId: string, s: number) => db.sql`
     INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, outcome, answers,
                               answered_by_kind, answered_by_id, answered_by_label, resolved_at, created_at)
@@ -512,6 +514,72 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
       '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
     ])
+  })
+
+  // #1415: a grant holder deciding over /mcp is not the user coming back.
+  it("an approval in the same turn decided by a token leaves the unattended window open", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turn = '00000000-0000-4000-8000-0000000000d1'
+    await timedOut(session.id, turn, 10)
+    await approvedAt(session.id, turn, 20, null, 'bearer')
+    await touchedAt(session.id, 'unattended', 30)
+    const done = await summaryOf(session.id, turn, 0)
+    expect(done.unattended).toBe(true)
+    expect(done.summary).toMatch(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/)
+  })
+
+  // #1416 item 2: the rule holds across a resume. A token approved the call turn A
+  // parked on, so the user never came back: turn B's work is unattended too.
+  it('a turn resumed by a token-decided approval keeps the window open through its own work', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000e1'
+    const b = '00000000-0000-4000-8000-0000000000e2'
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await approvedAt(session.id, a, 40, b, 'bearer')
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(true)
+    expect(done.summary).toMatch(
+      /^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)\n- created preset `resumed` of `sign` \(`save_preset`\)$/,
+    )
+  })
+
+  // #1411: the chain is walked to its start, not one hop back.
+  it('a turn resumed twice keeps the unattended record of the first turn of the chain', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000f1'
+    const b = '00000000-0000-4000-8000-0000000000f2'
+    const c = '00000000-0000-4000-8000-0000000000f3'
+    // A times out, works unattended and parks; B is resumed for it at 41 and parks again; C is resumed for B at 61.
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await approvedAt(session.id, a, 40, b)
+    await touchedAt(session.id, 'second', 50)
+    await approvedAt(session.id, b, 60, c)
+    await touchedAt(session.id, 'third', 70)
+    const done = await summaryOf(session.id, c, 61)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `third` of `sign` (`save_preset`)',
+    ])
+  })
+
+  // #1411: with no timed-out request in the chain, nothing before the resumed turn's start carries over.
+  it('a turn resumed from a chain with no timeouts lists only its own touches', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000f4'
+    const b = '00000000-0000-4000-8000-0000000000f5'
+    await touchedAt(session.id, 'parked-turn', 20)
+    await approvedAt(session.id, a, 40, b)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done).toEqual({ unattended: false, summary: '**What this turn changed**\n- created preset `resumed` of `sign` (`save_preset`)' })
   })
 
   it('undismissed done summaries do not push a request a turn is parked on off the pending list', async () => {
