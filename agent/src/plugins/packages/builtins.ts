@@ -83,7 +83,11 @@ const reviews = new Map<string, PackageReview>()
 function reviewOf(b: BuiltIn): PackageReview {
   let review = reviews.get(b.name)
   if (!review) {
-    const vetted = vetPackage(b.dir, b.name).review
+    const vetting = vetPackage(b.dir, b.name)
+    if (vetting.fatal.length) {
+      console.warn(`built-in plugin ${b.name}: its review is empty: ${vetting.fatal.join('; ')}`)
+    }
+    const vetted = vetting.fatal.length ? undefined : vetting.review
     review = {
       ...(vetted ?? { skills: [], commands: [], agents: [], hooks: [], mcp_servers: [], files: [], description: null }),
       name: b.name,
