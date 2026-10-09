@@ -178,6 +178,7 @@ class DurableSession:
                 await self._run_turn(prompt_of(message))
             self._turn = None
             self._in_turn = False
+            self._interrupted = None
             if self._message is None and self._agent.should_continue_as_new():
                 # Refuses sends from here: one accepted now would not be carried over.
                 self._in_turn = True
@@ -187,7 +188,6 @@ class DurableSession:
     async def _run_turn(self, prompt: str | None) -> None:
         sid = self._start.session_id
         turn_id = self._turn.turn_id if self._turn else ""
-        self._interrupted = None
         self._settings = await workflow.execute_activity(
             "gate_settings", start_to_close_timeout=SHORT, result_type=GateSettings
         )
@@ -202,6 +202,8 @@ class DurableSession:
         outcome: TurnOutcome = "done"
         message: str | None = None
         self._task = asyncio.create_task(self._agent.run(prompt))
+        if self._interrupted is not None:
+            self._task.cancel()
         try:
             await self._task
         except asyncio.CancelledError:
@@ -225,6 +227,7 @@ class DurableSession:
             park.cancel()
         self._parks = []
         self._seen = set()
+        self._parked = {}
         try:
             await workflow.wait_condition(follow.done, timeout=FOLLOW_DRAIN)
         except TimeoutError:
@@ -381,7 +384,10 @@ class DurableSession:
         # An approval runs only with its approved row (Ruling 10); an answer's call reads
         # whatever was recorded, so it is let through to report it.
         go = parked.kind == "answer" or (written and outcome == "approved")
-        self._agent.decide(parked.call_id, go, approver=responder.get("id"))
+        # The turn may have ended while resolve_input ran (an interrupt): the call then
+        # waits no more, and its row is already right (review of #1958).
+        with contextlib.suppress(ValueError):
+            self._agent.decide(parked.call_id, go, approver=responder.get("id"))
         return written
 
     async def _cancel_parked(self, reason: str) -> bool:
@@ -457,7 +463,13 @@ class DurableSession:
 
     @workflow.signal(name=INTERRUPT_SIGNAL)
     async def interrupt(self, args: dict[str, Any]) -> None:
-        if self._task is None or self._task.done():
+        if not self._in_turn:
+            return
+        if self._task is None:
+            # The turn is starting (gate_settings): it stops before its run begins.
+            self._interrupted = INTERRUPTED
+            return
+        if self._task.done():
             return
         self._interrupted = INTERRUPTED
         await self._cancel_parked(INTERRUPTED)

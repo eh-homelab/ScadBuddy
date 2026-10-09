@@ -44,7 +44,7 @@ from scadbuddy_durable.gate.names import (
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
-from scadbuddy_durable.session.models import FinishTurn
+from scadbuddy_durable.session.models import FinishTurn, GateSettings
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -499,3 +499,79 @@ async def test_a_call_that_cannot_be_described_is_refused_not_left_waiting(
     assert await handle.query(PENDING_INPUT_QUERY) == []
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert texts and texts[-1].startswith("print_output: error")
+
+
+async def test_a_respond_and_an_interrupt_together_end_the_turn_and_the_next_is_taken(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """Review of #1958: the approval's resolve_input returns after the interrupt ended the
+    turn, so its decide finds no call waiting; that must not fail the workflow task."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    [entry] = await _parked(handle)
+    await harness.agent.shutdown()
+    approving = asyncio.ensure_future(
+        handle.execute_update(
+            RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+        )
+    )
+    await asyncio.sleep(1)
+    await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+    async with harness.restart_agent():
+        with contextlib.suppress(WorkflowUpdateFailedError):
+            await asyncio.wait_for(approving, 60)
+
+        async def ended() -> bool:
+            return any(e["type"] == "error" for e in await events(agent_db, sid))
+
+        # The turn's own end, not the idle the cancelled entry's resolve writes.
+        await until(ended)
+        assert await settled(connect, sid) == "idle"
+        await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        assert (await asyncio.wait_for(send(handle, "hello again"), 60)).accepted
+
+        async def second() -> bool:
+            log = await events(agent_db, sid)
+            return len([e for e in log if e["type"] == "session.result"]) == 2
+
+        await until(second)
+        assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    # The scripted model reports its history's last call: here, the one the interrupt ended.
+    assert len(texts) == 1
+
+
+class HeldSettings(SessionActivities):
+    """gate_settings held: the window at a turn's start before its run begins."""
+
+    def __init__(self, connect: Connect) -> None:
+        super().__init__(connect)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @activity.defn(name="gate_settings")
+    async def gate_settings(self) -> GateSettings:
+        self.entered.set()
+        await self.release.wait()
+        return await super().gate_settings()
+
+
+async def test_an_interrupt_as_a_turn_starts_stops_it(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """Review of #1958: a Stop while gate_settings runs was dropped and the turn ran."""
+    held = HeldSettings(connect)
+    await harness.agent.shutdown()
+    harness.session_activities = held
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await asyncio.wait_for(held.entered.wait(), 30)
+        await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+        await asyncio.sleep(1)
+        held.release.set()
+        assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+    assert not any(e["type"] == "approval.required" for e in log)
+    assert harness.stand_in.ran == []
