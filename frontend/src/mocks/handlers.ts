@@ -3542,8 +3542,13 @@ export const handlers = [
     } else {
       const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
       if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
-      // #1754: a model's id, or a library file's `library:<file id>`.
-      if (body.scope === 'model' && !/^((builtin:)?[a-z0-9][a-z0-9-]*|library:\d+)$/.test(body.key)) {
+      // #1754: a model's id (`MODEL_ID_PATTERN`), or a library file's `library:<file id>`;
+      // a forget goes through for any key, as on the server.
+      if (
+        body.scope === 'model' &&
+        !empty &&
+        !/^((builtin:)?[a-z0-9][a-z0-9-]{0,99}|library:[1-9]\d*)$/.test(body.key)
+      ) {
         return problem(422, 'Unprocessable', `${body.key} is neither a model nor a library file`)
       }
       if (empty) delete map[body.key]

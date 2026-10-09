@@ -195,7 +195,10 @@ class PrintOptionsUpdate(BaseModel):
                 raise ValueError("the global scope takes no key")
         elif not self.key:
             raise ValueError(f"the {self.scope!r} scope needs a key")
-        elif self.scope == "model" and not is_options_scope(self.key):
+        # A forget passes for any key: one an older version stored still goes.
+        elif (
+            self.scope == "model" and not self.options.is_empty() and not is_options_scope(self.key)
+        ):
             raise ValueError(
                 f"{self.key!r} is neither a model nor a library file ('library:<file id>')"
             )

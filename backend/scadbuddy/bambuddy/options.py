@@ -28,7 +28,8 @@ from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 OptionScope = Literal["global", "printer", "model"]
 
 _MODEL_ID = re.compile(MODEL_ID_PATTERN)
-_LIBRARY_SCOPE = re.compile(r"library:[0-9]+")
+#: As ``PrintSubject.library`` writes it: no leading zero, so one file has one key.
+_LIBRARY_SCOPE = re.compile(r"library:[1-9][0-9]*")
 
 
 def options_scope(subject: PrintSubject, slug: str | None) -> str | None:
