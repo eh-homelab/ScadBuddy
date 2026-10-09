@@ -12,21 +12,23 @@ import {
   PREHEAT_CHOICES,
   PRINT_OPTIONS,
   resolveOptions,
-  SCOPE_LABELS,
+  scopeLabel,
   type OptionLayer,
   type OptionName,
   type OptionSpec,
   type OptionValue,
 } from '../lib/printOptions'
+import type { OptionsSubject } from '../lib/printSource'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
 interface Props {
   /**
-   * The model being sent — the key the per-model scope is remembered under. A library
-   * file has none (#313), so the per-model scope is not offered.
+   * What is being printed — the key its own scope is remembered under (#1754): the
+   * model's id, or a library file's `library:<file id>`. Without one, that scope is not
+   * offered.
    */
-  slug?: string
+  subject?: OptionsSubject
   /**
    * The printer the print will reach, when the caller already knows it. Left undefined,
    * the server says which one the per-printer scope keys on: the printer set in Settings.
@@ -53,12 +55,14 @@ const UNSET = ''
  * an absence: picking it removes the override rather than pinning the current default.
  */
 export function PrintOptionsDisclosure({
-  slug,
+  subject,
   printerId,
   value,
   onChange,
   onEffective,
 }: Props) {
+  const slug = subject?.key
+  const noun = subject?.noun ?? 'model'
   // Typed as the narrower view, because that is what the PUT answers with. The printer
   // the scope keys on is kept separately: only the GET resolves it, so reading it off
   // this object would make it vanish the moment a save lands — and `printer_id` being
@@ -184,6 +188,7 @@ export function PrintOptionsDisclosure({
                   effective={optionValue(effective, spec.name)}
                   fallback={optionValue(defaults, spec.name)}
                   source={effectiveScope(layers, spec.name)}
+                  noun={noun}
                   nonDefault={isNonDefault(spec.name, effective, defaults)}
                   onChange={(next) => set(spec.name, next)}
                 />
@@ -203,7 +208,7 @@ export function PrintOptionsDisclosure({
                 <option value="printer" disabled={!printerKey}>
                   This printer
                 </option>
-                {slug && <option value="model">This model</option>}
+                {slug && <option value="model">This {noun}</option>}
                 <option value="global">Every print</option>
               </select>
               <Button onClick={() => void remember(false)} disabled={busy || !remembered}>
@@ -215,7 +220,7 @@ export function PrintOptionsDisclosure({
               </Button>
               {savedScope && !error && (
                 <span role="status" className="text-[12px] text-ok">
-                  Remembered for {SCOPE_LABELS[savedScope]}.
+                  Remembered for {scopeLabel(savedScope, noun)}.
                 </span>
               )}
             </div>
@@ -233,7 +238,7 @@ export function PrintOptionsDisclosure({
             {!printerKey && (
               <p className="mt-2 text-[12px] text-faint">
                 No printer is picked yet, so options can only be remembered{' '}
-                {slug ? 'for this model or every print' : 'for every print'}.
+                {slug ? `for this ${noun} or every print` : 'for every print'}.
               </p>
             )}
             {error && (
@@ -253,6 +258,7 @@ function OptionRow({
   effective,
   fallback,
   source,
+  noun,
   nonDefault,
   onChange,
 }: {
@@ -260,6 +266,7 @@ function OptionRow({
   effective: OptionValue
   fallback: OptionValue
   source: OptionLayer['scope'] | null
+  noun: OptionsSubject['noun']
   nonDefault: boolean
   onChange: (next: OptionValue) => void
 }) {
@@ -270,7 +277,7 @@ function OptionRow({
     // The effective value, which for an option nobody set is Bambuddy's own default —
     // that is what the print will use, so that is what the row has to say.
     formatOption(spec.kind, isSet(effective) ? effective : fallback),
-    source ? `from ${SCOPE_LABELS[source]}` : "Bambuddy's default",
+    source ? `from ${scopeLabel(source, noun)}` : "Bambuddy's default",
     spec.hint,
   ]
     .filter(Boolean)

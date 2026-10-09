@@ -1,6 +1,7 @@
 """Opening envelopes sealed by agent/src/secrets.ts (spec 2026-10-01 §6.2).
 
-A port of `openSecret` only: this process never seals a credential. The format and
+A port of `openSecret`, and of the byte sealing the payload codec needs. This process
+never seals a credential. The format and
 its versions are documented in secrets.ts; agent/test/fixtures/secret-vectors.json
 (written by the agent's tests) is what both sides must open.
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -99,6 +101,23 @@ def _open(key: bytes, sealed: bytes, context: str) -> bytes:
         return AESGCM(key).decrypt(iv, ciphertext + tag, _aad(version, context))
     except InvalidTag:
         raise SealError("sealed value failed authentication (wrong key, or altered)") from None
+
+
+def open_bytes(key: bytes, sealed: bytes, context: str) -> bytes:
+    """secrets.ts ``openBytes``: what ``seal_bytes`` (or the agent) sealed under ``key``."""
+    return _open(key, sealed, context)
+
+
+def seal_bytes(key: bytes, data: bytes, context: str, iv: bytes | None = None) -> bytes:
+    """secrets.ts ``sealBytes``: the current version. ``iv`` is for the vectors only.
+
+    Only the payload codec seals here (its data keys and payloads); a credential is
+    never sealed by this process.
+    """
+    nonce = iv if iv is not None else os.urandom(_IV_BYTES)
+    out = AESGCM(key).encrypt(nonce, data, _aad(SEAL_V2, context))
+    ciphertext, tag = out[:-_TAG_BYTES], out[-_TAG_BYTES:]
+    return bytes([SEAL_V2]) + nonce + tag + ciphertext
 
 
 def open_secret(kek: Kek, envelope: Envelope, aad: str) -> str:

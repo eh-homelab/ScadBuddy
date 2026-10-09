@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { api, ApiError } from '../../api/client'
 import type {
   AnalysisRequest,
+  AnalysisTarget,
   AnalyzerDecision,
   AnalyzerDiagnostic,
   AnalyzerSeverity,
@@ -206,7 +207,8 @@ function setAsideReason(diagnostic: AnalyzerDiagnostic): string {
 }
 
 interface Props {
-  outputId: string | undefined
+  /** The output, or the library file (#1753), the dialog prints. */
+  target: AnalysisTarget | undefined
   /** The request the dialog would print with; `null` until it has one. */
   request: AnalysisRequest | null
   /** Printing every plate: the mesh checks still read one (`AnalysisRequest.plate_id`). */
@@ -220,8 +222,8 @@ interface Props {
  * dialog. Advisory throughout: no finding disables Print (`lib/analyzers.ts`). The
  * nozzle verdict passed as `children` is not an analyzer finding, and its errors do.
  */
-export function AnalyzerPanel({ outputId, request, allPlates = false, children }: Props) {
-  const { report, error, checking, reload } = useAnalysis(outputId, request)
+export function AnalyzerPanel({ target, request, allPlates = false, children }: Props) {
+  const { report, error, checking, reload } = useAnalysis(target, request)
   const { shown, setAside } = partition(report?.diagnostics ?? [])
   const skipped = report?.skipped ?? []
   /** Decisions are stored in Postgres; without it the run says why (`decisions_reason`). */

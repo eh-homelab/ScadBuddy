@@ -75,8 +75,7 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
           args: ['echo', { say: 'hi' }, 'toolu_9'],
         }),
       )
-      const [block] = content as { type: string; text: string }[]
-      expect(JSON.parse(unwrapUntrusted(block!.text))).toEqual({ said: 'hi', session: SESSION })
+      expect(JSON.parse(unwrapUntrusted(content as string))).toEqual({ said: 'hi', session: SESSION })
       // §6.5's gate for phase 4: a codec on this worker learns which workflow a
       // tool's arguments belong to, so it can pick that session's key.
       expect(codec.contexts).toContainEqual(expect.objectContaining({ type: 'activity', workflowId, activityId: 'tool-toolu_9' }))

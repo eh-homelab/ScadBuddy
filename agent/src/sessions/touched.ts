@@ -319,7 +319,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const key = str(input.key)
     if (!scope || (scope !== 'global' && !key)) return []
     return setting(scope === 'global' ? 'print_options:global' : `print_options:${scope}:${key}`, {
-      model: scope === 'model' ? key : null,
+      // A library file's own scope (`library:<file id>`, #1754) names no model.
+      model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
   remember_model_print_choices: (input) => {

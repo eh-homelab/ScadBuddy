@@ -67,7 +67,7 @@ def test_an_output_source_is_the_models_colors_and_slug(tmp_path: Path) -> None:
     )
 
     assert source.colours == ["#FF0000", "#0000FF"]
-    assert source.options_slug == "name-keychain"
+    assert source.options_scope == "name-keychain"
 
 
 def _file(file_id: int, file_type: str) -> None:
@@ -100,7 +100,7 @@ async def test_a_library_file_is_its_plates_and_its_filaments(bambuddy: Bambuddy
 
     assert await source.plate_ids(bambuddy) == [1, 2]
     assert source.colours == ["#0047BB", "#FF1493"]
-    assert source.options_slug is None
+    assert source.options_scope == "library:67"
     assert source.subject == PrintSubject.library(67)
     # Loading only reads: the file is downloaded when a print lays it out.
     assert {call.request.method for call in respx.calls} == {"GET"}

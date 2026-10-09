@@ -191,6 +191,15 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
   })),
+  ...(['GET /api/v1/print/library/{file_id}/preview.glb', 'GET /api/v1/print/library/{file_id}/file'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        "A library print's preview mesh and the file itself, for the print detail page (#1753). The " +
+        "agent's library print tools are #1749's step 8, after which these get one as an output's " +
+        'preview.glb has get_output_preview.',
+    }),
+  ),
   {
     operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
     reason:

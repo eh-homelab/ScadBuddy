@@ -127,6 +127,9 @@ docker build --target agent-durable -t scadbuddy-agent-durable:dev .   # checks 
 `agent/test/fixtures/secret-vectors.json` is written by `agent/test/secretVectors.test.ts`
 (`UPDATE_SECRET_VECTORS=1`) and opened by `agent-durable/tests`: a change to
 `agent/src/secrets.ts`'s format or `credentials.ts`'s AAD needs new vectors, and the port must open them.
+`agent/test/fixtures/payload-vectors.json` does the same for the payload codec
+(`agent/test/payloadCodec.test.ts`, `UPDATE_PAYLOAD_VECTORS=1`; `agent-durable/tests/test_codec.py`
+opens every one and seals it again byte for byte).
 The plugin pin moves only in its own PR, which carries the diff of `python/claude_agent_sdk`
 between the two SHAs; `agent-durable-pin.yml` checks weekly that it still resolves (`.github/scripts/agent-durable-pin.sh`).
 
@@ -293,6 +296,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `model.json`, with a legacy `presets.json` still read), uploads for `// file`
   parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
+- `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
+  launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
+  network sockets), and `component.py`, the per-client session cap (on only with
+  `SCADBUDDY_TRUSTED_PROXIES` set). The bridge itself is `library/lsp.py`.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
@@ -427,6 +434,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     durable-only `ask_user` / `wait_for_user` are `tools/answerTools.ts` (manifest only,
     never /mcp). `input.requested` / `input.resolved` are logged in both modes and never
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
+  - Durable payloads (#1056 phase 5c, spec §6.5): `src/temporal/payloadCodec.ts` seals
+    every payload of a `session-<uuid>` / `flow-<uuid>` workflow under that subject's
+    data key (`ai_payload_keys`, sealed under the KEK, re-wrapped at start on rotation);
+    the agent-tools worker and the service's Temporal client carry it when the KEK is
+    mounted. `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
+    the rows) is the one way a durable subject is deleted; operators run
+    `node dist/forget-subject.js session-<uuid>`. A gated tool's activity runs only
+    with an `approved` `ai_input_responses` row for its own request id.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
@@ -475,7 +490,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
   validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
   activities that write `ai_pending_input`, `ai_input_responses`, the session's events
-  and the approval audit row (`store.py`, mirroring `eventLog.ts`).
+  and the approval audit row (`store.py`, mirroring `eventLog.ts`). `codec.py` is the
+  payload codec's Python half (`data_converter`, the same vectors).
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
   `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in

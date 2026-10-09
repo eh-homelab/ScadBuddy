@@ -293,12 +293,12 @@ keeps its `first_seen_at` and its print history, and the write updates
   this, because the rack may have changed again by then; the hotend actually
   mounted during the print is not something §2 has measured. Accepted here;
   tracking the hotend actually mounted belongs to the telemetry work in #912.
-- Known limit: only an output's print is credited. A Bambuddy library-file run
-  ranks and sends picks, and its hotends are recorded as seen, but the watcher
-  settles by output id and a library print is linked nowhere, so no pick row is
-  saved for it and its use is never counted. An owner who prints mostly from
-  the library sees "least used" fall through to color and lowest position.
-  Tracked in #1073.
+- A Bambuddy library-file print is credited as an output's is (#1073). Its run
+  saves its picks, and its `FollowPrint` follows the run subject
+  (`library:<file id>`). The follow reads the queue items of the file's recent
+  sends (`progress.library_progress`) and links each archive they name. When they
+  settle, the rack's hook credits the subject's linked archives
+  (`record_settled(subject)`).
 - Open picks (#1079): a pick with no `rack_nozzle_prints` row for its queue
   item and group (the print row carries `queue_item_id` since
   `20261008T1351Z_rack_nozzle_pending.sql`) is still queued or printing, and

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useLocation } from 'react-router'
 import { useAiAvailability } from '../agent/chat/availability'
 import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
@@ -211,6 +212,15 @@ export function SettingsPage() {
     setDraft((current) => seedDraft(current, values, editedSince(since, edits.current)))
     setClearing((current) => current.filter((name) => !names.includes(name)))
   }, [settings])
+
+  // #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list)
+  // opens Settings at it, once the sections are rendered.
+  const { hash } = useLocation()
+  const loaded = Boolean(settings)
+  useEffect(() => {
+    if (!loaded || hash.length < 2) return
+    document.getElementById(decodeURIComponent(hash.slice(1)))?.scrollIntoView?.({ block: 'start' })
+  }, [loaded, hash])
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
   const setField = (name: FieldName, next: string) => {

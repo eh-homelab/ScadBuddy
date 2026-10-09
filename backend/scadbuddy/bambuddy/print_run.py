@@ -918,12 +918,11 @@ async def queue_plate(
     plate: PlatePlan,
     sliced: int,
     rack: RackUsage | None,
-    credit: bool,
 ) -> QueuedPlate:
     """Choose the rack hotends for ``plate``'s sliced file, ``POST /queue/`` once, then
-    save the picks (``credit``: only an output's print is ever settled, so a pick row
-    for a library run would never be credited). The pick and the save never raise
-    (spec 2026-10-01 §5): only the queue call can fail."""
+    save the picks, whatever the print's subject: every print is followed and settled
+    (#1073). The pick and the save never raise (spec 2026-10-01 §5): only the queue call
+    can fail."""
     notes: list[FilamentWarning] = []
     choice = (
         await rack_chooser(
@@ -951,8 +950,7 @@ async def queue_plate(
         nozzle_rack_choice=choice.nozzle_rack_choice if choice is not None else None,
     )
     picks = list(choice.picks) if choice is not None else []
-    if credit:
-        await save_picks(rack, planned.printer_id, [item], picks)
+    await save_picks(rack, planned.printer_id, [item], picks)
     return QueuedPlate(
         item_id=item,
         # Group ids repeat across plates, so each pick names its plate.
@@ -1009,7 +1007,7 @@ async def plan_run(
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here rather than half-applied.
     print_options = resolve_print_options(
-        settings, source.options_slug, printer_id, request_scope(request.copies, request.options)
+        settings, source.options_scope, printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 

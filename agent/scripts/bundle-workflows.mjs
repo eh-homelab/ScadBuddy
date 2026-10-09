@@ -8,5 +8,7 @@ import { URL, fileURLToPath } from 'node:url'
 
 const { code } = await bundleWorkflowCode({
   workflowsPath: fileURLToPath(new URL('../dist/temporal/workflows.js', import.meta.url)),
+  // Failures' messages sealed with the payloads (src/temporal/failureConverter.ts).
+  failureConverterPath: fileURLToPath(new URL('../dist/temporal/failureConverter.js', import.meta.url)),
 })
 await writeFile(new URL('../dist/temporal/workflow-bundle.js', import.meta.url), code)

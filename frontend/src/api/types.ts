@@ -213,6 +213,7 @@ export type PlateFit = Schemas['PlateFit']
  * the request the print dialog would send, and the report it answers with.
  */
 export type AnalysisRun = Schemas['AnalysisRun']
+export type AnalysisTarget = Schemas['AnalysisTarget']
 export type AnalysisRequest = Schemas['AnalysisRequest']
 export type AnalysisReport = Schemas['AnalysisReport']
 export type AnalyzerDiagnostic = Schemas['AnalyzerDiagnostic']

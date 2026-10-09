@@ -118,11 +118,15 @@ export function effectiveScope(layers: OptionLayer[], name: OptionName): OptionL
   return found
 }
 
-export const SCOPE_LABELS: Record<OptionLayer['scope'], string> = {
+const SCOPE_LABELS: Record<Exclude<OptionLayer['scope'], 'model'>, string> = {
   global: 'everywhere',
   printer: 'this printer',
-  model: 'this model',
   request: 'this send',
+}
+
+/** The `model` layer is the print's own subject's (#1754): this model, or this file. */
+export function scopeLabel(scope: OptionLayer['scope'], noun: 'model' | 'file' = 'model'): string {
+  return scope === 'model' ? `this ${noun}` : SCOPE_LABELS[scope]
 }
 
 export function formatOption(kind: OptionKind, value: OptionValue): string {

@@ -63,12 +63,14 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
+from scadbuddy.bambuddy.options import library_options_scope
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, StoredSettings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.schema import ParamValue
 
@@ -93,11 +95,13 @@ ROUTE_NOTE = (
 
 
 class AnalysisTarget(BaseModel):
-    """An output, or a configuration: a template and one parameter set.
+    """An output, a configuration (a template and one parameter set), or a file in
+    Bambuddy's library (#1753).
 
     A configuration is judged on the newest output rendered with exactly those
     parameters when there is one; without one, the analyzers that need a render are
-    skipped and say so.
+    skipped and say so. A library file is judged as any print is: its mesh read from
+    the 3MF the print path fetches, its slots off the file itself.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -105,11 +109,15 @@ class AnalysisTarget(BaseModel):
     output_id: str | None = Field(default=None, pattern=OUTPUT_ID_PATTERN)
     slug: str | None = Field(default=None, pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
     params: dict[str, ParamValue] | None = None
+    library_file_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _one_subject(self) -> AnalysisTarget:
-        if (self.output_id is None) == (self.slug is None):
-            raise ValueError("name either an output_id or a slug (with its params), not both")
+        named = [self.output_id, self.slug, self.library_file_id]
+        if sum(value is not None for value in named) != 1:
+            raise ValueError(
+                "name one of an output_id, a slug (with its params) or a library_file_id"
+            )
         if self.output_id is not None and self.params is not None:
             raise ValueError("an output's parameters are its own; params go with a slug")
         return self
@@ -252,7 +260,9 @@ ParamsCheckDep = Annotated[ParamsCheck, Depends()]
 
 def _subject(
     target: AnalysisTarget, outputs: OutputStore, catalogue: Catalogue
-) -> tuple[str, dict[str, ParamValue], OutputMeta | None]:
+) -> tuple[str | None, dict[str, ParamValue], OutputMeta | None]:
+    if target.library_file_id is not None:
+        return None, {}, None
     if target.output_id is not None:
         output = require_output(outputs, target.output_id)
         return output.slug, outputs.params(output.id), output
@@ -266,6 +276,19 @@ def _subject(
     return target.slug, params, meta
 
 
+def _remembered(
+    target: AnalysisTarget, slug: str | None, settings: StoredSettings
+) -> ModelPrintChoices | None:
+    """What the dialog reopens with for this subject: a library file's own (#313), else
+    the template's, both in the one store under the subject's options scope (#1754)."""
+    scope = (
+        library_options_scope(target.library_file_id)
+        if target.library_file_id is not None
+        else slug
+    )
+    return settings.model_print_choices.get(scope) if scope is not None else None
+
+
 async def _context(
     target: AnalysisTarget,
     request: AnalysisRequest,
@@ -273,8 +296,11 @@ async def _context(
     catalogue: Catalogue,
     store: SettingsStore,
     uploads: BambuddyUploadStore,
+    paths: DataPaths,
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
+    settings = store.load()
+    remembered = _remembered(target, slug, settings)
     library_file_id: int | None = None
     if meta is not None:
         # Any copy will do: every one is this output's 3MF, and the filament read only
@@ -287,12 +313,15 @@ async def _context(
         library_file_id = copies[-1].id if copies else None
     return await gather_context(
         outputs=outputs,
-        settings=store.load(),
+        settings=settings,
         slug=slug,
         params=params,
         request=request,
         meta=meta,
         library_file_id=library_file_id,
+        remembered=remembered,
+        library_subject=target.library_file_id,
+        cache=paths.cache,
     )
 
 
@@ -389,6 +418,7 @@ async def post_run(
     store: SettingsStoreDep,
     decisions: DecisionsDep,
     check: ParamsCheckDep,
+    paths: PathsDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -406,7 +436,7 @@ async def post_run(
     ``decisions_available`` is false and ``decisions_reason`` says why.
     """
     await check(body.target)
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
+    context = await _context(body.target, body.request, outputs, catalogue, store, uploads, paths)
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
     except DATABASE_ERRORS as error:
@@ -431,12 +461,13 @@ async def post_preview(
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
     check: ParamsCheckDep,
+    paths: PathsDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
     Changes nothing."""
     await check(body.target)
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
+    context = await _context(body.target, body.request, outputs, catalogue, store, uploads, paths)
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     blockers = fix.blockers
@@ -463,6 +494,7 @@ async def post_apply(
     decisions: DecisionsDep,
     events: EventsDep,
     check: ParamsCheckDep,
+    paths: PathsDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -479,7 +511,7 @@ async def post_apply(
     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
     """
     await check(body.target)
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
+    context = await _context(body.target, body.request, outputs, catalogue, store, uploads, paths)
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     if _fingerprint(context, diagnostic, fix, scope) != body.fingerprint:

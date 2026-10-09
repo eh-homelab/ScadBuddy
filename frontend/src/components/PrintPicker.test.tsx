@@ -102,6 +102,22 @@ describe('PrintPicker', () => {
     expect(screen.queryByText(/pipeline/i)).toBeNull()
   })
 
+  it('judges a library file with the analyzers, as any print (#1753)', async () => {
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0))
+    expect(bodies[0]).toMatchObject({ target: { library_file_id: 89 } })
+    expect(await screen.findByTestId('checks-headline')).toBeInTheDocument()
+  })
+
   it('marks Print user-only, since it queues a physical print', async () => {
     renderPicker()
     await loaded()

@@ -899,17 +899,21 @@ def request_scope(copies: int | None, options: PrintOptions) -> PrintOptions:
 
 
 def resolve_print_options(
-    settings: StoredSettings, slug: str | None, printer_id: int | None, request_scope: PrintOptions
+    settings: StoredSettings,
+    scope: str | None,
+    printer_id: int | None,
+    request_scope: PrintOptions,
 ) -> PrintOptions:
-    """global → per-printer → per-model → per-request, least specific first.
+    """global → per-printer → per-subject → per-request, least specific first.
 
     The print run's merge (#124). The send bar no longer queues (#312), so it resolves
-    none. A library file (#313) has no model, so its per-model layer is empty.
+    none. ``scope`` is the print's :func:`~scadbuddy.bambuddy.options.options_scope`: an
+    output's model, or a library file's own (#1754).
     """
     return resolve(
         settings.print_options,
         settings.printer_print_options.get(str(printer_id)) if printer_id is not None else None,
-        settings.model_print_options.get(slug) if slug is not None else None,
+        settings.model_print_options.get(scope) if scope is not None else None,
         request_scope,
     )
 

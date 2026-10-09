@@ -14,7 +14,8 @@ from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from scadbuddy.api.deps import PrintRunsDep, SettingsStoreDep, UploadsDep
+from scadbuddy.api.deps import PathsDep, PrintRunsDep, SettingsStoreDep, UploadsDep
+from scadbuddy.api.jobs import GLB_MEDIA_TYPE
 from scadbuddy.api.outputs import OutputPlate, read_plain_files
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
@@ -22,6 +23,7 @@ from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
+from scadbuddy.bambuddy.library_view import NotViewableError, library_preview
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -31,8 +33,10 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.rack.component import RackUsageDep
+from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.workflows.print_models import SourceSpec
 
 router = APIRouter(prefix="/print/library", tags=["print"])
@@ -119,6 +123,56 @@ async def get_library_objects(file_id: FileIdPath, store: SettingsStoreDep) -> L
             for obj in found.objects
         ],
     )
+
+
+@router.get(
+    "/{file_id}/preview.glb",
+    response_class=Response,
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+    summary="One plate of the library file as a preview mesh",
+)
+async def get_library_preview(
+    file_id: FileIdPath,
+    store: SettingsStoreDep,
+    paths: PathsDep,
+    plate: Annotated[int, Query(ge=1)] = 1,
+) -> Response:
+    """Plate ``plate`` of the file, read from the 3MF a print of it slices (#1753), as an
+    output's ``preview.glb`` is read from its own: its parts in their colours, where the
+    file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,
+    damaged, past the caps) is a 422 saying why; a plate it lacks is a 404."""
+    async with client_for(store.load()) as client:
+        try:
+            data = await library_preview(client, paths.cache, file_id, plate)
+        except NotViewableError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except NoSuchPlateError as error:
+            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+    return Response(data, media_type=GLB_MEDIA_TYPE)
+
+
+@router.get(
+    "/{file_id}/file",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="The library file itself",
+)
+async def get_library_file(
+    file_id: FileIdPath, request: Request, store: SettingsStoreDep
+) -> Response:
+    """The file as Bambuddy's library holds it: what a print of it was made from. Always
+    a download: a library file can be any type (an SVG, an HTML page), and served on
+    ScadBuddy's origin under the type Bambuddy names it could run script there."""
+    response = await _proxy(
+        store,
+        request,
+        f"/library/files/{file_id}/download",
+        operation="library.download",
+        what="download the library file",
+    )
+    response.headers["content-type"] = "application/octet-stream"
+    response.headers["content-disposition"] = "attachment"
+    return response
 
 
 @router.get(

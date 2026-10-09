@@ -1,0 +1,60 @@
+{
+  "kek_b64": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=",
+  "kek_id": "60bf07c488aad18f",
+  "subject": "session-0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60",
+  "dek_sealed_b64": "Ah2gI6YprC+yNbg7vuL4/iRLaTC2CPCFltP18GDEPNmaBh5wH9ykmZ3hEg05UrvRMwKpmobpgzsaQtpsrQ==",
+  "payloads": [
+    {
+      "name": "json",
+      "plain": {
+        "metadata": {
+          "encoding": "anNvbi9wbGFpbg=="
+        },
+        "data": "eyJ0ZXh0IjoiTWFrZSBpdCByZWQsIMOpIOKckyJ9"
+      },
+      "iv_b64": "M7Y5vD/CRchLzlHU",
+      "encoded": {
+        "metadata": {
+          "encoding": "YmluYXJ5L3NjYWRidWRkeS1zdWJqZWN0",
+          "scadbuddy-subject": "c2Vzc2lvbi0wYjZjMWU0ZS03ZDNhLTRmNWUtOWE1MS0zZjFjMmQ0ZTVmNjA="
+        },
+        "data": "AjO2Obw/wkXIS85R1Pm45Kyy0VfmtBwakk/NOqUR+r4Ars1GxGqy81ukfubmgCuqui8Ev7mK8+fBs84eOfxp0Q1LhiFaJNaRPwdTNI1r4AsT33jsrMv3JankTLvEnyT1Gz4SjPL63kRYVCX22CxgzQQ="
+      }
+    },
+    {
+      "name": "null",
+      "plain": {
+        "metadata": {
+          "encoding": "YmluYXJ5L251bGw="
+        },
+        "data": ""
+      },
+      "iv_b64": "X+Jl6GvucfR3+n0A",
+      "encoded": {
+        "metadata": {
+          "encoding": "YmluYXJ5L3NjYWRidWRkeS1zdWJqZWN0",
+          "scadbuddy-subject": "c2Vzc2lvbi0wYjZjMWU0ZS03ZDNhLTRmNWUtOWE1MS0zZjFjMmQ0ZTVmNjA="
+        },
+        "data": "Al/iZehr7nH0d/p9AEbVFvpffIhAI1GdC9nJwrQ0N5X2a5u3mjvL/ERpOVfLi6iDQgwviopv1Sjo4Amm1/pYzaXWX/U/4C23oA=="
+      }
+    },
+    {
+      "name": "two metadata keys",
+      "plain": {
+        "metadata": {
+          "messageType": "dGVtcG9yYWwuYXBpLlRoaW5n",
+          "encoding": "anNvbi9wcm90b2J1Zg=="
+        },
+        "data": "e30="
+      },
+      "iv_b64": "iw6RFJcanSCjJqks",
+      "encoded": {
+        "metadata": {
+          "encoding": "YmluYXJ5L3NjYWRidWRkeS1zdWJqZWN0",
+          "scadbuddy-subject": "c2Vzc2lvbi0wYjZjMWU0ZS03ZDNhLTRmNWUtOWE1MS0zZjFjMmQ0ZTVmNjA="
+        },
+        "data": "AosOkRSXGp0goyapLGp8ktbCNEauB9zYEV6hgaV77AdCSk4zveHQzx/21Wp4m1PRjMgEORSBPB8op/GuKn01Ys6lT5lOxQTLhIj+tbanVPs+Wr7ME2EVexRl8fPA19sVcPAqRE3dxUczPWfi7PdNxe3wNbrnFAigktk="
+      }
+    }
+  ]
+}
