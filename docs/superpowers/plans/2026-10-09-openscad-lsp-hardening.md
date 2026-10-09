@@ -46,10 +46,10 @@ test `backend/tests/test_editor_nonet.py`.
 **Produces:** `nonet.command(binary: str, *args: str) -> list[str]` (the argv that runs
 `binary` under the filter), `nonet.main(argv) -> NoReturn`.
 
-- [ ] Test: run `command(sys.executable, "-I", probe.py)` where the probe opens AF_UNIX
+- [x] Test: run `command(sys.executable, "-I", probe.py)` where the probe opens AF_UNIX
   (works) and AF_INET, AF_INET6, AF_NETLINK and AF_PACKET (each `OSError` EAFNOSUPPORT);
   run `command("/bin/true")` and expect exit 0 (exec works); an unknown arch exits non-zero.
-- [ ] Implement the BPF filter and launcher; run; commit.
+- [x] Implement the BPF filter and launcher; run; commit.
 
 ### Task 2: launch openscad-lsp through it
 
@@ -61,7 +61,8 @@ reports whether `socket(AF_INET)` succeeds, and the test asserts that it does no
 ### Task 3: per-client session limit
 
 **Files:** Create `backend/scadbuddy/editor/component.py` (`LanguageServerClients` with
-`take(client) -> bool` / `give(client)` as a context manager `slot(client)`;
+`client(headers, peer) -> str`, `full(client) -> bool` and the context manager
+`slot(client)`; the cap is on only with `SCADBUDDY_TRUSTED_PROXIES` set;
 `LSP_SESSIONS_PER_CLIENT = 2`; `Key("language_server_clients")`). Modify
 `backend/scadbuddy/api/lsp.py` `_serve` to check the client slot after the global check
 and before accept. Test in `tests/api/test_lsp.py`: with `lsp_sessions=4`, the third

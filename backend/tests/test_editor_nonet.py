@@ -65,6 +65,23 @@ def test_the_same_probe_opens_them_without_the_filter(tmp_path: Path) -> None:
     assert json.loads(done.stdout)["inet"] == "open"
 
 
+def test_io_uring_setup_is_refused() -> None:
+    """An io_uring could open a socket without the ``socket`` syscall."""
+    probe = (
+        "import ctypes; libc = ctypes.CDLL(None, use_errno=True); "
+        "params = ctypes.create_string_buffer(120); "
+        "print(libc.syscall(425, 1, params), ctypes.get_errno())"
+    )
+    done = subprocess.run(
+        nonet.command(sys.executable, "-I", "-c", probe),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    assert done.stdout.split() == ["-1", "38"]  # ENOSYS
+
+
 def test_the_program_keeps_its_arguments_and_exit_status() -> None:
     done = subprocess.run(
         nonet.command(sys.executable, "-I", "-c", "import sys; sys.exit(len(sys.argv))", "a", "b"),

@@ -69,7 +69,11 @@ def program(arch: int, nr_socket: int) -> list[bytes]:
 
     ``socket`` is the one call that makes a network endpoint: ``socketpair`` makes only
     connected local pairs, ``accept`` needs a listening socket the process could not
-    make, and it inherits no descriptor (``create_subprocess_exec`` closes them)."""
+    make, and it inherits no descriptor (``create_subprocess_exec`` closes them).
+
+    ``AF_UNIX`` stays open on purpose (libc's own lookups use it): "no network" is not
+    "no IPC", and the server can still reach a filesystem socket the container
+    exposes."""
     return [
         _op(_LD_W_ABS, _OFFSET_ARCH),
         _op(_JEQ_K, arch, jt=1),
