@@ -87,7 +87,7 @@ default font (DejaVu Sans in this image) with other geometry and no warning
   `FcNameParse` reads them: up to the first unescaped `-` or `:`, split at commas, and
   compared ignoring case and blanks, as fontconfig compares them
   ([fontconfig user docs, "Font Names"](https://www.freedesktop.org/software/fontconfig/fontconfig-user.html);
-  [`FcStrCmpIgnoreBlanksAndCase`](https://www.freedesktop.org/software/fontconfig/fontconfig-devel/fcstrcmpignoreblanksandcase.html)).
+  `FcStrCmpIgnoreBlanksAndCase` in fontconfig's [`src/fcstr.c`](https://gitlab.freedesktop.org/fontconfig/fontconfig/-/blob/main/src/fcstr.c), which has no page in the developer docs).
   A bare `-` in a family name is explained in the error: fontconfig reads it as the
   start of a point size.
 - **An install is checked.** After downloading a family and rebuilding fontconfig's
