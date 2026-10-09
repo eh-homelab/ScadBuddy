@@ -101,6 +101,17 @@ describe('extrudersIn', () => {
     )
   })
 
+  it('keeps the label when the colour was retyped as its shorthand (#1686)', () => {
+    const ran = { ...values, body_color: '#EE5533' }
+    const retyped = { ...values, body_color: '#e53' }
+    expect(extrudersIn(keychainSchema, retyped, ['#EE5533', String(values['text_color'])], ran)).toEqual(
+      new Map([
+        ['body_color', 1],
+        ['text_color', 2],
+      ]),
+    )
+  })
+
   it('says nothing about a colour that is not hex, which the render reports resolved', () => {
     // The backend resolves CSS names; the render reports "red" as #FF0000.
     const named = { ...values, body_color: 'red' }

@@ -510,7 +510,11 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
     item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
     lock = threading.Lock()
     # Each decode waits for a second to join it, so two provably overlap; with fewer
-    # than two allowed at once the wait times out and the request fails.
+    # than two allowed at once the wait times out and the request fails. That needs
+    # every request to decode, which holds because `slow` returns None (no thumbnail is
+    # cached), and an even count of requests, or the last decode waits alone.
+    requests = 8
+    assert requests % 2 == 0
     pair = threading.Barrier(2, timeout=10)
     running = 0
     most = 0
@@ -527,12 +531,15 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
         return None
 
     monkeypatch.setattr("scadbuddy.api.media._shrink", slow)
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=requests) as pool:
         codes = list(
-            pool.map(lambda _: client.get(_thumbnail_url(model, item["id"])).status_code, range(8))
+            pool.map(
+                lambda _: client.get(_thumbnail_url(model, item["id"])).status_code,
+                range(requests),
+            )
         )
 
-    assert codes == [200] * 8
+    assert codes == [200] * requests
     assert 1 < most <= MAX_CONCURRENT_THUMBNAILS
 
 

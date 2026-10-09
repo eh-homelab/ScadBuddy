@@ -412,15 +412,19 @@ describe('EditSourcePage, live (#269)', () => {
     const editor = await screen.findByLabelText('OpenSCAD source')
     const push = vi.spyOn(window.history, 'pushState')
     const back = vi.spyOn(window.history, 'back')
-    await api.replaceSource('name-keychain', THEIRS)
-    emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
-    await waitFor(() => expect(editor).toHaveValue(THEIRS))
-    // Never dirty, not even for the render before the buffer catches up: the leave
-    // guard would push its sentinel and take it back, dropping the Forward entries.
-    expect(push).not.toHaveBeenCalled()
-    expect(back).not.toHaveBeenCalled()
-    push.mockRestore()
-    back.mockRestore()
+    try {
+      await api.replaceSource('name-keychain', THEIRS)
+      emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+      await waitFor(() => expect(editor).toHaveValue(THEIRS))
+      // Never dirty, not even for the render before the buffer catches up: the leave
+      // guard would push its sentinel and take it back, dropping the Forward entries.
+      expect(push).not.toHaveBeenCalled()
+      expect(back).not.toHaveBeenCalled()
+    } finally {
+      // Restored even when an assertion fails, so later tests see the real history.
+      push.mockRestore()
+      back.mockRestore()
+    }
   })
 
   it('never overwrites an edited buffer, and offers theirs instead', async () => {
