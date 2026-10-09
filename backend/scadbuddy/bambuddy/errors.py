@@ -70,32 +70,25 @@ def upstream_body(response: httpx.Response) -> Any:
         return None
 
 
-#: The most of an answer's body `UpstreamAnswer` keeps.
+#: The most of a transport error's text `UpstreamAnswer` keeps.
 MAX_ANSWER_CHARS = 2000
 
 
 class UpstreamAnswer(BaseModel):
-    """What Bambuddy itself answered to a failed call, as it said it (#1542): the
-    status, the ``Retry-After`` it asked for, and the body as text; or, when it never
-    answered, why not."""
+    """What Bambuddy itself answered to a failed call (#1542): the status, the
+    ``Retry-After`` it asked for and its own ``detail``; or, when it never answered,
+    why not. Never the raw body: the URL is a setting, so a body passed through would
+    let whoever sets it read any address this server can reach."""
 
     status: int | None = None
     retry_after: str | None = None
-    body: str | None = None
+    detail: str | None = None
     error: str | None = None
 
 
 def _answered(error: ApiError, answer: UpstreamAnswer) -> ApiError:
     error.upstream = answer
     return error
-
-
-def _body_text(response: httpx.Response) -> str | None:
-    try:
-        text = response.text
-    except (UnicodeDecodeError, httpx.ResponseNotRead):
-        return None
-    return text[:MAX_ANSWER_CHARS] if text else None
 
 
 def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiError:
@@ -108,7 +101,7 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
     answer = UpstreamAnswer(
         status=response.status_code,
         retry_after=response.headers.get("Retry-After"),
-        body=_body_text(response),
+        detail=upstream_detail(response),
     )
     return _answered(_mapped(response, scope=scope, what=what, answer=answer), answer)
 

@@ -1325,6 +1325,12 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
             <dd>{answer.retry_after}</dd>
           </div>
         )}
+        {answer.detail != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Its message</dt>
+            <dd className="break-all">{answer.detail}</dd>
+          </div>
+        )}
         {answer.error != null && (
           <div className="flex gap-2">
             <dt className="text-muted">Error</dt>
@@ -1332,11 +1338,6 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
           </div>
         )}
       </dl>
-      {answer.body != null && (
-        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-[6px] bg-surface-2 p-2 font-mono text-[11px]">
-          {answer.body}
-        </pre>
-      )}
     </details>
   )
 }

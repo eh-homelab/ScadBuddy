@@ -20,7 +20,6 @@ from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.bambuddy.errors import MAX_ANSWER_CHARS
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
@@ -350,7 +349,7 @@ def test_an_unreachable_bambuddy_is_reported_not_raised(client: TestClient) -> N
     assert body["upstream"] == {
         "status": None,
         "retry_after": None,
-        "body": None,
+        "detail": None,
         "error": "ConnectError: no route to host",
     }
 
@@ -361,7 +360,7 @@ def test_a_rate_limited_test_shows_what_bambuddy_said(client: TestClient) -> Non
     client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
     respx.get(PRINTERS_URL).mock(
         return_value=httpx.Response(
-            429, headers={"Retry-After": "30"}, text="Too many requests for this API key"
+            429, headers={"Retry-After": "30"}, json={"detail": "Too many requests"}
         )
     )
 
@@ -372,18 +371,20 @@ def test_a_rate_limited_test_shows_what_bambuddy_said(client: TestClient) -> Non
     assert body["upstream"] == {
         "status": 429,
         "retry_after": "30",
-        "body": "Too many requests for this API key",
+        "detail": "Too many requests",
         "error": None,
     }
 
 
 @respx.mock
-def test_a_long_answer_is_cut(client: TestClient) -> None:
+def test_a_failed_test_never_passes_the_body_through(client: TestClient) -> None:
+    """The URL is a setting: a body passed through would read any reachable address."""
     client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
-    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(500, text="x" * 10_000))
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(500, text="internal secret page"))
 
     body = client.post("/api/v1/settings/test").json()
-    assert len(body["upstream"]["body"]) == MAX_ANSWER_CHARS
+    assert body["upstream"] == {"status": 500, "retry_after": None, "detail": None, "error": None}
+    assert "internal secret page" not in json.dumps(body)
 
 
 def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> None:

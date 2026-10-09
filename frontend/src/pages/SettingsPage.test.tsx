@@ -109,7 +109,7 @@ describe('SettingsPage', () => {
           ok: false,
           detail: 'Bambuddy is limiting requests and refused to list the printers; it asks to wait 30 s',
           printers: [],
-          upstream: { status: 429, retry_after: '30', body: 'Too many requests for this API key', error: null },
+          upstream: { status: 429, retry_after: '30', detail: 'Too many requests for this API key', error: null },
         }),
       ),
     )
