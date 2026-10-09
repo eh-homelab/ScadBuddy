@@ -249,7 +249,8 @@ export const printTools: Tool[] = [
       'one read: printers (and the one chosen), the installed nozzles, quality tiers and Bambu processes per ' +
       'nozzle size, filament presets per size, plate types with the one last printed on, the filament step ' +
       "(as get_print_filaments), the model's (or the file's) remembered choices, and its plates by index and " +
-      'name (what each holds; `null` when nothing names it), which print_output takes as `plate_id`. What ' +
+      'name (what each holds; `null` when nothing names it; empty when they cannot be read), which ' +
+      'print_output takes as `plate_id`. What ' +
       'print_output fills omitted choices from.',
     input: withSource({ printer_id: z.number().int().optional() }),
     risk: 'read',
@@ -266,9 +267,13 @@ export const printTools: Tool[] = [
     ],
     handler: async (args, ctx) => {
       const source = sourceOf(args)
-      const [choices, plates] = await Promise.all([getChoices(ctx, source, args.printer_id), getPlates(ctx, source)])
-      // #986 — a plate by what it holds, so the agent can say "the lid", not "plate 2".
-      return json({ ...choices, plates: plates.map(({ index, name }) => ({ index, name: name ?? null })) })
+      // #986 — a plate by what it holds, so the agent can say "the lid", not "plate 2". The plates
+      // are extra: an unreadable list is empty, as in the dialog, and never fails the choices.
+      const [choices, plates] = await Promise.all([
+        getChoices(ctx, source, args.printer_id),
+        getPlates(ctx, source).catch(() => []),
+      ])
+      return json({ ...choices, plates: plates.map(({ index, name }) => ({ index, name: name || null })) })
     },
   }),
 

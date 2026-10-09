@@ -101,7 +101,39 @@ describe('the library routes', () => {
     })
     await tool('get_print_filaments').execute({ library_file_id: FILE, plate_id: 2 }, ctx())
     expect(firstText(await tool('get_print_progress').execute({ library_file_id: FILE }, ctx()))).toEqual({ settled: true })
-    expect(asked.sort()).toEqual(['choices ?printer_id=3', 'filaments ?plate_id=2', 'plates', 'progress'])
+    // The choices and plates reads run together; the rest in order.
+    expect([...asked.slice(0, 2)].sort()).toEqual(['choices ?printer_id=3', 'plates'])
+    expect(asked.slice(2)).toEqual(['filaments ?plate_id=2', 'progress'])
+  })
+
+  it("still answers get_print_choices when the plates can't be read (#986)", async () => {
+    server.use(
+      http.get(`${LIB}/choices`, () => HttpResponse.json({ printer_id: 1 })),
+      http.get(`${LIB}/plates`, () => HttpResponse.json({ detail: 'Bambuddy could not read the plates' }, { status: 502 })),
+    )
+    expect(firstText(await tool('get_print_choices').execute({ library_file_id: FILE }, ctx()))).toEqual({
+      printer_id: 1,
+      plates: [],
+    })
+  })
+
+  it("names an output's plates in get_print_choices (#986)", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, () => HttpResponse.json({ printer_id: 1 })),
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}/plates`, () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Gear' },
+          { index: 2, has_thumbnail: true, name: '' },
+        ]),
+      ),
+    )
+    expect(firstText(await tool('get_print_choices').execute({ output_id: OUT }, ctx()))).toEqual({
+      printer_id: 1,
+      plates: [
+        { index: 1, name: 'Gear' },
+        { index: 2, name: null },
+      ],
+    })
   })
 
   it('remembers choices for a library file', async () => {

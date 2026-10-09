@@ -45,7 +45,7 @@ describe('QueuedPanel · rack picks (#836)', () => {
         polling={false}
         plates={[
           { index: 1, has_thumbnail: true, name: 'Lid' },
-          { index: 2, has_thumbnail: true, name: null },
+          { index: 2, has_thumbnail: true, name: '' },
         ]}
       />,
     )

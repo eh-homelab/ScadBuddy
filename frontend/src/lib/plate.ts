@@ -111,5 +111,5 @@ export function boundByPlate<S extends { parameters?: Param[] }>(schema: S, plat
 
 /** #986 — a plate as the dialog names it: what it holds (#929), else its number. */
 export function plateLabel(plates: readonly OutputPlate[], index: number): string {
-  return plates.find((plate) => plate.index === index)?.name ?? `Plate ${index}`
+  return plates.find((plate) => plate.index === index)?.name || `Plate ${index}`
 }
