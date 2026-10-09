@@ -691,8 +691,7 @@ published by the `agent` job in `build-image.yml` with the same tags as the
 backend image). It is meant to run as a **second container in the ScadBuddy
 pod**, not inside the backend image: the sidecar layout chosen in §4.1 of the
 AI design spec (`docs/superpowers/specs/2026-09-27-ai-integration-design.md`,
-issue #250; on branch `claude/scad-buddy-ai-integration-pfn00c` until it
-merges). The two containers share the pod network, so the agent reaches
+issue #250). The two containers share the pod network, so the agent reaches
 the backend on `http://127.0.0.1:8080` (§4.3).
 
 - It listens on port `8081` and answers `GET /healthz` (`agent/src/app.ts`).
@@ -935,16 +934,18 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
-- **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*` and `/mcp` to the
-  agent's port `8081`, ahead of the backend's `/`. That keeps the SPA, the
+- **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*`, `/mcp` and, for MCP
+  OIDC, `/.well-known/oauth-protected-resource` to the agent's port `8081`, ahead
+  of the backend's `/`. That keeps the SPA, the
   backend, the agent and the assistant's WebSocket on one origin, which is what
   works inside Bambuddy's iframe. The rules, an example `Ingress` and a
   `curl` check per path (every agent response carries
   `X-ScadBuddy-Service: agent`) are in `docs/ai/operating.md` §1.1.
-  `frontend/vite.config.ts` routes the same way for `pnpm dev` and
-  `pnpm preview`. The clusters manifest is in eh-homelab/clusters, and until it
-  deploys the sidecar the image's publish job is
-  `continue-on-error`, so it cannot hold back a backend deploy, and the new
+  `frontend/vite.config.ts` routes `/api/v1/ai/*` and `/mcp` the same way for
+  `pnpm dev` and `pnpm preview` (not the OIDC metadata path). The clusters
+  manifest that deploys the sidecar is in eh-homelab/clusters. The image's
+  publish job is still `continue-on-error`, so it cannot hold back a backend
+  deploy (the header of `build-image.yml` says when to drop it), and the new
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
 

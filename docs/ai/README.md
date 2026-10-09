@@ -54,7 +54,7 @@ clients reach over `/mcp`, plus an in-app assistant. Both are in use:
 | [#319](https://github.com/eh-homelab/ScadBuddy/pull/319) | Agent service scaffold on the Claude Agent SDK (Hono, `/healthz`, least-privilege query options, pinned Claude Code version check) | `agent/src/app.ts`, `agent/src/config.ts`, `agent/src/harness/options.ts`, `agent/src/check-cli-version.ts`, `Dockerfile` (`agent` stage) |
 | [#354](https://github.com/eh-homelab/ScadBuddy/pull/354) | Harness runner, encrypted Claude credential, `ai_*` migrations, credential routes | `agent/src/harness/run.ts`, `agent/src/secrets.ts`, `agent/src/credentials.ts`, `agent/src/routes/credentials.ts`, `agent/src/db/migrations.ts` |
 | [#379](https://github.com/eh-homelab/ScadBuddy/pull/379) | Hardening: origin allowlist, AAD binding, key rotation, bounded health, egress check, stderr redaction, plugin vetting | `agent/src/http/origins.ts`, `agent/src/routes/guard.ts`, `agent/src/http/egress.ts`, `agent/src/harness/redactLines.ts`, `agent/src/harness/plugins.ts` |
-| [#377](https://github.com/eh-homelab/ScadBuddy/pull/377) | Durable sessions: Postgres `SessionStore`, session manager, panel-protocol event log with scrubbing. Built in `main.ts` since #471; no HTTP route starts a session yet (PR #377 body, "HTTP routes") | `agent/src/sessions/` |
+| [#377](https://github.com/eh-homelab/ScadBuddy/pull/377) | Durable sessions: Postgres `SessionStore`, session manager, panel-protocol event log with scrubbing. Built in `main.ts` since #471; sessions start from the panel's chat socket and `POST /api/v1/ai/sessions` (`agent/src/routes/sessions.ts`, #527) | `agent/src/sessions/` |
 | [#368](https://github.com/eh-homelab/ScadBuddy/pull/368) | The tool registry, projected in-process for the harness and over `/mcp` (Streamable HTTP), with the auth modes (spec §5.1, §8.3) | `agent/src/tools/`, `agent/src/mcp/http.ts`, `agent/src/auth/` |
 | [#471](https://github.com/eh-homelab/ScadBuddy/pull/471) | Approvals of outward tool calls in Postgres (`ai_approvals`): parked session calls, orphans after a restart, decision routes (spec §8.2) | `agent/src/approvals/service.ts`, `agent/src/routes/approvals.ts` |
 | [#464](https://github.com/eh-homelab/ScadBuddy/pull/464) | Registered remote MCP plugins (`ai_plugins`) behind a loopback forwarder (spec §10). Not yet covered by these pages | `agent/src/plugins/`, `agent/src/routes/plugins.ts` |
@@ -71,14 +71,9 @@ clients reach over `/mcp`, plus an in-app assistant. Both are in use:
 | [#339](https://github.com/eh-homelab/ScadBuddy/pull/339) | In-browser agent bridge: semantic tools, snapshot, user-only confirmations, WebMCP opt-in | `frontend/src/agent/` |
 | #254 (this PR's follow-up to #339) | The agent's `browser_*` tools over the tab's socket, in both projections, and pairing by code in Postgres (spec §5.2, §8.5) | `agent/src/tools/browser.ts`, `agent/src/bridge/`, `agent/src/routes/bridge.ts`, `frontend/src/agent/link.ts`, `frontend/src/components/PairingPrompt.tsx` |
 | [#340](https://github.com/eh-homelab/ScadBuddy/pull/340) | Assistant panel: chat stream, action feed, approvals, sessions (against the scripted mock agent) | `frontend/src/components/assistant/`, `frontend/src/agent/chat/` |
-| [#363](https://github.com/eh-homelab/ScadBuddy/pull/363) | Spec only: the headless Playwright browser for the harness (spec §5.3, D11). Nothing is implemented | spec §5.3, §3.2 |
+| [#363](https://github.com/eh-homelab/ScadBuddy/pull/363) | Spec for the headless Playwright browser for the harness (spec §5.3, D11), since implemented under #349: see [headless-browser.md](headless-browser.md) | spec §5.3, §3.2 |
 
-## Coming (open PRs, not documented here)
-
-These are not on `main`. Their docs belong in their own PRs or a follow-up to this one.
-
-- [#501](https://github.com/eh-homelab/ScadBuddy/pull/501): MCP bearer tokens in Postgres (`ai_mcp_tokens`). Until it lands, `main.ts` wires a token store that verifies nothing, so `bearer` mode answers `401` to every `/mcp` request.
-- [#504](https://github.com/eh-homelab/ScadBuddy/pull/504): MCP resources and subscriptions over the event bus (spec §5.4, §7).
+Since merged, and documented in their own pages: [#501](https://github.com/eh-homelab/ScadBuddy/pull/501), MCP bearer tokens in Postgres (`ai_mcp_tokens`, [security.md](security.md) "MCP bearer tokens"), and [#504](https://github.com/eh-homelab/ScadBuddy/pull/504), MCP resources and subscriptions over the event bus ([mcp-resources.md](mcp-resources.md)).
 
 ## Citation rule
 
