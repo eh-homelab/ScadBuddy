@@ -655,6 +655,27 @@ UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
 When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy`),
 set `SCADBUDDY_STORE_BACKEND=local` instead.
 
+### Encrypted API keys (#602)
+
+With **`SCADBUDDY_SECRET_KEY_FILE`** set, the backend seals the API keys it stores
+(`bambuddy_api_key`, `bambuddy_render_api_key`, `google_fonts_api_key`) in the
+`settings` table with envelope encryption, in the agent's format and under the same key
+file (see "The agent sidecar" below: 32 random bytes, base64). At start the API seals any
+key still stored in plaintext, once, under the migration lock, and logs
+`sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
+start.
+
+- Mount the **same** file into the API, the render worker and the print worker, in one
+  rollout. They all read the keys from the database; a process without the key (or with
+  another one) cannot open a sealed key, logs `ignoring a stored secret this process
+  cannot open` and falls back to its own `SCADBUDDY_<FIELD>`.
+- Unset, the keys stay in plaintext as before, and the API (and the print worker) logs
+  `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
+  mount it yet: #1900.
+- Keep a copy of the key. A key sealed under a lost one cannot be opened: enter it again
+  in Settings. The file is read once per process, so a changed key takes effect only after
+  a restart. Rotating the key is not supported here yet.
+
 ### The agent sidecar (AI, #261)
 
 The AI agent service in `agent/` ships as a **separate image**,

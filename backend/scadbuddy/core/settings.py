@@ -88,7 +88,7 @@ class Settings(BaseSettings):
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
-    google_fonts_api_key: str | None = None
+    google_fonts_api_key: str | None = Field(default=None, repr=False)
     fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
 
     seed_models_dir: Path | None = None
@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     # Initial values for the stored settings (`library.settings_store`, in Postgres);
     # a value stored from the UI wins once written.
     bambuddy_url: str | None = None
-    bambuddy_api_key: str | None = None
+    bambuddy_api_key: str | None = Field(default=None, repr=False)
     # SCADBUDDY_BAMBUDDY_WEB_URLS: comma-separated URLs browsers reach Bambuddy at
     # (#775), when `bambuddy_url` is one only the server can (an in-cluster Service).
     # The first is where links point; the others are other hostnames of the same
@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     # SCADBUDDY_BAMBUDDY_RENDER_API_KEY / SCADBUDDY_STORE_BACKEND seed the stored values
     # (`library.settings_store`, ENV_SEEDED), like `bambuddy_api_key`: a value saved in
     # Settings wins. Render workers read them from there (spec §9).
-    bambuddy_render_api_key: str | None = None
+    bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     store_backend: StoreBackend = "local"
     # SCADBUDDY_STORE_MAX_TOTAL_BYTES / _MAX_COUNT: the store's caps (spec §6.2); a put
     # past either is refused unless the content is already stored. 0 is no limit.
@@ -161,6 +161,11 @@ class Settings(BaseSettings):
     # records (#455). Server-side only, like the Bambuddy key.
     database_url: str = Field(default="", validate_default=True)
     database_pool_size: int = DEFAULT_DATABASE_POOL_SIZE
+    # SCADBUDDY_SECRET_KEY_FILE: the key-encryption key the agent uses too (#602): 32
+    # random bytes, base64 (`openssl rand -base64 32`). With it the `SECRET_FIELDS` are
+    # sealed at rest (`core/secrets.py`); unset, they stay plaintext, with a warning at
+    # start. Every process that reads them (the API and both workers) needs the same file.
+    secret_key_file: Path | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -390,6 +395,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " credential."
         ),
         "database_pool_size": "Sizes the connection pool the settings are read through.",
+        "secret_key_file": (
+            "The key the stored API keys are encrypted with. A key kept in the database it"
+            " protects would protect nothing."
+        ),
         "allowed_origins": (
             "Which pages may open the realtime socket and make writes. Like the agent's"
             " trusted proxies, it"

@@ -24,6 +24,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.66b0,<0.67",
     "opentelemetry-instrumentation-psycopg>=0.66b0,<0.67",
     "temporalio[opentelemetry]>=1.33.0,<1.35",
+    "cryptography>=44,<51",
 ]
 
 [build-system]
