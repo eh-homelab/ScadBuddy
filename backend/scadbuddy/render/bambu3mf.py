@@ -972,6 +972,8 @@ class _MeshTarget:
             self._painted = self._painted or any(attrs.get(name) for name in _PAINTED)
         else:
             if tag == _MESH:
+                if any(element.tag == _MESH for element in self._open):
+                    raise ValueError("a <mesh> inside another <mesh>")
                 self._reset()
             self._open.append(self.builder.start(tag, attrs))
 
@@ -1014,7 +1016,11 @@ def parse_model(
             read += len(chunk)
             if read > cap:
                 raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
-            parser.feed(chunk)
+            try:
+                parser.feed(chunk)
+            except OverflowError:
+                # An index past 64 bits: as unreadable as one that is not a number.
+                raise ValueError(f"{name} has a vertex index out of range") from None
     root: ET.Element = parser.close()
     return ParsedModel(root, target.meshes)
 

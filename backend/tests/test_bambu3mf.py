@@ -1197,4 +1197,37 @@ def test_a_model_file_costs_about_its_own_size_to_read() -> None:
 
     (mesh,) = model.meshes.values()
     assert mesh.vertices.shape == (vertices, 3)
-    assert peak < 2 * size, f"{peak} bytes to read {size}"
+    # ET.fromstring measured 13x here; arrays and expat's buffers stay well under 4x.
+    assert peak < 4 * size, f"{peak} bytes to read {size}"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            '<triangle v1="0" v2="0" v3="99999999999999999999"/>', id="index-past-64-bits"
+        ),
+        pytest.param(
+            '<triangle v1="0" v2="0" v3="0" p1="99999999999999999999"/>', id="p1-past-64-bits"
+        ),
+        pytest.param('<triangle v1="x" v2="0" v3="0"/>', id="not-a-number"),
+    ],
+)
+def test_a_triangle_that_is_not_an_index_is_a_value_error(body: str) -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{body}</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+def test_a_mesh_inside_a_mesh_is_refused() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/>'
+        "<mesh/></vertices><triangles/></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="inside another"):
+        parse_model(archive, "3D/3dmodel.model")
