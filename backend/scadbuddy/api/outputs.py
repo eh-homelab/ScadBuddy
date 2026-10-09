@@ -574,10 +574,6 @@ async def arrange_outputs(
         await publish_library_pieces(state.store.blobs, found)
     with submit_problems():
         job = await render.arrange(slug, inputs)
-    # The job holds the library pieces from now: the sweep's grace covers only the
-    # moments between their publish and this.
-    for key in dict.fromkeys(e.part for found in library.values() for e in found.objects):
-        await asyncio.to_thread(state.refs.add, key, "job", job.id)
     return _job_status(job, None)
 
 
