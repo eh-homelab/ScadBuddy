@@ -466,9 +466,14 @@ async function runJudgedByResult(
       }),
     )
     if (raw === TIMED_OUT) {
+      const after = `${tool.name} did not answer within ${Math.round(deadline / 1000)} s`
+      // A read can simply be asked again. Anything else may have been done by
+      // the backend all the same (a handler need not heed the abort), and a
+      // retry is a new call with a new idempotency key: a second print.
       return failed(
-        `${tool.name} did not finish within ${Math.round(deadline / 1000)} s and was stopped: what it calls is not ` +
-          'answering. Try it again later, or carry on without it.',
+        tool.risk === 'read'
+          ? `${after} and was stopped: what it calls is not answering. Try it again later, or carry on without it.`
+          : `${after}. It may still have taken effect: check whether it did before calling ${tool.name} again.`,
       )
     }
     const by = executed()

@@ -75,8 +75,29 @@ describe('every call has a deadline (#1918)', () => {
     try {
       const result = await runTool(slow, { slug: 'cable-clip' }, ctx({ toolDeadlineMs: 50 }))
       expect(result.isError).toBe(true)
-      expect(firstText(result)).toContain('get_schema did not finish within 0 s and was stopped')
+      expect(firstText(result)).toContain('get_schema did not answer within 0 s and was stopped')
       expect(aborted?.aborted).toBe(true)
+    } finally {
+      release()
+    }
+  })
+
+  it('never tells the model a write that timed out did not happen', async () => {
+    let release = () => {}
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/:slug/presets`, () => new Promise<Response>((resolve) => {
+        release = () => resolve(HttpResponse.json({}))
+      })),
+    )
+    try {
+      const result = await runTool(
+        tool('save_preset'),
+        { slug: 'cable-clip', name: 'p', params: {} },
+        ctx({ toolDeadlineMs: 50 }),
+      )
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toMatch(/It may still have taken effect: check whether it did before calling save_preset again\.$/)
+      expect(firstText(result)).not.toContain('was stopped')
     } finally {
       release()
     }
