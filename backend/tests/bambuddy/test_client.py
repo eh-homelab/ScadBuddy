@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import socket
+import ssl
+
 import httpx
 import pytest
 import respx
@@ -14,6 +19,7 @@ from scadbuddy.bambuddy.errors import (
     SCOPE_PROBLEM,
     UNAVAILABLE_PROBLEM,
     Scope,
+    map_transport,
 )
 from scadbuddy.bambuddy.models import (
     PresetRef,
@@ -417,3 +423,61 @@ async def test_a_wrapped_list_where_a_bare_one_belongs_is_a_bad_gateway(
         await bambuddy.printers()
 
     assert caught.value.status == 502
+
+
+def _raised_from(cause: BaseException, error: httpx.HTTPError) -> httpx.HTTPError:
+    """``error`` chained to ``cause`` as httpx chains it: raised while handling it."""
+    try:
+        try:
+            raise cause
+        except BaseException:
+            raise error  # noqa: B904 - the implicit __context__ is the point
+    except httpx.HTTPError as raised:
+        return raised
+
+
+@pytest.mark.parametrize(
+    ("error", "said"),
+    [
+        (
+            _raised_from(
+                ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+                httpx.ConnectError("[Errno 111] Connection refused"),
+            ),
+            f"ConnectError: {os.strerror(errno.ECONNREFUSED)}",
+        ),
+        (
+            _raised_from(
+                socket.gaierror(socket.EAI_NONAME, "Name or service not known"),
+                httpx.ConnectError("[Errno -2] Name or service not known"),
+            ),
+            "ConnectError: the host name could not be resolved",
+        ),
+        (
+            _raised_from(ssl.SSLError(1, "[SSL] b'peer text'"), httpx.ConnectError("x")),
+            "ConnectError: TLS failed",
+        ),
+        (httpx.ReadTimeout("read b'peer text'"), "ReadTimeout: timed out waiting for the answer"),
+        (
+            httpx.RemoteProtocolError("illegal status line: bytearray(b'-ERR secret')"),
+            "RemoteProtocolError: the server did not answer in HTTP",
+        ),
+    ],
+)
+def test_a_transport_failure_is_explained_in_scadbuddys_words(
+    error: httpx.HTTPError, said: str
+) -> None:
+    """#2021 review: never the exception's own text, which can quote the peer; only the
+    local socket's errno text or a fixed sentence per failure."""
+    assert map_transport(error, what="list printers").upstream.error == said
+
+
+def test_a_looping_exception_chain_still_maps() -> None:
+    """A handler that re-raises can chain an exception back to itself (respx does)."""
+    outer = httpx.ConnectError("x")
+    inner = RuntimeError("y")
+    outer.__context__ = inner
+    inner.__context__ = outer
+    assert map_transport(outer, what="list printers").upstream.error == (
+        "ConnectError: could not connect"
+    )
