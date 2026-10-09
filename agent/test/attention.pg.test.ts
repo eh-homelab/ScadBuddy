@@ -582,6 +582,61 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(done).toEqual({ unattended: false, summary: '**What this turn changed**\n- created preset `resumed` of `sign` (`save_preset`)' })
   })
 
+  // #1416 item 3: the real resume path, not a hand-written resume_turn_id. Turn A
+  // times out, works unattended, parks an outward call and stops (a shutdown, so the
+  // approval stays pending); the user approves it in the panel, resumeApproved runs
+  // turn B, and B's done summary carries A's unattended work.
+  it('a turn resumed by approving an orphan in the panel posts a done summary with the parked turn\'s unattended work', async () => {
+    let runs = 0
+    const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const sessionId = run.sessionId ?? run.resume!
+        if (runs++ === 0) {
+          const card = attentionCard(input())
+          verdicts.push(
+            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [card], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+          )
+          await touch(sessionId, 'unattended')
+          await run.approvalGate!({
+            toolName: `mcp__${SERVER_NAME}__send_to_bambuddy`,
+            input: { output: 'o1' },
+            toolUseId: 'toolu_send',
+            tier: 'outward',
+            signal: run.signal!,
+          }).catch(() => {})
+          throw new Error('Claude Code process aborted by user')
+        }
+        await touch(sessionId, 'resumed')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'send it' })
+    let approvalId: string | undefined
+    await expect.poll(async () => {
+      const [row] = await db.sql<{ id: string }[]>`SELECT id FROM ai_approvals WHERE session_id = ${session.id} AND decision IS NULL`
+      approvalId = row?.id
+      return approvalId
+    }).toBeDefined()
+    m.abortAll()
+    await turn!.done
+    await expect.poll(async () => (await m.get(session.id, browser)).turnActive).toBe(false)
+
+    await m.approvals.decide(browser, approvalId!, true)
+    await expect.poll(async () => {
+      const [row] = await db.sql<{ summary: string; unattended: boolean }[]>`
+        SELECT summary, unattended FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+      return row
+    }, { timeout: 5000 }).toMatchObject({ unattended: true })
+    const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+    expect(done!.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+    await expect.poll(async () => (await m.get(session.id, browser)).turnActive, { timeout: 5000 }).toBe(false)
+  })
+
   it('undismissed done summaries do not push a request a turn is parked on off the pending list', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
     const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })

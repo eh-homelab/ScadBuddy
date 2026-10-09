@@ -17,7 +17,8 @@ import { cutBetweenCodePoints } from '../sessions/touched.js'
 // out: each starts when its request was asked and ends at the first reply the
 // user gave afterwards in the same turn (an answered question or attention
 // request, or an approval they decided in the panel; a grant holder's decision
-// is not the user coming back). A touch inside any window is unattended, so a
+// is not the user coming back, so a window a token's decision resumed stays
+// open through the resumed turn's work too). A touch inside any window is unattended, so a
 // second timeout after a reply opens a second window rather than being filed as
 // "After you replied". With no timed-out request the turn's changes are one list.
 
