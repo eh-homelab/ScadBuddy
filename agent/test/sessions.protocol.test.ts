@@ -219,8 +219,10 @@ describe('scrubForLog', () => {
 
 describe('the agent’s protocol mirror', () => {
   const sample: ServerEvent[] = [
-    event({ type: 'sessions.snapshot', sessions: [{ sessionId: S, title: 't', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'A' }, status: 'idle', parentId: null, updatedAt: '2026-10-09T00:00:00.000Z', costUsd: 0.25, budgetUsd: 1 }] }),
+    event({ type: 'sessions.snapshot', sessions: [{ sessionId: S, title: 't', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'A' }, status: 'idle', parentId: null, updatedAt: '2026-10-09T00:00:00.000Z', costUsd: 0.25, budgetUsd: 1, mode: 'durable' }] }),
     event({ type: 'session.started', sessionId: S, origin: 'chat', owner: { kind: 'browser', id: 'browser', label: 'You' }, title: '', budgetUsd: 1 }),
+    // Plan 5d: the mode, and why a default durable session ran classic.
+    event({ type: 'session.started', sessionId: S, origin: 'chat', owner: { kind: 'browser', id: 'browser', label: 'You' }, mode: 'classic', modeFallback: 'ran as classic: Temporal did not answer' }),
     event({ type: 'session.owner', sessionId: S, owner: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'user.turn', sessionId: S, turnId: 't', text: 'hi', author: { kind: 'flow', id: 'analyzer', label: 'Analyzer' } }),
     event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm:0', delta: 'x' }),

@@ -1,6 +1,6 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
@@ -44,18 +44,34 @@ describe.skipIf(!TEST_DATABASE_URL)(`a session's mode at insert${PG_SKIP}`, () =
     await drop()
   })
 
-  it('is classic by default and with any other value', async () => {
-    for (const value of [undefined, 'classic', 'nonsense']) {
+  it('is durable by default and with any value but classic, so it falls back to classic without Temporal', async () => {
+    for (const value of [undefined, 'durable', 'nonsense']) {
       const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode(value) })
-      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      const { session, modeFallback } = await m.start(browser, { origin: 'chat', title: 't' })
       expect(session.mode).toBe('classic')
+      expect(modeFallback).toMatch(/durable sessions need Temporal/)
+      // Said where the panel reads it, so the user sees which mode ran.
+      const [started] = await m.events.read(session.id, 0)
+      expect(started?.event).toMatchObject({ type: 'session.started', mode: 'classic', modeFallback })
     }
   })
 
-  it('refuses a durable start without Temporal or the key, and inserts nothing', async () => {
+  it('is classic with no fallback when the setting says classic', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode('classic') })
+    const { session, modeFallback } = await m.start(browser, { origin: 'chat', title: 't' })
+    expect(session.mode).toBe('classic')
+    expect(modeFallback).toBeUndefined()
+    const [started] = await m.events.read(session.id, 0)
+    expect(started?.event).toMatchObject({ type: 'session.started', mode: 'classic' })
+    expect(started?.event).not.toHaveProperty('modeFallback')
+  })
+
+  it('refuses a durable start the caller asked for without Temporal or the key, and inserts nothing', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode('durable') })
-    await expect(m.start(browser, { origin: 'chat', title: 't' })).rejects.toMatchObject({ code: 'unavailable', status: 503 })
-    await expect(m.start(browser, { origin: 'chat', title: 't', mode: 'durable' })).rejects.toMatchObject({ code: 'unavailable' })
+    await expect(m.start(browser, { origin: 'chat', title: 't', mode: 'durable' })).rejects.toMatchObject({
+      code: 'unavailable',
+      status: 503,
+    })
     expect(await db.sql`SELECT id FROM ai_sessions`).toHaveLength(0)
   })
 
@@ -246,5 +262,19 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     m.durableTurns = undefined
     await expect(m.send(session.id, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable' })
     expect((await m.get(session.id, browser)).status).toBe('idle')
+  }, 60_000)
+
+  it('falls back from the default, and refuses an asked-for durable start, while no durable worker polls', async () => {
+    const m = await durableManager()
+    m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: `nobody-${randomUUID()}` })
+    const { session, modeFallback } = await m.start(browser, { origin: 'chat', title: 't' })
+    expect(session.mode).toBe('classic')
+    expect(modeFallback).toMatch(/no durable session worker/)
+    await expect(m.start(browser, { origin: 'chat', title: 't', mode: 'durable' })).rejects.toMatchObject({
+      code: 'unavailable',
+    })
+    // With the stand-in polling its queue, the default is durable.
+    const durable = await durableManager()
+    expect((await durable.start(browser, { origin: 'chat', title: 't' })).session.mode).toBe('durable')
   }, 60_000)
 })

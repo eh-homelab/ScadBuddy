@@ -75,6 +75,7 @@ import {
   publicLabel,
   sameOwner,
   type ServerEvent,
+  type SessionMode,
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, type StoredBlob } from './blobs.js'
@@ -166,10 +167,9 @@ import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 export const SETTING_MODEL = 'model'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
-/** Which mode a new session runs in (plan 5c Ruling 13): `classic` unless it says `durable`. */
+/** Which mode a new session runs in when its creator names none: `durable` unless it says `classic` (plan 5d Ruling 1). */
 export const SETTING_SESSION_MODE = 'session_mode'
-export const SESSION_MODES = ['classic', 'durable'] as const
-export type SessionMode = (typeof SESSION_MODES)[number]
+export { SESSION_MODES, type SessionMode } from './protocol.js'
 
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
 export const MAX_SESSION_BUDGET_USD = 100
@@ -482,7 +482,11 @@ export type StartOptions = {
   images?: readonly UserImage[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
-  /** The session's mode; the `session_mode` setting's when omitted. No route sets it yet (5d). */
+  /**
+   * The session's mode. Named, it is kept or refused (`unavailable`). Omitted, the
+   * `session_mode` setting's applies, and a durable one this service cannot run now
+   * becomes classic, with the reason in `modeFallback` (plan 5d Ruling 2).
+   */
   mode?: SessionMode
 }
 
@@ -940,6 +944,7 @@ export class SessionManager {
         updatedAt: s.updatedAt,
         costUsd: s.costUsd,
         budgetUsd: s.budgetUsd,
+        mode: s.mode,
       })),
     })
   }
@@ -1031,9 +1036,25 @@ export class SessionManager {
     return session
   }
 
-  /** The `session_mode` setting: `durable` only when it says so (plan 5c Ruling 13). */
+  /** The `session_mode` setting: `classic` only when it says so (plan 5d Ruling 1, the owner's default). */
   private async modeSetting(): Promise<SessionMode> {
-    return (await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE)) === 'durable' ? 'durable' : 'classic'
+    return (await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE)) === 'classic' ? 'classic' : 'durable'
+  }
+
+  /**
+   * The mode a new session runs in (plan 5d Ruling 2). A durable session this service
+   * cannot run now (no Temporal, no key, no worker polling) is refused when the creator
+   * asked for it, and becomes classic, with the reason, when it came from the setting.
+   */
+  private async startMode(asked: SessionMode | undefined): Promise<{ mode: SessionMode; fallback?: string }> {
+    const mode = asked ?? (await this.modeSetting())
+    if (mode === 'classic') return { mode }
+    const why = this.durableTurns
+      ? await this.durableTurns.unready()
+      : 'durable sessions need Temporal (SCADBUDDY_TEMPORAL_ADDRESS) and the secret key; this agent service has not got them'
+    if (why === undefined) return { mode }
+    if (asked) throw new SessionError('unavailable', why)
+    return { mode: 'classic', fallback: `ran as classic: ${why}` }
   }
 
   /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window. */
@@ -1051,18 +1072,14 @@ export class SessionManager {
     }
   }
 
-  async start(principal: Owner, options: StartOptions): Promise<{ session: SessionRecord; turn?: Turn }> {
+  async start(
+    principal: Owner,
+    options: StartOptions,
+  ): Promise<{ session: SessionRecord; turn?: Turn; modeFallback?: string }> {
     const prompt = options.prompt?.trim()
     const id = randomUUID()
     const title = options.title?.trim() || (prompt ? titleFrom(prompt) : '')
-    const mode = options.mode ?? (await this.modeSetting())
-    // Never run as classic instead (Ruling 13): the caller asked for a durable session.
-    if (mode === 'durable' && !this.durableTurns) {
-      throw new SessionError(
-        'unavailable',
-        'durable sessions need Temporal (SCADBUDDY_TEMPORAL_ADDRESS) and the secret key; this agent service has not got them',
-      )
-    }
+    const { mode, fallback } = await this.startMode(options.mode)
     const session = await this.insert(id, principal, {
       origin: options.origin,
       title,
@@ -1079,16 +1096,19 @@ export class SessionManager {
         owner: session.owner,
         title,
         budgetUsd: session.budgetUsd,
+        mode,
+        ...(fallback ? { modeFallback: fallback } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
-    if (!prompt) return { session }
+    const said = fallback ? { modeFallback: fallback } : {}
+    if (!prompt) return { session, ...said }
     const turn = await this.send(id, principal, prompt, {
       ...(options.context ? { context: options.context } : {}),
       ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
-    return { session: await this.get(id, principal), turn }
+    return { session: await this.get(id, principal), turn, ...said }
   }
 
   /**
@@ -2224,6 +2244,7 @@ export class SessionManager {
         owner: child.owner,
         title,
         budgetUsd: child.budgetUsd,
+        mode: child.mode,
       }),
       // The conversation, re-addressed to the child.
       ...history.map((e) => ({ ...e, sessionId: childId })),
