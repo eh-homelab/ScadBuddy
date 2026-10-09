@@ -41,6 +41,8 @@ export const SEND_MESSAGE_UPDATE = 'send_message'
 
 /** How long a readiness answer is reused (plan 5d Ruling 2): one Temporal call per window, not per start. */
 const READY_TTL_MS = 15_000
+/** How long "Temporal did not answer" is reused: short, so a blip passes, but an outage costs one deadline per window. */
+const UNANSWERED_TTL_MS = 2_000
 /** How long the readiness check waits for Temporal before calling it unreachable. */
 const READY_DEADLINE_MS = 3_000
 /** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW */
@@ -111,7 +113,7 @@ export class DurableTurns {
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
   readonly #sendTimeoutMs: number
-  #ready: { at: number; why: string | undefined } | undefined
+  #ready: { until: number; why: string | undefined } | undefined
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -127,14 +129,14 @@ export class DurableTurns {
    * Why a new durable session could not run now, or undefined when it could (plan 5d
    * Ruling 2): some agent-durable worker polls the `agent` queue. Until one does, a
    * turn would wait on a queue no one reads, so the manager falls back or refuses at
-   * start instead. An answer from Temporal is reused for READY_TTL_MS; no answer is
-   * not kept, so one blip does not refuse every explicit durable start for the window.
+   * start instead. An answer from Temporal is reused for READY_TTL_MS, no answer for
+   * UNANSWERED_TTL_MS, so one blip does not refuse explicit durable starts for long.
    * Temporal keeps listing a poller for some minutes after its worker has gone, so a
    * worker that died just now still counts as ready until then.
    */
   async unready(): Promise<string | undefined> {
     const cached = this.#ready
-    if (cached && Date.now() - cached.at < READY_TTL_MS) return cached.why
+    if (cached && Date.now() < cached.until) return cached.why
     let why: string | undefined
     let answered = true
     try {
@@ -150,7 +152,7 @@ export class DurableTurns {
       why = 'Temporal did not answer'
       answered = false
     }
-    this.#ready = answered ? { at: Date.now(), why } : undefined
+    this.#ready = { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why }
     return why
   }
 
