@@ -157,6 +157,28 @@ export function isBuiltInAnswer(error: unknown): boolean {
   return error instanceof ApiError && (error.problem as { built_in?: unknown }).built_in === true
 }
 
+/** A file of a package, for review (#1029; agent `plugins/packages/files.ts`). */
+export interface PackageFile {
+  path: string
+  size: number
+}
+
+/** One file's content: `null` when it is binary, cut at a preview unless asked for all. */
+export interface PackageFileContent {
+  path: string
+  size: number
+  binary: boolean
+  media_type: string
+  truncated: boolean
+  content: string | null
+}
+
+/** Which pin's files: the package's own, or its pending re-pin's. */
+export interface PackageFilesOf {
+  name: string
+  pending: boolean
+}
+
 export type PackageInstall =
   | { kind: 'git'; url: string; ref?: string; path?: string }
   | { kind: 'marketplace'; url: string; ref?: string; entry: string }
@@ -225,4 +247,12 @@ export const aiPlugins = {
   discardRepin: (name: string) =>
     request<PluginPackage>(`/plugin-packages/${seg(name)}/pending`, { method: 'DELETE' }),
   deletePackage: (name: string) => request<void>(`/plugin-packages/${seg(name)}`, { method: 'DELETE' }),
+  packageFiles: ({ name, pending }: PackageFilesOf) =>
+    request<{ files: PackageFile[] }>(`/plugin-packages/${seg(name)}/files${pending ? '?pending=true' : ''}`),
+  packageFile: ({ name, pending }: PackageFilesOf, path: string, full = false) => {
+    const query = new URLSearchParams({ path })
+    if (pending) query.set('pending', 'true')
+    if (full) query.set('full', 'true')
+    return request<PackageFileContent>(`/plugin-packages/${seg(name)}/file?${query}`)
+  },
 }

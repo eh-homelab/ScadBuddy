@@ -47,7 +47,7 @@ function app(commands: Commands | undefined) {
     kek: { ok: false, reason: 'not configured' },
     credentials: new MemoryCredentials(),
     pluginPackages: {} as PackageRepo,
-    packageInstaller: { prepare: async () => undefined as never, evict: async () => undefined },
+    packageInstaller: { prepare: async () => undefined as never, evict: async () => undefined, readFile: async () => undefined as never },
     commands,
     testConnection: async () => ({ ok: true, detail: '', duration_ms: 0, model: null }),
     remoteAddress: () => '10.0.0.7',

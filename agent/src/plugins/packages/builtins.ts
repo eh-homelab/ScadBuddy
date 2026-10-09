@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import path from 'node:path'
 import type { AuditContext } from '../../audit/log.js'
 import {
   PLAYWRIGHT_MCP_VERSION,
@@ -6,6 +8,7 @@ import {
   VENDORED_PLUGIN_DIR,
 } from '../../harness/headlessBrowser.js'
 import { OWN_PLUGIN_DIR } from '../../harness/ownPlugin.js'
+import type { PackageFileEntry } from './files.js'
 import { OWN_PLUGIN_NAME, type PackageReview, vetPackage } from './vet.js'
 
 // The plugins that ship in the agent image, listed beside the installed plugin
@@ -97,6 +100,43 @@ function reviewOf(b: BuiltIn): PackageReview {
     reviews.set(b.name, review)
   }
   return review
+}
+
+const fileLists = new Map<string, PackageFileEntry[]>()
+
+/**
+ * Every file of the built-in `name` with its size, for review (#1029), or
+ * undefined for any other name. Links are followed: in the repository
+ * agent/plugins/scadbuddy links `skills` and `agents` to plugins/scadbuddy
+ * (ownPlugin.ts), and the image holds copies. Its files ship with the image, so
+ * the list is taken once per process.
+ */
+export function builtInFiles(name: string): PackageFileEntry[] | undefined {
+  const b = builtInNamed(name)
+  if (!b) return undefined
+  let files = fileLists.get(name)
+  if (!files) {
+    const out: PackageFileEntry[] = []
+    const walk = (rel: string) => {
+      for (const entry of readdirSync(path.join(b.dir, rel)).sort()) {
+        const p = rel ? `${rel}/${entry}` : entry
+        const stat = statSync(path.join(b.dir, p))
+        if (stat.isDirectory()) walk(p)
+        else if (stat.isFile()) out.push({ path: p, size: stat.size })
+      }
+    }
+    walk('')
+    files = out.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
+    fileLists.set(name, files)
+  }
+  return files
+}
+
+/** One file `builtInFiles` lists, or undefined for any other path. */
+export function readBuiltInFile(name: string, rel: string): Buffer | undefined {
+  const b = builtInNamed(name)
+  if (!b || !builtInFiles(name)!.some((f) => f.path === rel)) return undefined
+  return readFileSync(path.join(b.dir, rel))
 }
 
 export async function builtInEnabled(settings: Pick<Settings, 'get'> | undefined, b: BuiltIn): Promise<boolean> {

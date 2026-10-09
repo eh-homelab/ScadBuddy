@@ -4,7 +4,14 @@ import { EgressError } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
 import type { Commands } from '../operations/run.js'
 import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from '../plugins/packages/install.js'
-import { BuiltInPackages, type BuiltInPackageView, builtInNamed } from '../plugins/packages/builtins.js'
+import {
+  BuiltInPackages,
+  type BuiltInPackageView,
+  builtInFiles,
+  builtInNamed,
+  readBuiltInFile,
+} from '../plugins/packages/builtins.js'
+import { fileContent } from '../plugins/packages/files.js'
 import { INSTALL_KIND, REPIN_KIND } from '../plugins/packages/operations.js'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { PackageRepo } from '../plugins/packages/store.js'
@@ -20,6 +27,8 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 //
 //   GET    /api/v1/ai/plugin-packages                  list
 //   GET    /api/v1/ai/plugin-packages/:name            one, with its review and any pending re-pin + diff
+//   GET    /api/v1/ai/plugin-packages/:name/files      { files: [{ path, size }] } (?pending=true: the re-pin's)
+//   GET    /api/v1/ai/plugin-packages/:name/file       ?path=…[&pending=true][&full=true]: one file's content (files.ts)
 //   POST   /api/v1/ai/plugin-packages                  install: fetch, pin, vet → stored UNAPPROVED (201), a command
 //   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash, allow_refused? } as reviewed
 //   PATCH  /api/v1/ai/plugin-packages/:name            { enabled } (an approved pin only)
@@ -59,7 +68,7 @@ export type PackageRouteDeps = {
   packages: PackageRepo | undefined
   /** The plugins that ship with the agent (builtins.ts), listed first; undefined without the database. */
   builtIns: BuiltInPackages | undefined
-  installer: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
+  installer: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> | undefined
   /** Install and re-pin run here; undefined without Temporal (503). */
   commands: Commands | undefined
   ready: () => Promise<boolean>
@@ -177,6 +186,49 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     return c.json(found)
   })
 
+  // A package's files for review (#1029). Only a path in the pin's own file list
+  // is read, from the copy that hashes to the pin (install.ts `readFile`), so a
+  // request never names a path of its own on disk.
+  const truthy = (c: Context, name: string) => c.req.query(name) === 'true'
+
+  app.get(`${base}/:name/files`, async (c) => {
+    const repo = await store()
+    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    const name = c.req.param('name')
+    const pending = truthy(c, 'pending')
+    if (builtInNamed(name)) {
+      if (pending) return c.json({ detail: `"${name}" is built in: it has no re-pin` }, 404)
+      return c.json({ files: builtInFiles(name) })
+    }
+    const found = await repo.filesOf(name, pending)
+    if (!found) return c.json({ detail: `no ${pending ? 'pending re-pin of a ' : ''}plugin package named "${name}"` }, 404)
+    // Sorted here: jsonb keeps an object's keys in its own order.
+    const paths = Object.keys(found.files).sort()
+    return c.json({ files: paths.map((path) => ({ path, size: found.files[path]!.size })) })
+  })
+
+  app.get(`${base}/:name/file`, async (c) => {
+    const repo = await store()
+    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    const name = c.req.param('name')
+    const rel = c.req.query('path') ?? ''
+    const pending = truthy(c, 'pending')
+    const full = truthy(c, 'full')
+    const notFound = () => c.json({ detail: `"${name}" has no file "${rel}"${pending ? ' in its pending re-pin' : ''}` }, 404)
+    if (builtInNamed(name)) {
+      const bytes = pending ? undefined : readBuiltInFile(name, rel)
+      return bytes ? c.json(fileContent(rel, bytes, full)) : notFound()
+    }
+    const found = await repo.filesOf(name, pending)
+    if (!found || !Object.hasOwn(found.files, rel)) return notFound()
+    if (!deps.installer) return c.json({ detail: 'plugin packages are not available: no package cache' }, 503)
+    try {
+      return c.json(fileContent(rel, await deps.installer.readFile(found.pin, rel), full))
+    } catch (err) {
+      return refusal(c, err)
+    }
+  })
+
   app.post(base, async (c) => {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
@@ -276,7 +328,7 @@ declare module '../app.js' {
     /** Installed plugin packages (#297, plugins/packages/); undefined when there is no database. */
     pluginPackages?: PackageRepo | undefined
     /** Fetches and caches plugin packages; undefined disables installing. */
-    packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
+    packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> | undefined
   }
 }
 

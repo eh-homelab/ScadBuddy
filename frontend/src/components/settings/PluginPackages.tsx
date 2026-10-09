@@ -10,6 +10,7 @@ import {
   type BuiltInPluginPackage,
   type FileDiff,
   type ListedPackage,
+  type PackageFilesOf,
   type PackageInstall,
   type PackageReview,
   type PluginPackage,
@@ -20,6 +21,7 @@ import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
 import { Spinner } from '../ui/Spinner'
+import { PackageFiles } from './PackageFiles'
 
 /**
  * Settings → Plugin packages (#297): Claude plugins (skills, subagents, hooks,
@@ -78,8 +80,8 @@ function PartList({ label, items }: { label: string; items: ReactNode[] }) {
   )
 }
 
-/** Every part of a package, as the admin reviews it before approving. */
-export function ReviewParts({ review }: { review: PackageReview }) {
+/** Every part of a package, as the admin reviews it before approving; `of` is whose files to read. */
+export function ReviewParts({ review, of }: { review: PackageReview; of: PackageFilesOf }) {
   return (
     <dl className="grid gap-2 text-[12px] sm:grid-cols-2" aria-label={`Review of ${review.name}`}>
       <PartList label="Skills" items={review.skills.map((s) => `/${s}`)} />
@@ -113,16 +115,7 @@ export function ReviewParts({ review }: { review: PackageReview }) {
         </div>
       )}
       <div className="sm:col-span-2">
-        <details>
-          <summary className="cursor-pointer text-muted">Files to read ({review.files.length})</summary>
-          <ul className="mt-1 space-y-0.5">
-            {review.files.map((f) => (
-              <li key={f} className="sb-num break-all">
-                {f}
-              </li>
-            ))}
-          </ul>
-        </details>
+        <PackageFiles review={review} of={of} />
       </div>
     </dl>
   )
@@ -254,7 +247,7 @@ function ApproveDialog({
           </dd>
         </dl>
         {pending && <MovedNotice pkg={pkg} />}
-        <ReviewParts review={pin.review} />
+        <ReviewParts review={pin.review} of={{ name: pkg.name, pending: pending && pkg.pending !== null }} />
         <label className="flex items-start gap-2" {...USER_ONLY}>
           <input
             type="checkbox"
@@ -435,6 +428,27 @@ function Badge({ tone, children }: { tone: 'ok' | 'warn' | 'muted'; children: Re
   return <span className={`rounded-full border px-2 py-px text-[11px] ${cls}`}>{children}</span>
 }
 
+/** A built-in's skills and subagents on its card, not only in its review (#1297). */
+function BuiltInParts({ review }: { review: PackageReview }) {
+  if (review.skills.length === 0 && review.agents.length === 0) return null
+  return (
+    <div aria-label={`What ${review.name} adds`} className="mt-2 space-y-0.5 text-[12px]">
+      {review.skills.length > 0 && (
+        <p className="[overflow-wrap:anywhere]">
+          <span className="text-muted">Skills: </span>
+          <span className="sb-num">{review.skills.map((s) => `/${s}`).join(', ')}</span>
+        </p>
+      )}
+      {review.agents.length > 0 && (
+        <p className="[overflow-wrap:anywhere]">
+          <span className="text-muted">Subagents: </span>
+          <span className="sb-num">{review.agents.join(', ')}</span>
+        </p>
+      )}
+    </div>
+  )
+}
+
 /** The built-in whose switch is the headless-browser setting (agent plugins/packages/builtins.ts). */
 const BROWSER_PLUGIN = 'playwright'
 
@@ -465,6 +479,7 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
         {pkg.enabled ? <Badge tone="ok">Enabled</Badge> : <Badge tone="muted">Disabled</Badge>}
       </div>
       {pkg.review.description && <p className="mt-1 text-[12px] text-muted">{pkg.review.description}</p>}
+      <BuiltInParts review={pkg.review} />
       <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
         <dt className="text-muted">Source</dt>
         <dd>
@@ -474,7 +489,7 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
       <details className="mt-2">
         <summary className="cursor-pointer text-[12px] text-muted">Review</summary>
         <div className="mt-2">
-          <ReviewParts review={pkg.review} />
+          <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
         </div>
       </details>
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -565,7 +580,7 @@ function PackageCard({
       <details className="mt-2" open={!pkg.approved}>
         <summary className="cursor-pointer text-[12px] text-muted">Review</summary>
         <div className="mt-2">
-          <ReviewParts review={pkg.review} />
+          <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
         </div>
       </details>
 

@@ -333,6 +333,67 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect((await del()).status).toBe(409) // the built-in stays
     })
 
+    it("lists a package's files with their sizes and serves each one's content, the pending re-pin's too", async () => {
+      await install()
+      const a = app()
+      const files = await a.request('/api/v1/ai/plugin-packages/greeter/files', { headers: READ })
+      expect(files.status).toBe(200)
+      const listed = (await files.json()) as { files: { path: string; size: number }[] }
+      expect(listed.files).toContainEqual({ path: 'README.md', size: GREETER['README.md']!.length })
+      expect(listed.files.map((f) => f.path)).toEqual(Object.keys(GREETER).sort())
+
+      const read = (q: string) => a.request(`/api/v1/ai/plugin-packages/greeter/file?${q}`, { headers: READ })
+      const readme = await read('path=README.md')
+      expect(readme.status).toBe(200)
+      expect(await readme.json()).toEqual({
+        path: 'README.md',
+        size: GREETER['README.md']!.length,
+        binary: false,
+        media_type: 'text/markdown',
+        truncated: false,
+        content: GREETER['README.md'],
+      })
+      // Only a path the pin lists: never one outside the package, or a file it does not have.
+      for (const q of ['path=../../etc/passwd', 'path=%2Fetc%2Fpasswd', 'path=missing.md', '']) {
+        expect((await read(q)).status, q).toBe(404)
+      }
+      expect((await read('path=README.md&pending=true')).status).toBe(404) // no re-pin yet
+
+      repos.greeter!.commitFiles({ 'commands/wave.md': 'Wave twice.\n', 'NOTES.md': 'new\n' })
+      await a.request('/api/v1/ai/plugin-packages/greeter/repin', json('POST', { ref: 'main' }))
+      const pending = await read('path=NOTES.md&pending=true')
+      expect(await pending.json()).toMatchObject({ content: 'new\n' })
+      expect(await (await read('path=commands/wave.md&pending=true')).json()).toMatchObject({ content: 'Wave twice.\n' })
+      expect(await (await read('path=commands/wave.md')).json()).toMatchObject({ content: GREETER['commands/wave.md'] })
+      expect((await read('path=NOTES.md')).status).toBe(404)
+      const pendingList = (await (
+        await a.request('/api/v1/ai/plugin-packages/greeter/files?pending=true', { headers: READ })
+      ).json()) as { files: { path: string }[] }
+      expect(pendingList.files.map((f) => f.path)).toContain('NOTES.md')
+
+      expect((await a.request('/api/v1/ai/plugin-packages/nope/files', { headers: READ })).status).toBe(404)
+      const crossSite = await a.request('/api/v1/ai/plugin-packages/greeter/file?path=README.md', {
+        headers: { ...READ, 'sec-fetch-site': 'cross-site' },
+      })
+      expect(crossSite.status).toBe(403)
+    })
+
+    it("serves a built-in plugin's files, and has no re-pin of one", async () => {
+      const a = createApp({ ...appDeps(), settings: new SettingsStore(db.sql) })
+      const listed = (await (await a.request('/api/v1/ai/plugin-packages/scadbuddy/files', { headers: READ })).json()) as {
+        files: { path: string }[]
+      }
+      expect(listed.files.map((f) => f.path)).toContain('skills/authoring/SKILL.md')
+      const skill = await a.request('/api/v1/ai/plugin-packages/scadbuddy/file?path=skills/authoring/SKILL.md', {
+        headers: READ,
+      })
+      expect(await skill.json()).toMatchObject({ binary: false, media_type: 'text/markdown', content: expect.stringMatching(/^---/) })
+      const outside = await a.request('/api/v1/ai/plugin-packages/scadbuddy/file?path=../package.json', { headers: READ })
+      expect(outside.status).toBe(404)
+      const pending = await a.request('/api/v1/ai/plugin-packages/scadbuddy/files?pending=true', { headers: READ })
+      expect(pending.status).toBe(404)
+    })
+
     it('answers an install of a built-in plugin with 409 built_in, not a refusal', async () => {
       repos.greeter!.remove()
       repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })

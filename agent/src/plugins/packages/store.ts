@@ -171,6 +171,8 @@ export type PackageRepo = {
   delete(name: string): Promise<boolean>
   /** Every enabled (so approved) pin, for a harness run. */
   enabledPins(): Promise<PackagePin[]>
+  /** The pin (or its pending re-pin) with its file list, for reading its files (#1029). */
+  filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined>
 }
 
 export class PackageStore implements PackageRepo {
@@ -320,5 +322,23 @@ export class PackageStore implements PackageRepo {
   async enabledPins(): Promise<PackagePin[]> {
     const rows = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE enabled ORDER BY name`
     return rows.map(pin)
+  }
+
+  async filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined> {
+    const [row] = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name}`
+    if (!row) return undefined
+    if (!pending) return { pin: pin(row), files: row.files }
+    if (!row.pending_commit_sha || !row.pending_content_hash || !row.pending_files) return undefined
+    if (row.pending_fetch_url === null || row.pending_fetch_path === null) return undefined
+    return {
+      pin: {
+        name: row.name,
+        fetchUrl: row.pending_fetch_url,
+        fetchPath: row.pending_fetch_path,
+        commit: row.pending_commit_sha,
+        contentHash: row.pending_content_hash,
+      },
+      files: row.pending_files,
+    }
   }
 }

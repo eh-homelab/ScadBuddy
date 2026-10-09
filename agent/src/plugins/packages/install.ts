@@ -367,7 +367,19 @@ export class PackageInstaller {
     return next
   }
 
-  private async materialiseNow(pin: PackagePin): Promise<string> {
+  /**
+   * One file of `pin`, for review (#1029, routes/pluginPackages.ts): read from the
+   * copy that hashes to the pin, fetched again when it does not, but never vetted
+   * for loading, since a package the rules refuse is the one that most needs reading.
+   * `rel` must be a path in the pin's file list (the route checks). Runs in the
+   * package's queue, so a prune cannot remove the copy mid-read.
+   */
+  readFile(pin: PackagePin, rel: string): Promise<Buffer> {
+    return this.serial(pin.name, async () => readFile(path.join(await this.verifiedCopy(pin), rel)))
+  }
+
+  /** The cached directory of `pin` when every file hashes to it, else fetched again at the pinned commit. */
+  private async verifiedCopy(pin: PackagePin): Promise<string> {
     const dir = this.cacheDir(pin)
     if (!(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
@@ -394,6 +406,11 @@ export class PackageInstaller {
         throw new PluginError(`the cached copy of ${pin.name} does not match its pin after fetching`, 502)
       }
     }
+    return dir
+  }
+
+  private async materialiseNow(pin: PackagePin): Promise<string> {
+    const dir = await this.verifiedCopy(pin)
     // Re-vetted at every load: the rules may be stricter than when it was
     // approved. A pin approved with `allow_refused` skips the allowable ones,
     // including any a later rule adds: the admin allowed this exact content.

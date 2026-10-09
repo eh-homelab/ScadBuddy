@@ -103,7 +103,7 @@ function builtIns(): BuiltInPluginPackage[] {
         version: '0.1.10',
         skills: ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
         agents: ['scadbuddy:model-author', 'scadbuddy:print-analyst'],
-        files: ['.claude-plugin/plugin.json'],
+        files: ['.claude-plugin/plugin.json', 'agents/model-author.md', 'skills/authoring/SKILL.md'],
       },
       approved: true,
       enabled: true,
