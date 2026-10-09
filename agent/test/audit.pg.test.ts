@@ -312,6 +312,40 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     expect((await audit.list({ kind: 'approval' })).entries.every((r) => r.approved_by === null)).toBe(true)
   })
 
+  // spec §6.6: a durable call has no ai_approvals row; its approver is its request's responder.
+  it("names a durable call's approver from ai_input_responses, by its request id", async () => {
+    const session = '33333333-3333-4333-8333-333333333333'
+    await db.sql`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
+      VALUES (${session}, 'mcp', 'bearer', 'token:a', 'Agent A', 'bearer', 'token:a', 'running', 10, 1, 'durable')`
+    const yes = `durable:${session}:run-1:t1`
+    const no = `durable:${session}:run-1:t2`
+    await db.sql`
+      INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder)
+      VALUES (${yes}, ${session}, 'approval', 'approved', ${db.sql.json(browser)}),
+             (${no}, ${session}, 'approval', 'denied', ${db.sql.json(browser)})`
+    const call = (toolUseId: string, requestId: string) =>
+      audit.record({
+        kind: 'tool_call',
+        action: 'print_output',
+        surface: 'harness',
+        actor: { kind: 'bearer', id: 'token:a', label: 'Agent A' },
+        sessionId: session,
+        toolUseId,
+        requestId,
+        tier: 'outward',
+        outcome: 'ok',
+      })
+    await call('t1', yes)
+    await call('t2', no)
+    const rows = await db.sql<{ tool_use_id: string; request_id: string; approved_by_id: string | null }[]>`
+      SELECT tool_use_id, request_id, approved_by_id FROM ai_audit WHERE session_id = ${session} ORDER BY tool_use_id`
+    expect(rows.map((r) => [r.tool_use_id, r.request_id, r.approved_by_id])).toEqual([
+      ['t1', yes, 'browser'],
+      ['t2', no, null],
+    ])
+  })
+
   it('records confirm_action by what it did: refused while pending, the executed tool with its approval and approver', async () => {
     const output = '0123456789abcdef0123456789abcdef'
     const sent: unknown[] = []

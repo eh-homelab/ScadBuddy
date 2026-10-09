@@ -15,6 +15,7 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
+import { approvalEntry, inputRequested, inputResolved } from '../gate/classic.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
 import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
@@ -537,6 +538,31 @@ export class ApprovalService {
     }
   }
 
+  /** Whether a non-browser principal holds the per-token approval grant (spec §6). */
+  async holdsGrant(principal: Owner): Promise<boolean> {
+    return this.hasGrant(principal)
+  }
+
+  /**
+   * Every pending approval `principal` may see, oldest first: all of them for the
+   * browser user and grant holders; for anyone else, those of sessions it owns or
+   * started and its own session-less ones (MCP prepares).
+   */
+  async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
+    if (principal.kind === 'browser' || (await this.hasGrant(principal))) return this.list(principal, { pending: true })
+    await this.expireDue()
+    const rows = await this.deps.sql.unsafe<Row[]>(
+      `SELECT ${COLUMNS} FROM ai_approvals a
+       WHERE a.decision IS NULL AND (
+         (a.session_id IS NULL AND a.requested_by_kind = $1 AND a.requested_by_id = $2)
+         OR EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id = a.session_id
+                    AND ((s.owner_kind = $1 AND s.owner_id = $2) OR (s.creator_kind = $1 AND s.creator_id = $2))))
+       ORDER BY a.created_at, a.id LIMIT 500`,
+      [principal.kind, principal.id],
+    )
+    return rows.map(record)
+  }
+
   private async hasGrant(principal: Owner): Promise<boolean> {
     return principal.kind !== 'browser' && this.deps.grants !== undefined && (await this.deps.grants(principal))
   }
@@ -665,6 +691,7 @@ export class ApprovalService {
           summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
           risk: 'outward',
         }),
+        inputRequested(created.sessionId, approvalEntry(created)),
       ]
       // Only the parked turn itself moves the session to waiting_approval.
       if (request.turnId !== null) {
@@ -734,7 +761,10 @@ export class ApprovalService {
             ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
             ...(reason && (decision === 'expired' || decision === 'cancelled') ? { reason } : {}),
           })
-          const events = [scrubForLog(resolved, [])]
+          const events = [
+            scrubForLog(resolved, []),
+            inputResolved(settled.sessionId, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
+          ]
           logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
         }
         return settled

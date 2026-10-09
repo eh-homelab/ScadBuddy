@@ -6,7 +6,8 @@ import { attentionCard, type AttentionSpec, parseAttention } from '../src/harnes
 import { ANSWER_MAX, ATTENTION_TOOL, QUESTION_TEXT_MAX, QUESTIONS_MAX, type QuestionVerdict } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
-import { RespondBody, RESPONSE_MAX } from '../src/routes/pendingInput.js'
+import { randomUUID } from 'node:crypto'
+import { pendingInput, RespondBody, RESPONSE_MAX } from '../src/routes/pendingInput.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -371,5 +372,54 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
       { answered: true, answers: { 'The ScadBuddy tab closed; reopen it?': long } },
       { answered: true, answers: { 'Which colour?': long, 'Which parts?': long } },
     ])
+  })
+
+  // spec §6.6 "Two reads, two sources": the badge's read is one Postgres read of the
+  // classic stores and the durable projection; a durable entry past its timer is `expiring`.
+  it('lists durable entries from the projection beside classic ones, never their input, and marks an overdue one expiring', async () => {
+    const { m, session, turn } = await setUp()
+    const durable = randomUUID()
+    await db.sql`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
+      VALUES (${durable}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'waiting_approval', 10, 1, 'durable')`
+    await db.sql`
+      INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, requested_by, responders, expires_at)
+      VALUES (${`durable:${durable}:run-1:toolu_live`}, ${durable}, ${`session-${durable}`}, 'run-1', 'approval', 'print_output', '{"output":"box"}',
+              ${'a'.repeat(64)}, ${db.sql.json(browser)}, ${['browser', 'grant']}, now() + interval '10 minutes'),
+             (${`durable:${durable}:run-1:toolu_late`}, ${durable}, ${`session-${durable}`}, 'run-1', 'approval', 'print_output', '{"output":"box"}',
+              ${'a'.repeat(64)}, ${db.sql.json(browser)}, ${['browser', 'grant']}, now() - interval '1 second')`
+    const { entries } = await pendingInput(m)
+    const mine = entries.filter((e) => e.session_id === durable)
+    const live = mine.find((e) => e.id === `durable:${durable}:run-1:toolu_live`)
+    expect(mine).toHaveLength(2)
+    expect(live).toMatchObject({ kind: 'approval', summary: '{"output":"box"}', prompt: '', requested_by: browser })
+    expect(live).not.toHaveProperty('expiring')
+    expect(mine.find((e) => e.id === `durable:${durable}:run-1:toolu_late`)).toMatchObject({ expiring: true })
+    expect(entries.filter((e) => e.session_id === session.id)).toHaveLength(3)
+
+    // One session's entries: a classic one's from its stores.
+    const app = createApp({
+      database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+      backend: () => Promise.resolve(true),
+      kek: { ok: false, reason: 'unused' },
+      credentials: new MemoryCredentials(),
+      testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+      approvals: m.approvals,
+      sessions: m,
+    })
+    const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
+    const one = await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })
+    expect(one.status).toBe(200)
+    const page = (await one.json()) as { entries: { session_id: string }[] }
+    expect(page.entries).toHaveLength(3)
+    expect(page.entries.every((e) => e.session_id === session.id)).toBe(true)
+    expect((await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`)).status).toBe(403)
+    expect((await app.request(`/api/v1/ai/sessions/${randomUUID()}/pending-input`, { headers: READ })).status).toBe(404)
+    // A durable session with no Temporal configured: its workflow cannot be asked.
+    expect((await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })).status).toBe(503)
+    await m.interrupt(session.id, browser)
+    await turn.done
   })
 })

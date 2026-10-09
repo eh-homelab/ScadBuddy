@@ -463,6 +463,7 @@ export class ChatConnection {
           return
         }
         for await (const { event: e } of stream) {
+          if (!sentToPanel(e)) continue
           // Wait for the client to read what it has before sending more.
           if (!(await this.drained(controller.signal))) return
           this.emit(e)
@@ -474,6 +475,15 @@ export class ChatConnection {
       }
     })()
   }
+}
+
+/**
+ * Whether a logged event goes to the panel. `input.*` drive notifications (spec
+ * §6.6); the panel's cards keep their own events, and a bundle that predates these
+ * types would call each a protocol error.
+ */
+export function sentToPanel(e: ServerEvent): boolean {
+  return e.type !== 'input.requested' && e.type !== 'input.resolved'
 }
 
 export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {

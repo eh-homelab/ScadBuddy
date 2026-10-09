@@ -8,7 +8,11 @@ import { TabHub } from '../src/bridge/hub.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import type { TouchedCall } from '../src/sessions/touched.js'
-import { toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { answerResult } from '../src/gate/answers.js'
+import { answeredText, timedOutText } from '../src/harness/attention.js'
+import { answersText } from '../src/harness/questions.js'
+import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -228,5 +232,77 @@ describe('tool activities', () => {
     const running = e.run(h.activities.slow!, {})
     setTimeout(() => e.cancel(), 20)
     await expect(running).rejects.toBeInstanceOf(CancelledFailure)
+  })
+})
+
+// spec §6.6: a durable call's gate entry. Every call's audit row names its request id,
+// an `answer` tool's result is the recorded answer, and gate.describe_call gives
+// DurableSession an approval's summary and hash.
+describe('the gate in tool activities', () => {
+  const REQUEST = `durable:${SESSION}:run-1:toolu_01`
+
+  it("names the call's request id on its audit row", async () => {
+    const h = harness()
+    await env().run(h.activities.whoami!, {})
+    expect(h.audits[0]).toMatchObject({ requestId: REQUEST, toolUseId: 'toolu_01' })
+  })
+
+  it("returns an answer tool's recorded answer, never its handler's, and fails a call nobody answered", async () => {
+    const asked: string[] = []
+    const answers = {
+      result: async (requestId: string, tool: string, input: unknown) => {
+        asked.push(requestId)
+        return answerResult(
+          requestId === REQUEST ? { outcome: 'answered', response: { answers: ['Red', 'Both'] }, reason: null } : undefined,
+          tool,
+          input,
+        )
+      },
+    }
+    const h = harness({ answers }, [...TOOLS, ...DURABLE_ONLY_TOOLS])
+    const questions = [
+      { question: 'Which colour?', header: 'Colour', options: [{ label: 'Red', description: 'r' }, { label: 'Blue', description: 'b' }], multiSelect: false },
+      { question: 'Which parts?', header: 'Parts', options: [{ label: 'Both', description: 'x' }, { label: 'Lid', description: 'y' }], multiSelect: false },
+    ]
+    const content = (await env().run(h.activities.ask_user!, { questions })) as unknown as { text: string }[]
+    expect(content[0]!.text).toBe(answersText({ 'Which colour?': 'Red', 'Which parts?': 'Both' }))
+    expect(asked).toEqual([REQUEST])
+    expect(h.audits).toEqual([expect.objectContaining({ action: 'ask_user', requestId: REQUEST, outcome: 'ok' })])
+    const failed = await failure(env(undefined, 'tool-toolu_02').run(h.activities.wait_for_user!, { reason: 'blocked', message: 'stuck' }))
+    expect(failed.nonRetryable).toBe(true)
+    expect(failed.message).toMatch(/did not answer/)
+    // Without the database, an answer tool refuses.
+    await failure(env().run(harness({}, DURABLE_ONLY_TOOLS).activities.ask_user!, { questions }))
+  })
+
+  it('describes a call with the summary and hash a classic approval would carry', async () => {
+    const audit = { record: async () => {}, hash: (tool: string) => `hash:${tool}`, summarise: (tool: string) => `summary:${tool}` }
+    const describeCall = gateActivities({ audit })[DESCRIBE_CALL_ACTIVITY]!
+    expect(await env().run(describeCall, { tool: 'print_output', input: { output: 'box' } })).toEqual({
+      summary: 'summary:print_output',
+      input_hash: 'hash:print_output',
+    })
+    await failure(env().run(describeCall, { tool: 'print_output', input: [] }))
+    await failure(env().run(gateActivities({})[DESCRIBE_CALL_ACTIVITY]!, { tool: 'x', input: {} }))
+  })
+})
+
+describe('answerResult', () => {
+  it('turns a recorded outcome into the tool result the model reads', () => {
+    expect(answerResult({ outcome: 'answered', response: { answers: ['Print it'] }, reason: null }, 'wait_for_user', {})).toEqual({
+      ok: true,
+      text: answeredText('Print it'),
+    })
+    expect(answerResult({ outcome: 'timed_out', response: null, reason: null }, 'wait_for_user', { timeout_s: 60 })).toEqual({
+      ok: true,
+      text: timedOutText(60),
+    })
+    // A timer never answers a question, and a cancel is an error.
+    expect(answerResult({ outcome: 'timed_out', response: null, reason: null }, 'ask_user', {}).ok).toBe(false)
+    expect(answerResult({ outcome: 'cancelled', response: null, reason: 'a new turn' }, 'ask_user', {})).toEqual({
+      ok: false,
+      text: 'The user did not answer: a new turn.',
+    })
+    expect(answerResult({ outcome: 'answered', response: { answers: [] }, reason: null }, 'ask_user', {}).ok).toBe(false)
   })
 })

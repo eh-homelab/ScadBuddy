@@ -12,7 +12,8 @@ import { type PendingInput, PendingInputSchema } from './chat/protocol'
  * means "things waiting for you", not only approvals.
  *
  * This is the in-app channel only. OS notifications and the tab-disconnected trigger
- * are #815's later parts. Durable sessions join the same read when they land.
+ * are #815's later parts. Durable sessions' entries are in the same read; one past its
+ * timer whose worker has not resolved it yet is `expiring` and not counted.
  */
 
 export const ATTENTION_PATH = '/api/v1/ai/pending-input'
@@ -69,6 +70,7 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
     if (!parsed.success) return null
     const counts: PendingCounts = { approvals: 0, questions: 0, attention: 0, summaries: 0 }
     for (const entry of parsed.data.entries) {
+      if (entry.expiring) continue
       // An approval is the call's decision; an answer is a question, or an attention request when it says so
       // (a summary when its reason is `done`).
       if (entry.kind === 'approval') counts.approvals += 1

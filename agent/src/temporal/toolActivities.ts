@@ -5,6 +5,9 @@ import type { AuditLog } from '../audit/log.js'
 import { harnessPrincipal } from '../auth/principal.js'
 import type { Owner } from '../sessions/protocol.js'
 import { parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
+import type { AnswerReader } from '../gate/answers.js'
+import { durableRequestId } from '../gate/ids.js'
+import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
 // under the tool's name, which is how the durable worker's `activity_as_tool` stubs
@@ -48,6 +51,8 @@ export type ToolActivityDeps = {
   services: ToolServices
   sessions: SessionOwners
   audit?: Pick<AuditLog, 'record' | 'hash' | 'summarise'> | undefined
+  /** The recorded answers an `answer` tool returns (gate/answers.ts); those tools refuse without it. */
+  answers?: AnswerReader | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
   heartbeatMs?: number
 }
@@ -96,6 +101,10 @@ async function runAsActivity(
       UNKNOWN_SESSION,
     )
   }
+  const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
+  // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
+  const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
+  if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
   const principal = harnessPrincipal(owner)
   const services = deps.services
   const heartbeat = setInterval(() => context.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
@@ -125,7 +134,8 @@ async function runAsActivity(
     surface: 'harness',
     actor: owner,
     sessionId: session,
-    toolUseId: activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId,
+    toolUseId,
+    requestId,
     tier: run.ran ? (lookup(run.ran.tool)?.risk ?? tool.risk) : tool.risk,
     inputHash: deps.audit.hash(action, parsed),
     inputSummary: deps.audit.summarise(action, parsed),
@@ -137,4 +147,61 @@ async function runAsActivity(
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
   return run.result.content
+}
+
+/**
+ * An `answer` tool's call (ask_user, wait_for_user): DurableSession parked it and the
+ * user answered, or its timer ended it, before it was let through; the result is what
+ * was recorded, never a handler's (gate/answers.ts).
+ */
+async function answerAsActivity(
+  tool: Tool,
+  input: unknown,
+  deps: ToolActivityDeps,
+  call: { session: string; owner: Owner; toolUseId: string; requestId: string },
+): Promise<unknown> {
+  if (!deps.answers) throw ApplicationFailure.nonRetryable(`${tool.name} needs the database its answers are recorded in`, TOOL_ERROR)
+  const startedAt = new Date()
+  const answer = await deps.answers.result(call.requestId, tool.name, input)
+  const parsed = parsedOrRaw(tool, input)
+  await deps.audit?.record({
+    kind: 'tool_call',
+    action: tool.name,
+    surface: 'harness',
+    actor: call.owner,
+    sessionId: call.session,
+    toolUseId: call.toolUseId,
+    requestId: call.requestId,
+    tier: tool.risk,
+    inputHash: deps.audit.hash(tool.name, parsed),
+    inputSummary: deps.audit.summarise(tool.name, parsed),
+    outcome: answer.ok ? 'ok' : 'refused',
+    startedAt,
+    finishedAt: new Date(),
+  })
+  if (!answer.ok) throw ApplicationFailure.nonRetryable(answer.text, TOOL_ERROR)
+  return [{ type: 'text', text: answer.text }]
+}
+
+/** The activity that describes a call for its gate entry (gateActivities). */
+export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
+
+/**
+ * What DurableSession needs to open an `approval` entry (spec §6.6): the call's
+ * scrubbed summary and its input hash, computed as a classic approval's are (the
+ * approvals' HMAC key, audit/log.ts), so the agent alone holds the key and the
+ * scrubbing rules. Served on `agent-tools` beside the tools.
+ */
+export function gateActivities(deps: Pick<ToolActivityDeps, 'audit'>): Record<string, ToolActivity> {
+  return {
+    [DESCRIBE_CALL_ACTIVITY]: async (args: unknown) => {
+      const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
+      if (!deps.audit) throw ApplicationFailure.nonRetryable('describing a call needs the audit log and its key', TOOL_ERROR)
+      if (typeof tool !== 'string' || typeof input !== 'object' || input === null || Array.isArray(input)) {
+        throw ApplicationFailure.nonRetryable('describe_call takes {tool: string, input: object}', TOOL_ERROR)
+      }
+      const fields = input as Record<string, unknown>
+      return { summary: deps.audit.summarise(tool, fields), input_hash: deps.audit.hash(tool, fields) }
+    },
+  }
 }

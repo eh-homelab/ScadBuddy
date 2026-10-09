@@ -23,6 +23,14 @@ function closed(err: RespondError): { closed?: string } {
 }
 
 /**
+ * The respond route's id for a card: a classic card's id is its row's, so it takes its
+ * store's prefix; a durable session's card already carries its whole request id
+ * (`durable:…`, agent src/gate/ids.ts).
+ */
+export const requestIdOf = (kind: 'approval' | 'question', id: string): string =>
+  id.startsWith('durable:') ? id : `${kind}:${id}`
+
+/**
  * A response as the user action `assistant.respond` (#1384): its POST is the span's
  * child, so it carries the span's `traceparent` as other API calls do, where the socket
  * frame it replaced carried `messageTraceparent()`.
@@ -152,7 +160,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     // Shown as `sent` until the server's approval.resolved confirms it; a refused one
     // goes back to pending, buttons live, with the agent's reason (#815).
     dispatch({ type: 'decided', sessionId, approvalId })
-    tracedRespond(`approval:${approvalId}`, decisionBody(approve))
+    tracedRespond(requestIdOf('approval', approvalId), decisionBody(approve))
       .then(
         (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
         (err: RespondError) =>
@@ -165,7 +173,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     const item = claim(sessionId, 'question', questionId)
     if (item?.kind !== 'question') return
     dispatch({ type: 'answered', sessionId, questionId })
-    tracedRespond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined))
+    tracedRespond(requestIdOf('question', questionId), answerBody(item.questions, answers, item.attention !== undefined))
       .then(
         (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
         (err: RespondError) =>

@@ -40,8 +40,12 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
-import { PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { gateActivities, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { DURABLE_TOOLS } from './tools/manifest.js'
+import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
+import { DurableGate } from './gate/durable.js'
+import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
@@ -305,6 +309,11 @@ const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
 })
+// Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
+const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
+})
 // Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
 // or a restart that closed the pool under it) say so and stop claiming to run.
 const stopReaper = sessions?.startReaper(SESSION_REAP_MS, {
@@ -334,7 +343,13 @@ const temporalWorker =
         address: temporal.address,
         namespace: config.temporalNamespace,
         activities: {
-          ...toolActivities(ALL_TOOLS, { services: toolServices, sessions: new PgSessionOwners(temporal.sql), audit }),
+          ...toolActivities(DURABLE_TOOLS, {
+            services: toolServices,
+            sessions: new PgSessionOwners(temporal.sql),
+            audit,
+            answers: new PgAnswers(temporal.sql),
+          }),
+          ...gateActivities({ audit }),
           ...operationActivities(commandKinds, operationStore),
         },
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
@@ -343,14 +358,28 @@ const temporalWorker =
         },
       })
     : undefined
-// Routes start commands through a lazy client: a Temporal that is down answers 503.
+// Routes start commands, and reach durable sessions' gates, through a lazy client: a
+// Temporal that is down answers 503.
+const temporalClient = temporal
+  ? new Client({ connection: Connection.lazy({ address: temporal.address }), namespace: config.temporalNamespace })
+  : undefined
+// A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
+const stopOrphanSweep =
+  sessions && temporalClient
+    ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit }).start(
+        APPROVAL_SWEEP_MS,
+        {
+          ...(database ? { ready: database.ready } : {}),
+          onError: (err) => console.error('pending-input orphan sweep failed:', (err as Error).message),
+        },
+      )
+    : undefined
 const commands =
-  temporal && operationStore
+  temporalClient && operationStore
     ? new AgentCommands({
-        client: new Client({
-          connection: Connection.lazy({ address: temporal.address }),
-          namespace: config.temporalNamespace,
-        }),
+        client: temporalClient,
         store: operationStore,
         kinds: commandKinds,
         searchAttributes: config.temporalSearchAttributes,
@@ -425,6 +454,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 
 async function stop(): Promise<void> {
   stopSweeper?.()
+  stopQuestionSweeper?.()
+  stopOrphanSweep?.()
   stopReaper?.()
   stopRetention?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
