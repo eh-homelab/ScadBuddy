@@ -184,15 +184,19 @@ class SessionEvents:
                 activity.heartbeat()
                 await asyncio.sleep(FOLLOW_HEARTBEAT.total_seconds() / 3)
 
+        # A turn with a prompt ends only after it: an earlier turn's end, left unread when
+        # its subscriber was cancelled, is written but does not end this one.
+        own = not args.prompted
         beater = asyncio.create_task(beat())
         try:
             async for event in follow_agent(activity.client(), args.workflow_id, from_offset=at[0]):
                 at[0] = int(event["offset"])
+                own = own or event.get("type") == "prompt"
                 translated = translate(args.session_id, event, tiers)
                 async with self._connect() as conn:
                     if await append_from(conn, args.session_id, at[0], translated):
                         written += len(translated)
-                if event.get("type") in LAST:
+                if own and event.get("type") in LAST:
                     return FollowResult(ended=str(event["type"]), events=written)
             return FollowResult(ended="closed", events=written)
         finally:

@@ -62,6 +62,8 @@ class SessionStart:
     system_append: str | None = None
     agent: AgentState | None = None
     turn: TurnStart | None = None
+    # A Stop recorded in the activation that continued as new, carried to the turn.
+    interrupted: str | None = None
 
 
 @dataclass
@@ -98,6 +100,8 @@ class GateSettings:
 class FollowArgs:
     session_id: str
     workflow_id: str
+    # The turn sent a prompt: it ends only on an end that follows its `prompt` event.
+    prompted: bool = False
 
 
 @dataclass

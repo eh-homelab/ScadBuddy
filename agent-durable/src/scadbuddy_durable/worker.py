@@ -103,8 +103,9 @@ def build_worker(
     *,
     task_queue: str = TASK_QUEUE,
     session: SessionActivities | None = None,
+    gate: GateActivities | None = None,
 ) -> Worker:
-    gate = GateActivities(connect)
+    gate = gate or GateActivities(connect)
     session = session or SessionActivities(connect)
     events = SessionEvents(connect)
     return Worker(

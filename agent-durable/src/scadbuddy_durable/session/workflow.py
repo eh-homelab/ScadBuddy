@@ -147,7 +147,7 @@ class DurableSession:
         # From a message's acceptance until its turn's finish_turn has run: the plugin's
         # run() returns before the gate is drained and the turn is written (review of #1958).
         self._in_turn = start.turn is not None
-        self._interrupted: str | None = None
+        self._interrupted: str | None = start.interrupted
         self._settings = GateSettings(approval_expiry_s=600, question_expiry_s=3600)
         self._agent = DurableClaudeAgent(
             tools=manifest.durable_tools(entries),
@@ -162,7 +162,11 @@ class DurableSession:
         )
 
     def _next_run(self, state: AgentState) -> list[Any]:
-        return [dataclasses.replace(self._start, agent=state, turn=self._turn)]
+        return [
+            dataclasses.replace(
+                self._start, agent=state, turn=self._turn, interrupted=self._interrupted
+            )
+        ]
 
     @workflow.run
     async def run(self, start: SessionStart) -> None:
@@ -193,7 +197,11 @@ class DurableSession:
         )
         follow = workflow.start_activity(
             "follow_session",
-            FollowArgs(session_id=sid, workflow_id=workflow.info().workflow_id),
+            FollowArgs(
+                session_id=sid,
+                workflow_id=workflow.info().workflow_id,
+                prompted=prompt is not None,
+            ),
             start_to_close_timeout=FOLLOW_TIMEOUT,
             heartbeat_timeout=FOLLOW_HEARTBEAT,
             retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=10)),
@@ -258,7 +266,7 @@ class DurableSession:
             raise
         except FailureError:
             if any(p.call_id == str(call["id"]) for p in self._parked.values()):
-                raise  # parked, and failed resolving: its entry is the gate's to end
+                return  # parked: its entry is ended by the gate (cancel, interrupt, turn end)
             with contextlib.suppress(ValueError):
                 self._agent.decide(str(call["id"]), False, approver="scadbuddy")
 
@@ -390,10 +398,13 @@ class DurableSession:
             self._agent.decide(parked.call_id, go, approver=responder.get("id"))
         return written
 
-    async def _cancel_parked(self, reason: str) -> bool:
+    async def _cancel_parked(self, reason: str, *, bounded: bool = False) -> bool:
+        """Only cancel_input, an Update with a caller to tell, gives up after 30 s. A Stop
+        or a turn's end retries without end, as the timer does: a failure raised from the
+        interrupt Signal or from run() would fail the whole session (review of #1958)."""
         pending = [p for p in self._parked.values() if p.entry.state == "pending"]
         for parked in pending:
-            await self._resolve(parked, "cancelled", SYSTEM, None, reason)
+            await self._resolve(parked, "cancelled", SYSTEM, None, reason, timer=not bounded)
         return bool(pending)
 
     # ---- handlers ----
@@ -459,14 +470,16 @@ class DurableSession:
     @workflow.update(name=CANCEL_INPUT_UPDATE)
     async def cancel_input(self, args: dict[str, Any]) -> str:
         reason = str((args or {}).get("reason") or "cancelled")[:200]
-        return "cancelled" if await self._cancel_parked(reason) else "none"
+        return "cancelled" if await self._cancel_parked(reason, bounded=True) else "none"
 
     @workflow.signal(name=INTERRUPT_SIGNAL)
     async def interrupt(self, args: dict[str, Any]) -> None:
         if not self._in_turn:
             return
         if self._task is None:
-            # The turn is starting (gate_settings): it stops before its run begins.
+            # The turn is starting (gate_settings): it stops before its run begins. While
+            # it drains or writes its end, there is nothing left to stop, and the flag is
+            # cleared with the turn.
             self._interrupted = INTERRUPTED
             return
         if self._task.done():

@@ -29,18 +29,25 @@ from session_support import (
 )
 from temporalio import activity
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
-from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
+from temporalio.client import (
+    Client,
+    WorkflowExecutionStatus,
+    WorkflowHandle,
+    WorkflowUpdateFailedError,
+)
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
+from scadbuddy_durable.gate.activities import GateActivities
 from scadbuddy_durable.gate.names import (
     CANCEL_INPUT_UPDATE,
     INTERRUPT_SIGNAL,
     PENDING_INPUT_QUERY,
     RESPOND_UPDATE,
 )
+from scadbuddy_durable.gate.store import ResolveInput
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
@@ -92,6 +99,7 @@ class Harness:
     agent: Worker
     handles: list[WorkflowHandle[Any, Any]]
     session_activities: SessionActivities | None = None
+    gate_activities: GateActivities | None = None
 
     async def session(self, conn: Conn) -> tuple[str, WorkflowHandle[Any, Any]]:
         sid = await insert_session(conn)
@@ -106,6 +114,7 @@ class Harness:
             ScriptedClaude(policy),
             task_queue=self.queue,
             session=self.session_activities,
+            gate=self.gate_activities,
         )
         return self.agent
 
@@ -575,3 +584,44 @@ async def test_an_interrupt_as_a_turn_starts_stops_it(
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
     assert not any(e["type"] == "approval.required" for e in log)
     assert harness.stand_in.ran == []
+
+
+class SlowCancel(GateActivities):
+    """Postgres out for longer than the respond path's 30 s: a cancel's first attempt hangs."""
+
+    def __init__(self, connect: Connect) -> None:
+        super().__init__(connect)
+        self.hung = False
+
+    @activity.defn(name="resolve_input")
+    async def resolve_input(self, args: ResolveInput) -> bool:
+        if args.outcome == "cancelled" and not self.hung:
+            self.hung = True
+            await asyncio.sleep(35)
+        return await super().resolve_input(args)
+
+
+async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """Review of #1958: a system cancel ran under the respond path's 30 s bound, and its
+    failure, raised in the interrupt Signal, failed the whole workflow."""
+    await harness.agent.shutdown()
+    harness.gate_activities = SlowCancel(connect)
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await _parked(handle)
+        await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+
+        async def ended() -> bool:
+            return any(e["type"] == "error" for e in await events(agent_db, sid))
+
+        await until(ended, timeout=120)
+        assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+        assert await settled(connect, sid) == "idle"
+        await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        assert (await send(handle, "hello again")).accepted
+        assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]

@@ -168,3 +168,35 @@ async def test_a_session_that_is_gone_is_not_retried(connect: object) -> None:
         )
     assert failed.value.type == "LookupError"
     assert failed.value.non_retryable
+
+
+@pytest.mark.requires_postgres
+async def test_a_turn_ends_on_its_own_end_not_the_last_turns(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI on #1958: a previous turn's subscriber was cancelled before it wrote that turn's
+    end, so the next one read it first and stopped before its own text."""
+    sid = await insert_session(agent_db)
+    stream = [
+        {"type": "cancelled", "offset": 0},
+        {"type": "prompt", "text": "again", "offset": 1},
+        {"type": "text", "text": "hello", "offset": 2},
+        {"type": "done", "result": "hello", "offset": 3},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    result = await env.run(
+        acts.follow_session,
+        FollowArgs(session_id=sid, workflow_id=f"session-{sid}", prompted=True),
+    )
+    assert result.ended == "done"
+    assert [e["type"] for e in await events(agent_db, sid)] == [
+        "assistant.text.delta",
+        "assistant.text.done",
+    ]
