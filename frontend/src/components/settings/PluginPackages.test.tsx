@@ -3,9 +3,14 @@ import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { BUILT_IN_ANSWER, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
+import { GREETER_SKILL, LONG_CHANGELOG, PREVIEW_CHARS } from '../../mocks/features/pluginPackageFiles'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { PluginPackagesPanel } from './PluginPackages'
+
+async function openFiles(user: ReturnType<typeof renderPage>['user'], scope: HTMLElement) {
+  await user.click(within(scope).getByText(/^Files to read \(/))
+}
 
 async function install(user: ReturnType<typeof renderPage>['user'], url: string, extra: Record<string, string> = {}) {
   await user.type(screen.getByLabelText('Repository URL'), url)
@@ -280,6 +285,129 @@ describe('PluginPackagesPanel', () => {
     const dialog = screen.getByRole('dialog')
     expect(isUserOnly(within(dialog).getByRole('button', { name: 'Approve this pin' }))).toBe(true)
     expect(isUserOnly(within(dialog).getByRole('checkbox'))).toBe(true)
+  })
+
+  it("shows ScadBuddy's own skills and subagents on its card, with its version, without opening the review", async () => {
+    renderPage(<PluginPackagesPanel />)
+    const own = await screen.findByRole('listitem', { name: 'Built-in plugin scadbuddy' })
+    expect(within(own).getByText('v0.1.10')).toBeInTheDocument()
+    const parts = within(own).getByLabelText('What scadbuddy adds')
+    expect(parts).toBeVisible()
+    expect(parts).toHaveTextContent('Skills: /scadbuddy:authoring, /scadbuddy:customize, /scadbuddy:print')
+    expect(parts).toHaveTextContent('Subagents: scadbuddy:model-author, scadbuddy:print-analyst')
+    // The browser has neither, so says nothing.
+    const browser = screen.getByRole('listitem', { name: 'Built-in plugin playwright' })
+    expect(within(browser).queryByLabelText('What playwright adds')).not.toBeInTheDocument()
+  })
+
+  it('opens each file to read, with its size, and steps through every file', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await openFiles(user, card)
+    const toRead = await within(card).findByRole('list', { name: 'Files to read in greeter' })
+    const readme = within(toRead).getByRole('listitem', { name: 'README.md' })
+    expect(await within(readme).findByText('22 B')).toBeInTheDocument()
+    expect(within(card).getByText('Read 0 of 9 files')).toBeInTheDocument()
+
+    await user.click(within(readme).getByRole('button', { name: 'README.md' }))
+    let viewer = await within(card).findByRole('region', { name: 'greeter: README.md' })
+    expect(await within(viewer).findByText(/A fixture\./)).toBeInTheDocument()
+    expect(within(viewer).getByText(/22 B · text\/markdown/)).toBeInTheDocument()
+    expect(within(card).getByText('Read 1 of 9 files')).toBeInTheDocument()
+
+    await user.click(within(viewer).getByRole('button', { name: 'Next file' }))
+    viewer = await within(card).findByRole('region', { name: 'greeter: agents/helper.md' })
+    expect(await within(viewer).findByText(/Help\./)).toBeInTheDocument()
+    await user.click(within(viewer).getByRole('button', { name: 'Previous file' }))
+    expect(await within(card).findByRole('region', { name: 'greeter: README.md' })).toBeInTheDocument()
+    expect(within(card).getByText('Read 2 of 9 files')).toBeInTheDocument()
+
+    // Every file, not only the Markdown and JSON the review lists.
+    const others = within(card).getByRole('list', { name: 'Other files in greeter' })
+    expect(within(others).getAllByRole('button').map((b) => b.textContent)).toEqual(['CHANGELOG.txt', 'assets/icon.png'])
+  })
+
+  it('shows Markdown raw, highlighted, or rendered', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await openFiles(user, card)
+    await user.click(await within(card).findByRole('button', { name: 'skills/hello/SKILL.md' }))
+    const viewer = await within(card).findByRole('region', { name: 'greeter: skills/hello/SKILL.md' })
+    const raw = await within(viewer).findByTestId('file-content')
+    expect(raw.textContent).toBe(GREETER_SKILL)
+    expect(within(raw).getByText('# Hello')).toHaveAttribute('data-token', 'heading')
+    expect(within(viewer).getByRole('button', { name: 'Raw' })).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(within(viewer).getByRole('button', { name: 'Rendered' }))
+    expect(within(viewer).getByRole('heading', { name: 'Hello' })).toBeInTheDocument()
+    expect(within(viewer).getByText('hello').tagName).toBe('STRONG')
+  })
+
+  it('shows a binary file as its size and type, and cuts a long file until asked for all of it', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await openFiles(user, card)
+    await user.click(await within(card).findByRole('button', { name: 'assets/icon.png' }))
+    let viewer = await within(card).findByRole('region', { name: 'greeter: assets/icon.png' })
+    expect(await within(viewer).findByText('Binary file, not shown: 12 B · image/png')).toBeInTheDocument()
+    expect(within(viewer).queryByTestId('file-content')).not.toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'CHANGELOG.txt' }))
+    viewer = await within(card).findByRole('region', { name: 'greeter: CHANGELOG.txt' })
+    const content = await within(viewer).findByTestId('file-content')
+    expect(content.textContent).toHaveLength(PREVIEW_CHARS)
+    expect(within(viewer).getByText(/Showing the first 66 kB of 91 kB\./)).toBeInTheDocument()
+    await user.click(within(viewer).getByRole('button', { name: 'Show all' }))
+    await waitFor(() => expect(within(viewer).getByTestId('file-content').textContent).toBe(LONG_CHANGELOG))
+    expect(within(viewer).queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument()
+  })
+
+  it("reads the re-pin's own files in its approval", async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await user.type(within(card).getByLabelText('Re-pin to branch, tag or commit'), 'v2')
+    await user.click(within(card).getByRole('button', { name: 'Fetch re-pin' }))
+    const pending = await within(card).findByRole('generic', { name: 'Pending re-pin' })
+    await user.click(within(pending).getByRole('button', { name: 'Approve re-pin…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Approve the re-pin of greeter' })
+    await openFiles(user, dialog)
+    await user.click(await within(dialog).findByRole('button', { name: 'skills/bye/SKILL.md' }))
+    const viewer = await within(dialog).findByRole('region', { name: 'greeter: skills/bye/SKILL.md' })
+    expect(await within(viewer).findByText(/Say goodbye\./)).toBeInTheDocument()
+  })
+
+  it("reads a built-in plugin's files", async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    const own = await screen.findByRole('listitem', { name: 'Built-in plugin scadbuddy' })
+    await user.click(within(own).getByText('Review'))
+    await openFiles(user, own)
+    await user.click(await within(own).findByRole('button', { name: 'skills/authoring/SKILL.md' }))
+    const viewer = await within(own).findByRole('region', { name: 'scadbuddy: skills/authoring/SKILL.md' })
+    expect(await within(viewer).findByText(/Writes OpenSCAD templates\./)).toBeInTheDocument()
+  })
+
+  it('says when a file cannot be read', async () => {
+    server.use(
+      http.get('/api/v1/ai/plugin-packages/:name/file', () =>
+        HttpResponse.json({ detail: 'fetched commit abc, the pin is def' }, { status: 502 }),
+      ),
+    )
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await openFiles(user, card)
+    await user.click(await within(card).findByRole('button', { name: 'README.md' }))
+    const viewer = await within(card).findByRole('region', { name: 'greeter: README.md' })
+    expect(await within(viewer).findByRole('alert')).toHaveTextContent('fetched commit abc, the pin is def')
   })
 
   it('says when the agent service is unavailable', async () => {
