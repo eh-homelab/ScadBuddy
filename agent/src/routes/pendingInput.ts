@@ -2,7 +2,9 @@ import type { Hono } from 'hono'
 import { z } from 'zod'
 import { ApprovalError, conflictReason } from '../approvals/service.js'
 import { BACK_REPLIES } from '../harness/attention.js'
-import { ANSWER_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX } from '../harness/questions.js'
+import { ANSWER_MAX } from '../harness/questions.js'
+import { parseRequestId } from '../gate/ids.js'
+import { REFUSAL_STATUS, RESPONSE_MAX, RespondRefusal, validateRespond } from '../gate/validate.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { QuestionError } from '../questions/service.js'
 import type { SessionManager } from '../sessions/manager.js'
@@ -130,19 +132,8 @@ export async function pendingInput(sessions: SessionManager): Promise<PendingInp
   return { entries: entries.sort((a, b) => a.created_at.localeCompare(b.created_at)), summaries_truncated: summariesTruncated }
 }
 
-/**
- * A response's cap, derived from the largest answer the panel can send rather
- * than §6.6's flat 16 KiB, which is smaller than one ANSWER_MAX answer and would
- * refuse answers the socket's `question.answer` takes. The largest valid body is
- * a question's: QUESTIONS_MAX answers of ANSWER_MAX, each keyed by a question
- * text of QUESTION_TEXT_MAX (an attention request's one `choice` or `text`, and
- * a multi-select's picks, which join to one ANSWER_MAX answer, are smaller).
- * Those bounds count UTF-16 code units, and a code unit is at most 6 bytes of
- * JSON (a `\uXXXX` escape), as for guard.ts JSON_BODY_MAX; 1 KiB covers the
- * rest of the body. The panel's copies of these bounds are pinned to the agent's
- * (test/sessions.protocol.test.ts), so the cap follows them.
- */
-export const RESPONSE_MAX = QUESTIONS_MAX * (QUESTION_TEXT_MAX + ANSWER_MAX) * 6 + 1024
+/** A response's cap (gate/validate.ts, plan 5b ruling 1). */
+export { RESPONSE_MAX }
 
 const answerText = z.string().min(1).max(ANSWER_MAX)
 
@@ -174,9 +165,9 @@ export type RespondResult = { id: string; kind: PendingInputEntry['kind']; outco
  */
 export class RespondError extends Error {
   override name = 'RespondError'
-  readonly status: 400 | 403 | 404 | 409 | 410
+  readonly status: 400 | 403 | 404 | 409 | 410 | 413 | 503
   readonly reason: string | undefined
-  constructor(status: 400 | 403 | 404 | 409 | 410, message: string, reason?: string) {
+  constructor(status: 400 | 403 | 404 | 409 | 410 | 413 | 503, message: string, reason?: string) {
     super(message)
     this.status = status
     this.reason = reason
@@ -192,12 +183,18 @@ function endedReason(entry: { outcome: 'answered' | 'cancelled' | 'timed_out' | 
 
 const QUESTION_STATUS = { not_found: 404, forbidden: 403, conflict: 409, invalid: 400 } as const
 
+/** A validator refusal as the route answers it; `reason` says how an ended entry ended. */
+function refused(err: RespondRefusal, reason?: string): RespondError {
+  return new RespondError(REFUSAL_STATUS[err.code], err.message, err.code === 'resolved' ? reason : undefined)
+}
+
 /**
  * §6.6 `respond` for the classic stores: answers the entry `requestId` names as
- * `principal`. Refuses (RespondError) an unknown or stale id, an entry no longer
- * pending, a body whose kind is not the entry's, and an answer that does not fit
- * the entry: a question needs one answer per question, keyed by its text; an
- * attention request one of its options as `choice`, or its own words as `text`.
+ * `principal`. The entry is read, then checked with the gate's shared validator
+ * (gate/validate.ts), which refuses an entry no longer pending, a body whose kind is
+ * not the entry's, and an answer that does not fit it: a question needs one answer
+ * per question, keyed by its text; an attention request one of its options as
+ * `choice`, or its own words as `text`. An unknown or stale id is refused first.
  */
 export async function respond(
   sessions: SessionManager,
@@ -206,25 +203,38 @@ export async function respond(
   body: RespondBody,
   where: { clientIp?: string | undefined } = {},
 ): Promise<RespondResult> {
-  const match = /^(approval|question):(.+)$/.exec(requestId)
+  const parsed = parseRequestId(requestId)
   const stale = new RespondError(404, `no pending input ${requestId}: it is stale or was never asked`)
-  if (!match?.[1] || !match[2]) throw stale
-  const store = match[1] === 'approval' ? 'approval' : 'question'
-  const rowId = match[2]
+  if (parsed?.store !== 'approval' && parsed?.store !== 'question') throw stale
+  const rowId = parsed.rowId
+  const request = { requestId, response: body, responder: principal, role: 'browser' as const }
 
-  if (store === 'approval') {
+  if (parsed.store === 'approval') {
     try {
       // Read first, as a question is: an unknown id is stale whatever the body names
       // (#1358), and one already decided is a 409 before its kind is checked (#1479).
       const approval = await sessions.approvals.get(rowId, principal)
-      if (body.kind !== 'approval') {
-        if (approval.decision !== null) {
-          throw new RespondError(409, `${requestId} is no longer waiting for a decision`, conflictReason(approval))
-        }
-        throw new RespondError(400, `${requestId} is an approval: respond with {"kind": "approval", "decision": …}`)
+      let decision: 'approve' | 'deny'
+      try {
+        const valid = validateRespond(
+          {
+            id: requestId,
+            kind: 'approval',
+            state: approval.decision === null ? 'pending' : 'resolved',
+            inputHash: approval.inputHash,
+            requestedBy: approval.requestedBy,
+            sessionOwner: null,
+            sessionCreator: null,
+          },
+          request,
+        )
+        decision = 'decision' in valid ? valid.decision : 'deny'
+      } catch (err) {
+        if (err instanceof RespondRefusal) throw refused(err, conflictReason(approval))
+        throw err
       }
-      const decided = await sessions.approvals.decide(principal, rowId, body.decision === 'approve', {
-        ...(body.input_hash === undefined ? {} : { inputHash: body.input_hash }),
+      const decided = await sessions.approvals.decide(principal, rowId, decision === 'approve', {
+        ...(body.kind === 'approval' && body.input_hash !== undefined ? { inputHash: body.input_hash } : {}),
         clientIp: where.clientIp,
       })
       return { id: requestId, kind: 'approval', outcome: decided.decision === 'approved' ? 'approved' : 'denied' }
@@ -244,47 +254,27 @@ export async function respond(
     entry.kind === 'attention' &&
     entry.outcome === 'reconnected' &&
     BACK_REPLIES.includes(body.choice ?? body.text ?? '')
-  // An entry no longer pending is a 409 whatever kind the body names (#1479).
-  if (!entry.pending && !backAfterReconnect) throw ended(entry)
-  if (body.kind !== 'answer') {
-    throw new RespondError(400, `${requestId} asks for an answer: respond with {"kind": "answer", …}`)
-  }
   let answers: string[]
-  if (entry.kind === 'attention') {
-    if (body.answers !== undefined || (body.choice === undefined) === (body.text === undefined)) {
-      throw new RespondError(400, `${requestId} is an attention request: respond with exactly one of "choice" or "text"`)
-    }
-    const options = entry.questions[0]?.options.map((o) => o.label) ?? []
-    if (body.choice !== undefined && !options.includes(body.choice)) {
-      throw new RespondError(400, `"choice" must be one of ${JSON.stringify(options)}; use "text" for your own words`)
-    }
-    answers = [body.choice ?? body.text ?? '']
-  } else {
-    const given = body.answers
-    if (!given || body.choice !== undefined || body.text !== undefined) {
-      throw new RespondError(400, `${requestId} is a question: respond with "answers", one per question, keyed by its text`)
-    }
-    const asked = entry.questions.map((q) => q.question)
-    const keys = Object.keys(given)
-    if (keys.length !== asked.length || !asked.every((q) => Object.hasOwn(given, q))) {
-      throw new RespondError(400, `"answers" must answer exactly these questions: ${JSON.stringify(asked)}`)
-    }
-    // A multi-select's picks join as the panel's card joins them (FeedItemView), so only
-    // a multi-select takes a list, and no pick may contain the separator (#1357): its
-    // option labels cannot (harness/questions.ts), and a typed pick would read as two.
-    answers = entry.questions.map((q) => {
-      const a = given[q.question] ?? ''
-      if (typeof a === 'string') return a
-      if (!q.multiSelect) throw new RespondError(400, `${JSON.stringify(q.question)} takes one answer: send a string, not a list`)
-      if (a.some((pick) => pick.includes(', '))) {
-        throw new RespondError(400, `a pick must not contain ", ", which joins a multi-select's picks; send the answer as one string`)
-      }
-      return a.join(', ')
-    })
-    // The socket caps each answer at ANSWER_MAX; joined picks must fit it too.
-    if (answers.some((a) => a.length > ANSWER_MAX)) {
-      throw new RespondError(400, `each answer must be at most ${ANSWER_MAX} characters, a multi-select's picks joined with ", "`)
-    }
+  try {
+    const valid = validateRespond(
+      {
+        id: requestId,
+        kind: 'answer',
+        state: entry.pending || backAfterReconnect ? 'pending' : 'resolved',
+        inputHash: null,
+        requestedBy: null,
+        sessionOwner: null,
+        sessionCreator: null,
+        ...(entry.kind === 'attention'
+          ? { options: entry.questions[0]?.options.map((o) => o.label) ?? [] }
+          : { questions: entry.questions.map((q) => ({ question: q.question, multiSelect: q.multiSelect })) }),
+      },
+      request,
+    )
+    answers = 'answers' in valid ? valid.answers : []
+  } catch (err) {
+    if (err instanceof RespondRefusal) throw err.code === 'resolved' ? ended(entry) : refused(err)
+    throw err
   }
   try {
     await sessions.questions.answer(

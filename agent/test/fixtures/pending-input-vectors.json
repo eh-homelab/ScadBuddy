@@ -1,0 +1,1431 @@
+{
+  "description": "The tool-call gate's validator (spec 2026-10-01 §6.6), run against agent/src/gate/validate.ts and agent-durable's gate/validate.py. {\"$repeat\": s, \"times\": n} is s repeated n times, where n may name a top-level number. The classic suite skips a durable_only vector by name.",
+  "response_max": 529024,
+  "answer_max": 20000,
+  "prompt_max": 16384,
+  "names": {
+    "pending_input": "pending_input",
+    "respond": "respond",
+    "cancel_input": "cancel_input",
+    "interrupt": "interrupt",
+    "refused_type": "GateRefused"
+  },
+  "vectors": [
+    {
+      "name": "stale: nothing is parked",
+      "entry": null,
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "stale"
+      }
+    },
+    {
+      "name": "stale: another entry is parked",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-0:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "stale"
+      }
+    },
+    {
+      "name": "resolved: an approval already decided",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "resolved",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "resolved"
+      }
+    },
+    {
+      "name": "resolved: an answer, whatever kind the body names",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "resolved",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "resolved"
+      }
+    },
+    {
+      "name": "resolving: a response is being recorded",
+      "durable_only": true,
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "resolving",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "resolving"
+      }
+    },
+    {
+      "name": "resolving: its timer is being recorded",
+      "durable_only": true,
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "resolving",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "resolving"
+      }
+    },
+    {
+      "name": "the browser user approves in another principal's session",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "decision": "approve"
+      }
+    },
+    {
+      "name": "the browser user denies",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "deny"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "a grant holder approves another agent's call",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "role": "grant"
+      },
+      "expect": {
+        "ok": true,
+        "decision": "approve"
+      }
+    },
+    {
+      "name": "an owner role decides nothing",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "role": "owner"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "self: a grant holder decides the call it asked for",
+      "kind": "approval",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-c"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "role": "grant"
+      },
+      "expect": {
+        "refused": "self"
+      }
+    },
+    {
+      "name": "self: a grant holder decides a call in a session it started",
+      "kind": "approval",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "role": "grant"
+      },
+      "expect": {
+        "refused": "self"
+      }
+    },
+    {
+      "name": "the owner answers their own session's question",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "answers": [
+          "Red",
+          "Lid"
+        ]
+      }
+    },
+    {
+      "name": "a grant holder answers nothing",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "role": "grant"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "an approval given an answer",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "a question given a decision",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an approval with an unknown key",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve",
+          "extra": 1
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an approval decision that is neither",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "maybe"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "a body that is not an object",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": "approve",
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "a question missing an answer",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "a question with an extra answer",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": "Lid",
+            "Which size?": "M"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "a multi-select given picks",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": [
+              "Lid",
+              "Base"
+            ]
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "answers": [
+          "Red",
+          "Lid, Base"
+        ]
+      }
+    },
+    {
+      "name": "a single-select given a list",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": [
+              "Red"
+            ],
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "a pick containing the separator",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": [
+              "Lid, Base"
+            ]
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an empty answer",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an answer of only spaces",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "   ",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an attention request answered with an option",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "options": [
+          "I'm here",
+          "Carry on without me"
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "choice": "I'm here"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "answers": [
+          "I'm here"
+        ]
+      }
+    },
+    {
+      "name": "an attention request answered in words",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "options": [
+          "I'm here",
+          "Carry on without me"
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "text": "back in five"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "answers": [
+          "back in five"
+        ]
+      }
+    },
+    {
+      "name": "an attention choice outside its options",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "options": [
+          "I'm here",
+          "Carry on without me"
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "choice": "Print it anyway"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an attention request given both",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "options": [
+          "I'm here",
+          "Carry on without me"
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "choice": "I'm here",
+          "text": "hi"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "an attention request given neither",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "options": [
+          "I'm here",
+          "Carry on without me"
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "malformed"
+      }
+    },
+    {
+      "name": "a response over the cap",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "options": [
+          "I'm here",
+          "Carry on without me"
+        ]
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "text": {
+            "$repeat": "x",
+            "times": "response_max"
+          }
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "too_large"
+      }
+    },
+    {
+      "name": "an approval for another input",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve",
+          "input_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "refused": "input_mismatch"
+      }
+    },
+    {
+      "name": "an approval for the input shown",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        }
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve",
+          "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "decision": "approve"
+      }
+    }
+  ]
+}
