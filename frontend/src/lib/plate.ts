@@ -95,7 +95,15 @@ export function boundByPlate<S extends { parameters?: Param[] }>(schema: S, plat
     ...schema,
     parameters: parameters.map((param) => {
       if (!param.plate_max) return param
-      const limit = Math.max(plateLimit(plate, param.plate_max), param.min ?? -Infinity)
+      const room = plateLimit(plate, param.plate_max)
+      const min = param.min ?? -Infinity
+      // A slider's bound lands on its step grid, counted from its min.
+      const decimals = String(param.step ?? '').split('.')[1]?.length ?? 0
+      const onGrid =
+        param.step && param.min != null
+          ? Number((param.min + Math.floor((room - param.min) / param.step + 1e-9) * param.step).toFixed(decimals))
+          : room
+      const limit = Math.max(onGrid, min)
       return param.max != null && param.max <= limit ? param : { ...param, max: limit }
     }),
   }

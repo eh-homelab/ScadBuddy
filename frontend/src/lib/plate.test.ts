@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Job, Param, Plate, PlateFit } from '../api/types'
-import { boundByPlate, fitLabel,fitMessages, fitTargets, platesFitMessages, worstFit } from './plate'
+import { boundByPlate, fitLabel, fitMessages, fitTargets, platesFitMessages, worstFit } from './plate'
 
 const H2C: Plate = {
   model: 'Bambu Lab H2C',
@@ -143,6 +143,14 @@ describe('boundByPlate', () => {
     const narrow = param({ name: 'width', max: 100, plate_max: 'x' })
     const free = param({ name: 'free', max: 900 })
     expect(boundByPlate(schema(narrow, free), H2C).parameters).toEqual([narrow, free])
+  })
+
+  it("lands a slider's bound on its step grid", () => {
+    const stepped = param({ name: 'width', type: 'slider', min: 3, max: 400, step: 7, plate_max: 'x' })
+    // 300 is between steps: 3 + 42 * 7 = 297 is the last one under it.
+    expect(boundByPlate(schema(stepped), H2C).parameters.map((p) => p.max)).toEqual([297])
+    const fine = param({ name: 'width', type: 'slider', min: 1.6, max: 400, step: 0.2, plate_max: 'x' })
+    expect(boundByPlate(schema(fine), H2C).parameters.map((p) => p.max)).toEqual([300])
   })
 
   it('never puts the max under the min', () => {
