@@ -209,6 +209,7 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "upstream.available",
         "output.created",
         "output.deleted",
+        "output.updated",
         "print.progress",
         "print.settled",
         "print.run",

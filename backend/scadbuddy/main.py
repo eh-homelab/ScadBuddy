@@ -430,7 +430,7 @@ async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> 
     error; the boot's pass only logs it."""
     try:
         await asyncio.to_thread(
-            attach_backfills, state.outputs, state.refs, state.render.store.read
+            attach_backfills, state.outputs, state.refs, state.render.store.read, state.events
         )
     except Exception:
         logger.exception("could not attach the finished output re-renders")
@@ -941,7 +941,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the housekeeping Schedule's `BACKFILL_SWEEP` catches one none heard.
         unfollow_backfills = follow_backfills(
             state.events,
-            partial(attach_job_backfills, state.outputs, state.refs, state.render.store.read),
+            partial(
+                attach_job_backfills,
+                state.outputs,
+                state.refs,
+                state.render.store.read,
+                events=state.events,
+            ),
         )
         # And once now, whatever the Schedule: a re-render that settled while no replica
         # was listening (the sweeps' interval 0, or the Schedule paused).

@@ -21,7 +21,7 @@ from psycopg_pool import ConnectionPool
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
-from scadbuddy.core.events import InProcessEventBus, JobEvent
+from scadbuddy.core.events import Event, InProcessEventBus, JobEvent, OutputEvent
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.backfill import (
     attach_backfills,
@@ -318,6 +318,51 @@ async def _until(check, timeout: float = 5.0) -> None:  # type: ignore[no-untype
         await asyncio.sleep(0.02)
 
 
+def _output_events() -> tuple[InProcessEventBus, list[OutputEvent]]:
+    bus = InProcessEventBus()
+    heard: list[OutputEvent] = []
+
+    def on_event(event: Event) -> None:
+        if isinstance(event, OutputEvent):
+            heard.append(event)
+
+    bus.add_listener(on_event)
+    return bus, heard
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    "state",
+    [pytest.param("done", id="attached"), pytest.param("failed", id="marked-failed")],
+)
+async def test_a_settled_backfill_is_announced_on_the_output(
+    tmp_path: Path, pg_conninfo: str, state: str
+) -> None:
+    """#1970: Arrange reads the output on this rather than polling it."""
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    if state == "failed":
+        job = job.model_copy(
+            update={"state": "failed", "error": "x", "result": None, "outputs": []}
+        )
+    bus, heard = _output_events()
+    with store_pool(pg_conninfo) as pool:
+        attach_backfills(store, BlobRefs(pool), _jobs(job), bus)
+        attach_backfills(store, BlobRefs(pool), _jobs(job), bus)  # nothing left: no event
+    assert [(e.kind, e.output_id, e.slug) for e in heard] == [("output.updated", old.id, "demo")]
+
+
+@pytest.mark.requires_postgres
+async def test_an_unfinished_backfill_is_not_announced(tmp_path: Path, pg_conninfo: str) -> None:
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    running = job.model_copy(update={"state": "running", "result": None, "outputs": []})
+    bus, heard = _output_events()
+    with store_pool(pg_conninfo) as pool:
+        attach_job_backfills(store, BlobRefs(pool), _jobs(running), job.id, bus)
+    assert heard == []
+
+
 @pytest.mark.requires_postgres
 async def test_a_job_done_event_attaches_its_backfill_promptly(
     tmp_path: Path, pg_conninfo: str
@@ -447,6 +492,7 @@ async def test_the_backstop_sweep_attaches_a_backfill_whose_event_was_missed(
             outputs=store,
             refs=BlobRefs(pool),
             render=SimpleNamespace(store=SimpleNamespace(read=_jobs(job))),
+            events=None,
         )
         activities = main._housekeeping_activities(state)  # type: ignore[arg-type]
         names = [fn.__temporal_activity_definition.name for fn in activities]  # type: ignore[attr-defined]

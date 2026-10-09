@@ -1,6 +1,6 @@
 import { api } from '../api/client'
 import type { Job } from '../api/types'
-import { getRealtime } from './realtime'
+import { getRealtime, type RealtimeEvent } from './realtime'
 
 /** The wait's limit passed with the job still going. */
 export class JobStillRunning extends Error {
@@ -27,8 +27,40 @@ export function waitForJob(
   jobId: string,
   opts: { pollMs: number; waitMs?: number; signal?: AbortSignal; onJob?: (job: Job) => void },
 ): Promise<Job> {
+  return followUntil(`job:${jobId}`, {
+    ...opts,
+    read: () => api.getJob(jobId),
+    done: settled,
+    // A step starting changes nothing a read would show.
+    relevant: (event) => event.kind !== 'job.progress',
+    onRead: opts.onJob,
+    stillRunning: () => new JobStillRunning(jobId),
+  })
+}
+
+/**
+ * `read()` once `done` holds of it, reading once per signal on `topic` that
+ * `relevant` admits (and on the subscription's confirmation, so a change made before
+ * it is still seen), and on a `pollMs` timer only while the socket is unavailable.
+ * `onRead` sees every read that is not done. An aborted `signal` rejects with its
+ * reason; `waitMs` passing rejects with `stillRunning()`; a failed read rejects with
+ * its error.
+ */
+export function followUntil<T>(
+  topic: string,
+  opts: {
+    read: () => Promise<T>
+    done: (value: T) => boolean
+    relevant?: (event: RealtimeEvent) => boolean
+    onRead?: ((value: T) => void) | undefined
+    stillRunning: () => Error
+    pollMs: number
+    waitMs?: number | undefined
+    signal?: AbortSignal | undefined
+  },
+): Promise<T> {
   const { signal } = opts
-  return new Promise<Job>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     if (signal?.aborted) {
       reject(signal.reason as Error)
       return
@@ -39,7 +71,7 @@ export function waitForJob(
     let again = false
     let poll: ReturnType<typeof setTimeout> | undefined
     const limit =
-      opts.waitMs === undefined ? undefined : setTimeout(() => end(() => reject(new JobStillRunning(jobId))), opts.waitMs)
+      opts.waitMs === undefined ? undefined : setTimeout(() => end(() => reject(opts.stillRunning())), opts.waitMs)
 
     const onAbort = () => end(() => reject(signal?.reason as Error))
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -52,10 +84,10 @@ export function waitForJob(
       }
       reading = true
       try {
-        const job = await api.getJob(jobId)
+        const value = await opts.read()
         if (ended) return
-        if (settled(job)) end(() => resolve(job))
-        else opts.onJob?.(job)
+        if (opts.done(value)) end(() => resolve(value))
+        else opts.onRead?.(value)
       } catch (cause) {
         end(() => reject(cause as Error))
       } finally {
@@ -67,9 +99,8 @@ export function waitForJob(
       }
     }
 
-    const unfollow = realtime.subscribe(`job:${jobId}`, (event) => {
-      // A step starting changes nothing a read would show.
-      if (event !== 'resync' && event.kind === 'job.progress') return
+    const unfollow = realtime.subscribe(topic, (event) => {
+      if (event !== 'resync' && opts.relevant && !opts.relevant(event)) return
       void read()
     })
     const fallback = () => {

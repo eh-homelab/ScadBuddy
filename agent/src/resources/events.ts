@@ -63,6 +63,7 @@ export function affectedBy(event: BusEvent): Affected {
     case 'upstream.available':
       return { uris: slug ? model(slug, '', '/upstream') : [], listChanged: false }
     case 'output.created':
+    case 'output.updated':
     case 'output.deleted': {
       const id = event.output_id
       return {

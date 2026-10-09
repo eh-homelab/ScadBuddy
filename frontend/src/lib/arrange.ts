@@ -1,6 +1,6 @@
 import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
 import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
-import { JobStillRunning, waitForJob } from './waitForJob'
+import { followUntil, JobStillRunning, waitForJob } from './waitForJob'
 
 export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
 
@@ -80,19 +80,6 @@ export async function runArrange(
   return { output, plates: Math.max(1, (job.plates ?? []).length) }
 }
 
-/** `ms`, or less when `signal` aborts; the caller checks the signal after. */
-function pause(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const timer = setTimeout(done, ms)
-    function done() {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', done)
-      resolve()
-    }
-    signal?.addEventListener('abort', done)
-  })
-}
-
 /** An output as a caller may know it: its id, and its name when it has one. */
 export type OutputRef = Pick<Output, 'id'> & Partial<Pick<Output, 'name'>>
 
@@ -166,7 +153,7 @@ export const BACKFILL_WAIT_MS = 5 * 60_000
 
 /**
  * #902 — re-render each output saved before Arrange, all at once: queue it, follow its
- * job until it ends (over the socket, #1909), then read the output until the server has attached what the
+ * job until it ends (over the socket, #1909), then follow the output (`output.updated`, #1970) until the server has attached what the
  * render recorded (`backfill` gone) or says why not (`backfill.error`). An aborted
  * `signal` stops every wait and rejects; the server still finishes the re-renders.
  */
@@ -211,19 +198,19 @@ export async function backfillOutputs(
       throw new Error(job.error ?? `the re-render was ${job.status}`)
     }
     say('Recording its layout…')
-    // The server attaches the re-render on the job's settling event and announces
-    // nothing when it has: read the output until it shows.
-    for (;;) {
-      signal?.throwIfAborted()
-      const read = await api.getOutput(output.id)
-      if (read.backfill?.error) throw new Error(read.backfill.error)
-      if (!read.backfill) {
-        if (needsBackfill(read)) throw new Error('the re-render recorded no objects')
-        return read
-      }
-      if (Date.now() >= deadline) throw new JobStillRunning(job.id)
-      await pause(pollMs, signal)
-    }
+    // #1970 — the server announces the attach (or why not) as `output.updated`.
+    const read = await followUntil('outputs', {
+      read: () => api.getOutput(output.id),
+      done: (o) => !o.backfill || !!o.backfill.error,
+      relevant: (event) => event.data['output_id'] === output.id,
+      stillRunning: () => new JobStillRunning(job.id),
+      pollMs,
+      waitMs: Math.max(0, deadline - Date.now()),
+      signal,
+    })
+    if (read.backfill?.error) throw new Error(read.backfill.error)
+    if (needsBackfill(read)) throw new Error('the re-render recorded no objects')
+    return read
   }
   const settled = await Promise.allSettled(outputs.map(one))
   signal?.throwIfAborted()
