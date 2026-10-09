@@ -174,6 +174,22 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(logs).toEqual([])
   })
 
+  it('recalls once per hooks (one user message): the same prompt again reuses it, any other prompt gets nothing (#1896)', async () => {
+    fake.memories = ['The user prints in PETG.']
+    const seen: MemoryActivity[] = []
+    const h = hooks({ onActivity: (a) => void seen.push(a) })
+    const recall = h.hooks.UserPromptSubmit?.[0]?.hooks[0]
+    const first = await call(recall, prompt('Make a box'))
+    expect((first as { hookSpecificOutput?: unknown }).hookSpecificOutput).toBeDefined()
+    // A rerun of the same message (an attempt that never reached a transcript) gets the same memories.
+    expect(await call(recall, prompt('Make a box'))).toEqual(first)
+    // Any other prompt under the same hooks continues the message, whose memories are already in context.
+    expect(await call(recall, prompt('Continue where you left off.'))).toEqual({})
+    await h.settled()
+    expect(fake.recalls()).toHaveLength(1)
+    expect(seen.filter((a) => a.action === 'recall')).toHaveLength(1)
+  })
+
   it('uses a fixed recallQuery, tags and budget when configured, and injects nothing for no results', async () => {
     const h = hooks({
       budget: 'low',
