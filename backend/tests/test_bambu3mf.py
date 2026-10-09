@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.render import bambu3mf
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
     CORE_NS,
@@ -1221,6 +1222,66 @@ def test_a_triangle_that_is_not_an_index_is_a_value_error(body: str) -> None:
 
     with pytest.raises(ValueError):
         parse_model(archive, "3D/3dmodel.model")
+
+
+@pytest.mark.parametrize(
+    ("body", "block"),
+    [
+        pytest.param(
+            '<vertices><vertex x="0" y="0" z="0"/></vertices>'
+            '<vertices><vertex x="1" y="0" z="0"/></vertices><triangles/>',
+            "vertices",
+            id="vertices",
+        ),
+        pytest.param(
+            '<vertices><vertex x="0" y="0" z="0"/></vertices>'
+            '<triangles><triangle v1="0" v2="0" v3="0"/></triangles>'
+            '<triangles><triangle v1="0" v2="0" v3="0"/></triangles>',
+            "triangles",
+            id="triangles",
+        ),
+    ],
+)
+def test_a_mesh_with_a_repeated_block_is_refused(body: str, block: str) -> None:
+    """#2024: a second block would be appended to the first, so its indices would not
+    mean what the writer meant. The old parse read only the first."""
+    archive = _model_zip(f'<object id="1"><mesh>{body}</mesh></object>')
+
+    with pytest.raises(ValueError, match=f"more than one <{block}>"):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+def test_each_mesh_has_its_own_blocks() -> None:
+    mesh = (
+        '<mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        '<triangles><triangle v1="0" v2="0" v3="0"/></triangles></mesh>'
+    )
+    archive = _model_zip(f'<object id="1">{mesh}</object><object id="2">{mesh}</object>')
+
+    assert len(parse_model(archive, "3D/3dmodel.model").meshes) == 2
+
+
+def test_a_mesh_naming_too_many_property_groups_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2024: each distinct ``pid`` costs a dict entry, so their number is capped."""
+    monkeypatch.setattr(bambu3mf, "MAX_MESH_PIDS", 3)
+    triangles = "".join(f'<triangle v1="0" v2="0" v3="0" pid="{n}"/>' for n in range(4))
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="more than 3 property groups"):
+        parse_model(archive, "3D/3dmodel.model")
+    # As many as the cap still read, and the same pid again costs nothing.
+    triangles = "".join(f'<triangle v1="0" v2="0" v3="0" pid="{n % 3}"/>' for n in range(9))
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object>"
+    )
+    [arrays] = parse_model(archive, "3D/3dmodel.model").meshes.values()
+    assert arrays.pids == ("0", "1", "2")
 
 
 def test_a_mesh_inside_a_mesh_is_refused() -> None:

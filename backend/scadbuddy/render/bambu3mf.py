@@ -895,6 +895,11 @@ _MESH = f"{{{CORE_NS}}}mesh"
 _VERTICES = f"{{{CORE_NS}}}vertices"
 _VERTEX = f"{{{CORE_NS}}}vertex"
 _TRIANGLES = f"{{{CORE_NS}}}triangles"
+#: The most distinct triangle ``pid`` values one mesh may name. A ``pid`` is a property
+#: group's resource id, so a real file names a handful per mesh; each new one costs a
+#: dict entry, and an untrusted file could otherwise name one per triangle (#2024).
+#: Generous on purpose: far past any slicer's output, far below what memory notices.
+MAX_MESH_PIDS = 10_000
 _TRIANGLE = f"{{{CORE_NS}}}triangle"
 #: Per-triangle painting: Bambu Studio's, and PrusaSlicer's multi-material one.
 _PAINTED = ("paint_color", "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation")
@@ -948,6 +953,8 @@ class _MeshTarget:
         self._pids: dict[str, int] = {}
         self._p1 = array("q")
         self._painted = False
+        #: The ``<vertices>`` and ``<triangles>`` blocks this mesh has had.
+        self._blocks: set[str] = set()
 
     def _within(self, parent: str) -> bool:
         return len(self._open) >= 2 and self._open[-1].tag == parent and self._open[-2].tag == _MESH
@@ -966,6 +973,8 @@ class _MeshTarget:
                 (int(attrs.get("v1", 0)), int(attrs.get("v2", 0)), int(attrs.get("v3", 0)))
             )
             pid = attrs.get("pid")
+            if pid is not None and pid not in self._pids and len(self._pids) >= MAX_MESH_PIDS:
+                raise ValueError(f"a <mesh> names more than {MAX_MESH_PIDS} property groups")
             self._pid.append(-1 if pid is None else self._pids.setdefault(pid, len(self._pids)))
             p1 = attrs.get("p1")
             self._p1.append(-1 if p1 is None else int(p1 or 0))
@@ -975,6 +984,12 @@ class _MeshTarget:
                 if any(element.tag == _MESH for element in self._open):
                     raise ValueError("a <mesh> inside another <mesh>")
                 self._reset()
+            elif tag in (_VERTICES, _TRIANGLES) and self._open and self._open[-1].tag == _MESH:
+                # One of each, as the spec has it: a second would be appended to the
+                # first, so its indices would not mean what the writer meant (#2024).
+                if tag in self._blocks:
+                    raise ValueError(f"a <mesh> with more than one <{tag.rpartition('}')[2]}>")
+                self._blocks.add(tag)
             self._open.append(self.builder.start(tag, attrs))
 
     def end(self, tag: str) -> None:
