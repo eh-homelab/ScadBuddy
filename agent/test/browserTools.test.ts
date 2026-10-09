@@ -427,6 +427,16 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     expect((await callTool('browser_click', { role: 'button', name: 'Render' })).text).toMatch(/needs the "write" tier/)
     expect(t.calls()).toEqual([])
   })
+
+  it('lets a read-tier token point at a control: browser_highlight reaches the tab ungated (#1919)', async () => {
+    const { t, pairings, principal, callTool } = await setup('read')
+    const request = await pairings.request(principal)
+    await pairings.accept(request.id, request.code, TAB)
+    const result = await callTool('browser_highlight', { role: 'button', name: 'Render' })
+    expect(result.isError).toBe(false)
+    expect(result.body).toEqual({ tool: 'highlight' })
+    expect(t.calls()).toMatchObject([{ type: 'call', tool: 'highlight', args: { role: 'button', name: 'Render' } }])
+  })
 })
 
 // #815 §2: a call that finds no tab, in a session the user owns, waits for the
