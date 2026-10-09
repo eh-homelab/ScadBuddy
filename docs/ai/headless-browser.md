@@ -11,7 +11,8 @@ it may also open other sites, each only once a human approves it for the session
 ("Beyond the backend", below).
 
 It is **off by default**. Settings has a switch for it ("AI headless browser"), which
-stores `headless_browser_enabled` through `PUT /api/v1/ai/settings/headless-browser`;
+stores `headless_browser_enabled` through `PUT /api/v1/ai/settings/headless-browser`
+(the built-in `playwright` row in Settings → Plugin packages sets the same key);
 from the next turn on, every session turn gets the browser (`main.ts` gives the
 `SessionManager` its `headlessBrowser` dependency).
 

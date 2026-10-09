@@ -3,8 +3,10 @@ import { z } from 'zod'
 import { EgressError } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
 import type { Commands } from '../operations/run.js'
-import { PackageRefusedError, type PackageInstaller } from '../plugins/packages/install.js'
+import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from '../plugins/packages/install.js'
+import { BuiltInPackages, type BuiltInPackageView, builtInNamed } from '../plugins/packages/builtins.js'
 import { INSTALL_KIND, REPIN_KIND } from '../plugins/packages/operations.js'
+import { UI_ACTOR } from '../audit/writes.js'
 import type { PackageRepo } from '../plugins/packages/store.js'
 import { type PackageSource, validateRef, validateSource } from '../plugins/packages/source.js'
 import { PluginError } from '../plugins/registry.js'
@@ -36,7 +38,15 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 // A package whose review lists refusals (vet.ts `refused`) installs, and is
 // approved only with `allow_refused: true`, the admin's decision to load it
 // as it is. Fatal problems (vet.ts `fatal`, egress, symlinks) still refuse
-// the install with a 422.
+// the install with a 422. ScadBuddy's own plugin is answered 409 with
+// `built_in: true`: the harness already loads it (install.ts BuiltInPluginError).
+//
+// The built-in plugins (builtins.ts: ScadBuddy's own and the headless browser's)
+// are listed first, with `built_in: true`. PATCH turns one on or off (its
+// setting); approve, re-pin and DELETE answer 409, since it ships with the agent,
+// and an install that names one answers 409 with `built_in: true`. A package
+// stored under a built-in's name before then is never loaded (install.ts
+// `loadPackagesForRun`) and DELETE removes it.
 //
 // The two fetches are commands (spec 2026-10-01 §4.2, #1055): AgentOperation runs them
 // on `agent-tools` (plugins/packages/operations.ts), keyed by the client's
@@ -47,6 +57,8 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 export type PackageRouteDeps = {
   /** Undefined when there is no database (spec §9). */
   packages: PackageRepo | undefined
+  /** The plugins that ship with the agent (builtins.ts), listed first; undefined without the database. */
+  builtIns: BuiltInPackages | undefined
   installer: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
   /** Install and re-pin run here; undefined without Temporal (503). */
   commands: Commands | undefined
@@ -100,6 +112,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
   }
 
   function refusal(c: Context, err: unknown) {
+    if (err instanceof BuiltInPluginError) return c.json({ detail: err.message, built_in: true }, 409)
     if (err instanceof PackageRefusedError) {
       return c.json({ detail: 'the plugin package is refused', problems: err.problems }, 422)
     }
@@ -113,6 +126,19 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (!deps.installer) return c.json({ detail: 'plugin packages are not available: no package cache' }, 503)
     if (!deps.commands) return c.json({ detail: NO_COMMANDS }, 503)
     return undefined
+  }
+
+  /** The built-in plugin `name` names, or undefined; a store that is not ready says so. */
+  async function builtIn(name: string): Promise<BuiltInPackageView | string | undefined> {
+    if (!builtInNamed(name)) return undefined
+    const repo = await store()
+    if (typeof repo === 'string') return repo
+    return deps.builtIns?.get(name)
+  }
+  const isBuiltIn = (c: Context, what: string): Response | undefined => {
+    const name = c.req.param('name') ?? ''
+    if (!builtInNamed(name)) return undefined
+    return c.json({ detail: `"${name}" is built in: it cannot be ${what}. Disable it instead.`, built_in: true }, 409)
   }
 
   const key = (c: Context): string | undefined => c.req.header('idempotency-key')?.slice(0, 128) || undefined
@@ -138,12 +164,14 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
   app.get(base, async (c) => {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
-    return c.json(await repo.list())
+    return c.json([...((await deps.builtIns?.list()) ?? []), ...(await repo.list())])
   })
 
   app.get(`${base}/:name`, async (c) => {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    const builtin = await builtIn(c.req.param('name'))
+    if (builtin) return typeof builtin === 'string' ? c.json({ detail: builtin }, 503) : c.json(builtin)
     const found = await repo.get(c.req.param('name'))
     if (!found) return c.json({ detail: `no plugin package named "${c.req.param('name')}"` }, 404)
     return c.json(found)
@@ -168,6 +196,8 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
   })
 
   app.post(`${base}/:name/approve`, async (c) => {
+    const refused = isBuiltIn(c, 'approved: it ships with the agent, so there is no pin')
+    if (refused) return refused
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, ApproveBody)
@@ -184,6 +214,11 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, PatchBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
+    // Always the built-in: a package stored under its name never loads, so it has no switch.
+    if (builtInNamed(c.req.param('name')) && deps.builtIns) {
+      const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
+      return c.json(await deps.builtIns.setEnabled(c.req.param('name'), body.enabled, context))
+    }
     try {
       return c.json(await repo.setEnabled(c.req.param('name'), body.enabled))
     } catch (err) {
@@ -192,6 +227,8 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
   })
 
   app.post(`${base}/:name/repin`, async (c) => {
+    const refused = isBuiltIn(c, 're-pinned: it ships with the agent')
+    if (refused) return refused
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, RepinBody)
@@ -209,6 +246,8 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
   })
 
   app.delete(`${base}/:name/pending`, async (c) => {
+    const refused = isBuiltIn(c, 'given a re-pin to discard: it ships with the agent')
+    if (refused) return refused
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     try {
@@ -222,6 +261,9 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const name = c.req.param('name')
+    // An installed package under a built-in's name (stored before builtins.ts) is
+    // removed; the built-in itself never is.
+    if (builtInNamed(name) && !(await repo.get(name))) return isBuiltIn(c, 'removed')!
     if (!(await repo.delete(name))) return c.json({ detail: `no plugin package named "${name}"` }, 404)
     await deps.installer?.evict(name).catch(() => undefined)
     return c.body(null, 204)
@@ -242,6 +284,7 @@ export const route: RouteModule = {
   register(app, deps) {
     registerPluginPackageRoutes(app, {
       packages: deps.pluginPackages,
+      builtIns: deps.settings ? new BuiltInPackages(deps.settings) : undefined,
       installer: deps.packageInstaller,
       commands: deps.commands,
       ready: ready(deps),
