@@ -40,7 +40,7 @@ from scadbuddy.store.snapshots import (
     snapshot_key,
 )
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.models import PieceRequest, piece_key
+from scadbuddy.workflows.models import PieceRequest, PrepareResult, piece_key
 from tests.conftest import write_openscad_3mf
 from tests.support.openscad import install_fake_openscad
 from tests.support.store import local_content
@@ -709,3 +709,62 @@ async def test_every_piece_activity_brings_the_source_back_when_the_export_is_go
     shutil.rmtree(export)
     await activities.finish_piece(req, prepared, main)
     assert (export / "model.scad").read_text() == "cube(4);"
+
+
+async def test_every_openscad_activity_brings_the_templates_fonts_to_its_worker(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    """#2012: `prepare` synced the template's fonts on its own worker only. A later
+    activity on another worker rendered with DejaVu instead (spec §3)."""
+    rev = "d" * 40
+    api_paths = DataPaths(tmp_path / "api")
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text('text("hi", font = "Lobster Two");')
+    await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"ttf")
+    await FontMirror(content, api_fonts).publish("Lobster Two")
+
+    # Shared by every worker, as the store shares pieces. It sits on the last
+    # worker's volume because `finish_piece` names its outputs relative to that.
+    blobs = LocalBlobStore(DataPaths(tmp_path / "worker-d").blobs)
+    openscad = install_fake_openscad(tmp_path, api_paths).openscad
+
+    def worker(name: str) -> tuple[RenderActivities, Path, DataPaths]:
+        paths = DataPaths(tmp_path / name)
+        fonts = FontService(tmp_path / name)
+        deps = replace(
+            _worker_deps(tmp_path, pool, SnapshotStore(content, paths, history=None)),
+            paths=paths,
+            config=Config(openscad=openscad, data_dir=paths.root),
+            blobs=blobs,
+            fonts_mirror=FontMirror(content, fonts),
+        )
+        return RenderActivities(deps), fonts.root / family.name / "LobsterTwo-Regular.ttf", paths
+
+    def on(paths: DataPaths, prepared: PrepareResult) -> PrepareResult:
+        """`prepared` as another worker reads it: the same path on its own volume."""
+        scad = paths.model_revision_dir("demo", rev) / "model.scad"
+        return prepared.model_copy(update={"scad": str(scad)})
+
+    req = PieceRequest(
+        slug="demo", revision=rev, params={}, piece_key=piece_key("demo", rev, "model.scad", {})
+    )
+    first, font, _ = worker("worker-a")
+    prepared = await first.prepare(req)
+    assert font.read_bytes() == b"ttf"
+
+    second, font, paths = worker("worker-b")
+    main = await second.render_main(req, on(paths, prepared))
+    assert font.read_bytes() == b"ttf"
+
+    third, font, paths = worker("worker-c")
+    await third.render_solids(req, on(paths, prepared), main)
+    assert font.read_bytes() == b"ttf"
+
+    fourth, font, paths = worker("worker-d")
+    await fourth.finish_piece(req, on(paths, prepared), main)
+    assert font.read_bytes() == b"ttf"
