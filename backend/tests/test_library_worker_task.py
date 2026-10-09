@@ -26,7 +26,10 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     second = asyncio.Event()
     built: list[StubWorker] = []
 
+    runners: list[Any] = []
+
     def build(*args: Any, **kwargs: Any) -> StubWorker:
+        runners.append(kwargs.get("workflow_runner"))
         built.append(StubWorker(False, second if built else asyncio.Event(), fail_after=not built))
         return built[-1]
 
@@ -54,6 +57,8 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     assert len(built) == 2
     assert built[1].stopped.is_set()
     assert "the library worker failed" in caplog.text
+    # The app's sandbox, as every worker's (#2014).
+    assert all("opentelemetry" in runner.restrictions.passthrough_modules for runner in runners)
 
 
 async def test_a_library_worker_still_connecting_stops_at_once(

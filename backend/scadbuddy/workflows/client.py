@@ -81,8 +81,9 @@ def connect_lazily(address: str, namespace: str) -> Client:
 
 
 def sandboxed_runner() -> SandboxedWorkflowRunner:
-    """The render worker's workflow sandbox. The interceptor's workflow spans run inside
-    it; OpenTelemetry's module state must be the process's, not a sandboxed copy.
+    """Every worker's workflow sandbox: the render, ``bambuddy`` and ``library`` workers
+    (#2014). The client's tracing interceptor makes workflow spans inside it, and
+    OpenTelemetry's module state must be the process's, not a sandboxed copy.
     tests/test_trace_scrub.py runs a workflow under this same runner (#1810)."""
     return SandboxedWorkflowRunner(
         restrictions=SandboxRestrictions.default.with_passthrough_modules("opentelemetry")
@@ -155,6 +156,7 @@ def bambuddy_worker(
             FollowPrint if build_id is None else VersionedFollowPrint,
         ],
         activities=activities,
+        workflow_runner=sandboxed_runner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=print_deployment(build_id),
     )

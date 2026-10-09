@@ -68,6 +68,7 @@ from scadbuddy.workflows.client import (
     follow_worker,
     reconcile_lost_operations,
     reconcile_lost_runs,
+    sandboxed_runner,
 )
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
@@ -735,6 +736,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 queue,
                 activities,
                 workflows=[PreviewBackfill, OperationWorkflow],
+                workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )
             if not await _serve_until([worker], stop, name="library"):
