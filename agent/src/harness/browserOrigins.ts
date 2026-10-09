@@ -1,5 +1,6 @@
 import type { Sql } from 'postgres'
 import { normaliseOrigin, OriginConfigError, originPolicy } from '../http/origins.js'
+import type { UiReach, UiReachMap } from './browserReach.js'
 
 // Where the headless browser (#349, headlessBrowser.ts) may go, and how a
 // session remembers the origins a human let it open.
@@ -30,6 +31,17 @@ import { normaliseOrigin, OriginConfigError, originPolicy } from '../http/origin
 //
 // An approved origin is re-checked against the variable on every turn, so
 // narrowing the list takes effect even for origins approved before.
+//
+// REACHABLE FIRST: a UI origin behind an SSO proxy answers the headless
+// browser, which has no login there, with a redirect to a sign-in page off
+// ScadBuddy, which the request guard refuses. The session manager asks each UI
+// origin's /healthz once per turn (browserReach.ts, cached briefly) and passes
+// the answers as `reach`: the UI origins are ordered reachable first, so `ui[0]`
+// and every "open … instead" name one the browser can open; a navigation to an
+// origin that answered with a sign-in or an error is refused with a pointer to a
+// reachable one, or, when none is, with that said plainly. An origin that was
+// not asked is treated as before. Every UI origin stays one (its requests carry
+// the marker, a page may load from it): only where a tool is told to go changes.
 
 /** The browser's origins, normalised (`scheme://host[:port]`, default port dropped). */
 export type BrowserOrigins = {
@@ -39,6 +51,8 @@ export type BrowserOrigins = {
   ui: readonly string[]
   /** Off-origin origins that may be approved; `*` for any http(s) origin. Empty: none (the default). */
   allowed: '*' | readonly string[]
+  /** How each UI origin answered this turn's probe (browserReach.ts); left out when none was made. */
+  reach?: UiReachMap
 }
 
 export class BrowserOriginsError extends Error {
@@ -85,6 +99,8 @@ export function browserOrigins(options: {
   uiOrigins?: string | undefined
   /** SCADBUDDY_BROWSER_ALLOWED_ORIGINS, raw. */
   browserAllowed?: string | undefined
+  /** How the UI origins answered this turn's probe (browserReach.ts); they are ordered reachable first. */
+  reach?: UiReachMap | undefined
 }): BrowserOrigins {
   const backend = normaliseOrigin(options.backendUrl)
   if (!backend) throw new BrowserOriginsError(`not an http(s) origin: ${options.backendUrl}`)
@@ -99,12 +115,34 @@ export function browserOrigins(options: {
   }
   if (ui.size === 0) ui.add(backend)
   const allowed = parseBrowserAllowedOrigins(options.browserAllowed)
+  const reach = options.reach
+  // Stable: reachable ones first, the rest in their configured order.
+  const ordered = reach ? [...ui].sort((a, b) => Number(!opens(reach[a])) - Number(!opens(reach[b]))) : [...ui]
   return {
     backend,
-    ui: [...ui],
+    ui: ordered,
     // The backend and the UI origins are never off-origin.
     allowed: allowed === '*' ? '*' : allowed.filter((o) => o !== backend && !ui.has(o)),
+    ...(reach ? { reach } : {}),
   }
+}
+
+/** Whether the browser can be sent to a UI origin: it answered 2xx, or was not asked. */
+function opens(reach: UiReach | undefined): boolean {
+  return reach === undefined || reach.reach === 'ok'
+}
+
+/** The refusal when no UI origin answered without a login or an error. */
+function noneReachable(origins: BrowserOrigins, shown: string): string {
+  const why = origins.ui.map((o) => {
+    const r = origins.reach?.[o]
+    return r && r.reach !== 'ok' ? `${o} (${r.detail})` : o
+  })
+  return (
+    `cannot open ScadBuddy now: none of ScadBuddy's origins answers the headless browser without a login ` +
+    `(${why.join(', ')}), so ${shown} was not opened. Tell the user; an operator can list an origin the agent ` +
+    'reaches without a login in SCADBUDDY_ALLOWED_ORIGINS.'
+  )
 }
 
 /** Whether `origin` may be approved at all. */
@@ -158,20 +196,35 @@ export function classifyNavigation(url: unknown, origins: BrowserOrigins, approv
   const origin = typeof url === 'string' ? normaliseOrigin(url) : undefined
   const shown = typeof url === 'string' ? JSON.stringify(url) : 'that URL'
   if (typeof url === 'string' && origin !== undefined) {
+    // Ordered reachable first (browserOrigins), so ui[0] opens if any does.
+    const first = origins.ui[0]!
+    const elsewhere = () => {
+      const u = new URL(url.trim())
+      return JSON.stringify(`${first}${u.pathname}${u.search}${u.hash}`)
+    }
     if (origins.ui.includes(origin)) {
-      if (!isAgentPath(url.trim())) return { kind: 'ui', url }
+      if (isAgentPath(url.trim())) {
+        return {
+          kind: 'refused',
+          reason: `may not open the assistant's own API (${AGENT_PATH_PREFIXES.join(', ')}) on ScadBuddy's origin; ${shown} was not opened.`,
+        }
+      }
+      const reach = origins.reach?.[origin]
+      if (reach === undefined || reach.reach === 'ok') return { kind: 'ui', url }
+      if (!opens(origins.reach?.[first])) return { kind: 'refused', reason: noneReachable(origins, shown) }
       return {
         kind: 'refused',
-        reason: `may not open the assistant's own API (${AGENT_PATH_PREFIXES.join(', ')}) on ScadBuddy's origin; ${shown} was not opened.`,
+        reason:
+          `does not open ${origin}: it answers the headless browser, which has no login there, with ${reach.detail}; ` +
+          `open ${elsewhere()} instead.`,
       }
     }
     if (origin === origins.backend) {
       // Its requests would carry the marker only on a UI origin; say where to go instead.
-      const u = new URL(url.trim())
-      const instead = JSON.stringify(`${origins.ui[0]}${u.pathname}${u.search}${u.hash}`)
+      if (!opens(origins.reach?.[first])) return { kind: 'refused', reason: noneReachable(origins, shown) }
       return {
         kind: 'refused',
-        reason: `does not open ScadBuddy's backend at ${origin}, only its UI at ${origins.ui.join(', ')}; open ${instead} instead.`,
+        reason: `does not open ScadBuddy's backend at ${origin}, only its UI at ${origins.ui.join(', ')}; open ${elsewhere()} instead.`,
       }
     }
     if (mayApprove(origins, origin)) return approved.has(origin) ? { kind: 'approved', origin } : { kind: 'ask', origin }
