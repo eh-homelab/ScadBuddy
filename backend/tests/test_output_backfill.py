@@ -389,17 +389,50 @@ async def test_a_job_done_event_attaches_its_backfill_promptly(
 ) -> None:
     store, old, job, written = await _legacy_output(tmp_path)
     store.start_backfill(old.id, job.id)
-    bus = InProcessEventBus()
+    bus, heard = _output_events()
     with store_pool(pg_conninfo) as pool:
+        # As main.py wires it: the attach announces on the same bus it follows.
         remove = follow_backfills(
-            bus, partial(attach_job_backfills, store, BlobRefs(pool), _jobs(job))
+            bus, partial(attach_job_backfills, store, BlobRefs(pool), _jobs(job), events=bus)
         )
         try:
             bus.publish(JobEvent(kind="job.done", job_id=job.id, slug="demo"))
             await _until(lambda: store.backfill(old.id) is None, timeout=2.0)
+            # #2038: and Arrange, waiting on the output, hears that it was attached.
+            await _until(lambda: bool(heard), timeout=2.0)
         finally:
             await remove()
     assert store.manifest(old.id) == written.manifest
+    assert [(e.kind, e.output_id) for e in heard] == [("output.updated", old.id)]
+
+
+@pytest.mark.requires_postgres
+async def test_a_failed_re_read_after_an_attach_never_marks_it_failed(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2038: the re-read that decides the announcement runs after the attach is done.
+    A ``ValueError`` from it (a half-written ``backfill.json``) must not reach the
+    attach's ``fail_backfill``; it announces anyway, which only makes a reader re-read."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    reads = 0
+    backfill: Callable[[str], BackfillState | None] = store.backfill
+
+    def flaky(output_id: str) -> BackfillState | None:
+        nonlocal reads
+        reads += 1
+        if reads == 2:  # the re-read after the attach
+            raise ValueError("half-written backfill.json")
+        return backfill(output_id)
+
+    monkeypatch.setattr(store, "backfill", flaky)
+    bus, heard = _output_events()
+    with store_pool(pg_conninfo) as pool:
+        assert attach_backfills(store, BlobRefs(pool), _jobs(job), bus) == 1
+    assert reads == 2
+    assert store.manifest(old.id) == written.manifest
+    assert backfill(old.id) is None  # attached, not marked failed
+    assert [e.output_id for e in heard] == [old.id]
 
 
 async def test_removing_the_follower_waits_for_an_attach_in_flight() -> None:
