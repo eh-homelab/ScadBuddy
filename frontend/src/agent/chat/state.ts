@@ -9,6 +9,7 @@ import type {
   SessionStatus,
   SessionSummary,
   Source,
+  ToolImage,
   VersionLink,
 } from './protocol'
 
@@ -23,9 +24,12 @@ export type FeedItem =
       name: string
       input: Record<string, unknown>
       risk: Risk
-      result?: { ok: boolean; summary: string; sources: Source[]; version?: VersionLink }
+      /** `images`: what the result carried (#782), served by the agent (`blobUrl`). */
+      result?: { ok: boolean; summary: string; sources: Source[]; version?: VersionLink; images?: ToolImage[] }
       /** A subagent's call (#1108): the session's `Agent` call that spawned it. */
       parent?: string
+      /** #782 — what the call does, as the tool declares it; `toolTitle` names the rest. */
+      title?: string
     }
   | {
       kind: 'approval'
@@ -313,6 +317,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           input: event.input,
           risk: event.risk,
           ...(event.parent === undefined ? {} : { parent: event.parent }),
+          ...(event.title === undefined ? {} : { title: event.title }),
         }),
       )
 
@@ -327,6 +332,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
                   summary: event.summary,
                   sources: event.sources ?? [],
                   version: event.version,
+                  ...(event.images?.length ? { images: event.images } : {}),
                 },
               }
             : i,

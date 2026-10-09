@@ -127,10 +127,12 @@ describe('the tool card', () => {
       />,
     )
 
-  it('in basic mode shows what ran and how it ended, without its arguments', () => {
+  it('in basic mode shows what ran and how it ended, without its arguments or raw result (#782)', () => {
     card(false)
     const tool = screen.getByTestId('agent-tool')
-    expect(tool).toHaveTextContent('Set 1 parameter')
+    expect(tool).toHaveTextContent('Set parameters')
+    expect(tool).toHaveTextContent('Done')
+    expect(tool).not.toHaveTextContent('Set 1 parameter')
     expect(screen.queryByTestId('agent-tool-arguments')).toBeNull()
     expect(tool.querySelector('details')).not.toHaveAttribute('open')
   })
@@ -138,8 +140,9 @@ describe('the tool card', () => {
   it('in advanced mode shows its arguments and sources, open', () => {
     card(true)
     const args = screen.getByTestId('agent-tool-arguments')
-    expect(args).toHaveAttribute('open')
+    expect(args).toBeVisible()
     expect(args).toHaveTextContent('"width": 40')
+    expect(screen.getByTestId('agent-tool-result')).toHaveTextContent('Set 1 parameter')
     expect(screen.getByRole('link', { name: 'Customizer docs' })).toBeVisible()
   })
 })
