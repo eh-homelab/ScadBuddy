@@ -424,9 +424,12 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
 /**
  * Tools whose error result still names what they made, so a failed call is
  * recorded too: a render_model whose render failed, or whose save_output did,
- * created its job all the same, and its error result is the job's summary.
+ * created its job all the same, and its error result is the job's summary. A
+ * print_output whose run failed after it tried to queue (`may_have_queued`)
+ * answers the run, so the session shows a print may have gone out (#1017); any
+ * other failed run answers plain text and records nothing.
  */
-export const RECORDED_WHEN_FAILED: ReadonlySet<string> = new Set(['render_model'])
+export const RECORDED_WHEN_FAILED: ReadonlySet<string> = new Set(['render_model', 'print_output'])
 
 /**
  * What a call touched: its extractor's rows, one `unclassified` row for a

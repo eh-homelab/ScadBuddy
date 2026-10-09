@@ -1,4 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -334,6 +335,15 @@ describe('extractors', () => {
     expect(failed('apply_patch', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
     expect(failed('edit_file', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
     expect(failed('set_print_options', { scope: 'global' }, {})).toEqual([])
+  })
+
+  it('records a failed print_output that may have queued as its run (#1017)', () => {
+    const failed = (answer: CallToolResult) =>
+      touchesOf({ name: 'print_output', risk: 'outward' }, { output_id: 'o1' }, { ...answer, isError: true }, false)
+    const run = { id: 'r1', status: 'failed', may_have_queued: true, error: { status: 504 }, result: null }
+    expect(failed(result(run, 'print_output'))).toEqual([{ type: 'print_run', id: 'r1', action: 'created', before: 'o1' }])
+    // A run that failed before it tried to queue answers plain text: nothing went out.
+    expect(failed({ content: [{ type: 'text', text: 'print o1 failed (HTTP 422): no spool' }] })).toEqual([])
   })
 
   it('records nothing it cannot name, rather than a row with no id', () => {

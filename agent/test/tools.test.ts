@@ -796,7 +796,14 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     server.use(...capturedRun({}, { status: 'failed', error: failed, may_have_queued: true }))
     const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
     expect(result.isError).toBe(true)
-    expect(firstText(result)).toContain("may still have been queued: check Bambuddy's queue")
+    // The run's own answer (#1017), so the session records the run that may have queued.
+    expect(firstText(result)).toMatchObject({
+      id: RUN,
+      status: 'failed',
+      may_have_queued: true,
+      error: failed,
+      note: expect.stringContaining("may still have been queued: check Bambuddy's queue"),
+    })
   })
 
   it('hands back a run still slicing when the wait runs out', async () => {

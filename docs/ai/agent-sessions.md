@@ -209,7 +209,8 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
 ### 4.1 What a session touched (#931)
 
 Every ScadBuddy tool call a session makes that succeeds (and a `render_model` that
-fails, since its job was made all the same) is mapped to the resources it created,
+fails, since its job was made all the same, and a `print_output` whose run failed with
+`may_have_queued`, recorded as its `print_run` since a print may have gone out, #1017) is mapped to the resources it created,
 changed or deleted, one
 `ai_session_resources` row each (`agent/src/sessions/touched.ts`). A per-tool
 extractor reads the call's parsed input and its result: models, revisions (the new
