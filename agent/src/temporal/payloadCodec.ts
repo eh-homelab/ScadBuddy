@@ -132,7 +132,7 @@ export class PgPayloadKeys implements PayloadKeys {
 
   async keyFor(subject: string, create: boolean): Promise<Buffer> {
     const cached = this.#cache.get(subject)
-    if (cached && cached.until > Date.now()) return cached.key
+    if (cached && cached.until > Date.now()) return Buffer.from(cached.key)
     if (cached) this.forget(subject)
     let [row] = await this.#sql<{ dek_sealed: Buffer; kek_id: string }[]>`
       SELECT dek_sealed, kek_id FROM ai_payload_keys WHERE subject = ${subject}`
@@ -170,7 +170,8 @@ export class PgPayloadKeys implements PayloadKeys {
       if (oldest !== undefined) this.forget(oldest)
     }
     this.#cache.set(subject, { key, until: Date.now() + this.#cacheMs })
-    return key
+    // A copy: the cache zeroes its own when it forgets or evicts it, never one an encode holds.
+    return Buffer.from(key)
   }
 }
 

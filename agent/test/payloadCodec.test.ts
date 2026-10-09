@@ -167,6 +167,23 @@ describe('SubjectPayloadCodec', () => {
     expect(JSON.stringify(pg)).not.toContain(KEK_B64.slice(0, 16))
   })
 
+  // Security review of 5c (crypto-key-lifecycle): forgetting or evicting a cached key
+  // zeroes the cache's copy, never the key an encode in flight was handed.
+  it('hands out a copy of a cached key, so evicting it never zeroes a key in use', async () => {
+    const dek = Buffer.alloc(32, 7)
+    const other = 'session-0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f63'
+    const rows = new Map([SUBJECT, other].map((s) => [s, sealBytes(kek.key, dek, payloadKeyContext(s))]))
+    const sql = (async (_strings: TemplateStringsArray, subject: string) => [{ dek_sealed: rows.get(subject), kek_id: kek.id }]) as never
+    const keys = new PgPayloadKeys(sql, kek, { cacheMax: 1 })
+    const first = await keys.keyFor(SUBJECT, false)
+    const again = await keys.keyFor(SUBJECT, false)
+    expect(again).not.toBe(first)
+    await keys.keyFor(other, false) // evicts SUBJECT's entry
+    keys.forget(other)
+    expect(first.equals(dek)).toBe(true)
+    expect(again.equals(dek)).toBe(true)
+  })
+
   it('names the subject form it seals', () => {
     expect(subjectOf(SUBJECT)).toBe(SUBJECT)
     expect(subjectOf(SUBJECT.toUpperCase())).toBeUndefined()
