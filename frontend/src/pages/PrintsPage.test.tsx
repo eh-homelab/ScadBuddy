@@ -161,6 +161,40 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(location()).toBe('/prints?from=2026-09-27')
   })
 
+  it("names a library print by its file, and filters to that file's prints (#1755)", async () => {
+    const library = {
+      ...summaryOf(35),
+      archive_id: 90,
+      output_id: null,
+      slug: null,
+      params_diff: null,
+      library_file_id: 89,
+      library_file_name: 'bracket.3mf',
+    }
+    const asked: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/prints', ({ request }) => {
+        const file = new URL(request.url).searchParams.get('library_file_id')
+        asked.push(file)
+        const items = file === '89' ? [library] : [library, summaryOf(35)]
+        return HttpResponse.json({ items, next_cursor: null } satisfies PrintPage)
+      }),
+    )
+    const { user } = render()
+    const row = await item(90)
+    await user.click(within(row).getByRole('link', { name: 'bracket.3mf' }))
+
+    expect(location()).toBe('/prints?file=89')
+    await waitFor(async () => expect(await shown()).toEqual(['90']))
+    expect(asked.at(-1)).toBe('89')
+    const chip = screen.getByRole('group', { name: 'Library file' })
+    expect(chip).toHaveTextContent('bracket.3mf')
+
+    await user.click(within(chip).getByRole('button', { name: "Show every file's prints" }))
+    expect(location()).toBe('/prints')
+    await waitFor(async () => expect(await shown()).toEqual(['90', '35']))
+  })
+
   it('searches by text after a pause, and clears every filter', async () => {
     const { user } = render('/prints?status=printing')
     await waitFor(async () => expect(await shown()).toEqual(['37']))

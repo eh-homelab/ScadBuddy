@@ -134,6 +134,7 @@ describe('useRunPrint, traced', () => {
       const [span] = tracing.exporter.getFinishedSpans()
       expect(span?.name).toBe('print')
       expect(span?.attributes).toEqual({
+        'scadbuddy.print_source': 'output',
         'scadbuddy.output_id': OUTPUT,
         'scadbuddy.printer_id': 1,
         'scadbuddy.plate_id': 1,
@@ -145,7 +146,7 @@ describe('useRunPrint, traced', () => {
     }
   })
 
-  it("does not record a library file's id, which is Bambuddy's (spec §6)", async () => {
+  it("says a library file was printed, but not its id, which is Bambuddy's (spec §6, #1231)", async () => {
     const tracing = installTestTracing()
     try {
       vi.spyOn(api, 'runLibraryPrint').mockResolvedValue(queuedResult)
@@ -156,11 +157,12 @@ describe('useRunPrint, traced', () => {
 
       const [span] = tracing.exporter.getFinishedSpans()
       expect(span?.name).toBe('print')
-      expect(Object.keys(span?.attributes ?? {}).sort()).toEqual([
-        'scadbuddy.all_plates',
-        'scadbuddy.plate_id',
-        'scadbuddy.printer_id',
-      ])
+      expect(span?.attributes).toEqual({
+        'scadbuddy.print_source': 'library',
+        'scadbuddy.printer_id': 1,
+        'scadbuddy.plate_id': 1,
+        'scadbuddy.all_plates': true,
+      })
     } finally {
       tracing.uninstall()
     }

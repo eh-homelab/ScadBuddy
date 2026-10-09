@@ -24,7 +24,7 @@ import psycopg
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.linking import link_by_hash, link_item
+from scadbuddy.bambuddy.linking import link_by_hash, link_item, scan_library_by_hash
 from scadbuddy.bambuddy.models import QueueItem, SliceJob
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.stages import Stage, stage_of
@@ -450,13 +450,19 @@ LIBRARY_PRINT_WINDOW = timedelta(hours=24)
 
 
 async def library_progress(
-    client: BambuddyClient, subject: PrintSubject, links: PrintLinkStore
+    client: BambuddyClient,
+    subject: PrintSubject,
+    links: PrintLinkStore,
+    *,
+    uploads: BambuddyUploadStore | None = None,
 ) -> PrintProgress | None:
     """The progress of a library file's print (#1073), read as an output's is: each of
     its recent sends' queue items, as one progress over its plates. ``None`` when the
     file has no send. Each item that names its archive is linked to the file on the way,
     so the settle hooks find it (`linking.link_library_prints` does the same for the
-    prints list); one Bambuddy no longer has reads as done, as an output's does."""
+    prints list); one Bambuddy no longer has reads as done, as an output's does, and
+    with ``uploads`` has the file's archives looked for by hash (#1755), as an output's
+    gone item does."""
     sends = await links.sends_for(subject)
     newest = max((send.first_seen for send in sends if send.first_seen is not None), default=None)
     if newest is not None:
@@ -486,6 +492,8 @@ async def library_progress(
             if error.status != 404:
                 raise
             await linked(links.library_gone(queue_item_id), queue_item_id)
+            if uploads is not None and subject.file_id is not None:
+                await scan_library_by_hash(client, uploads, links, subject.file_id)
             return PrintProgress(
                 route="slice_queue",
                 stage="done",

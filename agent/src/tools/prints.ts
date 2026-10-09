@@ -16,12 +16,15 @@ export const printHistoryTools: Tool[] = [
     name: 'list_prints',
     description:
       "ScadBuddy's print history, newest first: each print's status, printer, times, filament, cover image and the " +
-      'parameters that differ from the template defaults. Filter by template (`slug`), Bambuddy `status` ' +
-      '(completed, failed, printing, … or deleted_in_bambuddy), `printer_id`, start day (`from`/`to`, inclusive) and ' +
-      'text `q` (output or print name, parameter values). Pass `next_cursor` back as `cursor` for the next page: ' +
-      'with a narrow filter a page can be short or empty and still have one, so keep going until it is null.',
+      'parameters that differ from the template defaults; a Bambuddy library file\'s print names the file ' +
+      '(`library_file_name`). Filter by template (`slug`) or by one library file (`library_file_id`, not both), ' +
+      'Bambuddy `status` (completed, failed, printing, … or deleted_in_bambuddy), `printer_id`, start day ' +
+      '(`from`/`to`, inclusive) and text `q` (output, library file or print name, parameter values). Pass ' +
+      '`next_cursor` back as `cursor` for the next page: with a narrow filter a page can be short or empty and ' +
+      'still have one, so keep going until it is null.',
     input: z.object({
       slug: slug.optional(),
+      library_file_id: z.number().int().min(1).optional(),
       status: z.string().min(1).max(64).optional(),
       printer_id: z.number().int().optional(),
       from: day.optional(),

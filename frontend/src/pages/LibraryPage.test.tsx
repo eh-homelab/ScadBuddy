@@ -184,6 +184,16 @@ describe('LibraryPage, item context (#975)', () => {
     expect(within(card).getByRole('button', { name: `Print ${filename}` })).toBeInTheDocument()
   })
 
+  it('links each printable file to its own print history (#1755)', async () => {
+    renderPage(<LibraryPage />, { route: '/library' })
+    const card = await screen.findByTestId('library-file-89')
+    const filename = card.querySelector('p')?.textContent ?? ''
+    expect(within(card).getByRole('link', { name: `Prints of ${filename}` })).toHaveAttribute(
+      'href',
+      '/prints?file=89',
+    )
+  })
+
   it('marks the open folder, and reads its count apart from its name', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')

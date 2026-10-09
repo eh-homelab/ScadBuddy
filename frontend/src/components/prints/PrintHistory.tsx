@@ -152,7 +152,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
     () => apiFilters(query, fixedSlug),
     // Each field on its own: `query` is rebuilt every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fixedSlug, query.slug, query.status, query.printer, query.from, query.to, query.q],
+    [fixedSlug, query.slug, query.status, query.printer, query.from, query.to, query.q, query.file],
   )
   const pages = usePrintPages(filters)
   const templates = useAsync(() => (fixedSlug ? Promise.resolve([]) : api.listModels()), [fixedSlug], ['models'])
@@ -197,6 +197,9 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
     [templates.data],
   )
   const filtered = isFiltered(query)
+  const fileName =
+    pages.items.find((print) => query.file !== '' && String(print.library_file_id) === query.file)
+      ?.library_file_name ?? null
 
   return (
     <>
@@ -204,6 +207,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
         query={query}
         onChange={setQuery}
         printers={printers}
+        fileName={fileName}
         templates={
           fixedSlug ? undefined : (templates.data ?? []).map((model) => ({ slug: model.slug, name: model.name }))
         }
@@ -329,9 +333,13 @@ function MorePrints({
   )
 }
 
-/** The template a print was made from, or that it was a Bambuddy library file (#976). */
+/**
+ * The template a print was made from, or the Bambuddy library file it was (#976): by
+ * the file's name, while Bambuddy still has the file (#1755).
+ */
 function templateLabel(print: PrintSummary, names: Map<string, string>): string {
-  return print.slug === null ? 'Bambuddy library file' : (names.get(print.slug) ?? print.slug)
+  if (print.slug === null) return print.library_file_name ?? 'Bambuddy library file'
+  return names.get(print.slug) ?? print.slug
 }
 
 /**

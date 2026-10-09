@@ -1380,6 +1380,19 @@ describe('prints (#308)', () => {
     })
   })
 
+  it("lists one library file's prints (#1755)", async () => {
+    let query: URLSearchParams | undefined
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints`, ({ request }) => {
+        query = new URL(request.url).searchParams
+        return HttpResponse.json({ items: [], next_cursor: null })
+      }),
+    )
+    const result = await runTool(tool('list_prints'), { library_file_id: 89 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(Object.fromEntries(query!)).toEqual({ library_file_id: '89' })
+  })
+
   it('gets one print, asking the printer only when told to', async () => {
     const asked: string[] = []
     server.use(

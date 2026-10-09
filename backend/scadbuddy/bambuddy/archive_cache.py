@@ -21,6 +21,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchiveRunList,
+    LibraryFile,
     TimelapseInfo,
     TimelapseThumbnails,
 )
@@ -59,6 +60,20 @@ class ArchiveCache:
                 raise
 
         return await self._get(client, "archive", archive_id, load)
+
+    async def library_file(self, client: BambuddyClient, file_id: int) -> LibraryFile | None:
+        """A library file a print was made of (#1755), or None when Bambuddy has none
+        by that id (deleted there): the history names a library print by it."""
+
+        async def load() -> LibraryFile | None:
+            try:
+                return await client.library_file(file_id)
+            except ApiError as error:
+                if error.status == status.HTTP_404_NOT_FOUND:
+                    return None
+                raise
+
+        return await self._get(client, "library_file", file_id, load)
 
     async def runs(self, client: BambuddyClient, archive_id: int) -> ArchiveRunList:
         return await self._get(client, "runs", archive_id, lambda: client.archive_runs(archive_id))
