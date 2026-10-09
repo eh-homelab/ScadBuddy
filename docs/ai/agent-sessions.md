@@ -153,7 +153,10 @@ per-token grant (§6), and never for its own calls or sessions."
   (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off for
   every token. Mint a token with it through `POST /api/v1/ai/mcp-tokens`
   (`{"name":…, "tier":"outward", "approval_grant":true}`,
-  [operating.md §4.1](operating.md#41-mcp-access-tokens)). Only an `outward` token can
+  [operating.md §4.1](operating.md#41-mcp-access-tokens)), or in Settings → "MCP access
+  tokens", whose checkbox shows only for Outward and is labelled with the grant's whole
+  scope, "This token can approve or deny any agent's outward action, in any session"
+  (#804); a token holding it carries an "Approves for any session" badge. Only an `outward` token can
   hold it: the route answers 400 otherwise, and the table's `CHECK` refuses it. It
   cannot be changed on an existing token; mint another.
 - **The check** is `approvalGrantCheck()` in
@@ -275,8 +278,6 @@ route returns for that model, read again each time the picker opens.
 - **Skills on start.** The issue's `sessions.start` takes an optional skill
   (`/scadbuddy:…`). Session queries load ScadBuddy's plugin and have the Skill tool
   (#896), so the model can use a skill, but `sessions.start` does not take one yet.
-- **Settings UI** for the grant: the route takes `approval_grant`, but Settings → "MCP
-  access tokens" has no checkbox for it yet.
 - **A2A** is deferred (spec §6).
 - **The rest of #931**: a backfill from `ai_audit`, and "restore to before this
   session".

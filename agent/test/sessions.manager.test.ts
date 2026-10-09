@@ -199,6 +199,36 @@ describe.skipIf(!TEST_DATABASE_URL)(
       ])
     })
 
+    it("says so in the session when one of the turn's in-process tool servers did not connect (#1255)", async () => {
+      // A server Claude Code cannot connect is only logged at debug level, and every
+      // tool on it is gone for the turn: the session must keep the evidence.
+      const paths = await tempPaths()
+      const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+      const inits = [
+        [{ name: HTTP_SERVER, status: 'failed' }],
+        [{ name: HTTP_SERVER, status: 'connected' }],
+        [],
+      ]
+      const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          yield { type: 'system', subtype: 'init', mcp_servers: inits.shift(), plugins: [] } as unknown as SDKMessage
+          yield* scripted.runner(run)
+        })()
+      const m = manager({ sql: db.sql, paths, run: runner, settings: new SettingsStore(db.sql), httpRequest: {} })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+      await turn!.done
+      await (await m.send(session.id, agentA, 'again')).done
+      await (await m.send(session.id, agentA, 'and again')).done
+      const logged = (
+        await db.sql<{ event: string }[]>`
+          SELECT event FROM ai_session_events WHERE session_id = ${session.id} ORDER BY seq`
+      ).map((e) => JSON.parse(e.event) as { type: string; code?: string; message?: string })
+      expect(logged.filter((e) => e.code === 'tools_unavailable').map((e) => e.message)).toEqual([
+        `the ${HTTP_SERVER} tools are not available in this turn: Claude Code reports their in-process MCP server as failed`,
+        `the ${HTTP_SERVER} tools are not available in this turn: Claude Code reports their in-process MCP server as missing`,
+      ])
+    })
+
     it('rejects a concurrent send on the same replica with a clear error', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ hang: true }))

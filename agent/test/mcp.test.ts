@@ -13,7 +13,10 @@ import { appFetch, BACKEND, baseDeps, connect, firstText, INGRESS, LOOPBACK, MCP
 
 const MODELS = [{ slug: 'keychain', name: 'Keychain', description: '', tags: [], origin: 'mine' }]
 
-const server = setupServer(http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json(MODELS)))
+// Like the backend, which pages /models and answers the whole list's length in X-Total-Count (#843).
+const server = setupServer(
+  http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json(MODELS, { headers: { 'X-Total-Count': String(MODELS.length) } })),
+)
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())

@@ -32,6 +32,7 @@ function seed(): McpToken[] {
       last_used_at: '2026-09-27T18:40:00Z',
       revoked_at: null,
       status: 'active',
+      approval_grant: false,
     },
     {
       id: '0b8e4d2a-7f3b-4a61-8c0d-5e9f2a7b3c02',
@@ -42,6 +43,7 @@ function seed(): McpToken[] {
       last_used_at: null,
       revoked_at: '2026-08-15T12:30:00Z',
       status: 'revoked',
+      approval_grant: false,
     },
   ]
 }
@@ -87,7 +89,7 @@ function randomToken(): string {
 }
 
 function problems(body: Partial<McpTokenCreate> & Record<string, unknown>): string | undefined {
-  const extra = Object.keys(body).filter((key) => !['name', 'tier', 'expires_in'].includes(key))
+  const extra = Object.keys(body).filter((key) => !['name', 'tier', 'expires_in', 'approval_grant'].includes(key))
   if (extra.length > 0) return `body: unrecognized key(s) ${extra.join(', ')}`
   const name = typeof body.name === 'string' ? body.name.trim() : ''
   if (!name) return 'name: give the token a name'
@@ -99,6 +101,12 @@ function problems(body: Partial<McpTokenCreate> & Record<string, unknown>): stri
     (typeof expires !== 'number' || !Number.isInteger(expires) || expires < 60 || expires > MAX_EXPIRES_IN)
   ) {
     return 'expires_in: whole seconds, at least 60'
+  }
+  if (body.approval_grant !== undefined && typeof body.approval_grant !== 'boolean') {
+    return 'approval_grant: expected boolean'
+  }
+  if (body.approval_grant && body.tier !== 'outward') {
+    return 'approval_grant: an approval grant needs an outward token: deciding an outward action is at least as much as taking one'
   }
   return undefined
 }
@@ -195,6 +203,7 @@ export const handlers = [
       last_used_at: null,
       revoked_at: null,
       status: 'active',
+      approval_grant: body.approval_grant === true,
     }
     state.tokens = [record, ...state.tokens]
     const minted: MintedMcpToken = { token: randomToken(), record }

@@ -67,6 +67,70 @@ describe('McpTokensSection', () => {
     expect(document.body.textContent).not.toContain(token)
   })
 
+  it('offers the approval grant only for an Outward token, worded as system-wide (#804)', async () => {
+    const { user } = renderPage(<McpTokensSection />)
+    await listed()
+    const grant = () => screen.queryByRole('checkbox', { name: /approve or deny any agent/i })
+
+    // Read and Write tokens cannot hold it (the route answers 400), so it is not offered.
+    expect(grant()).toBeNull()
+    await user.selectOptions(screen.getByLabelText('Access'), 'write')
+    expect(grant()).toBeNull()
+
+    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    const box = grant() as HTMLInputElement
+    expect(box).not.toBeChecked()
+    // The label itself states the scope: every agent, every session, not only this token's own.
+    expect(box.labels![0]).toHaveTextContent(
+      "This token can approve or deny any agent's outward action, in any session",
+    )
+    const help = document.getElementById(box.getAttribute('aria-describedby')!)!
+    expect(help).toHaveTextContent('System-wide')
+    expect(help).toHaveTextContent('not only sessions this token started')
+    expect(help).toHaveTextContent('never its own')
+  })
+
+  it('mints an Outward token with the grant, and badges tokens that hold it (#804)', async () => {
+    const create = vi.spyOn(api, 'createMcpToken')
+    const { user } = renderPage(<McpTokensSection />)
+    await listed()
+    await user.type(screen.getByLabelText('Token name'), 'Reviewer agent')
+    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    await user.click(screen.getByRole('checkbox', { name: /approve or deny any agent/i }))
+    await user.click(screen.getByRole('button', { name: 'Create token' }))
+
+    expect(create).toHaveBeenCalledWith({
+      name: 'Reviewer agent',
+      tier: 'outward',
+      expires_in: 90 * 86400,
+      approval_grant: true,
+    })
+    await waitFor(() => expect(within(screen.getByRole('list')).getAllByTestId('mcp-token')).toHaveLength(3))
+    const [row, plain] = within(screen.getByRole('list')).getAllByTestId('mcp-token')
+    const badge = within(row!).getByTestId('mcp-token-grant')
+    expect(badge).toHaveTextContent('Approves for any session')
+    expect(badge).toHaveAttribute('title', expect.stringMatching(/any agent's outward action, in any session/))
+    expect(within(plain!).queryByTestId('mcp-token-grant')).toBeNull()
+
+    // The form forgets the grant with the name, so the next token does not inherit it.
+    expect(screen.getByRole('checkbox', { name: /approve or deny any agent/i })).not.toBeChecked()
+  })
+
+  it('drops a checked grant when the tier moves off Outward (#804)', async () => {
+    const create = vi.spyOn(api, 'createMcpToken')
+    const { user } = renderPage(<McpTokensSection />)
+    await listed()
+    await user.type(screen.getByLabelText('Token name'), 'ci')
+    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    await user.click(screen.getByRole('checkbox', { name: /approve or deny any agent/i }))
+    await user.selectOptions(screen.getByLabelText('Access'), 'write')
+    await user.click(screen.getByRole('button', { name: 'Create token' }))
+    expect(create).toHaveBeenCalledWith({ name: 'ci', tier: 'write', expires_in: 90 * 86400 })
+
+    await user.selectOptions(screen.getByLabelText('Access'), 'outward')
+    expect(screen.getByRole('checkbox', { name: /approve or deny any agent/i })).not.toBeChecked()
+  })
+
   it('copies the token with the Clipboard API', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     const { user } = renderPage(<McpTokensSection />)

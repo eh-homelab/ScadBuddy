@@ -2015,3 +2015,86 @@ describe('list_versions paging (#837)', () => {
     expect(JSON.stringify(other.content)).toMatch(/another listing/)
   })
 })
+
+describe('list_models and list_outputs page in the backend (#843)', () => {
+  const models = Array.from({ length: 60 }, (_, i) => ({ slug: `m${String(i).padStart(2, '0')}`, name: `Model ${i}` }))
+  const outputs = Array.from({ length: 30 }, (_, i) => ({ id: i.toString(16).padStart(32, '0'), slug: 'box' }))
+
+  /** The backend's `limit`/`after` window (api/models.py `page_window`), recording each query. */
+  function windowed<T>(items: () => T[], key: (item: T) => string, queries: URLSearchParams[]) {
+    return ({ request }: { request: Request }) => {
+      const query = new URL(request.url).searchParams
+      queries.push(query)
+      const all = items()
+      const after = query.get('after')
+      const start = after === null ? 0 : all.findIndex((item) => key(item) === after) + 1
+      if (after !== null && start === 0) {
+        return HttpResponse.json({ detail: `no item '${after}' is listed any more` }, { status: 409 })
+      }
+      const limit = query.get('limit')
+      const window = all.slice(start, limit === null ? undefined : start + Number(limit))
+      return HttpResponse.json(window, { headers: { 'X-Total-Count': String(all.length) } })
+    }
+  }
+
+  it('list_models asks for one page (and one more item) after the last key, never the whole catalogue', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => models, (m) => m.slug, queries)))
+    const first = firstText(await runTool(tool('list_models'), { limit: 25 }, ctx())) as {
+      items: { slug: string }[]
+      next_cursor: string
+      total: number | null
+    }
+    expect(first.items.map((m) => m.slug)).toEqual(models.slice(0, 25).map((m) => m.slug))
+    expect(first.total).toBe(60)
+    const second = firstText(await runTool(tool('list_models'), { limit: 25, cursor: first.next_cursor }, ctx())) as {
+      items: { slug: string }[]
+      next_cursor: string
+    }
+    const third = firstText(await runTool(tool('list_models'), { limit: 25, cursor: second.next_cursor }, ctx())) as {
+      items: { slug: string }[]
+      next_cursor: string | null
+    }
+    expect([...first.items, ...second.items, ...third.items].map((m) => m.slug)).toEqual(models.map((m) => m.slug))
+    expect(third.next_cursor).toBeNull()
+    expect(queries.map((q) => [q.get('limit'), q.get('after')])).toEqual([
+      ['26', null],
+      ['26', 'm24'],
+      ['26', 'm49'],
+    ])
+  })
+
+  it('list_models calls a cursor stale when the backend no longer lists its item', async () => {
+    let served = models
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => served, (m) => m.slug, [])))
+    const first = firstText(await runTool(tool('list_models'), { limit: 10 }, ctx())) as { next_cursor: string }
+    served = models.filter((m) => m.slug !== 'm09')
+    const stale = await runTool(tool('list_models'), { limit: 10, cursor: first.next_cursor }, ctx())
+    expect(stale.isError).toBe(true)
+    expect(JSON.stringify(stale.content)).toMatch(/stale/)
+  })
+
+  it('list_outputs passes the window through for its model, and scopes the cursor to it', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models/:slug/outputs`, windowed(() => outputs, (o) => o.id, queries)))
+    const first = firstText(await runTool(tool('list_outputs'), { slug: 'box', limit: 20 }, ctx())) as {
+      items: { id: string }[]
+      next_cursor: string
+      total: number | null
+    }
+    expect(first.items).toHaveLength(20)
+    expect(first.total).toBe(30)
+    const second = firstText(
+      await runTool(tool('list_outputs'), { slug: 'box', limit: 20, cursor: first.next_cursor }, ctx()),
+    ) as { items: { id: string }[]; next_cursor: string | null }
+    expect(second.items.map((o) => o.id)).toEqual(outputs.slice(20).map((o) => o.id))
+    expect(second.next_cursor).toBeNull()
+    expect(queries.map((q) => [q.get('limit'), q.get('after')])).toEqual([
+      ['21', null],
+      ['21', outputs[19]!.id],
+    ])
+    const other = await runTool(tool('list_outputs'), { slug: 'lid', limit: 20, cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
+  })
+})

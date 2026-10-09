@@ -5,7 +5,7 @@ import { command, commandAnswer, isRunning } from './command.js'
 import { ok } from './call.js'
 import { commit, decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'
-import { page, PAGED, pageInput } from './pagination.js'
+import { backendPage, PAGED, pageInput, totalCount } from './pagination.js'
 
 // Catalogue & models (issue #251): list, get, create, import, check, duplicate,
 // delete, and edit details, README, source and thumbnail. Routes:
@@ -23,8 +23,14 @@ export const catalogueTools: Tool[] = [
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models'],
     title: () => 'List templates',
+    // The backend pages (#843): it builds only this page's records, not the catalogue.
     handler: async (args, { backend }) =>
-      json(page(await ok(backend.GET('/api/v1/models'), 'list models'), args, (m) => m.slug, 'list_models')),
+      json(
+        await backendPage(args, (m: { slug: string }) => m.slug, 'list_models', async (query) => {
+          const pending = backend.GET('/api/v1/models', { params: { query } })
+          return { items: await ok(pending, 'list models'), total: totalCount((await pending).response) }
+        }),
+      ),
   }),
 
   defineTool({

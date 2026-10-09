@@ -33,6 +33,12 @@ const TIER_HELP: Record<McpTokenTier, string> = {
     'Outward: can also ask to send, print, delete or change settings; each of those waits for a person to approve it in ScadBuddy.',
 }
 
+// #804: the approval grant is instance-wide, not a small per-token extra. A holder can
+// decide every pending outward approval, in every session (ApprovalService.visible() and
+// authorize(); docs/ai/agent-sessions.md §3), so the label states that scope itself.
+const GRANT_LABEL = "This token can approve or deny any agent's outward action, in any session"
+const GRANT_BADGE = 'Approves for any session'
+
 const DAY = 24 * 60 * 60
 
 const EXPIRY: { value: string; label: string; seconds: number | undefined }[] = [
@@ -60,6 +66,15 @@ function TokenRow({ token, onRevoke }: { token: McpToken; onRevoke: (token: McpT
         </p>
         <p className="mt-0.5 text-[12px] text-muted">
           <span className="rounded-[4px] border border-line px-1 py-px">{TIER_LABEL[token.tier]}</span>
+          {token.approval_grant && (
+            <span
+              className="ml-2 rounded-[4px] border border-warn/50 px-1 py-px text-warn"
+              title={`${GRANT_LABEL}.`}
+              data-testid="mcp-token-grant"
+            >
+              {GRANT_BADGE}
+            </span>
+          )}
           {token.status === 'revoked' && token.revoked_at && (
             <span className="ml-2 text-warn">Revoked {day(token.revoked_at)}</span>
           )}
@@ -107,6 +122,7 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
   const [name, setName] = useState('')
   const [tier, setTier] = useState<McpTokenTier>('read')
   const [expiry, setExpiry] = useState('90')
+  const [grant, setGrant] = useState(false)
   const [creating, setCreating] = useState(false)
   const [minted, setMinted] = useState<MintedMcpToken | null>(null)
   const [copied, setCopied] = useState<'copied' | 'manual' | null>(null)
@@ -129,10 +145,12 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
         name: name.trim(),
         tier,
         ...(seconds === undefined ? {} : { expires_in: seconds }),
+        ...(grant && tier === 'outward' ? { approval_grant: true } : {}),
       })
       setMinted(result)
       setCopied(null)
       setName('')
+      setGrant(false)
       listState.reload()
     } catch (cause) {
       setError(describeError(cause, 'Could not create the token.'))
@@ -274,7 +292,11 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
             <select
               id="mcp-token-tier"
               value={tier}
-              onChange={(event) => setTier(event.target.value as McpTokenTier)}
+              onChange={(event) => {
+                const next = event.target.value as McpTokenTier
+                setTier(next)
+                if (next !== 'outward') setGrant(false)
+              }}
               className="sb-field mt-1.5 cursor-pointer"
               aria-describedby="mcp-token-tier-help"
             >
@@ -316,6 +338,32 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
         <p id="mcp-token-tier-help" className="-mt-2 text-[12px] text-muted">
           {TIER_HELP[tier]}
         </p>
+        {tier === 'outward' && (
+          <div className="flex items-start gap-2">
+            <input
+              id="mcp-token-grant"
+              type="checkbox"
+              checked={grant}
+              onChange={(event) => setGrant(event.target.checked)}
+              className="mt-0.5 cursor-pointer"
+              aria-describedby="mcp-token-grant-help"
+              {...USER_ONLY}
+            />
+            <div>
+              <label htmlFor="mcp-token-grant" className="block cursor-pointer text-[13px]">
+                {GRANT_LABEL}
+              </label>
+              <p id="mcp-token-grant-help" className="mt-0.5 text-[12px] text-muted">
+                System-wide: whoever holds this token sees every pending send, print, delete or
+                settings change any agent asks for, in every session on this ScadBuddy, not only
+                sessions this token started, and can decide it in place of a person, though never
+                its own: not the actions it asked for, nor those in sessions it started or owns.
+                Leave this off unless that client is meant to review other agents. It cannot be
+                changed later; revoke the token to withdraw it.
+              </p>
+            </div>
+          </div>
+        )}
 
         {error && (
           <p role="alert" className="text-[13px] text-warn">

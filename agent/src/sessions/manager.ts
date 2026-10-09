@@ -1271,6 +1271,8 @@ export class SessionManager {
       let forwarded: PluginsForRun | undefined
       let packages: PackagesForRun | undefined
       let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
+      /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
+      let inProcessServers: string[] = []
       /** Whether this turn wrote headless-browser folders, removed when it ends. */
       let browserDirs = false
       try {
@@ -1321,6 +1323,24 @@ export class SessionManager {
           for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
             if (!loaded.has(path.resolve(dir))) {
               await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+            }
+          }
+          // #1255: Claude Code drops an in-process server it cannot connect, and every
+          // tool on it, logging that at debug level only. Say so in the session.
+          for (const name of inProcessServers) {
+            const status = message.mcp_servers.find((s) => s.name === name)?.status
+            if (status !== 'connected') {
+              await this.events.append(id, [
+                scrubForLog(
+                  event({
+                    type: 'error',
+                    sessionId: id,
+                    code: 'tools_unavailable',
+                    message: `the ${name} tools are not available in this turn: Claude Code reports their in-process MCP server as ${status ?? 'missing'}`,
+                  }),
+                  secrets,
+                ),
+              ])
             }
           }
           for (const plugin of remotePlugins) {
@@ -1476,6 +1496,7 @@ export class SessionManager {
           traceHooks: traced.hooks(),
           ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
         }
+        inProcessServers = Object.keys(run.mcpServers ?? {})
         const turn = runWithFallback(run, {
           candidates,
           report: this.deps.credentials.reporter({ sessionId: id, turnId }),

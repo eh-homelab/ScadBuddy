@@ -257,9 +257,84 @@ def _parse_tags(raw: str | None) -> list[str] | None:
     return parsed
 
 
-@router.get("/models", response_model=list[ModelRecord], summary="List models")
-def list_models(catalogue: CatalogueDep) -> list[ModelRecord]:
-    return catalogue.list_models()
+#: Paging a list route in the backend (#843): `limit` and `after` (the key of the last
+#: item of the page before) pick a window of the route's own order, and only that
+#: window is built. Without either the route answers the whole list, as before. The
+#: whole list's length is in `X-Total-Count`. An `after` that is no longer listed is a
+#: 409: the item went away, and guessing where it stood could skip or repeat items.
+MAX_PAGE_LIMIT = 500
+TOTAL_COUNT_HEADER = "X-Total-Count"
+PageLimit = Annotated[
+    int | None,
+    Query(ge=1, le=MAX_PAGE_LIMIT, description="At most this many items; all when omitted"),
+]
+PageAfter = Annotated[
+    str | None,
+    Query(
+        min_length=1,
+        max_length=256,
+        description="Start after the item with this key (the last key of the page before)",
+    ),
+]
+PAGED_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "headers": {
+            TOTAL_COUNT_HEADER: {
+                "description": "How many items the whole list holds",
+                "schema": {"type": "integer"},
+            }
+        }
+    },
+    409: {"description": "`after` names an item that is no longer listed"},
+}
+
+
+def page_window(keys: list[str], after: str | None, limit: int | None, what: str) -> slice:
+    """The slice of a listing whose keys are ``keys`` that `limit`/`after` ask for."""
+    start = 0
+    if after is not None:
+        try:
+            start = keys.index(after) + 1
+        except ValueError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"no {what} {after!r} is listed any more to page after; list again without `after`",
+            ) from None
+    return slice(start, None if limit is None else start + limit)
+
+
+@router.get(
+    "/models",
+    response_model=list[ModelRecord],
+    summary="List models",
+    responses=PAGED_RESPONSES,
+)
+def list_models(
+    catalogue: CatalogueDep,
+    response: Response,
+    limit: PageLimit = None,
+    after: PageAfter = None,
+) -> list[ModelRecord]:
+    """Mine, then the built-ins. `X-Total-Count` counts every template, one whose
+    ``model.json`` cannot be read (and so is left out of the list) too.
+
+    A page holds `limit` records whenever the list goes on past it: a model left out
+    of a window does not shorten the page, because the agent reads a short page as
+    the end of the list and would never list the models after it."""
+    slugs = catalogue.slugs()
+    response.headers[TOTAL_COUNT_HEADER] = str(len(slugs))
+    if limit is None and after is None:
+        return catalogue.list_models(slugs)
+    window = page_window(slugs, after, limit, "model")
+    if limit is None:
+        return catalogue.list_models(slugs[window])
+    records: list[ModelRecord] = []
+    start = window.start
+    while len(records) < limit and start < len(slugs):
+        chunk = slugs[start : start + limit - len(records)]
+        records.extend(catalogue.list_models(chunk))
+        start += len(chunk)
+    return records
 
 
 class PastedSource(BaseModel):

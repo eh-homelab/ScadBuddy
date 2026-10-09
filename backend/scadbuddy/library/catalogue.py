@@ -1028,10 +1028,12 @@ class Catalogue:
                     break
         return found
 
-    def list_models(self) -> list[ModelRecord]:
+    def list_models(self, slugs: list[str] | None = None) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
-        is a template, so the ``_builtin`` mirror itself is never listed as one."""
-        slugs = self.slugs()
+        is a template, so the ``_builtin`` mirror itself is never listed as one.
+        ``slugs``, a window of :meth:`slugs`, builds only those records (#843)."""
+        if slugs is None:
+            slugs = self.slugs()
         # ONE git call for the page, not one per model: see `last_commits`. The same
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
