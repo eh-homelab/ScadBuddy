@@ -846,7 +846,20 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(snapshot).toEqual({
           v: 1,
           type: 'sessions.snapshot',
-          sessions: [{ sessionId: b.id, title: 'b', origin: 'mcp', owner: agentB, status: 'idle' }],
+          sessions: [
+            {
+              sessionId: b.id,
+              title: 'b',
+              origin: 'mcp',
+              owner: agentB,
+              status: 'idle',
+              // #795: the switcher's nesting, last activity and spend.
+              parentId: null,
+              updatedAt: expect.any(String),
+              costUsd: 0,
+              budgetUsd: 1,
+            },
+          ],
         })
       })
 
