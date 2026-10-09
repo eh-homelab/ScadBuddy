@@ -103,6 +103,23 @@ describe('the library routes', () => {
     expect(body).toEqual({ printer_id: null, filament_plan: [], nozzles: [], tier: 'fine', process_name: null })
   })
 
+  it("forgets a library file's remembered choices when given nothing else (#1964)", async () => {
+    let body: unknown
+    server.use(
+      http.put(`${LIB}/choices`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({})
+      }),
+    )
+    const result = await tool('remember_model_print_choices').execute({ library_file_id: FILE }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ printer_id: null, filament_plan: [], nozzles: [], tier: null, process_name: null })
+    // And the listing says so, rather than sending the user to Settings.
+    const listing = tool('get_remembered_choices').description
+    expect(listing).toContain('library_file_id')
+    expect(listing).not.toContain('forgotten in Settings')
+  })
+
   it('files a library print under a project', async () => {
     let body: unknown
     server.use(
