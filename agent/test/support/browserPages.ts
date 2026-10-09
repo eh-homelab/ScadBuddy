@@ -87,6 +87,10 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <p id="fetch-result">fetch not run</p>
   <button id="socket" onclick="const ws = new WebSocket('${otherOrigin.replace(/^http/, 'ws')}/socket'); ws.onopen = () => document.getElementById('socket-result').textContent = 'socket open'; ws.onerror = ws.onclose = () => document.getElementById('socket-result').textContent = 'socket closed'">Socket</button>
   <p id="socket-result">socket not run</p>
+  <button id="approve" onclick="fetch('/api/v1/ai/pending-input/approval:1', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{&quot;decision&quot;:&quot;approved&quot;}'}).then(r => document.getElementById('approve-result').textContent = 'approve ' + r.status, () => document.getElementById('approve-result').textContent = 'approve blocked')">Approve</button>
+  <p id="approve-result">approve not run</p>
+  <button id="agent-socket" onclick="const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/v1/ai/chat'); ws.onopen = () => document.getElementById('agent-socket-result').textContent = 'agent socket open'; ws.onerror = ws.onclose = () => document.getElementById('agent-socket-result').textContent = 'agent socket closed'">Agent socket</button>
+  <p id="agent-socket-result">agent socket not run</p>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
 </body></html>`
   return serve(async (url, method, res, headers) => {
@@ -99,6 +103,12 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
     }
     if (url === '/redirect-home') {
       res.writeHead(302, { location: '/?from=redirect' })
+      res.end()
+      return
+    }
+    if (url === '/redirect-agent') {
+      // To a path the ingress would route to the agent.
+      res.writeHead(302, { location: '/api/v1/ai/status' })
       res.end()
       return
     }

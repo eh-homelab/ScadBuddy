@@ -113,6 +113,37 @@ export function mayApprove(origins: BrowserOrigins, origin: string): boolean {
   return origins.allowed === '*' || origins.allowed.includes(origin)
 }
 
+/**
+ * The paths the ingress routes to the agent itself on ScadBuddy's origin
+ * (docs/ai/operating.md §1.1, both `Prefix`). The headless browser never
+ * reaches them: a page there could answer the session's own parked approvals
+ * (review of #1934). headlessBrowser.ts `redirectGuardSource` holds a copy.
+ */
+export const AGENT_PATH_PREFIXES = ['/api/v1/ai', '/mcp'] as const
+
+/**
+ * Whether a URL's path is, or could be after a proxy normalises it, one of the
+ * agent's (AGENT_PATH_PREFIXES). As nginx does before matching a location:
+ * percent-escapes decoded (`%2F` too), slashes merged, dot segments resolved;
+ * and lower-cased, and backslashes read as slashes, to refuse more rather than
+ * less. Anything that does not parse counts as the agent's.
+ */
+export function isAgentPath(url: string): boolean {
+  let path: string
+  try {
+    path = decodeURIComponent(new URL(url).pathname)
+  } catch {
+    return true
+  }
+  const segments: string[] = []
+  for (const segment of path.replace(/\\/g, '/').split('/')) {
+    if (segment === '..') segments.pop()
+    else if (segment !== '' && segment !== '.') segments.push(segment)
+  }
+  const normal = `/${segments.join('/')}`.toLowerCase()
+  return AGENT_PATH_PREFIXES.some((prefix) => normal.startsWith(prefix))
+}
+
 export type Navigation =
   /** One of ScadBuddy's own origins: open `url` as it is. */
   | { kind: 'ui'; url: string }
@@ -127,7 +158,13 @@ export function classifyNavigation(url: unknown, origins: BrowserOrigins, approv
   const origin = typeof url === 'string' ? normaliseOrigin(url) : undefined
   const shown = typeof url === 'string' ? JSON.stringify(url) : 'that URL'
   if (typeof url === 'string' && origin !== undefined) {
-    if (origins.ui.includes(origin)) return { kind: 'ui', url }
+    if (origins.ui.includes(origin)) {
+      if (!isAgentPath(url.trim())) return { kind: 'ui', url }
+      return {
+        kind: 'refused',
+        reason: `may not open the assistant's own API (${AGENT_PATH_PREFIXES.join(', ')}) on ScadBuddy's origin; ${shown} was not opened.`,
+      }
+    }
     if (origin === origins.backend) {
       // Its requests would carry the marker only on a UI origin; say where to go instead.
       const u = new URL(url.trim())

@@ -26,6 +26,7 @@ import {
   type BrowserOrigins,
   browserOrigins,
   BrowserOriginsError,
+  isAgentPath,
   parseBrowserAllowedOrigins,
 } from '../src/harness/browserOrigins.js'
 import { probeChromiumSandbox } from '../src/harness/headlessSandbox.js'
@@ -195,6 +196,32 @@ describe('the navigation guard and file names', () => {
       const any = browserOrigins({ backendUrl: ORIGIN, publicUrl: 'https://scadbuddy.internal.example', browserAllowed: '*' })
       expect(check('browser_navigate', { url: `${ORIGIN}/` }, any, new Set([ORIGIN]))).toHaveProperty('deny')
       expect(originToApprove(t('browser_navigate'), { url: `${ORIGIN}/` }, any, none)).toBeUndefined()
+    })
+
+    // The ingress routes these to the agent itself (docs/ai/operating.md §1.1): a page
+    // there could answer the session's own parked approvals (review of #1934).
+    it.each([
+      '/api/v1/ai/pending-input/abc',
+      '/api/v1/ai',
+      '/API/V1/AI/status',
+      '/api/v1/%61i/pending-input/abc',
+      '/api/v1/ai%2Fpending-input',
+      '//api//v1/ai/status',
+      '/m/../api/v1/ai/status',
+      '/m/%2e%2e/api/v1/ai/status',
+      '/mcp',
+      '/mcp/x',
+      '/%6dcp',
+    ])("refuses the agent's own route %s on a UI origin", (pathname) => {
+      expect(isAgentPath(`https://scadbuddy.internal.example${pathname}`)).toBe(true)
+      expect(check('browser_navigate', { url: `https://scadbuddy.internal.example${pathname}` }, origins)).toEqual({
+        deny: expect.stringMatching(/assistant's own API/),
+      })
+    })
+
+    it.each(['/', '/m/box', '/api/v1/models', '/api/v1/settings', '/assets/ai.js'])('keeps %s', (pathname) => {
+      expect(isAgentPath(`https://scadbuddy.internal.example${pathname}`)).toBe(false)
+      expect(check('browser_navigate', { url: `https://scadbuddy.internal.example${pathname}` }, origins)).toBeUndefined()
     })
 
     it('keeps the backend when it is listed, or when nothing else is configured', () => {

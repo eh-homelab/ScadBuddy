@@ -52,11 +52,13 @@ nothing here depends on the client's address.
 
 The marker is not authentication. A request without it is exactly as trusted as today
 (§4.3); forging one can only get a request refused. Measured on the pinned
-``@playwright/mcp`` 0.0.82 (``agent/test/headlessBrowser.server.test.ts``): the header
-reaches every request the page makes to the backend and none to another origin, and a
-page ``fetch`` that sets the same header itself arrives with the session's value, not
-its own. The pin moved to 0.0.83 without re-running that test against it; re-date this
-once it has.
+``@playwright/mcp`` 0.0.83 with chromium-headless-shell 1247
+(``agent/test/headlessBrowser.server.test.ts``): the header reaches every request the
+page makes to ScadBuddy's origins (the backend's, or the public one since #983) and
+none to another origin, and a page ``fetch`` that sets the same header itself arrives
+with the session's value, not its own. The agent refuses every request that carries
+it (``agent/src/app.ts``), and the browser never reaches the agent's paths on the public
+origin (``isAgentPath`` in ``agent/src/harness/browserOrigins.ts``).
 """
 
 from __future__ import annotations

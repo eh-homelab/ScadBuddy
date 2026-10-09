@@ -221,6 +221,20 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
     expect(ui.hits.filter((h) => h.url === '/api/v1/prints').map((h) => [h.headers.host, marker(h)])).toEqual([
       [new URL(publicOrigin).host, sessionId],
     ])
+    // Nothing reaches a path the ingress routes to the agent (review of #1934): a page's
+    // POST that would answer the session's own approval, a socket, a redirect, a
+    // direct navigation, nor an encoded or dotted spelling of one.
+    await call('browser_click', { element: 'Approve', target: '#approve' })
+    await call('browser_wait_for', { text: 'approve blocked' })
+    await call('browser_click', { element: 'Agent socket', target: '#agent-socket' })
+    await call('browser_wait_for', { text: 'agent socket closed' })
+    for (const url of ['/redirect-agent', '/api/v1/ai/status', '/api/v1/%61i/status', '/m/%2e%2e/api/v1/ai/status', '/mcp']) {
+      const refused = await call('browser_navigate', { url: `${publicOrigin}${url}` })
+      if (url !== '/redirect-agent') expect(refused.text, url).toContain('Blocked')
+    }
+    await call('browser_wait_for', { time: 1 })
+    const agentHits = ui.hits.filter((h) => /^\/(api\/v1\/(ai|%61i)|mcp|m\/%2e)/i.test(h.url))
+    expect(agentHits).toEqual([])
     // The backend's own origin is not a place any more.
     const before = ui.hits.length
     const backend = await call('browser_navigate', { url: `${ui.origin}/m/box?via=backend` })

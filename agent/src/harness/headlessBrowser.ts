@@ -4,7 +4,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normaliseOrigin } from '../http/origins.js'
-import { type BrowserOrigins, browserOrigins, classifyNavigation, mayApprove } from './browserOrigins.js'
+import {
+  AGENT_PATH_PREFIXES,
+  type BrowserOrigins,
+  browserOrigins,
+  classifyNavigation,
+  mayApprove,
+} from './browserOrigins.js'
 import { isUuid } from './stateDirs.js'
 import type { GuardVerdict, RiskTier } from './permissions.js'
 
@@ -413,12 +419,30 @@ const approved = () => {
     return []
   }
 }
+// browserOrigins.ts isAgentPath, the same steps: on ScadBuddy's origin the ingress
+// routes these paths to the agent itself, which the browser never reaches.
+const AGENT_PATH_PREFIXES = ${JSON.stringify(AGENT_PATH_PREFIXES)}
+const isAgentPath = (url) => {
+  let path
+  try {
+    path = decodeURIComponent(new URL(url).pathname)
+  } catch {
+    return true
+  }
+  const segments = []
+  for (const segment of path.replace(/\\\\/g, '/').split('/')) {
+    if (segment === '..') segments.pop()
+    else if (segment !== '' && segment !== '.') segments.push(segment)
+  }
+  const normal = ('/' + segments.join('/')).toLowerCase()
+  return AGENT_PATH_PREFIXES.some((prefix) => normal.startsWith(prefix))
+}
 // Where a URL may go, or null: whether it is one of ScadBuddy's own origins
 // (and so carries the marker).
 const place = (url) => {
   const origin = originOf(url)
   if (origin === null) return null
-  if (UI.includes(origin)) return { url, ui: true }
+  if (UI.includes(origin)) return isAgentPath(url) ? null : { url, ui: true }
   if (approved().includes(origin)) return { url, ui: false }
   return null
 }

@@ -100,7 +100,10 @@ In order, from the model outwards:
    ([`browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts)), comparing origins
    with `normaliseOrigin()` from [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts):
    - one of **ScadBuddy's own origins** (next section): runs at the tool's tier,
-     with the URL as it is;
+     with the URL as it is, **except** the agent's own paths (`/api/v1/ai`, `/mcp`,
+     which the ingress routes to the agent): denied, as is any spelling a proxy could
+     normalise into one (`isAgentPath`: percent-escapes decoded, slashes merged, dot
+     segments resolved, case folded);
    - the backend's origin when ScadBuddy's own are configured and it is not among
      them: **denied**, naming the same path on the public URL to open instead;
    - an origin `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` allows: **outward** until a human
@@ -117,8 +120,9 @@ In order, from the model outwards:
 3. **The request guard** (`redirectGuardSource()`, loaded through the server's
    `browser.initPage` and installed once on the browser context, so popups are covered
    from their first request) routes every request itself. A request may go to one of
-   ScadBuddy's own origins, or to an origin approved in this session. Anything else
-   is refused. A request that may go is made with
+   ScadBuddy's own origins (but never to the agent's paths there, the same
+   `isAgentPath` check), or to an origin approved in this session. Anything else
+   is refused, sockets and redirect hops included. A request that may go is made with
    `maxRedirects: 0`; a 3xx to a place the session may not go is refused, an allowed
    3xx on a GET navigation becomes a new navigation (which the guard sees again), and
    any other 3xx is refused. So neither a ScadBuddy page redirecting off-origin nor an
@@ -130,7 +134,13 @@ In order, from the model outwards:
 4. **The backend's agent-actor gate.** Every request from the headless context to
    ScadBuddy carries `X-ScadBuddy-Agent-Session`, and reaches the backend through
    the ingress like the user's own. The gate reads the header, not the client's
-   address, so it holds there exactly as it did on loopback. `AgentActorGate` lets such a request
+   address, so it holds there exactly as it did on loopback.
+5. **The agent refuses the marker.** On the public origin the agent's own routes
+   share the page's origin. A page there that could reach
+   `/api/v1/ai/pending-input/{id}` would answer the session's own parked approvals
+   (review of #1934). Guards 1 and 3 keep the browser off those paths. As a second
+   line, the agent answers every request carrying the marker with `403`, whatever
+   its method or path (`agent/src/app.ts`). `AgentActorGate` lets such a request
    through for `GET`/`HEAD`/`OPTIONS`, and for the non-safe routes in
    `AGENT_ALLOWED_WRITES` (the read/write tools' routes that no outward tool shares;
    `agent/test/agentActor.test.ts` derives the same list from the tool registry and
