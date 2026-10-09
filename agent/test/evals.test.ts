@@ -62,14 +62,14 @@ describe('eval credential resolution', () => {
 
 describe.skipIf(!TEST_DATABASE_URL)(`eval credential from the database${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   it('reads the credential and model saved in Settings, as the service does', async () => {
-    const { db, schema, drop } = await throwawayDatabase()
+    const { db, schema, url, drop } = await throwawayDatabase()
     const keyDir = await mkdtemp(path.join(os.tmpdir(), 'evals-kek-'))
     try {
       expect(await db.ready()).toBe(true)
       const key = randomBytes(32).toString('base64')
       const keyFile = path.join(keyDir, 'kek')
       await writeFile(keyFile, key)
-      const env = { SCADBUDDY_DATABASE_URL: TEST_DATABASE_URL, SCADBUDDY_SECRET_KEY_FILE: keyFile }
+      const env = { SCADBUDDY_DATABASE_URL: url, SCADBUDDY_SECRET_KEY_FILE: keyFile }
 
       const empty = await resolveEvalCredential(env, { searchPath: schema })
       expect(empty).toEqual({ ok: false, reason: expect.stringContaining('no Claude credential is saved in Settings') })

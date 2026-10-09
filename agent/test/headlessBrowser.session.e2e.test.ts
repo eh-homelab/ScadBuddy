@@ -60,13 +60,14 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
   let other: PageServer
   let db: Database
   let schema: string
+  let url: string
   let drop: () => Promise<void>
   let stop: AbortController
   const pools: Database[] = []
   const statuses: number[] = []
 
   beforeEach(async () => {
-    ;({ db, schema, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     stop = new AbortController()
     statuses.length = 0
@@ -94,7 +95,7 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
   async function replica(enabled: boolean, browserAllowedOrigins?: string): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
-    const pool = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+    const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
     const values: Record<string, unknown> = { model: 'claude-sonnet-4-5', [SETTING_HEADLESS_BROWSER]: enabled }
     return manager({

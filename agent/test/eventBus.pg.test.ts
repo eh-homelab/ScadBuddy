@@ -67,11 +67,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
   () => {
     let db: Database
     let schema: string
+    let url: string
     let drop: () => Promise<void>
     const listeners: PgEventListener[] = []
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, url, drop } = await throwawayDatabase())
       await db.sql.unsafe(EVENTS_DDL)
     })
     afterEach(async () => {
@@ -81,7 +82,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     async function listen(options: { replayLimit?: number } = {}) {
       const logs: string[] = []
-      const listener = new PgEventListener(TEST_DATABASE_URL!, {
+      const listener = new PgEventListener(url, {
         searchPath: schema,
         retryMinMs: 20,
         retryMaxMs: 100,
@@ -230,14 +231,15 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     let db: Database
     let schema: string
+    let url: string
     let drop: () => Promise<void>
     let listener: PgEventListener
     let client: Client | undefined
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, url, drop } = await throwawayDatabase())
       await db.sql.unsafe(EVENTS_DDL)
-      listener = new PgEventListener(TEST_DATABASE_URL!, { searchPath: schema, retryMinMs: 20, log: () => {} })
+      listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
       listener.start()
       await listener.ready()
     })
