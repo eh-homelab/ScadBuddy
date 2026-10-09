@@ -40,7 +40,7 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
-import { gateActivities, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
@@ -346,10 +346,11 @@ const temporalWorker =
           ...toolActivities(DURABLE_TOOLS, {
             services: toolServices,
             sessions: new PgSessionOwners(temporal.sql),
+            approvals: new PgApprovalRecords(temporal.sql),
             audit,
             answers: new PgAnswers(temporal.sql),
           }),
-          ...gateActivities({ audit }),
+          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
         },
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).

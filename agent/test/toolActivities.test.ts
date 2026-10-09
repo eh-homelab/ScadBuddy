@@ -11,7 +11,7 @@ import type { TouchedCall } from '../src/sessions/touched.js'
 import { answerResult } from '../src/gate/answers.js'
 import { answeredText, timedOutText } from '../src/harness/attention.js'
 import { answersText } from '../src/harness/questions.js'
-import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { DESCRIBE_CALL_ACTIVITY, DURABLE_IMAGE_NOTE, gateActivities, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
@@ -90,6 +90,7 @@ function harness(overrides: Partial<ToolActivityDeps> = {}, tools: readonly Tool
   const deps: ToolActivityDeps = {
     services: services({ backend, touched: { record: async (call) => void touched.push(call) } }),
     sessions: { ownerOf: async (id) => (id === SESSION ? owner : undefined) },
+    approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
     audit: {
       record: async (entry) => void audits.push(entry),
       hash: (tool) => `hash:${tool}`,
@@ -109,10 +110,10 @@ function env(workflowId = `session-${SESSION}`, activityId = 'tool-toolu_01') {
   })
 }
 
-/** The tool's own text, out of its untrusted-data envelope. */
+/** The tool's own text, out of its untrusted-data envelope (the activity returns the result's text). */
 function text(content: unknown): string {
-  const [block] = content as { type: string; text: string }[]
-  return unwrapUntrusted(block!.text)
+  expect(typeof content).toBe('string')
+  return unwrapUntrusted(content as string)
 }
 
 async function failure(promise: Promise<unknown>): Promise<ApplicationFailure> {
@@ -154,10 +155,10 @@ describe('tool activities', () => {
     ])
   })
 
-  it('runs an outward tool without preparing an approval: the workflow decided it', async () => {
+  it('runs an approved outward tool without preparing an approval: the workflow decided it', async () => {
     const pending = new PendingActionStore()
     const h = harness({ services: services({ pending }) })
-    const content = await env().run(h.activities.send!, { to: 'printer' })
+    const content = await env(undefined, 'tool-toolu_approved').run(h.activities.send!, { to: 'printer' })
     expect(text(content)).toContain('"sent": "printer"')
     // /mcp, with no gate, still only prepares it.
     const run = await runToolWithOutcome(send, { to: 'printer' }, {
@@ -176,14 +177,63 @@ describe('tool activities', () => {
     expect(broke.nonRetryable).toBe(true)
     expect(broke.type).toBe('ToolError')
     expect(broke.message).toContain('it broke')
-    const invalid = await failure(env().run(h.activities.send!, { to: 3 }))
+    const invalid = await failure(env(undefined, 'tool-toolu_approved').run(h.activities.send!, { to: 3 }))
     expect(invalid.nonRetryable).toBe(true)
     expect(invalid.message).toContain('invalid arguments')
     // A token owner holds `read` only (harnessPrincipal), so an outward tool is refused.
-    const refused = await failure(env().run(harness({}, TOOLS, BEARER).activities.send!, { to: 'x' }))
+    const refused = await failure(env(undefined, 'tool-toolu_approved').run(harness({}, TOOLS, BEARER).activities.send!, { to: 'x' }))
     expect(refused.nonRetryable).toBe(true)
     expect(refused.message).toContain('needs the "outward" tier')
     expect(h.audits.map((a) => a.outcome)).toEqual(['error', 'error'])
+  })
+
+  // Security review of 5b (missing-authorization): `gate: 'workflow'` must not be
+  // borrowed by any workflow named after a durable session. A gated call runs only
+  // with an `approved` outcome recorded for its own request id (session, run, call).
+  it('refuses a gated call with no approval recorded for its request id, and runs nothing', async () => {
+    const asked: string[] = []
+    const h = harness({
+      approvals: {
+        approved: async (requestId) => {
+          asked.push(requestId)
+          return false
+        },
+      },
+    })
+    const refused = await failure(env(undefined, 'tool-toolu_07').run(h.activities.send!, { to: 'printer' }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('NotApproved')
+    expect(asked).toEqual([`durable:${SESSION}:run-1:toolu_07`])
+    expect(h.audits).toEqual([expect.objectContaining({ action: 'send', outcome: 'refused', requestId: `durable:${SESSION}:run-1:toolu_07` })])
+    // An ungated tool never asks.
+    await env().run(h.activities.whoami!, {})
+    expect(asked).toHaveLength(1)
+    // Without the record store, a gated call cannot be checked, so it is refused.
+    const none = await failure(env(undefined, 'tool-toolu_approved').run(harness({ approvals: undefined }).activities.send!, { to: 'x' }))
+    expect(none.type).toBe('NotApproved')
+  })
+
+  it('joins a result into the text the plugin hands the model, and names an image it cannot', async () => {
+    const pic = defineTool({
+      name: 'pic',
+      description: 'an image and words',
+      input: z.object({}),
+      risk: 'read',
+      routes: [],
+      handler: async () => ({
+        content: [
+          { type: 'text', text: 'first' },
+          { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+          { type: 'text', text: 'second' },
+        ],
+      }),
+    })
+    const out = await env().run(harness({}, [pic]).activities.pic!, {})
+    expect(typeof out).toBe('string')
+    expect(out).toContain('first')
+    expect(out).toContain('second')
+    expect(out).toContain(DURABLE_IMAGE_NOTE)
+    expect(out).not.toContain('iVBORw0KGgo')
   })
 
   it('refuses a workflow that is not a known session, and runs nothing', async () => {
@@ -264,8 +314,8 @@ describe('the gate in tool activities', () => {
       { question: 'Which colour?', header: 'Colour', options: [{ label: 'Red', description: 'r' }, { label: 'Blue', description: 'b' }], multiSelect: false },
       { question: 'Which parts?', header: 'Parts', options: [{ label: 'Both', description: 'x' }, { label: 'Lid', description: 'y' }], multiSelect: false },
     ]
-    const content = (await env().run(h.activities.ask_user!, { questions })) as unknown as { text: string }[]
-    expect(content[0]!.text).toBe(answersText({ 'Which colour?': 'Red', 'Which parts?': 'Both' }))
+    const content = await env().run(h.activities.ask_user!, { questions })
+    expect(content).toBe(answersText({ 'Which colour?': 'Red', 'Which parts?': 'Both' }))
     expect(asked).toEqual([REQUEST])
     expect(h.audits).toEqual([expect.objectContaining({ action: 'ask_user', requestId: REQUEST, outcome: 'ok' })])
     const failed = await failure(env(undefined, 'tool-toolu_02').run(h.activities.wait_for_user!, { reason: 'blocked', message: 'stuck' }))
@@ -277,13 +327,19 @@ describe('the gate in tool activities', () => {
 
   it('describes a call with the summary and hash a classic approval would carry', async () => {
     const audit = { record: async () => {}, hash: (tool: string) => `hash:${tool}`, summarise: (tool: string) => `summary:${tool}` }
-    const describeCall = gateActivities({ audit })[DESCRIBE_CALL_ACTIVITY]!
+    const sessions = { ownerOf: async (id: string) => (id === SESSION ? BROWSER : undefined) }
+    const describeCall = gateActivities({ audit, sessions })[DESCRIBE_CALL_ACTIVITY]!
     expect(await env().run(describeCall, { tool: 'print_output', input: { output: 'box' } })).toEqual({
       summary: 'summary:print_output',
       input_hash: 'hash:print_output',
     })
     await failure(env().run(describeCall, { tool: 'print_output', input: [] }))
-    await failure(env().run(gateActivities({})[DESCRIBE_CALL_ACTIVITY]!, { tool: 'x', input: {} }))
+    await failure(env().run(gateActivities({ sessions })[DESCRIBE_CALL_ACTIVITY]!, { tool: 'x', input: {} }))
+    // Security review of 5b: the HMAC key's hashes are given only to a durable session's workflow.
+    for (const workflowId of ['flow-abc', `session-${'1'.repeat(8)}-0000-4000-8000-000000000000`]) {
+      const refused = await failure(env(workflowId).run(describeCall, { tool: 'print_output', input: {} }))
+      expect(refused.type).toBe('UnknownSession')
+    }
   })
 })
 

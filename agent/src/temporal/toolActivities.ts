@@ -47,9 +47,35 @@ export class PgSessionOwners implements SessionOwners {
   }
 }
 
+/**
+ * The gate's recorded decisions (spec §6.6): whether `ai_input_responses` holds an
+ * `approved` outcome for a durable call's request id, which resolve_input writes
+ * before the workflow lets the call through.
+ */
+export interface ApprovalRecords {
+  approved(requestId: string): Promise<boolean>
+}
+
+export class PgApprovalRecords implements ApprovalRecords {
+  readonly #sql: Sql
+
+  constructor(sql: Sql) {
+    this.#sql = sql
+  }
+
+  async approved(requestId: string): Promise<boolean> {
+    const rows = await this.#sql`
+      SELECT 1 FROM ai_input_responses
+      WHERE request_id = ${requestId} AND kind = 'approval' AND outcome = 'approved'`
+    return rows.length > 0
+  }
+}
+
 export type ToolActivityDeps = {
   services: ToolServices
   sessions: SessionOwners
+  /** Where a gated call's approval is checked; a gated call is refused without it. */
+  approvals?: ApprovalRecords | undefined
   audit?: Pick<AuditLog, 'record' | 'hash' | 'summarise'> | undefined
   /** The recorded answers an `answer` tool returns (gate/answers.ts); those tools refuse without it. */
   answers?: AnswerReader | undefined
@@ -63,6 +89,21 @@ export type ToolActivity = (input: unknown) => Promise<unknown>
 export const TOOL_ERROR = 'ToolError'
 /** The failure type of a call from a workflow that is no known session. */
 export const UNKNOWN_SESSION = 'UnknownSession'
+/** The failure type of a gated call with no approval recorded for it. */
+export const NOT_APPROVED = 'NotApproved'
+
+/** What the model reads in place of an image a tool returned (plan 5c Ruling 4). */
+export const DURABLE_IMAGE_NOTE =
+  '[The tool returned an image. Durable sessions do not yet receive images from tools; use a classic session to see it.]'
+
+/**
+ * A result as the durable plugin hands it to the model: text. The plugin delivers an
+ * activity's result as `ToolOutcome(content=result)` and JSON-encodes anything but a
+ * string, so content blocks would reach the model as JSON, an image as its base64.
+ */
+function resultText(content: readonly { type: string; text?: string }[]): string {
+  return content.map((block) => (block.type === 'text' ? (block.text ?? '') : DURABLE_IMAGE_NOTE)).join('\n')
+}
 
 const SESSION_WORKFLOW = /^session-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
 const DEFAULT_HEARTBEAT_MS = 10_000
@@ -84,6 +125,21 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
   return Object.fromEntries(tools.map((tool) => [tool.name, (input: unknown) => runAsActivity(tool, input, deps, lookup)]))
 }
 
+/** The durable session the current activity's workflow is, and its owner; refused otherwise. */
+async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner }> {
+  const { workflowExecution } = Context.current().info
+  const session = sessionOf(workflowExecution?.workflowId)
+  // A lookup that throws (the database is away) is left to the activity's retries.
+  const owner = session === undefined ? undefined : await sessions.ownerOf(session)
+  if (session === undefined || owner === undefined) {
+    throw ApplicationFailure.nonRetryable(
+      `${what} runs only for a durable ScadBuddy session; ${workflowExecution?.workflowId ?? 'this workflow'} is none`,
+      UNKNOWN_SESSION,
+    )
+  }
+  return { session, owner }
+}
+
 async function runAsActivity(
   tool: Tool,
   input: unknown,
@@ -92,19 +148,35 @@ async function runAsActivity(
 ): Promise<unknown> {
   const context = Context.current()
   const { workflowExecution, activityId } = context.info
-  const session = sessionOf(workflowExecution?.workflowId)
-  // A lookup that throws (the database is away) is left to the activity's retries.
-  const owner = session === undefined ? undefined : await deps.sessions.ownerOf(session)
-  if (session === undefined || owner === undefined) {
-    throw ApplicationFailure.nonRetryable(
-      `${tool.name} runs only for a durable ScadBuddy session; ${workflowExecution?.workflowId ?? 'this workflow'} is none`,
-      UNKNOWN_SESSION,
-    )
-  }
+  const { session, owner } = await durableSession(tool.name, deps.sessions)
   const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
   // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
   const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
   if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
+  // `gate: 'workflow'` below skips preparing an approval because the workflow parked
+  // the call and a person approved it. That is checked here, not assumed: any client of
+  // the namespace can name a workflow after a durable session (security review of 5b).
+  if (tool.gated && !(await deps.approvals?.approved(requestId))) {
+    const parsed = parsedOrRaw(tool, input)
+    const now = new Date()
+    await deps.audit?.record({
+      kind: 'tool_call',
+      action: tool.name,
+      surface: 'harness',
+      actor: owner,
+      sessionId: session,
+      toolUseId,
+      requestId,
+      tier: tool.risk,
+      inputHash: deps.audit.hash(tool.name, parsed),
+      inputSummary: deps.audit.summarise(tool.name, parsed),
+      outcome: 'refused',
+      detail: 'no approval is recorded for this call',
+      startedAt: now,
+      finishedAt: now,
+    })
+    throw ApplicationFailure.nonRetryable(`${tool.name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
+  }
   const principal = harnessPrincipal(owner)
   const services = deps.services
   const heartbeat = setInterval(() => context.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
@@ -146,7 +218,7 @@ async function runAsActivity(
   })
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
-  return run.result.content
+  return resultText(run.result.content)
 }
 
 /**
@@ -180,7 +252,7 @@ async function answerAsActivity(
     finishedAt: new Date(),
   })
   if (!answer.ok) throw ApplicationFailure.nonRetryable(answer.text, TOOL_ERROR)
-  return [{ type: 'text', text: answer.text }]
+  return answer.text
 }
 
 /** The activity that describes a call for its gate entry (gateActivities). */
@@ -192,9 +264,12 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
  * approvals' HMAC key, audit/log.ts), so the agent alone holds the key and the
  * scrubbing rules. Served on `agent-tools` beside the tools.
  */
-export function gateActivities(deps: Pick<ToolActivityDeps, 'audit'>): Record<string, ToolActivity> {
+export function gateActivities(deps: Pick<ToolActivityDeps, 'audit' | 'sessions'>): Record<string, ToolActivity> {
   return {
     [DESCRIBE_CALL_ACTIVITY]: async (args: unknown) => {
+      // The hash is keyed by the approvals' HMAC key: only a durable session's workflow
+      // gets one (security review of 5b).
+      await durableSession(DESCRIBE_CALL_ACTIVITY, deps.sessions)
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
       if (!deps.audit) throw ApplicationFailure.nonRetryable('describing a call needs the audit log and its key', TOOL_ERROR)
       if (typeof tool !== 'string' || typeof input !== 'object' || input === null || Array.isArray(input)) {
