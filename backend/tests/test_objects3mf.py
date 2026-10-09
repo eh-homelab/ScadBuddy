@@ -11,17 +11,20 @@ import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.render import objects3mf
 from scadbuddy.render.bambu3mf import (
     PlateParts,
     stl_3mf,
     write_bambu_3mf,
     write_plates_3mf,
 )
+from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.jobs import LAYOUT_NAME, PlateLayout
 from scadbuddy.render.objects3mf import (
     MAX_OBJECTS,
     UnreadableObjectsError,
     read_objects,
+    read_plate_parts,
     write_piece,
 )
 from scadbuddy.render.split import ColourPart
@@ -293,3 +296,90 @@ def test_a_non_finite_vertex_or_prusa_painting_is_refused() -> None:
         read_objects(_one_triangle('<vertex x="nan" y="1" z="0"/>'))
     with pytest.raises(UnreadableObjectsError, match="painted"):
         read_objects(_one_triangle('<vertex x="0" y="1" z="0"/>', ' slic3rpe:mmu_segmentation="4"'))
+
+
+def test_a_plates_parts_are_placed_as_the_file_places_them() -> None:
+    body = _box(20, 10, 5)
+    cap = _box(20, 10, 2)
+    cap.apply_translation((0, 0, 5))
+    payload = bambu_project(
+        items=[at(50, 50), at(100, 50)],
+        parts={1: (body, "normal_part", None), 2: (cap, "normal_part", 2)},
+    )
+    read = read_plate_parts(payload, 1)
+    assert read.plates == 1
+    assert [p.colour for p in read.parts] == ["#FF0000", "#00FF00"]
+    joined = trimesh.util.concatenate([p.mesh for p in read.parts])
+    assert tuple(np.round(joined.bounds[0], 3)) == (50, 50, 0)
+    assert tuple(np.round(joined.bounds[1], 3)) == (120, 60, 7)
+    with pytest.raises(NoSuchPlateError):
+        read_plate_parts(payload, 2)
+
+
+def test_each_plate_of_a_multi_plate_file_is_read_on_its_own(tmp_path: Path) -> None:
+    red = ColourPart(1, "Color 1", "#FF0000", _box(10, 10, 4))
+    blue = ColourPart(2, "Color 2", "#0000FF", _box(6, 6, 9))
+    out = tmp_path / "model.3mf"
+    write_plates_3mf(
+        [PlateParts((red, blue), (1, 2)), PlateParts((blue,), (2,))],
+        ["#FF0000", "#0000FF"],
+        out,
+        thumbnails=None,
+    )
+    first, second = (read_plate_parts(out.read_bytes(), plate) for plate in (1, 2))
+    assert (first.plates, second.plates) == (2, 2)
+    assert [p.colour for p in first.parts] == ["#FF0000", "#0000FF"]
+    assert [p.colour for p in second.parts] == ["#0000FF"]
+    with pytest.raises(NoSuchPlateError):
+        read_plate_parts(out.read_bytes(), 3)
+
+
+def test_a_plate_is_refused_as_the_objects_are(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(objects3mf, "MAX_VISITS", 1_000)
+    painted = bambu_project(
+        items=[at(0, 0)],
+        parts={1: (_box(20, 10, 5), "normal_part", None)},
+        triangle_extra=' paint_color="8"',
+    )
+    with pytest.raises(UnreadableObjectsError, match="painted"):
+        read_plate_parts(painted, 1)
+    with pytest.raises(UnreadableObjectsError, match="too many"):
+        read_plate_parts(_fan_out(7, 10), 1)
+
+
+def _fan_out(levels: int, fan: int) -> bytes:
+    """One triangle, named ``fan`` times by each of ``levels`` nested objects: a few KB
+    that expands to ``fan ** levels`` meshes."""
+    objects = [
+        '<object id="1" type="model"><mesh><vertices><vertex x="0" y="0" z="0"/>'
+        '<vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>'
+        '<triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>'
+    ]
+    for level in range(2, levels + 2):
+        components = f'<component objectid="{level - 1}"/>' * fan
+        objects.append(
+            f'<object id="{level}" type="model"><components>{components}</components></object>'
+        )
+    root = (
+        f'<model xmlns="{CORE}"><resources>{"".join(objects)}</resources>'
+        f'<build><item objectid="{levels + 1}"/></build></model>'
+    )
+    return _zip({"3D/3dmodel.model": root})
+
+
+def test_components_that_fan_out_are_refused_before_they_are_expanded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 10 ** 7 meshes from a file of a few KB: refused, not expanded. A lower cap than
+    # the default only keeps the test quick; the default is the same kind of bound.
+    monkeypatch.setattr(objects3mf, "MAX_VISITS", 1_000)
+    with pytest.raises(UnreadableObjectsError, match="too many"):
+        read_objects(_fan_out(7, 10))
+    assert len(read_objects(_fan_out(2, 3))[0].parts[0].mesh.faces) == 9
+
+
+def test_triangles_past_the_cap_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(objects3mf, "MAX_TRIANGLES", 8)
+    assert read_objects(_fan_out(1, 8))
+    with pytest.raises(UnreadableObjectsError, match="too many"):
+        read_objects(_fan_out(1, 9))
