@@ -147,7 +147,7 @@ describe('boundByPlate', () => {
 
   it('never puts the max under the min', () => {
     const big = param({ name: 'width', min: 350, max: 400, plate_max: 'x' })
-    expect(boundByPlate(schema(big), H2C).parameters[0].max).toBe(350)
+    expect(boundByPlate(schema(big), H2C).parameters.map((p) => p.max)).toEqual([350])
   })
 
   it('is the schema itself with no plate, or nothing to bound', () => {

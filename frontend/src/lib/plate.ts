@@ -88,11 +88,12 @@ function plateLimit(plate: Plate, axis: NonNullable<Param['plate_max']>): number
  * min: a plate too small for even that is the fit warning's to say. The same object
  * back when nothing changes.
  */
-export function boundByPlate<S extends { parameters: Param[] }>(schema: S, plate: Plate | undefined): S {
-  if (!plate || !schema.parameters.some((param) => param.plate_max)) return schema
+export function boundByPlate<S extends { parameters?: Param[] }>(schema: S, plate: Plate | undefined): S {
+  const parameters = schema.parameters ?? []
+  if (!plate || !parameters.some((param) => param.plate_max)) return schema
   return {
     ...schema,
-    parameters: schema.parameters.map((param) => {
+    parameters: parameters.map((param) => {
       if (!param.plate_max) return param
       const limit = Math.max(plateLimit(plate, param.plate_max), param.min ?? -Infinity)
       return param.max != null && param.max <= limit ? param : { ...param, max: limit }
