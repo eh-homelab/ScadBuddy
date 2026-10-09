@@ -65,7 +65,11 @@ def program(arch: int, nr_socket: int) -> list[bytes]:
     """The filter: wrong ABI → kill; x32 and ``io_uring_setup`` → ``ENOSYS``;
     ``socket(family != AF_UNIX)`` → ``EAFNOSUPPORT``; anything else → allowed. On a
     little-endian machine the low 32 bits of ``args[0]`` sit at offset 16, and the
-    family is an ``int``."""
+    family is an ``int``.
+
+    ``socket`` is the one call that makes a network endpoint: ``socketpair`` makes only
+    connected local pairs, ``accept`` needs a listening socket the process could not
+    make, and it inherits no descriptor (``create_subprocess_exec`` closes them)."""
     return [
         _op(_LD_W_ABS, _OFFSET_ARCH),
         _op(_JEQ_K, arch, jt=1),

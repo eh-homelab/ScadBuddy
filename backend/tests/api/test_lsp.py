@@ -42,7 +42,6 @@ from .conftest import set_fake_env
 FAKE_LSP = """#!/usr/bin/env python3
 import json
 import os
-import platform
 import signal
 import pathlib
 import sys
