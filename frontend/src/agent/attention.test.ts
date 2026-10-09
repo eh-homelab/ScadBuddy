@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { setPendingAnswers, setPendingApprovals } from '../mocks/features/pendingInput'
+import { setPendingAnswers, setPendingApprovals, setSummariesTruncated } from '../mocks/features/pendingInput'
 import { server } from '../mocks/server'
 import {
   APPROVALS_LIST_MAX,
@@ -23,15 +23,15 @@ afterEach(() => {
 describe('fetchPendingInput', () => {
   it('counts what the agent lists as parked on the user, by kind', async () => {
     setPendingApprovals(2)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false })
     setPendingAnswers(1, 3)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false })
   })
 
   it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
     setPendingAnswers(1, 1, 2)
     const counts = await fetchPendingInput()
-    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2 })
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false })
     expect(totalOf(counts!)).toBe(2)
     expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
     expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
@@ -41,6 +41,14 @@ describe('fetchPendingInput', () => {
     expect(totalOf(only!)).toBe(0)
     expect(attentionLabel(totalOf(only!))).toBe('')
     expect(summaryLabel(only)).toBe('1 summary')
+  })
+
+  it("reads the mock agent's summaries_truncated, which tests set like the agent's own (#1413)", async () => {
+    setPendingAnswers(0, 0, 2)
+    setSummariesTruncated(true)
+    const cut = await fetchPendingInput()
+    expect(cut).toEqual({ approvals: 0, questions: 0, attention: 0, summaries: 2, summariesTruncated: true })
+    expect(summaryLabel(cut)).toBe('2+ summaries')
   })
 
   it('says when the agent listed only some of the done summaries, and not otherwise', async () => {

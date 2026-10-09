@@ -9,7 +9,9 @@
  * cites its sources and links the version it made, then an `outward` send that pauses
  * on `approval.required` and goes nowhere until the panel decides it (spec §8.2). A
  * first message that mentions a draft gets a question instead (#940): a draft to
- * approve, which waits on `question.asked` until the panel answers. The panel answers
+ * approve, which waits on `question.asked` until the panel answers; one that mentions a
+ * summary posts a `done` summary, and one that says the tab dropped parks on an attention
+ * request (#815). The panel answers
  * both over HTTP (`POST /api/v1/ai/pending-input/{id}`, #815: `features/pendingInput.ts`
  * calls `respond` below); the socket's `approval.decision` and `question.answer` still
  * work, as the real agent's do. It also lists a session an external MCP agent owns, so the picker's
@@ -283,6 +285,73 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     ]
   }
 
+  /**
+   * #815: an attention request. A first message that mentions a summary posts a `done`
+   * summary, which waits for nothing, and the turn ends; one that mentions the tab
+   * parks on a tab-disconnected card until the panel answers it.
+   */
+  const attentionTurn = (s: MockSession, done: boolean): Array<() => void> => {
+    const askId = nextId('tool')
+    const questionId = nextId('question')
+    const questions = [
+      done
+        ? {
+            question: 'Rendered the sign headlessly.',
+            header: 'Done',
+            multiSelect: false,
+            options: [
+              { label: 'Dismiss', description: '' },
+              { label: 'Got it', description: '' },
+            ],
+          }
+        : {
+            question: 'I need your ScadBuddy tab, but it is not connected.',
+            header: 'Tab disconnected',
+            multiSelect: false,
+            options: [
+              { label: "I'm back", description: '' },
+              { label: 'Carry on without the tab', description: '' },
+            ],
+          },
+    ]
+    return [
+      () =>
+        emit({
+          type: 'tool.call',
+          sessionId: s.sessionId,
+          id: askId,
+          name: 'mcp__scadbuddy_questions__request_user_attention',
+          input: { reason: done ? 'done' : 'tab_disconnected' },
+          risk: 'read',
+        }),
+      () => {
+        if (done) {
+          emit({
+            type: 'question.asked',
+            sessionId: s.sessionId,
+            id: questionId,
+            tool: askId,
+            questions,
+            attention: { reason: 'done', summary: '**What this turn changed**\n- nothing' },
+          })
+          emit({ type: 'tool.result', sessionId: s.sessionId, id: askId, ok: true, summary: 'posted' })
+          finish(s)
+          return
+        }
+        s.asking = { id: questionId, toolCallId: askId }
+        emit({
+          type: 'question.asked',
+          sessionId: s.sessionId,
+          id: questionId,
+          tool: askId,
+          questions,
+          attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: new Date(Date.now() + 300_000).toISOString() },
+        })
+        setStatus(s, 'waiting_input')
+      },
+    ]
+  }
+
   const resolveQuestion = (s: MockSession, answers: string[]) => {
     const asking = s.asking
     if (!asking) return
@@ -407,7 +476,16 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           ...(msg.images?.length ? { images: msg.images.map((image) => image.preview) } : {}),
         })
         setStatus(s, 'running')
-        play(s, isNew ? (/draft/i.test(msg.text) ? questionTurn(s) : firstTurn(s)) : followUp(s, msg.text))
+        play(
+          s,
+          !isNew
+            ? followUp(s, msg.text)
+            : /draft/i.test(msg.text)
+              ? questionTurn(s)
+              : /summary|tab dropped/i.test(msg.text)
+                ? attentionTurn(s, /summary/i.test(msg.text))
+                : firstTurn(s),
+        )
         return
       }
       case 'question.answer': {

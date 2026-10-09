@@ -16,7 +16,7 @@ import { mockAgentSessions } from '../agent'
  * request is kept for tests (`respondRequests`).
  */
 
-const state = { approvals: 0, questions: 0, attention: 0, done: 0 }
+const state = { approvals: 0, questions: 0, attention: 0, done: 0, summariesTruncated: false }
 let responses: { id: string; body: RespondBody }[] = []
 /** Listed entries already responded to, with how each ended. */
 const ended = new Map<string, string>()
@@ -38,12 +38,18 @@ export function setPendingAnswers(questions: number, attention = 0, done = 0): v
   state.done = done
 }
 
+/** Tests: whether the agent says it listed only some of the `done` summaries (`summaries_truncated`). */
+export function setSummariesTruncated(truncated: boolean): void {
+  state.summariesTruncated = truncated
+}
+
 export function reset(): void {
   state.approvals = 0
   state.questions = 0
   state.attention = 0
   responses = []
   state.done = 0
+  state.summariesTruncated = false
   ended.clear()
 }
 
@@ -123,5 +129,7 @@ export const handlers = [
     }
     return HttpResponse.json({ id, kind: body.kind, outcome: outcomeOf(body) })
   }),
-  http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: listed().filter((e) => !ended.has(e.id)) })),
+  http.get('/api/v1/ai/pending-input', () =>
+    HttpResponse.json({ entries: listed().filter((e) => !ended.has(e.id)), summaries_truncated: state.summariesTruncated }),
+  ),
 ]

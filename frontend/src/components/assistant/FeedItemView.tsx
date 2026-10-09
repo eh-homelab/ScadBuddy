@@ -199,7 +199,7 @@ function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: st
       {item.state === 'pending' ? (
         <div className="mt-2" data-agent-user-only="">
           <Button type="button" variant="primary" size="sm" onClick={() => onAnswer([dismiss])}>
-            Dismiss
+            {dismiss}
           </Button>
         </div>
       ) : (

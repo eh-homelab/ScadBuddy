@@ -21,7 +21,7 @@ describe('the mocked respond route', () => {
     expect(await respond(question!, { kind: 'answer', answers: { 'Which colour?': 'Red' } })).toBe('answered')
     expect(await respond(attention!, { kind: 'answer', choice: "I'm here" })).toBe('answered')
     expect(await listedIds()).toEqual([second])
-    expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0, summariesTruncated: false })
 
     const again = await respond(first!, { kind: 'approval', decision: 'deny' }).catch((e: unknown) => e)
     expect(again).toBeInstanceOf(RespondError)
