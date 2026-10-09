@@ -11,20 +11,22 @@ covered by a tool or by an entry in `agent/src/tools/coverage.ts`.
 
 | Tool | Tier | Route | What it does |
 |---|---|---|---|
-| `list_libraries` | read | `GET /api/v1/libraries` | The curated catalogue (BOSL2, dotSCAD, NopSCADlib, Round-Anything, MCAD; `backend/scadbuddy/library/libraries.py` `CURATED`) |
+| `list_libraries` | read | `GET /api/v1/libraries` | The curated catalogue (BOSL2, dotSCAD, NopSCADlib, Round-Anything, MCAD, gridfinity-rebuilt-openscad; `backend/scadbuddy/library/libraries.py` `CURATED`), each with a description and tags. `q` keeps the entries whose name, description or tags hold every word of it, ignoring case (#1913) |
 | `pin_library` | write | `PUT /api/v1/models/{slug}/libraries/{name}` | Pin a catalogue library to a model at its ref or another tag or branch. Only the catalogue's own repository |
 | `pin_library_from_url` | outward | same | Pin from any other https git URL, behind a human approval (spec §8.2) |
 | `repin_library` / `repin_library_from_pinned_url` | write / outward | `PATCH /api/v1/models/{slug}/libraries/{name}` | Re-pin from the URL the pin records; outward when that URL is not the catalogue's |
 | `unpin_library` | write | `DELETE /api/v1/models/{slug}/libraries/{name}` | Remove a library from a model |
 | `list_installed_libraries` | read | `GET /api/v1/libraries/installed` | The checkouts on the volume and the models that pin each |
 | `remove_library_checkout` | outward | `DELETE /api/v1/libraries/{name}` | Delete checkouts no model pins |
+| `list_library_users` | read | `GET /api/v1/libraries/{name}/users` | The models whose live pin reads a library, with what each pins (#1914) |
+| `check_library_candidate` / `check_library_candidate_from_pinned_url` | write / outward | `POST /api/v1/models/{slug}/libraries/{name}/check` | A re-pin's dry run: clone the candidate ref from the URL the pin records and parse-check the model against it, recording nothing. Tiered as the re-pin is, since it fetches the same way (#1914) |
 | `check_dependencies` | read | `POST /api/v1/models/{slug}/dependencies` | Include/use resolution and font literals, below (#253) |
 
 A pin is a revision of the model's `model.json` (`libraries`), so every pin change is a
 commit in the model's history (`backend/scadbuddy/library/libraries.py`, module
-docstring). The upgrade flow's routes (`GET /api/v1/libraries/{name}/users`,
-`POST /api/v1/models/{slug}/libraries/{name}/check`, #169) have no tool yet; their
-`coverage.ts` entry says why.
+docstring). The upgrade flow (#169, Settings > Libraries) is, for an agent,
+`list_library_users`, then `check_library_candidate` for each model, then
+`repin_library` for the ones that parse.
 
 ## Include/use resolution
 

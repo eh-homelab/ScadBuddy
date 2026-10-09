@@ -694,6 +694,8 @@ export const libraries: CatalogueLibrary[] = [
     ref: 'v2.0.761',
     licence: 'BSD-2-Clause',
     homepage: 'https://github.com/BelfrySCAD/BOSL2',
+    description: 'The Belfry OpenSCAD Library: shapes, attachments, rounding, threading, gears, hinges, paths and transforms.',
+    tags: ['general', 'shapes', 'attachments', 'rounding', 'threads', 'gears', 'screws'],
   },
   {
     name: 'dotSCAD',
@@ -701,6 +703,8 @@ export const libraries: CatalogueLibrary[] = [
     ref: 'v3.3',
     licence: 'LGPL-3.0',
     homepage: 'https://github.com/JustinSDK/dotSCAD',
+    description: 'Paths, curves, sweeps, polyhedra, turtle graphics, mazes and other generative shapes.',
+    tags: ['paths', 'curves', 'sweep', 'generative', 'turtle', 'maze'],
   },
 ]
 

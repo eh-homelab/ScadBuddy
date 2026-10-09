@@ -1234,6 +1234,77 @@ describe("tools for #324's routes", () => {
   })
 })
 
+describe('library search and the upgrade flow (#1913, #1914)', () => {
+  const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '', description: '', tags: [] }]
+  const model = (url: string) => ({ slug: 'box', name: 'Box', libraries: [{ name: 'BOSL2', url, ref: 'main', commit: 'a'.repeat(40) }] })
+
+  it('list_libraries sends `q` to the backend, and its cursor belongs to that search', async () => {
+    const asked: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/libraries`, ({ request }) => {
+        asked.push(new URL(request.url).searchParams.get('q'))
+        return HttpResponse.json([{ ...CATALOGUE[0], name: 'a' }, { ...CATALOGUE[0], name: 'b' }])
+      }),
+    )
+    const first = firstText(await runTool(tool('list_libraries'), { q: 'gridfinity', limit: 1 }, ctx())) as { next_cursor: string }
+    expect(asked).toEqual(['gridfinity'])
+    const elsewhere = await runTool(tool('list_libraries'), { q: 'bosl', cursor: first.next_cursor }, ctx())
+    expect(elsewhere.isError).toBe(true)
+    expect(firstText(await runTool(tool('list_libraries'), {}, ctx()))).toMatchObject({ total: 2 })
+    expect(asked.at(-1)).toBeNull()
+  })
+
+  it("list_library_users is a read that pages a library's users by slug", async () => {
+    const users = [
+      { slug: 'box', url: CATALOGUE[0]!.url, ref: 'main', commit: 'a'.repeat(40) },
+      { slug: 'lid', url: null, ref: null, commit: null },
+    ]
+    server.use(http.get(`${BACKEND}/api/v1/libraries/BOSL2/users`, () => HttpResponse.json(users)))
+    expect(tool('list_library_users').risk).toBe('read')
+    const first = firstText(await runTool(tool('list_library_users'), { name: 'BOSL2', limit: 1 }, ctx())) as {
+      items: unknown[]
+      next_cursor: string
+      total: number
+    }
+    expect(first).toMatchObject({ items: [users[0]], total: 2 })
+    const second = firstText(await runTool(tool('list_library_users'), { name: 'BOSL2', cursor: first.next_cursor }, ctx()))
+    expect(second).toEqual({ items: [users[1]], next_cursor: null, total: 2 })
+  })
+
+  it('checks a catalogue-pinned candidate unattended, and refuses one pinned from another URL', async () => {
+    let pinnedFrom = CATALOGUE[0]!.url
+    let checked: unknown
+    const verdict = { ok: true, errors: [], warnings: [], ref: 'v2.1.0', commit: 'b'.repeat(40) }
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json(model(pinnedFrom))),
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.post(`${BACKEND}/api/v1/models/box/libraries/BOSL2/check`, async ({ request }) => {
+        checked = await request.json()
+        return HttpResponse.json(verdict)
+      }),
+    )
+    expect(tool('check_library_candidate').risk).toBe(tool('repin_library').risk)
+    expect(tool('check_library_candidate_from_pinned_url').risk).toBe(tool('repin_library_from_pinned_url').risk)
+
+    const result = await runTool(tool('check_library_candidate'), { slug: 'box', name: 'BOSL2', ref: 'v2.1.0' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual(verdict)
+    expect(checked).toEqual({ ref: 'v2.1.0' })
+
+    checked = undefined
+    pinnedFrom = 'https://attacker.example/BOSL2'
+    const refused = await runTool(tool('check_library_candidate'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(firstText(refused)).toContain('check_library_candidate_from_pinned_url')
+    expect(checked).toBeUndefined()
+
+    expect(
+      firstText(await runTool(tool('check_library_candidate_from_pinned_url'), { slug: 'box', name: 'BOSL2', ref: 'v9' }, ctx())),
+    ).toMatchObject({ status: 'pending_approval' })
+    expect(checked).toBeUndefined()
+  })
+})
+
 describe('base64 inputs', () => {
   it('refuses malformed base64 instead of uploading truncated bytes', async () => {
     const result = await runTool(tool('upload_asset'), { slug: 'box', filename: 'a.png', content_base64: 'iVBOR!!w0K' }, ctx())
