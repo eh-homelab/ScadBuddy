@@ -63,8 +63,12 @@ export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/
  * `mcp__scadbuddy__*`) and the headless browser plugin (#349), whose tools have
  * tiers of their own, plus the vendor names, plus the server names Claude Code
  * treats specially and drops or never offers tools from. Read from the pinned
- * CLI (2.1.289): its reserved-name check (`claude mcp add` answers "this name
- * is reserved"; a plugin's server is dropped) covers `workspace`,
+ * CLI (2.1.289, the native binary of @anthropic-ai/claude-agent-sdk-<platform>
+ * 0.3.289): search the binary for the message `Cannot add MCP server "${e}":
+ * this name is reserved.` and read the predicate the check before it calls,
+ * and the sets that predicate tests. The minified names change every build, so
+ * search for the message, never a name. That check (`claude mcp add` answers
+ * "this name is reserved"; a plugin's server is dropped) covers `workspace`,
  * `computer-use`, `claude-in-chrome`, `claude-device`, `hearthbot`,
  * `remote-devices`, `webagent` and `claude-code-remote` in a local run, and
  * `widgets` only in a hosted or CLAUDE_CODE_REMOTE run. `ide` is the IDE
