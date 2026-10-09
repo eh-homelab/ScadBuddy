@@ -555,6 +555,43 @@ async def test_a_preview_waiting_on_its_snapshot_is_tried_again_by_itself() -> N
     store.record_failure.assert_not_called()
 
 
+async def test_an_edit_during_a_pending_pin_is_not_pushed_back_by_the_backoff() -> None:
+    """#1433: an edit's request that lands while the pin is in flight is due after the
+    debounce. The pending snapshot's backoff must not move it back to its own delay."""
+    calls: list[float] = []
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        calls.append(loop.time())
+        if len(calls) == 1:
+            in_flight.set()
+            await release.wait()
+            raise SnapshotPendingError("still uploading", retry_after=30)
+        return b"png"
+
+    store = mock.MagicMock()
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), store, runner, timeout=1.0, debounce=0.05, interval=0
+    )
+    with mock.patch.object(scheduler, "plan", return_value="key"):
+        scheduler.start()
+        try:
+            scheduler.request(SLUG)
+            await asyncio.wait_for(in_flight.wait(), 5)
+            scheduler.request(SLUG)  # the edit
+            await asyncio.sleep(0.01)  # `request` schedules through the loop
+            release.set()
+            async with asyncio.timeout(5):
+                while len(calls) < 2:
+                    await asyncio.sleep(0.01)
+        finally:
+            await scheduler.aclose()
+    # Well before the backoff's 30 s: the debounce, plus however long the pin held it.
+    assert calls[1] - calls[0] < 5
+
+
 async def test_a_preview_waiting_on_its_snapshot_backs_off() -> None:
     """#1435: each try holds the scheduler's one worker for up to `PIN_TIMEOUT`, so a
     stalled Bambuddy must not have it retried at a fixed rate, starving every other
@@ -573,7 +610,7 @@ async def test_a_preview_waiting_on_its_snapshot_backs_off() -> None:
     delays: list[float] = []
     with (
         mock.patch.object(scheduler, "plan", return_value="key"),
-        mock.patch.object(scheduler, "_schedule", lambda slug, delay: delays.append(delay)),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay, **_: delays.append(delay)),
     ):
         for _ in range(5):
             assert await scheduler.refresh(SLUG) is True
@@ -602,7 +639,7 @@ async def test_a_preview_backoff_does_not_compound_the_stores_own() -> None:
     delays: list[float] = []
     with (
         mock.patch.object(scheduler, "plan", return_value="key"),
-        mock.patch.object(scheduler, "_schedule", lambda slug, delay: delays.append(delay)),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay, **_: delays.append(delay)),
     ):
         for _ in range(5):
             assert await scheduler.refresh(SLUG) is True
@@ -623,7 +660,7 @@ async def test_a_new_source_does_not_inherit_an_older_ones_backoff() -> None:
     keys = iter(["old", "old", "old", "new"])
     with (
         mock.patch.object(scheduler, "plan", side_effect=lambda slug: next(keys)),
-        mock.patch.object(scheduler, "_schedule", lambda slug, delay: delays.append(delay)),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay, **_: delays.append(delay)),
     ):
         for _ in range(4):
             assert await scheduler.refresh(SLUG) is True
