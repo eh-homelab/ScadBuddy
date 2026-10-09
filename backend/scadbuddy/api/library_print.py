@@ -160,14 +160,19 @@ async def get_library_preview(
 async def get_library_file(
     file_id: FileIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
-    """The file as Bambuddy's library holds it: what a print of it was made from."""
-    return await _proxy(
+    """The file as Bambuddy's library holds it: what a print of it was made from. Always
+    a download: a library file can be any type (an SVG, an HTML page), and served on
+    ScadBuddy's origin under the type Bambuddy names it could run script there."""
+    response = await _proxy(
         store,
         request,
         f"/library/files/{file_id}/download",
         operation="library.download",
         what="download the library file",
     )
+    response.headers["content-type"] = "application/octet-stream"
+    response.headers["content-disposition"] = "attachment"
+    return response
 
 
 @router.get(

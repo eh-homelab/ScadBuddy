@@ -829,3 +829,23 @@ def test_the_library_file_itself_is_served(client: TestClient) -> None:
 
     assert served.status_code == 200, served.text
     assert served.content == b"the file's bytes"
+
+
+@respx.mock
+def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) -> None:
+    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin."""
+    configure(client)
+    respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"<svg onload='alert(1)'/>",
+            headers={"content-type": "image/svg+xml", "content-disposition": "inline"},
+        )
+    )
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.headers["content-type"] == "application/octet-stream"
+    assert served.headers["content-disposition"].startswith("attachment")
+    assert served.headers["x-content-type-options"] == "nosniff"
