@@ -46,7 +46,7 @@ export async function throwawayDatabase(options: { empty?: boolean } = {}): Prom
       },
     }
   }
-  await admin.unsafe(`CREATE DATABASE "${name}" TEMPLATE "${await migratedTemplate(admin)}"`)
+  await admin.unsafe(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE}"`)
   const url = databaseUrl(base, name)
   const db = connectDatabase(url, { searchPath: 'public' })
   return {
@@ -70,40 +70,37 @@ function databaseUrl(url: string, database: string): string {
 // Named for the migrations it holds, so a changed or added migration builds a
 // new template rather than copying a stale one.
 const TEMPLATE = `test_template_${createHash('sha256').update(JSON.stringify(MIGRATIONS)).digest('hex').slice(0, 16)}`
-// Distinct from MIGRATION_LOCK: it only orders the workers building the template.
+// Distinct from MIGRATION_LOCK: it only orders the suites building the template.
 const TEMPLATE_LOCK = 0x5343_4144_5450_4c54n
 
-let built: Promise<string> | undefined
-
-/** The migrated template, built by whichever worker of the run gets there first. */
-function migratedTemplate(admin: postgres.Sql): Promise<string> {
-  built ??= (async () => {
+/**
+ * Builds the migrated template unless it exists: once per run, from vitest's
+ * globalSetup, before any worker copies it. A killed run cannot leave a
+ * half-migrated template: it is built under another name and renamed when done.
+ */
+export async function ensureTemplate(): Promise<void> {
+  if (!TEST_DATABASE_URL) return
+  const admin = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} })
+  try {
+    // Two suites started at once (two worktrees, say) take turns.
     await admin`SELECT pg_advisory_lock(${TEMPLATE_LOCK.toString()}::bigint)`
+    const [found] = await admin`SELECT 1 FROM pg_database WHERE datname = ${TEMPLATE}`
+    if (found) return
+    const building = `${TEMPLATE}_building`
+    await admin.unsafe(`DROP DATABASE IF EXISTS "${building}" WITH (FORCE)`)
+    await admin.unsafe(`CREATE DATABASE "${building}"`)
+    let cause: unknown
+    const db = connectDatabase(databaseUrl(TEST_DATABASE_URL, building), {
+      searchPath: 'public',
+      onMigrationError: (err) => (cause = err),
+    })
     try {
-      const [found] = await admin`SELECT 1 FROM pg_database WHERE datname = ${TEMPLATE}`
-      if (found) return TEMPLATE
-      // Built under another name and renamed once complete, so nothing ever
-      // copies a half-migrated template, even one a killed run left behind.
-      const building = `${TEMPLATE}_building`
-      await admin.unsafe(`DROP DATABASE IF EXISTS "${building}" WITH (FORCE)`)
-      await admin.unsafe(`CREATE DATABASE "${building}"`)
-      let cause: unknown
-      const db = connectDatabase(databaseUrl(TEST_DATABASE_URL!, building), {
-        searchPath: 'public',
-        onMigrationError: (err) => (cause = err),
-      })
-      try {
-        if (!(await db.ready())) throw new Error(`migrating the test template ${building} failed`, { cause })
-      } finally {
-        await db.close()
-      }
-      await admin.unsafe(`ALTER DATABASE "${building}" RENAME TO "${TEMPLATE}"`)
-      return TEMPLATE
+      if (!(await db.ready())) throw new Error(`migrating the test template ${building} failed`, { cause })
     } finally {
-      await admin`SELECT pg_advisory_unlock(${TEMPLATE_LOCK.toString()}::bigint)`
+      await db.close()
     }
-  })()
-  // A failed build is not kept: the next test tries again, and says why.
-  built.catch(() => (built = undefined))
-  return built
+    await admin.unsafe(`ALTER DATABASE "${building}" RENAME TO "${TEMPLATE}"`)
+  } finally {
+    await admin.end({ timeout: 5 })
+  }
 }
