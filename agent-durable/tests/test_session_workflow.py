@@ -22,6 +22,7 @@ from session_support import (
     events,
     insert_session,
     send,
+    send_next,
     settled,
     start_session,
     tools_worker,
@@ -195,7 +196,7 @@ async def test_a_turn_without_tools_writes_the_panels_events(
     assert log[-2]["turns"] == 0  # the scripted runner does not count turns: the real one does
     # A second turn continues the session.
     await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
-    await send(handle, "again")
+    await send_next(handle, "again")
     assert await settled(connect, sid) == "idle"
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert texts == ["you said: hello there", "you said: again"]
@@ -459,7 +460,7 @@ async def test_a_send_while_a_turn_is_finishing_is_refused_busy(
         held.release.set()
         assert await settled(connect, sid) == "idle"
         await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
-        assert (await send(handle, "now")).accepted
+        assert (await send_next(handle, "now")).accepted
         assert await settled(connect, sid) == "idle"
     log = await events(agent_db, sid)
     texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
@@ -537,7 +538,7 @@ async def test_a_respond_and_an_interrupt_together_end_the_turn_and_the_next_is_
         await until(ended)
         assert await settled(connect, sid) == "idle"
         await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
-        assert (await asyncio.wait_for(send(handle, "hello again"), 60)).accepted
+        assert (await asyncio.wait_for(send_next(handle, "hello again"), 60)).accepted
 
         async def second() -> bool:
             log = await events(agent_db, sid)
@@ -621,7 +622,7 @@ async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
         assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
         assert await settled(connect, sid) == "idle"
         await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
-        assert (await send(handle, "hello again")).accepted
+        assert (await send_next(handle, "hello again")).accepted
         assert await settled(connect, sid) == "idle"
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
