@@ -25,6 +25,11 @@ dependencies = [
     "opentelemetry-instrumentation-psycopg>=0.66b0,<0.67",
     "temporalio[opentelemetry]>=1.33.0,<1.35",
     "cryptography>=44,<51",
+    # temporal-agent-harness 0.6.0 (PyPI) by its tag's full SHA, as phase 5 pins its
+    # SDK (plan 2026-10-09-durable-phase-6-flows.md Ruling 1). The code-mode extra is
+    # exactly pydantic-monty 1.0.0. A bump is its own PR carrying the diff between the
+    # SHAs, and must pass tests/flows/test_harness_facts.py and the replay fixtures.
+    "temporal-agent-harness[code-mode] @ git+https://github.com/temporal-community/temporal-agent-harness@04a49d1b037de46da2cba31676d2aa2f4c59118f",
 ]
 
 [build-system]
@@ -33,6 +38,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["scadbuddy"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [dependency-groups]
 dev = [
@@ -63,6 +71,11 @@ python_version = "3.12"
 strict = true
 files = ["scadbuddy", "tests"]
 untyped_calls_exclude = ["trimesh"]
+
+# temporal-agent-harness ships no py.typed marker (0.6.0): its names are Any here.
+[[tool.mypy.overrides]]
+module = ["temporal_agent_harness", "temporal_agent_harness.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -619,6 +619,12 @@ jobs:
         working-directory: .
         run: .github/scripts/agent-durable-pin.test.sh
 
+      # The same check on the backend's temporal-agent-harness pin (plan
+      # 2026-10-09-durable-phase-6-flows.md Ruling 1).
+      - name: Check the harness pin still resolves
+        working-directory: .
+        run: .github/scripts/harness-pin.test.sh
+
       - name: Install
         run: uv sync --frozen
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Usage: agent-durable-pin.sh [project dir, default agent-durable]
+# (also run on backend/, for its temporal-agent-harness pin: harness-pin.yml)
 #
 # Fails when agent-durable's git-pinned temporalio/ai-integrations commit no
 # longer resolves (spec 2026-10-01 §6.2: a commit only a draft PR references can
