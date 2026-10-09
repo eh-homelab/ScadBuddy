@@ -369,6 +369,19 @@ def test_a_test_never_passes_on_what_a_non_http_peer_sent(client: TestClient) ->
 
 
 @respx.mock
+def test_a_rate_limit_until_a_date_reads_as_one(client: TestClient) -> None:
+    """#2037: a Retry-After HTTP-date is said as "until", never as "<date> s"."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    when = "Thu, 09 Oct 2026 07:28:00 GMT"
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(429, headers={"Retry-After": when}))
+
+    body = client.post("/api/v1/settings/test").json()
+    assert f"wait until {when}" in body["detail"]
+    assert f"{when} s" not in body["detail"]
+    assert body["upstream"]["retry_after"] == when
+
+
+@respx.mock
 def test_a_rate_limited_test_shows_what_bambuddy_said(client: TestClient) -> None:
     """#1542: a 429's own words and its Retry-After, not only ScadBuddy's sentence."""
     client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})

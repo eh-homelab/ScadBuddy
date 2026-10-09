@@ -8,6 +8,7 @@ signal. Each client call therefore declares the API-key scope it needs, and a
 
 from __future__ import annotations
 
+import email.utils
 import os
 import re
 import socket
@@ -74,6 +75,28 @@ def upstream_body(response: httpx.Response) -> Any:
         return None
 
 
+#: Longer than any HTTP-date (29 characters) or delay a server sends.
+MAX_RETRY_AFTER_CHARS = 40
+
+
+def retry_after(value: str | None) -> str | None:
+    """A ``Retry-After`` header as RFC 9110 §10.2.3 allows it, a delay in seconds or an
+    HTTP-date, else None (#2037). It is the peer's text, carried into a problem's
+    detail and the Settings page, so anything else is dropped rather than passed on."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or len(value) > MAX_RETRY_AFTER_CHARS:
+        return None
+    if value.isdigit():
+        return value
+    try:
+        email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
 class UpstreamAnswer(BaseModel):
     """What Bambuddy itself answered to a failed call (#1542): the status, the
     ``Retry-After`` it asked for and its own ``detail``; or, when it never answered,
@@ -100,7 +123,7 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
     """
     answer = UpstreamAnswer(
         status=response.status_code,
-        retry_after=response.headers.get("Retry-After"),
+        retry_after=retry_after(response.headers.get("Retry-After")),
         detail=upstream_detail(response),
     )
     return _answered(_mapped(response, scope=scope, what=what, answer=answer), answer)
@@ -149,7 +172,13 @@ def _mapped(
             bambuddy_body=upstream_body(response),
         )
     if code == status.HTTP_429_TOO_MANY_REQUESTS:
-        wait = f"; it asks to wait {answer.retry_after} s" if answer.retry_after else ""
+        wait = (
+            ""
+            if answer.retry_after is None
+            else f"; it asks to wait {answer.retry_after} s"
+            if answer.retry_after.isdigit()
+            else f"; it asks to wait until {answer.retry_after}"
+        )
         return ApiError(
             status.HTTP_502_BAD_GATEWAY,
             f"Bambuddy is limiting requests and refused to {what}{wait}{suffix}",

@@ -77,7 +77,7 @@ class ApiError(Exception):
         self.extensions = extensions
         #: What an upstream service itself answered, for a caller that shows it (the
         #: Settings connection test, #1542). Never part of the problem document.
-        self.upstream: Any = None
+        self.upstream: BaseModel | None = None
 
 
 def problem_response(
