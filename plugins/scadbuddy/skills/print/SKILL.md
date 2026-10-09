@@ -30,8 +30,11 @@ The ScadBuddy MCP tools arrive with issue #251. A print tool wraps the run
 behind a single approval (AI spec §5.1): read the choices, then run with them.
 The routes below are what it calls. Use the tool when you have it. There is no
 pipeline or eligibility step in the print dialog any more (spool-first spec §0).
-The `/api/v1/print/library` routes (#313, printing a file already in Bambuddy's
-library) have no agent tool yet — that's a #313 follow-up.
+A file already in Bambuddy's library (#313) prints the same way as an output; only
+the 3MF it slices differs (#1749). The `/api/v1/print/library/{file_id}/…` routes
+mirror the output ones, and every print tool takes `library_file_id` (a file from
+`GET /api/v1/print/library`, the `list_library` tool) in place of `output_id`
+(#1756).
 
 ## Approvals come first
 

@@ -117,6 +117,12 @@ function str(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null
 }
 
+/** What a print tool printed (#1756): its output, or `library:<file id>`, the run's own subject. */
+function printed(input: Record<string, unknown>): string | null {
+  const file = bambuddyId(input.library_file_id)
+  return file ? `library:${file}` : str(input.output_id)
+}
+
 function field(value: unknown, key: string): unknown {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined
 }
@@ -295,7 +301,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // `print_run` is ScadBuddy's own run (backend bambuddy/runs.py PrintRun.id).
   print_output: (input, result) => {
     const run = str(field(result, 'id'))
-    const output = str(input.output_id)
+    const output = printed(input)
     const items = field(field(result, 'result'), 'queue_item_ids')
     return [
       ...(run ? [{ type: 'print_run' as const, id: run, action: 'created' as const, before: output }] : []),
@@ -332,6 +338,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   },
   remember_model_print_choices: (input) => {
     const slug = str(input.slug)
+    const file = bambuddyId(input.library_file_id)
+    if (file) return setting(`print_choices:library:${file}`, { model: null })
     return setting(slug ? `print_choices:${slug}` : null, { model: slug })
   },
   remember_last_project: (input) => setting('last_project', { after: bambuddyId(input.project_id) }),
@@ -351,7 +359,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // The project, and the queue items and archives filed under it.
   file_output_under_project: (input, result) => {
     const project = bambuddyId(field(result, 'project_id')) ?? bambuddyId(input.project_id)
-    const before = str(input.output_id)
+    const before = printed(input)
     return [
       ...(project ? [{ type: 'project' as const, id: project, action: 'modified' as const, before }] : []),
       ...ids(field(result, 'queue_item_ids')).map((id) => ({ type: 'print' as const, id, action: 'modified' as const, before })),
