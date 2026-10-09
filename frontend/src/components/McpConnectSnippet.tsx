@@ -19,8 +19,19 @@ interface Props {
 
 /** The server URL an outside client is given: the public URL's origin and path, plus `/mcp`. */
 function mcpUrl(publicUrl: string | null | undefined): string {
-  const base = publicUrl?.trim() || window.location.origin
+  let base = window.location.origin
+  try {
+    const u = new URL(publicUrl?.trim() || base)
+    if (u.protocol === 'http:' || u.protocol === 'https:') base = `${u.origin}${u.pathname}`
+  } catch {
+    // Not a URL: this page's origin stands in.
+  }
   return `${base.replace(/\/+$/, '')}/mcp`
+}
+
+/** One POSIX shell word: the snippet is pasted into a shell, so nothing in it may run. */
+function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`
 }
 
 /**
@@ -41,7 +52,7 @@ export function McpConnectSnippet({ publicUrl, authMode, token }: Props) {
   const url = mcpUrl(publicUrl)
   const header = authMode !== 'disabled'
   const bearer = `Bearer ${token ?? PLACEHOLDER}`
-  const claudeCode = `claude mcp add --transport http scadbuddy ${url}${header ? ` --header "Authorization: ${bearer}"` : ''}`
+  const claudeCode = `claude mcp add --transport http scadbuddy ${shellQuote(url)}${header ? ` --header ${shellQuote(`Authorization: ${bearer}`)}` : ''}`
   const claudeDesktop = JSON.stringify(
     {
       mcpServers: {

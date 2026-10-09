@@ -12,7 +12,7 @@ describe('McpConnectSnippet (#1910)', () => {
   it('builds both snippets from the public URL, with a placeholder for the token', () => {
     renderPage(<McpConnectSnippet publicUrl="https://scadbuddy.example/" authMode="bearer" />)
     expect(code()).toBe(
-      'claude mcp add --transport http scadbuddy https://scadbuddy.example/mcp --header "Authorization: Bearer <your token>"',
+      "claude mcp add --transport http scadbuddy 'https://scadbuddy.example/mcp' --header 'Authorization: Bearer <your token>'",
     )
     expect(desktop()).toEqual({
       mcpServers: {
@@ -28,7 +28,7 @@ describe('McpConnectSnippet (#1910)', () => {
 
   it('fills in a token just minted', () => {
     renderPage(<McpConnectSnippet publicUrl="https://scadbuddy.example" authMode="bearer" token="sbmcp_abc" />)
-    expect(code()).toContain('--header "Authorization: Bearer sbmcp_abc"')
+    expect(code()).toContain("--header 'Authorization: Bearer sbmcp_abc'")
     expect(desktop().mcpServers.scadbuddy.env).toEqual({ SCADBUDDY_AUTH: 'Bearer sbmcp_abc' })
     expect(screen.queryByText(/Create a token below/)).not.toBeInTheDocument()
   })
@@ -40,11 +40,21 @@ describe('McpConnectSnippet (#1910)', () => {
 
   it('sends no header while MCP authentication is off', () => {
     renderPage(<McpConnectSnippet publicUrl="https://scadbuddy.example" authMode="disabled" token="sbmcp_abc" />)
-    expect(code()).toBe('claude mcp add --transport http scadbuddy https://scadbuddy.example/mcp')
+    expect(code()).toBe("claude mcp add --transport http scadbuddy 'https://scadbuddy.example/mcp'")
     expect(desktop()).toEqual({
       mcpServers: { scadbuddy: { command: 'npx', args: ['-y', 'mcp-remote', 'https://scadbuddy.example/mcp'] } },
     })
     expect(screen.getByTestId('mcp-snippet')).not.toHaveTextContent('Authorization')
+  })
+
+  it('quotes the URL as one shell word, so a stored public URL cannot run commands', () => {
+    renderPage(<McpConnectSnippet publicUrl="https://x.example/a';touch pwned;'" authMode="disabled" />)
+    expect(code()).toBe("claude mcp add --transport http scadbuddy 'https://x.example/a'\\'';touch%20pwned;'\\''/mcp'")
+  })
+
+  it("falls back to this page's origin for a public URL that is not http(s)", () => {
+    renderPage(<McpConnectSnippet publicUrl="javascript:alert(1)" authMode="disabled" />)
+    expect(code()).toBe(`claude mcp add --transport http scadbuddy '${window.location.origin}/mcp'`)
   })
 
   it("uses this page's origin when no public URL is set", () => {
