@@ -229,6 +229,21 @@ describe('followUntil reads once before its limit (#2038)', () => {
     ).rejects.toThrow('still running')
     expect(read).toHaveBeenCalledTimes(1)
   })
+
+  it('stays a bound when that read never answers (#2045 review)', async () => {
+    fakeRealtime({ confirm: false })
+    // fetch has no timeout: a held request never settles.
+    const read = vi.fn(() => new Promise<string>(() => {}))
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: (value) => value === 'ready',
+        stillRunning: () => new Error('still running'),
+        pollMs: 20,
+        waitMs: 0,
+      }),
+    ).rejects.toThrow('still running')
+  })
 })
 
 describe('backfillFailures (#1007)', () => {

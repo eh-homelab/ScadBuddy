@@ -44,7 +44,7 @@ export function waitForJob(
  * it is still seen), and on a `pollMs` timer only while the socket is unavailable.
  * `onRead` sees every read that is not done. An aborted `signal` rejects with its
  * reason; `waitMs` passing rejects with `stillRunning()`, after one read if none has
- * answered yet; a failed read rejects with its error.
+ * answered yet (waiting at most `pollMs` more for it); a failed read rejects with its error.
  */
 export function followUntil<T>(
   topic: string,
@@ -73,6 +73,8 @@ export function followUntil<T>(
     let answered = false
     let expired = false
     let poll: ReturnType<typeof setTimeout> | undefined
+    /** Bounds that one look: fetch has no timeout, so a read can hang (#2045 review). */
+    let grace: ReturnType<typeof setTimeout> | undefined
     const giveUp = () => end(() => reject(opts.stillRunning()))
     const limit =
       opts.waitMs === undefined
@@ -80,9 +82,13 @@ export function followUntil<T>(
         : setTimeout(() => {
             expired = true
             // A limit that passes before the first read (a caller's budget already
-            // spent) still looks once (#2038); a read in flight decides on its return.
+            // spent) still looks once (#2038), for at most `pollMs` more: the limit
+            // stays a bound however long that read takes.
             if (answered) giveUp()
-            else if (!reading) void read()
+            else {
+              grace = setTimeout(giveUp, opts.pollMs)
+              if (!reading) void read()
+            }
           }, opts.waitMs)
 
     const onAbort = () => end(() => reject(signal?.reason as Error))
@@ -133,6 +139,7 @@ export function followUntil<T>(
       unfollow()
       clearTimeout(poll)
       clearTimeout(limit)
+      clearTimeout(grace)
       signal?.removeEventListener('abort', onAbort)
       settle()
     }
