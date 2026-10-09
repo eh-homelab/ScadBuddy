@@ -22,18 +22,20 @@ import {
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
 import { isDone, type UserImage } from '../../agent/chat/protocol'
-import { askedBy, isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
+import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
 import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
 import { api, ApiError } from '../../api/client'
+import type { AiSessionView } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
-import { OriginBadge, OwnerBadge } from './badges'
+import { OriginBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
 import { ToolGroup } from './ToolGroup'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
+import { SessionSwitcher } from './SessionSwitcher'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
@@ -49,6 +51,19 @@ function formatCost(amount: number): string {
 /** What a failed agent call says, for the budget card. */
 function reason(caught: unknown): Error {
   return new Error(caught instanceof ApiError ? caught.detail : 'The assistant service did not answer; try again.')
+}
+
+/** #792 — a session route's answer, as the panel's state keeps it. */
+function patchOf(view: AiSessionView): SessionPatch {
+  return {
+    id: view.id,
+    title: view.title,
+    status: view.status,
+    parentId: view.parent_id,
+    updatedAt: view.updated_at,
+    costUsd: view.cost_usd,
+    budgetUsd: view.budget_usd,
+  }
 }
 
 interface Props {
@@ -312,13 +327,33 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     composer.current?.focus()
   }
 
-  // #790 — a chat that used its budget. Forking copies the transcript into a new
+  // #790, #794 — a fork copies the transcript (with `upTo`, through that reply) into a new
   // session with a fresh budget; the panel then shows that one (attach replays it).
+  // `draft` is the message a user-message fork puts back in the composer, to edit and send.
+  const openFork = async (id: string, options: { upTo?: string; draft?: string } = {}) => {
+    const { session } = await api.forkAiSession(id, options.upTo === undefined ? {} : { upTo: options.upTo })
+    chat.patch(patchOf(session))
+    chat.select(session.id)
+    if (options.draft !== undefined) writeDraft(options.draft)
+    setPickerOpen(false)
+    focusSession()
+  }
   const continueInNewChat = async (id: string) => {
     try {
-      const { session } = await api.forkAiSession(id)
-      chat.select(session.id)
-      composer.current?.focus()
+      await openFork(id)
+    } catch (caught) {
+      throw reason(caught)
+    }
+  }
+  const [forkError, setForkError] = useState<string | null>(null)
+  const fork = (id: string, options: { upTo?: string; draft?: string } = {}) => {
+    setForkError(null)
+    openFork(id, options).catch((caught: unknown) => setForkError(reason(caught).message))
+  }
+  // #795 — rename and done answer with the session, shown at once; a refusal is the row's to show.
+  const updateSession = async (id: string, edit: { title: string } | { done: true }) => {
+    try {
+      chat.patch(patchOf((await api.updateAiSession(id, edit)).session))
     } catch (caught) {
       throw reason(caught)
     }
@@ -331,6 +366,21 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       throw reason(caught)
     }
   }
+
+  // #794 — what "Fork from here" forks up to: a finished reply itself; a user message,
+  // the last finished reply before it (none before the first message).
+  const forkPoints = new Map<string, { upTo: string; draft?: string }>()
+  let lastReply: string | undefined
+  for (const item of active?.items ?? []) {
+    if (item.kind === 'assistant' && item.done) {
+      lastReply = item.id
+      forkPoints.set(`assistant:${item.id}`, { upTo: item.id })
+    } else if (item.kind === 'user' && lastReply) {
+      forkPoints.set(`user:${item.id}`, { upTo: lastReply, draft: item.text })
+    }
+  }
+  const hasReply = lastReply !== undefined
+  const parent = active?.parentId ? state.sessions[active.parentId] : undefined
 
   const prompts = suggestedPrompts(pathname)
   const sessions = state.order.map((id) => state.sessions[id]).filter((s): s is SessionState => !!s)
@@ -413,41 +463,24 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                   `None of the loaded sessions changed ${filterBy}.`}
             </p>
           ) : (
-            <ul className="max-h-56 overflow-y-auto py-1">
-              {listed.map((s) => (
-                <li key={s.id}>
-                  <button
-                    type="button"
-                    aria-current={s.id === state.activeId ? 'true' : undefined}
-                    onClick={() => {
-                      chat.select(s.id)
-                      setPickerOpen(false)
-                      focusSession()
-                    }}
-                    className={`flex w-full flex-col gap-1 border-l-2 px-3 py-1.5 text-left hover:bg-surface-3 ${
-                      s.id === state.activeId ? 'border-accent bg-surface-3' : 'border-transparent'
-                    }`}
-                  >
-                    <span className="truncate text-[12.5px]">{s.title}</span>
-                    <span className="flex items-center gap-1.5">
-                      {s.id === state.activeId && (
-                        <span className="rounded-[4px] bg-accent/15 px-1 text-[10.5px] font-medium text-accent">Open</span>
-                      )}
-                      <OriginBadge origin={s.origin} />
-                      <OwnerBadge owner={s.owner} />
-                      <span className="text-[11px] text-faint">{statusLabel(s.status)}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <SessionSwitcher
+              sessions={listed}
+              activeId={state.activeId}
+              onOpen={(id) => {
+                chat.select(id)
+                setPickerOpen(false)
+                focusSession()
+              }}
+              onRename={(id, title) => updateSession(id, { title })}
+              onDone={(id) => updateSession(id, { done: true })}
+            />
           )}
         </nav>
       )}
 
       {active && (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5 text-[12px]">
-          <span className="min-w-0 flex-1 truncate font-medium" title={active.title}>
+          <span className="min-w-0 flex-1 truncate font-medium" title={active.title} data-testid="active-session-title">
             {active.title}
           </span>
           <OriginBadge origin={active.origin} />
@@ -470,6 +503,20 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <Button
             variant="ghost"
             size="sm"
+            disabled={!hasReply}
+            title={
+              hasReply
+                ? 'Copy this chat into a new one and continue there; this one stays as it is'
+                : 'No reply to fork yet: wait for the assistant to answer'
+            }
+            data-agent-user-only=""
+            onClick={() => fork(active.id)}
+          >
+            Fork
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             aria-expanded={touchedOpen}
             aria-controls={touchedOpen ? touchedId : undefined}
             title="What this session's tool calls created, changed or deleted"
@@ -478,6 +525,25 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             Touched
           </Button>
           <BudgetMeter session={active} />
+          {active.parentId && (
+            <div className="flex w-full items-center gap-1 text-[11.5px] text-muted">
+              <button
+                type="button"
+                className="truncate underline decoration-dotted underline-offset-2 hover:text-ink"
+                onClick={() => {
+                  chat.select(active.parentId!)
+                  focusSession()
+                }}
+              >
+                Forked from {parent?.title ?? 'an earlier chat'}
+              </button>
+            </div>
+          )}
+          {forkError && (
+            <p role="alert" className="w-full text-warn">
+              The chat was not forked: {forkError}
+            </p>
+          )}
           {!owned && (
             <div className="flex w-full items-center gap-2">
               <span className="text-muted">Controlled by {active.owner.label}</span>
@@ -543,6 +609,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                 advanced={advanced}
                 sessionId={active.id}
                 askedBy={block.item.kind === 'question' ? askedBy(active.items, block.item) : undefined}
+                onForkHere={
+                  forkPoints.has(`${block.item.kind}:${block.item.id}`)
+                    ? () => fork(active.id, forkPoints.get(`${block.item.kind}:${block.item.id}`) ?? {})
+                    : undefined
+                }
                 onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
                 onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
               />

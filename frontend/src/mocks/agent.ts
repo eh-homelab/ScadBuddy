@@ -9,7 +9,9 @@
  * cites its sources and links the version it made, then an `outward` send that pauses
  * on `approval.required` and goes nowhere until the panel decides it (spec §8.2). A
  * first message that mentions a draft gets a question instead (#940): a draft to
- * approve, which waits on `question.asked` until the panel answers. The panel answers
+ * approve, which waits on `question.asked` until the panel answers; one that says "post a
+ * summary" posts a `done` summary, and one that says the tab dropped parks on an attention
+ * request (#815). The panel answers
  * both over HTTP (`POST /api/v1/ai/pending-input/{id}`, #815: `features/pendingInput.ts`
  * calls `respond` below); the socket's `approval.decision` and `question.answer` still
  * work, as the real agent's do. It also lists a session an external MCP agent owns, so the picker's
@@ -53,8 +55,13 @@ export const COST_PER_TURN = 0.0184
 
 /** The session routes' side of the open mock agent (fork, raise), for the msw handlers. */
 export interface MockAgentSessions {
-  /** The new session's id and title, or an error to answer with. */
-  fork(sessionId: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
+  /**
+   * The new session's id and title, or an error to answer with. `upTo` (#793) is a
+   * reply's message id: the fork keeps the conversation through it.
+   */
+  fork(sessionId: string, upTo?: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
+  /** #795 — renames a session or marks it done, as agent `sessions/edits.ts` does; the owner only. */
+  update(sessionId: string, edit: { title?: string; done?: boolean }): { title: string; status: SessionStatus; costUsd: number; budgetUsd: number; parentId: string | null } | { error: string; status: number }
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
@@ -88,6 +95,8 @@ interface MockSession extends SessionSummary {
   turns: number
   costUsd: number
   budgetUsd: number
+  /** #795 — the session it was forked from. */
+  parentId?: string
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -283,6 +292,73 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     ]
   }
 
+  /**
+   * #815: an attention request. A first message that says "post a summary" posts a `done`
+   * summary, which waits for nothing, and the turn ends; one that mentions the tab
+   * parks on a tab-disconnected card until the panel answers it.
+   */
+  const attentionTurn = (s: MockSession, done: boolean): Array<() => void> => {
+    const askId = nextId('tool')
+    const questionId = nextId('question')
+    const questions = [
+      done
+        ? {
+            question: 'Rendered the sign headlessly.',
+            header: 'Done',
+            multiSelect: false,
+            options: [
+              { label: 'Dismiss', description: '' },
+              { label: 'Got it', description: '' },
+            ],
+          }
+        : {
+            question: 'I need your ScadBuddy tab, but it is not connected.',
+            header: 'Tab disconnected',
+            multiSelect: false,
+            options: [
+              { label: "I'm back", description: '' },
+              { label: 'Carry on without the tab', description: '' },
+            ],
+          },
+    ]
+    return [
+      () =>
+        emit({
+          type: 'tool.call',
+          sessionId: s.sessionId,
+          id: askId,
+          name: 'mcp__scadbuddy_questions__request_user_attention',
+          input: { reason: done ? 'done' : 'tab_disconnected' },
+          risk: 'read',
+        }),
+      () => {
+        if (done) {
+          emit({
+            type: 'question.asked',
+            sessionId: s.sessionId,
+            id: questionId,
+            tool: askId,
+            questions,
+            attention: { reason: 'done', summary: '**What this turn changed**\n- nothing' },
+          })
+          emit({ type: 'tool.result', sessionId: s.sessionId, id: askId, ok: true, summary: 'posted' })
+          finish(s)
+          return
+        }
+        s.asking = { id: questionId, toolCallId: askId }
+        emit({
+          type: 'question.asked',
+          sessionId: s.sessionId,
+          id: questionId,
+          tool: askId,
+          questions,
+          attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: new Date(Date.now() + 300_000).toISOString() },
+        })
+        setStatus(s, 'waiting_input')
+      },
+    ]
+  }
+
   const resolveQuestion = (s: MockSession, answers: string[]) => {
     const asking = s.asking
     if (!asking) return
@@ -407,7 +483,16 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           ...(msg.images?.length ? { images: msg.images.map((image) => image.preview) } : {}),
         })
         setStatus(s, 'running')
-        play(s, isNew ? (/draft/i.test(msg.text) ? questionTurn(s) : firstTurn(s)) : followUp(s, msg.text))
+        play(
+          s,
+          !isNew
+            ? followUp(s, msg.text)
+            : /draft/i.test(msg.text)
+              ? questionTurn(s)
+              : /post a summary|tab dropped/i.test(msg.text)
+                ? attentionTurn(s, /post a summary/i.test(msg.text))
+                : firstTurn(s),
+        )
         return
       }
       case 'question.answer': {
@@ -457,10 +542,29 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     }
   }
 
+  /** The session picker's list, as the agent's `sessions.snapshot` carries it. */
+  const snapshot = (): ServerEvent => ({
+    v: PROTOCOL_VERSION,
+    type: 'sessions.snapshot',
+    sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd }) => ({
+      sessionId,
+      title,
+      origin,
+      owner,
+      status,
+      parentId: parentId ?? null,
+      updatedAt: new Date().toISOString(),
+      costUsd,
+      budgetUsd,
+    })),
+  })
+
   const controls: MockAgentSessions = {
-    fork(sessionId) {
+    fork(sessionId, upTo) {
       const parent = sessions.get(sessionId)
       if (!parent) return { error: `no session ${sessionId}`, status: 404 }
+      const cut = upTo === undefined ? parent.log.length : parent.log.findIndex((e) => e.type === 'assistant.text.done' && e.messageId === upTo) + 1
+      if (cut === 0) return { error: `session ${sessionId} has no finished reply ${upTo} to fork from`, status: 400 }
       const child: MockSession = {
         sessionId: nextId('chat'),
         title: `${parent.title || 'session'} (fork)`,
@@ -472,15 +576,33 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         turns: 0,
         costUsd: 0,
         budgetUsd,
+        parentId: parent.sessionId,
       }
       sessions.set(child.sessionId, child)
       const conversation = new Set(['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result'])
       child.log.push(
         { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd },
-        ...parent.log.filter((e) => conversation.has(e.type)).map((e) => ({ ...e, sessionId: child.sessionId }) as ServerEvent),
+        ...parent.log
+          .slice(0, cut)
+          .filter((e) => conversation.has(e.type))
+          .map((e) => ({ ...e, sessionId: child.sessionId }) as ServerEvent),
         { v: PROTOCOL_VERSION, type: 'session.status', sessionId: child.sessionId, status: 'idle' },
       )
+      // The real agent's socket re-reads the list every few seconds; the mock sends it now.
+      deliver(snapshot())
       return { id: child.sessionId, title: child.title, budgetUsd, parentId: parent.sessionId }
+    },
+    update(sessionId, edit) {
+      const s = sessions.get(sessionId)
+      if (!s) return { error: `no session ${sessionId}`, status: 404 }
+      if (s.owner.kind !== 'browser') return { error: `session ${sessionId} is controlled by ${s.owner.label}; take it over first`, status: 403 }
+      if (edit.done && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input')) {
+        return { error: `session ${sessionId} is running a turn; Stop it first, then mark it done`, status: 409 }
+      }
+      if (edit.title !== undefined) s.title = edit.title
+      if (edit.done && s.status !== 'done') setStatus(s, 'done')
+      deliver(snapshot())
+      return { title: s.title, status: s.status, costUsd: s.costUsd, budgetUsd: s.budgetUsd, parentId: s.parentId ?? null }
     },
     has(sessionId) {
       return sessions.has(sessionId)
@@ -521,17 +643,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
       // In-process, so open at once (the real socket reports it when its handshake is done).
       h.onOpen?.()
       seedExternal()
-      deliver({
-        v: PROTOCOL_VERSION,
-        type: 'sessions.snapshot',
-        sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status }) => ({
-          sessionId,
-          title,
-          origin,
-          owner,
-          status,
-        })),
-      })
+      deliver(snapshot())
     },
     send(message) {
       sent.push(message)

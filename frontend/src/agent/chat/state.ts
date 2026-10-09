@@ -114,6 +114,28 @@ export interface SessionState {
    * the respond route's answer (`responded`/`respond-failed`) still finds it (#1395).
    */
   sending?: string[]
+  /** #795 — the session it was forked from, for the switcher's nesting and the "Forked from" link. */
+  parentId?: string | null
+  /** #795 — when it last changed (the agent's `updated_at`), for the switcher. */
+  updatedAt?: string
+}
+
+/**
+ * #792 — what a session route answered about a session (`AiSessionView` of a fork or
+ * an edit, agent `routes/sessions.ts`), laid over what the panel knows. A session the
+ * panel has not heard of yet (a fork it is about to open) is added, first in the list.
+ */
+export interface SessionPatch {
+  id: string
+  title?: string
+  status?: SessionStatus
+  parentId?: string | null
+  updatedAt?: string
+  costUsd?: number
+  budgetUsd?: number
+  /** For a session new to the panel: where it came from and who holds it. */
+  origin?: Origin
+  owner?: Owner
 }
 
 export interface ChatState {
@@ -151,6 +173,8 @@ export type ChatAction =
    * still arrives, replaces it with the real outcome).
    */
   | { type: 'respond-failed'; sessionId: string; id: string; message: string; closed?: string }
+  /** #792 — a session route's answer (fork, rename, done), shown before the socket says it. */
+  | { type: 'session-patched'; patch: SessionPatch }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -165,15 +189,29 @@ export const initialChatState: ChatState = {
   notice: null,
 }
 
-function blankSession(summary: Omit<SessionSummary, 'sessionId'> & { id: string }): SessionState {
+function blankSession(summary: Pick<SessionState, 'id' | 'title' | 'origin' | 'owner' | 'status'>): SessionState {
   return { ...summary, items: [] }
+}
+
+/**
+ * #795 — a snapshot's parent, last activity and spend, laid over `s`. The spend is
+ * taken only when `live` is false: the open session's events are newer than the list.
+ */
+function withListed(s: SessionState, summary: SessionSummary, live: boolean): SessionState {
+  let next = s
+  if (summary.parentId !== undefined) next = { ...next, parentId: summary.parentId }
+  if (summary.updatedAt !== undefined) next = { ...next, updatedAt: summary.updatedAt }
+  if (summary.costUsd !== undefined && summary.budgetUsd !== undefined && (!live || !next.budget)) {
+    next = withBudget(next, summary.costUsd, summary.budgetUsd)
+  }
+  return next
 }
 
 function upsertSummary(state: ChatState, s: SessionSummary): ChatState {
   const existing = state.sessions[s.sessionId]
   const next: SessionState = existing
     ? { ...existing, title: s.title, origin: s.origin, owner: s.owner, status: s.status }
-    : blankSession({ id: s.sessionId, ...s })
+    : blankSession({ id: s.sessionId, title: s.title, origin: s.origin, owner: s.owner, status: s.status })
   return {
     ...state,
     sessions: { ...state.sessions, [s.sessionId]: next },
@@ -228,15 +266,14 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       const sessions: Record<string, SessionState> = {}
       for (const s of event.sessions) {
         const existing = state.sessions[s.sessionId]
-        sessions[s.sessionId] = existing
-          ? {
-              ...existing,
-              title: s.title,
-              origin: s.origin,
-              owner: s.owner,
-              status: s.sessionId === state.activeId ? existing.status : s.status,
-            }
-          : blankSession({ id: s.sessionId, ...s })
+        const live = s.sessionId === state.activeId
+        sessions[s.sessionId] = withListed(
+          existing
+            ? { ...existing, title: s.title, origin: s.origin, owner: s.owner, status: live ? existing.status : s.status }
+            : blankSession({ id: s.sessionId, title: s.title, origin: s.origin, owner: s.owner, status: s.status }),
+          s,
+          live && !!existing,
+        )
       }
       const active = state.activeId ? state.sessions[state.activeId] : undefined
       if (active && !listed.has(active.id)) sessions[active.id] = active
@@ -460,6 +497,29 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
  */
 const BUDGET_CODES = new Set(['error_max_budget_usd', 'budget_exhausted'])
 
+function patched(state: ChatState, p: SessionPatch): ChatState {
+  const existing = state.sessions[p.id]
+  const parent = p.parentId ? state.sessions[p.parentId] : undefined
+  let s: SessionState = existing ?? {
+    id: p.id,
+    title: p.title ?? 'New chat',
+    origin: p.origin ?? parent?.origin ?? 'chat',
+    owner: p.owner ?? { kind: 'browser', id: 'browser', label: 'You' },
+    status: p.status ?? 'idle',
+    items: [],
+  }
+  if (p.title !== undefined) s = { ...s, title: p.title }
+  if (p.status !== undefined) s = { ...s, status: p.status }
+  if (p.parentId !== undefined) s = { ...s, parentId: p.parentId }
+  if (p.updatedAt !== undefined) s = { ...s, updatedAt: p.updatedAt }
+  if (p.costUsd !== undefined && p.budgetUsd !== undefined) s = withBudget(s, p.costUsd, p.budgetUsd)
+  return {
+    ...state,
+    sessions: { ...state.sessions, [p.id]: s },
+    order: existing ? state.order : [p.id, ...state.order],
+  }
+}
+
 /** New budget numbers; the session is spent exactly when they say so. */
 function withBudget(s: SessionState, costUsd: number, budgetUsd: number): SessionState {
   return { ...s, budget: { costUsd, budgetUsd }, budgetSpent: costUsd >= budgetUsd }
@@ -512,6 +572,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           }))
         : next
     }
+    case 'session-patched':
+      return patched(state, action.patch)
     case 'not-sent':
       return { ...state, awaitingStart: false, notice: action.message }
     case 'queued':

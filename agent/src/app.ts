@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
 import type { AuditRepo } from './audit/log.js'
+import type { UiReachSummary } from './harness/browserReach.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import type { CredentialRepo } from './credentials.js'
 import { AGENT_ACTOR_HEADER } from './harness/headlessBrowser.js'
@@ -79,6 +80,13 @@ export interface AppDeps {
   tabs?: TabHub | undefined
   /** The agent-tools worker's state (#1055, temporal/worker.ts); left out without SCADBUDDY_TEMPORAL_ADDRESS. */
   temporal?: (() => TemporalHealth) | undefined
+  /**
+   * Whether the headless browser's probe last found a UI origin it reaches
+   * without a login (harness/browserReach.ts `UiOriginProbe.summary`); left out
+   * without sessions. Only that: /healthz is unauthenticated, so the origins and
+   * their answers go to the log.
+   */
+  browserReach?: (() => UiReachSummary) | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
@@ -106,6 +114,13 @@ function budgetVerb(method: string, path: string): string | undefined {
   return method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/budget$/.test(path) ? 'session_budget_usd' : undefined
 }
 
+/** A fork of a session, or a rename or done (#792); successful forks are recorded by the manager (sessions/manager.ts fork). */
+function sessionWriteVerb(method: string, path: string): string | undefined {
+  if (method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/fork$/.test(path)) return 'session_fork'
+  if (method === 'PATCH' && /^\/api\/v1\/ai\/sessions\/[^/]+$/.test(path)) return 'session_update'
+  return undefined
+}
+
 /** Which plugin requests are writes; connection tests are not. */
 function pluginVerb(method: string, path: string): string | undefined {
   if (path.endsWith('/test')) return undefined
@@ -129,6 +144,8 @@ export type Health = {
   secret_key: 'ok' | 'not configured'
   credential: CredentialState
   temporal: TemporalHealth | 'not configured'
+  /** Whether the headless browser reaches any UI origin without a login, as last asked; only with sessions. */
+  browser_origins?: UiReachSummary
 }
 
 /** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep, and every session event stream. */
@@ -174,6 +191,7 @@ export function createApp(deps: AppDeps): AgentApp {
       secret_key: deps.kek.ok ? 'ok' : 'not configured',
       credential,
       temporal: deps.temporal ? deps.temporal() : 'not configured',
+      ...(deps.browserReach ? { browser_origins: deps.browserReach() } : {}),
     }
     return c.json(body)
   })
@@ -197,6 +215,8 @@ export function createApp(deps: AppDeps): AgentApp {
     // Refused or failed raises of a session's budget (#790); a raise that
     // lands is recorded by the manager (sessions/manager.ts raiseBudget).
     app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'settings', verb: budgetVerb, failuresOnly: true }))
+    // Refused or failed forks, renames and dones (#792).
+    app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'resource', verb: sessionWriteVerb, failuresOnly: true }))
   }
 
   const shutdown = new AbortController()

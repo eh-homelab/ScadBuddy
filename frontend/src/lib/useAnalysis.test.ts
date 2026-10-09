@@ -8,6 +8,7 @@ import { fakeRealtime } from './realtime.fake'
 import { ANALYSIS_DEBOUNCE_MS, useAnalysis } from './useAnalysis'
 
 const OUTPUT = fixtures.outputs[0]!
+const TARGET = { output_id: OUTPUT.id }
 
 type Size = NonNullable<AnalysisRequest['choices']>['nozzles'][number]['size']
 
@@ -52,7 +53,7 @@ describe('useAnalysis', () => {
 
   it('judges the output against the request, in advanced detail', async () => {
     run.mockResolvedValue(report('1 suggestion'))
-    const { result } = renderHook(() => useAnalysis(OUTPUT.id, request('0.4')))
+    const { result } = renderHook(() => useAnalysis(TARGET, request('0.4')))
     await settle()
     expect(run).toHaveBeenCalledTimes(1)
     expect(run).toHaveBeenCalledWith({
@@ -64,8 +65,20 @@ describe('useAnalysis', () => {
     expect(result.current.checking).toBe(false)
   })
 
+  it('judges a library file by its id, as any print is (#1753)', async () => {
+    run.mockResolvedValue(report('1 suggestion'))
+    const target = { library_file_id: 89 }
+    renderHook(() => useAnalysis(target, request('0.4')))
+    await settle()
+    expect(run).toHaveBeenCalledWith({
+      target: { library_file_id: 89 },
+      request: request('0.4'),
+      detail: 'advanced',
+    })
+  })
+
   it('runs nothing until the dialog has a request', async () => {
-    const { result } = renderHook(() => useAnalysis(OUTPUT.id, null))
+    const { result } = renderHook(() => useAnalysis(TARGET, null))
     await settle(ANALYSIS_DEBOUNCE_MS)
     expect(run).not.toHaveBeenCalled()
     expect(result.current.report).toBeNull()
@@ -74,7 +87,7 @@ describe('useAnalysis', () => {
 
   it('waits for the choices to settle, and keeps the last report while it re-runs', async () => {
     run.mockResolvedValue(report('first'))
-    const { result, rerender } = renderHook(({ size }) => useAnalysis(OUTPUT.id, request(size)), {
+    const { result, rerender } = renderHook(({ size }) => useAnalysis(TARGET, request(size)), {
       initialProps: { size: '0.4' as Size },
     })
     await settle()
@@ -96,7 +109,7 @@ describe('useAnalysis', () => {
 
   it('reads again when a decision is recorded anywhere', async () => {
     run.mockResolvedValue(report('before'))
-    const { result } = renderHook(() => useAnalysis(OUTPUT.id, request('0.4')))
+    const { result } = renderHook(() => useAnalysis(TARGET, request('0.4')))
     await settle()
     expect(realtime.following()).toEqual(['analyzers'])
 
@@ -109,7 +122,7 @@ describe('useAnalysis', () => {
 
   it('reports a run that failed rather than an old report', async () => {
     run.mockResolvedValue(report('ok'))
-    const { result } = renderHook(() => useAnalysis(OUTPUT.id, request('0.4')))
+    const { result } = renderHook(() => useAnalysis(TARGET, request('0.4')))
     await settle()
     run.mockRejectedValue(new Error('down'))
     act(() => result.current.reload())

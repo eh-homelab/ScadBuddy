@@ -797,6 +797,35 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(runs[1]!.headlessBrowser?.livePublicUrl).toBeUndefined()
     })
 
+    it("asks each of the turn's UI origins whether it answers without a login, and gives the turn the answers", async () => {
+      const paths = await tempPaths()
+      const settings = new SettingsStore(db.sql)
+      await settings.set(SETTING_HEADLESS_BROWSER, true)
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      const asked: string[][] = []
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: runner,
+        settings,
+        headlessBrowser: {
+          backendUrl: 'http://127.0.0.1:8000',
+          publicUrl: 'https://scadbuddy.sso.example',
+          uiOrigins: 'https://scadbuddy.internal.example',
+          livePublicUrl: () => Promise.resolve('https://scadbuddy.live.example/'),
+          probe: (origins) => {
+            asked.push([...origins])
+            return Promise.resolve(Object.fromEntries(origins.map((o) => [o, { reach: 'ok' as const }])))
+          },
+        },
+      })
+      const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
+      await turn!.done
+      const ui = ['https://scadbuddy.live.example', 'https://scadbuddy.sso.example', 'https://scadbuddy.internal.example']
+      expect(asked).toEqual([ui])
+      expect(runs[0]!.headlessBrowser?.uiReach).toEqual(Object.fromEntries(ui.map((o) => [o, { reach: 'ok' }])))
+    })
+
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
       const paths = await tempPaths()
       const settings = new SettingsStore(db.sql)
@@ -846,7 +875,20 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(snapshot).toEqual({
           v: 1,
           type: 'sessions.snapshot',
-          sessions: [{ sessionId: b.id, title: 'b', origin: 'mcp', owner: agentB, status: 'idle' }],
+          sessions: [
+            {
+              sessionId: b.id,
+              title: 'b',
+              origin: 'mcp',
+              owner: agentB,
+              status: 'idle',
+              // #795: the switcher's nesting, last activity and spend.
+              parentId: null,
+              updatedAt: expect.any(String),
+              costUsd: 0,
+              budgetUsd: 1,
+            },
+          ],
         })
       })
 

@@ -16,7 +16,10 @@ and support blockers or enforcers print nothing and are dropped, with a note.
 
 The file is untrusted: the archive is bounded as the print path bounds it
 (:data:`~scadbuddy.render.bambu3mf.MAX_UNCOMPRESSED_BYTES`), every entry is read
-capped, and at most :data:`MAX_OBJECTS` distinct objects are read.
+capped, and at most :data:`MAX_OBJECTS` distinct objects are read. Components may
+name one object many times, so what the file expands to is bounded too: at most
+:data:`MAX_VISITS` objects visited and :data:`MAX_TRIANGLES` triangles produced, however
+few bytes asked for them.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import io
 import json
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from xml.sax.saxutils import quoteattr
@@ -47,6 +50,7 @@ from scadbuddy.render.bambu3mf import (
     PlateParts,
     _read_capped,
 )
+from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PartSource, PlateLayout
 from scadbuddy.render.split import ColourPart, normalise_colour
@@ -74,6 +78,12 @@ _DROPPED = {"modifier_part", "support_blocker", "support_enforcer"}
 _MMU_SEGMENTATION = "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation"
 #: A component chain deeper than this is not a file any slicer writes.
 _MAX_DEPTH = 8
+#: The most objects one read visits, components included: a few KB of components that
+#: each name the same object many times would otherwise expand without bound.
+MAX_VISITS = 20_000
+#: The most triangles one read produces, every instance of a mesh counted: about what a
+#: model file at the archive cap can hold, so a real file never reaches it.
+MAX_TRIANGLES = 5_000_000
 
 
 class UnreadableObjectsError(ValueError):
@@ -163,15 +173,22 @@ def _extruder(value: str | None) -> int | None:
     return number if number is not None and number >= 1 else None
 
 
-def _object_settings(archive: _Archive) -> dict[str, _ObjectSettings] | None:
-    """Bambu Studio's per-object and per-part settings, by object id; None when the
-    file has none (not a Bambu project)."""
+def _model_settings(archive: _Archive) -> ET.Element | None:
+    """Bambu Studio's ``model_settings.config``; None when the file has none (not a
+    Bambu project)."""
     if MODEL_SETTINGS_NAME not in archive.names:
         return None
-    config = _parse(
+    return _parse(
         _read_capped(archive.archive, MODEL_SETTINGS_NAME, MAX_SETTINGS_BYTES * 16),
         MODEL_SETTINGS_NAME,
     )
+
+
+def _object_settings(config: ET.Element | None) -> dict[str, _ObjectSettings] | None:
+    """Bambu Studio's per-object and per-part settings, by object id; None when the
+    file has none."""
+    if config is None:
+        return None
     settings: dict[str, _ObjectSettings] = {}
     for obj in config.findall("object"):
         meta = _metadata(obj)
@@ -227,6 +244,14 @@ class _Reader:
     #: Bambu Studio's settings, when the file is a Bambu project.
     settings: dict[str, _ObjectSettings] | None
     filaments: list[str]
+    visits: int = 0
+    triangles: int = 0
+
+    def _spend(self, visits: int = 0, triangles: int = 0) -> None:
+        self.visits += visits
+        self.triangles += triangles
+        if self.visits > MAX_VISITS or self.triangles > MAX_TRIANGLES:
+            raise UnreadableObjectsError("the 3MF expands to too many objects or triangles to read")
 
     def colour_of(self, extruder: int) -> str:
         return self.filaments[extruder - 1] if extruder <= len(self.filaments) else STL_COLOUR
@@ -243,6 +268,7 @@ class _Reader:
         by ``matrix``. ``extruder`` is the Bambu part's, which colours the whole mesh."""
         if depth > _MAX_DEPTH:
             raise UnreadableObjectsError("the 3MF's components nest too deep")
+        self._spend(visits=1)
         root, objects, scale = self.archive.model(model)
         obj = objects.get(object_id)
         if obj is None:
@@ -276,6 +302,7 @@ class _Reader:
         triangles = mesh.find(f"{_CORE}triangles")
         if node is None or triangles is None or not len(triangles):
             return
+        self._spend(triangles=len(triangles))
         points = np.array(
             [[float(v.get("x", 0)), float(v.get("y", 0)), float(v.get("z", 0))] for v in node],
             dtype=np.float64,
@@ -370,9 +397,86 @@ class _Reader:
 def read_objects(payload: bytes) -> list[ReadObject]:
     """Every object ``payload``'s build places, each with its count, in build order.
     Raises :class:`UnreadableObjectsError` for a file whose objects cannot be read."""
+    return _opened(payload, _read)
+
+
+@dataclass(frozen=True)
+class PlateRead:
+    """One plate of a file: its parts, one per colour, and how many plates it has."""
+
+    parts: list[ColourPart]
+    plates: int
+
+
+def read_plate_parts(payload: bytes, plate: int = 1) -> PlateRead:
+    """The parts of ``payload``'s plate ``plate``, one per colour in the order colours
+    appear, placed where the file places them: what a library file's preview and mesh
+    checks read, as an output's read its own 3MF (#1753). Plates are Bambu Studio's
+    (``model_settings.config``); a file that lists none is one plate. Refused as
+    :func:`read_objects` refuses; a plate the file lacks is
+    :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
+    return _opened(payload, lambda archive: _read_plate(archive, plate))
+
+
+def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
+    """Each plate's ``(object id, instance)`` pairs: an object's instances are its
+    build items, in build order. Empty when the file lists no plates."""
+    plates: dict[int, set[tuple[str, int]]] = {}
+    for node in config.iter("plate") if config is not None else []:
+        index = _extruder(_metadata(node).get("plater_id"))
+        if index is None:
+            continue
+        on = plates.setdefault(index, set())
+        for instance in node.findall("model_instance"):
+            meta = _metadata(instance)
+            number = meta.get("instance_id") or "0"
+            on.add((meta.get("object_id", ""), int(number) if number.isdecimal() else 0))
+    return plates
+
+
+def _read_plate(archive: _Archive, plate: int) -> PlateRead:
+    model = _root_model_name(archive)
+    items = _build_items(archive, model)
+    config = _model_settings(archive)
+    reader = _Reader(archive, _object_settings(config), _filament_colours(archive))
+    plates = _plates(config)
+    count = len(plates) or 1
+    if (plates and plate not in plates) or (not plates and plate != 1):
+        raise NoSuchPlateError(plate, count)
+    instances: dict[str, int] = {}
+    by_colour: dict[str, list[trimesh.Trimesh]] = {}
+    for item in items:
+        object_id = item.get("objectid", "")
+        instance = instances.get(object_id, 0)
+        instances[object_id] = instance + 1
+        if plates and (object_id, instance) not in plates[plate]:
+            continue
+        path = (item.get(_PATH) or "").lstrip("/") or model
+        parts, _ = reader.item(path, object_id, _matrix(item.get("transform")))
+        for part in parts:
+            by_colour.setdefault(part.colour, []).append(part.mesh)
+    found: list[ColourPart] = []
+    for index, (colour, meshes) in enumerate(by_colour.items(), start=1):
+        joined = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
+        if isinstance(joined, trimesh.Trimesh):
+            found.append(ColourPart(index, f"Color {index}", colour, joined))
+    if not found:
+        raise UnreadableObjectsError(f"plate {plate} of the 3MF places no object with any geometry")
+    return PlateRead(found, count)
+
+
+def _opened[T](payload: bytes, read: Callable[[_Archive], T]) -> T:
+    """``read`` over ``payload``'s archive, every way it can fail an
+    :class:`UnreadableObjectsError`."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as zipped:
-            return _read(_Archive(zipped))
+            archive = _Archive(zipped)
+            infos = zipped.infolist()
+            if any(_GCODE.fullmatch(info.filename) for info in infos):
+                raise UnreadableObjectsError("the file is sliced already; print it from Bambuddy")
+            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
+                raise UnreadableObjectsError("the 3MF is too large to read")
+            return read(archive)
     except zipfile.BadZipFile:
         raise UnreadableObjectsError("the file is not a 3MF archive") from None
     except (KeyError, ValueError) as error:
@@ -383,21 +487,22 @@ def read_objects(payload: bytes) -> list[ReadObject]:
         ) from None
 
 
-def _read(archive: _Archive) -> list[ReadObject]:
-    infos = archive.archive.infolist()
-    if any(_GCODE.fullmatch(info.filename) for info in infos):
-        raise UnreadableObjectsError("the file is sliced already; print it from Bambuddy")
-    if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
-        raise UnreadableObjectsError("the 3MF is too large to read")
-    model = _root_model_name(archive)
+def _build_items(archive: _Archive, model: str) -> list[ET.Element]:
     root, _, _ = archive.model(model)
     build = root.find(f"{_CORE}build")
-    items = [
+    return [
         item
         for item in (build if build is not None else [])
         if item.tag == f"{_CORE}item" and item.get("printable", "1") != "0"
     ]
-    reader = _Reader(archive, _object_settings(archive), _filament_colours(archive))
+
+
+def _read(archive: _Archive) -> list[ReadObject]:
+    model = _root_model_name(archive)
+    items = _build_items(archive, model)
+    reader = _Reader(
+        archive, _object_settings(_model_settings(archive)), _filament_colours(archive)
+    )
     groups: dict[tuple[str, str, tuple[float, ...]], tuple[np.ndarray, int]] = {}
     for item in items:
         matrix = _matrix(item.get("transform"))

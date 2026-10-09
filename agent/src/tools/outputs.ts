@@ -74,10 +74,15 @@ export const outputTools: Tool[] = [
     routes: ['DELETE /api/v1/outputs/{output_id}'],
     summarize: ({ output_id }) => `Delete output ${output_id} and its 3MF`,
     handler: async ({ output_id }, ctx) => {
+      // Its model, read first: once deleted the output can no longer say (#1071). A read
+      // that fails leaves it unnamed; the delete answers for whether the output exists.
+      const { data } = await ctx.backend
+        .GET('/api/v1/outputs/{output_id}', { params: { path: { output_id } }, signal: ctx.signal })
+        .catch(() => ({ data: undefined }))
       await command(ctx, `delete output ${output_id}`, (headers) =>
         ctx.backend.DELETE('/api/v1/outputs/{output_id}', { params: { path: { output_id } }, headers }),
       )
-      return json({ deleted: output_id })
+      return json({ deleted: output_id, slug: data?.slug ?? null })
     },
   }),
 

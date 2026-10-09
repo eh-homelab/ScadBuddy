@@ -270,6 +270,22 @@ describe('assistant panel', () => {
     await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
   })
 
+  // #1383: the panel's live region announces an attention request, never a done summary.
+  it('announces an attention request, and keeps quiet about a done summary (#815)', async () => {
+    const view = renderShell()
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await view.user.type(box, 'post a summary when you are done{Enter}')
+    await screen.findByTestId('agent-done')
+    await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
+    expect(screen.queryByText('The assistant needs your attention.')).not.toBeInTheDocument()
+
+    await view.user.click(screen.getByRole('button', { name: 'New chat' }))
+    await view.user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'my tab dropped{Enter}')
+    await screen.findByRole('heading', { name: 'The assistant needs you: Tab disconnected' })
+    expect(await screen.findByText('The assistant needs your attention.')).toHaveAttribute('role', 'status')
+  })
+
   it('Deny sends a refusal and nothing is sent', async () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Deny' }))
@@ -373,7 +389,7 @@ describe('assistant panel', () => {
       await user.click(screen.getByRole('button', { name: 'New chat' }))
       await user.click(screen.getByRole('button', { name: /^Sessions/ }))
       const picker = screen.getByRole('navigation', { name: 'Sessions' })
-      within(picker).getByRole('button', { name: /Make the name bigger/ }).focus()
+      within(picker).getByRole('button', { name: /^Make the name bigger/ }).focus()
       await user.keyboard('{Enter}')
 
       expect(screen.queryByRole('navigation', { name: 'Sessions' })).not.toBeInTheDocument()
@@ -381,7 +397,7 @@ describe('assistant panel', () => {
 
       await user.click(screen.getByRole('button', { name: /^Sessions/ }))
       const reopened = screen.getByRole('navigation', { name: 'Sessions' })
-      const open = within(reopened).getByRole('button', { name: /Make the name bigger/ })
+      const open = within(reopened).getByRole('button', { name: /^Make the name bigger/ })
       expect(open).toHaveAttribute('aria-current', 'true')
       expect(open).toHaveTextContent('Open')
       for (const other of within(reopened).getAllByRole('button').filter((b) => b !== open)) {

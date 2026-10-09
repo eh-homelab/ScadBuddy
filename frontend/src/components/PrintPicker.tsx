@@ -3,6 +3,7 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
+  AnalysisTarget,
   FilamentWarning,
   Output,
   PrintOptions,
@@ -174,6 +175,12 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   const slug = source?.kind === 'output' ? source.output.slug : undefined
   // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
   const outputId = source?.kind === 'output' ? source.output.id : undefined
+  /** What the analyzers judge: the output, or the library file, as any print (#1753). */
+  const analysisTarget: AnalysisTarget | undefined = !source
+    ? undefined
+    : source.kind === 'output'
+      ? { output_id: source.output.id }
+      : { library_file_id: source.file.id }
   const picker = usePrintChoices(open, source, carry)
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
@@ -536,10 +543,6 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
       <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
     </>
   )
-  const verdictShown =
-    check.error !== undefined ||
-    Boolean(check.verdict?.rack) ||
-    (checkVerdict?.errors ?? []).length + (checkVerdict?.warnings ?? []).length > 0
 
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
@@ -852,26 +855,11 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                 </>
               )}
 
-              {/* The analyzers judge an output's own 3MF; a library file has none (#313), so its
-                  Checks are the nozzle verdict alone (#755). */}
-              {outputId !== undefined ? (
-                <AnalyzerPanel outputId={outputId} request={analysisRequest} allPlates={allPlates}>
-                  {verdict}
-                </AnalyzerPanel>
-              ) : (
-                verdictShown && (
-                  <section
-                    aria-labelledby="print-checks-title"
-                    data-testid="print-checks"
-                    className="rounded-[6px] border border-line bg-surface-2 px-3 py-2"
-                  >
-                    <h3 id="print-checks-title" className="text-[13px] text-ink">
-                      Checks
-                    </h3>
-                    {verdict}
-                  </section>
-                )
-              )}
+              {/* The analyzers judge what the print slices: an output's 3MF, or a library
+                  file's, read as a print of it reads it (#1753). */}
+              <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
+                {verdict}
+              </AnalyzerPanel>
             </div>
           )}
 

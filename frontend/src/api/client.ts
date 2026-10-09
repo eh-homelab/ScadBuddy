@@ -1502,9 +1502,23 @@ export const api = {
       body: JSON.stringify(limits),
     }),
 
-  /** #790 — "Continue in a new chat": a new session with this one's transcript and a fresh budget. */
-  forkAiSession: (id: string) =>
-    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/fork`, { method: 'POST' }),
+  /**
+   * #790, #794 — a new session with this one's transcript and a fresh budget: "Continue in
+   * a new chat", Fork, and with `upTo` (a reply's message id) "Fork from here", which
+   * keeps the conversation only through that reply.
+   */
+  forkAiSession: (id: string, options: { upTo?: string } = {}) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/fork`, {
+      method: 'POST',
+      ...(options.upTo === undefined ? {} : { body: JSON.stringify({ up_to: options.upTo }) }),
+    }),
+
+  /** #795 — renames a session, or marks it done; only the session's owner can. */
+  updateAiSession: (id: string, edit: { title: string } | { done: true }) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(edit),
+    }),
 
   /** #790 — adds to one session's budget; only the user can (it spends money). */
   raiseAiSessionBudget: (id: string, addUsd: number) =>

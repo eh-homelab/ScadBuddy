@@ -230,6 +230,68 @@ describe('the navigation guard and file names', () => {
     })
   })
 
+  // Production: SCADBUDDY_PUBLIC_URL is behind an SSO proxy that answers every
+  // unauthenticated request with a 302 to its sign-in page; an internal origin
+  // in SCADBUDDY_ALLOWED_ORIGINS answers 200 (browserReach.ts).
+  describe('preferring a UI origin the browser reaches without a login', () => {
+    const SSO = 'https://scadbuddy.sso.example'
+    const INTERNAL = 'https://scadbuddy.internal.example'
+    const config = { backendUrl: ORIGIN, publicUrl: SSO, uiOrigins: `${INTERNAL},${SSO}` }
+    const signIn = { reach: 'sign-in', detail: '302 to https://authenticate.sso.example' } as const
+    const reachable = browserOrigins({ ...config, reach: { [SSO]: signIn, [INTERNAL]: { reach: 'ok' } } })
+    const none = browserOrigins({
+      ...config,
+      reach: { [SSO]: signIn, [INTERNAL]: { reach: 'unreachable', detail: 'answered 503' } },
+    })
+
+    it('puts the reachable origins first, keeping every one a UI origin', () => {
+      expect(browserOrigins(config).ui).toEqual([SSO, INTERNAL])
+      expect(reachable.ui).toEqual([INTERNAL, SSO])
+      expect(none.ui).toEqual([SSO, INTERNAL])
+    })
+
+    it('names the reachable origin when refusing the backend', () => {
+      expect(check('browser_navigate', { url: `${ORIGIN}/m/box?x=1` }, reachable)).toEqual({
+        deny: expect.stringContaining(`open "${INTERNAL}/m/box?x=1" instead`),
+      })
+    })
+
+    it('refuses an origin that answers with a sign-in, naming the reachable one with the same path', () => {
+      const verdict = check('browser_navigate', { url: `${SSO}/m/box#p` }, reachable)
+      expect(verdict).toEqual({ deny: expect.stringContaining(`open "${INTERNAL}/m/box#p" instead`) })
+      expect(verdict).toEqual({ deny: expect.stringContaining('302 to https://authenticate.sso.example') })
+      expect(check('browser_navigate', { url: `${INTERNAL}/m/box` }, reachable)).toBeUndefined()
+    })
+
+    it('says so when no UI origin is reachable, instead of pointing at a login page', () => {
+      for (const url of [`${ORIGIN}/m/box`, `${SSO}/m/box`, `${INTERNAL}/`]) {
+        const verdict = check('browser_navigate', { url }, none)
+        expect(verdict).toEqual({ deny: expect.stringContaining('none of ScadBuddy\'s origins answers the headless browser without a login') })
+        expect(verdict).toEqual({ deny: expect.stringContaining(`${SSO} (302 to https://authenticate.sso.example)`) })
+        expect(verdict).toEqual({ deny: expect.stringContaining(`${INTERNAL} (answered 503)`) })
+        expect(verdict).toEqual({ deny: expect.not.stringContaining(' instead') })
+      }
+    })
+
+    it('keeps the old behaviour for an origin that was not asked', () => {
+      const partial = browserOrigins({ ...config, reach: { [SSO]: signIn } })
+      expect(partial.ui).toEqual([INTERNAL, SSO])
+      expect(check('browser_navigate', { url: `${INTERNAL}/` }, partial)).toBeUndefined()
+      expect(check('browser_navigate', { url: `${ORIGIN}/x` }, partial)).toEqual({
+        deny: expect.stringContaining(`open "${INTERNAL}/x" instead`),
+      })
+    })
+
+    it('still refuses the agent paths and off-origin URLs first', () => {
+      expect(check('browser_navigate', { url: `${INTERNAL}/api/v1/ai/status` }, reachable)).toEqual({
+        deny: expect.stringMatching(/assistant's own API/),
+      })
+      expect(check('browser_navigate', { url: 'https://evil.example/' }, reachable)).toEqual({
+        deny: expect.stringMatching(/may only open ScadBuddy's own UI/),
+      })
+    })
+  })
+
   describe('off-origin navigation (SCADBUDDY_BROWSER_ALLOWED_ORIGINS)', () => {
     const listed = browserOrigins({ backendUrl: ORIGIN, browserAllowed: 'https://docs.example, http://printer.lan:8080/' })
     const any = browserOrigins({ backendUrl: ORIGIN, browserAllowed: '*' })
@@ -306,6 +368,21 @@ describe('the per-session plugin', () => {
     expect(config.allowUnrestrictedFileAccess).toBe(false)
     expect(config.webmcp).toBe(false)
     expect(config.capabilities).toBeUndefined()
+  })
+
+  it("orders the turn's UI origins by this turn's probe, and lets the page reach every one", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const plugin = materializeHeadlessBrowser({
+      sessionId: randomUUID(),
+      backendUrl: ORIGIN,
+      publicUrl: 'https://sso.example',
+      uiOrigins: 'https://internal.example',
+      uiReach: { 'https://sso.example': { reach: 'sign-in', detail: '302 to https://login.example' }, 'https://internal.example': { reach: 'ok' } },
+      dir,
+    })
+    expect(plugin.origins.ui).toEqual(['https://internal.example', 'https://sso.example'])
+    const config = JSON.parse(readFileSync(plugin.configFile, 'utf8')) as { network: { allowedOrigins: string[] } }
+    expect(config.network.allowedOrigins).toEqual(['https://internal.example', 'https://sso.example'])
   })
 
   it('loads the request guard on every page, with the backend, the session and its approved origins', async () => {

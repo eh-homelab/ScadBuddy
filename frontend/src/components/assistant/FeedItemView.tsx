@@ -199,7 +199,7 @@ function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: st
       {item.state === 'pending' ? (
         <div className="mt-2" data-agent-user-only="">
           <Button type="button" variant="primary" size="sm" onClick={() => onAnswer([dismiss])}>
-            Dismiss
+            {dismiss}
           </Button>
         </div>
       ) : (
@@ -377,6 +377,24 @@ function QuestionCard({
   )
 }
 
+/**
+ * #794 — shown on hover, and always to the keyboard (it is in the tab order) and on
+ * touch screens, which have no hover.
+ */
+function ForkHere({ onClick, title }: { onClick: () => void; title: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      data-agent-user-only=""
+      className="absolute -top-2.5 right-0 rounded-[4px] border border-line bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted opacity-0 hover:text-ink focus:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+    >
+      Fork from here
+    </button>
+  )
+}
+
 export function FeedItemView({
   item,
   onDecide,
@@ -384,6 +402,7 @@ export function FeedItemView({
   advanced = false,
   askedBy,
   sessionId = '',
+  onForkHere,
 }: {
   item: FeedItem
   onDecide: (approvalId: string, approve: boolean) => void
@@ -395,27 +414,41 @@ export function FeedItemView({
   askedBy?: string | undefined
   /** #782 — the session the item is in, where its tool images are served. */
   sessionId?: string
+  /**
+   * #794 — "Fork from here" on a message: a new chat with the conversation up to it.
+   * Absent where there is nothing to fork up to (the first message, a reply still streaming).
+   */
+  onForkHere?: (() => void) | undefined
 }) {
   switch (item.kind) {
     case 'user':
       return (
-        <div className="ml-8 rounded-[6px] bg-surface-3 px-2.5 py-1.5 text-[13px]">
+        <div data-feed-item="user" className="group relative ml-8 rounded-[6px] bg-surface-3 px-2.5 py-1.5 text-[13px]">
           {item.author.kind !== 'browser' && (
             <p className="mb-0.5 text-[11px] text-faint">{item.author.label}</p>
           )}
           {item.images && <SentImages images={item.images} />}
           <p className="whitespace-pre-wrap">{item.text}</p>
+          {onForkHere && (
+            <ForkHere
+              onClick={onForkHere}
+              title="Start a new chat with the conversation before this message, and this message to edit and send"
+            />
+          )}
         </div>
       )
     case 'assistant':
       return (
-        <div className="text-[13px] leading-relaxed" data-testid="agent-text">
+        <div data-feed-item="assistant" className="group relative text-[13px] leading-relaxed" data-testid="agent-text">
           <Markdown text={item.text} />
           {!item.done && (
             <span
               aria-hidden="true"
               className="ml-0.5 inline-block h-3 w-1.5 bg-accent align-middle motion-safe:animate-pulse"
             />
+          )}
+          {onForkHere && (
+            <ForkHere onClick={onForkHere} title="Start a new chat with the conversation up to this reply" />
           )}
         </div>
       )

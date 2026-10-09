@@ -214,6 +214,40 @@ test.describe('assistant panel (#256)', () => {
     await touched.getByRole('group', { name: 'Revisions' }).getByRole('link', { name: /3f9c2a1/ }).click()
     await expect(page).toHaveURL(/\/m\/gridfinity-bin\?version=3f9c2a1b7d4e$/)
   })
+
+  // #792: fork from a reply by keyboard, the parent link, the fork nested under its
+  // parent in Sessions, and a rename.
+  test('forks a chat from a reply, nests the fork under it, and renames it', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /^Tune the gridfinity bin/ }).click()
+    const log = panel.getByRole('log', { name: 'Conversation' })
+    const reply = log.locator('[data-feed-item="assistant"]').filter({ hasText: 'Done: the bin is now 3 units' })
+
+    // Shown on hover, and to the keyboard when it has focus.
+    const forkHere = reply.getByRole('button', { name: 'Fork from here' })
+    await forkHere.focus()
+    await expect(forkHere).toHaveCSS('opacity', '1')
+    await page.keyboard.press('Enter')
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Tune the gridfinity bin (fork)')
+    await expect(log.getByText('Done: the bin is now 3 units (21 mm) tall.')).toBeVisible()
+    await expect(panel.getByRole('textbox', { name: 'Message the assistant' })).toBeEnabled()
+
+    await panel.getByRole('button', { name: 'Sessions (2)' }).click()
+    const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+    const forks = sessions.getByRole('list', { name: 'Forks of Tune the gridfinity bin' })
+    await forks.getByRole('button', { name: 'Rename Tune the gridfinity bin (fork)' }).click()
+    const title = sessions.getByRole('textbox', { name: 'Chat title' })
+    await title.fill('Bin, taller')
+    await title.press('Enter')
+    await expect(forks.getByRole('button', { name: /^Bin, taller/ })).toBeVisible()
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Bin, taller')
+
+    await panel.getByRole('button', { name: 'Forked from Tune the gridfinity bin' }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Tune the gridfinity bin')
+  })
 })
 
 test.describe('the assistant beside a dialog (#798)', () => {
@@ -249,6 +283,30 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await composer.fill('Which spool is the grey one?')
     await expect(composer).toHaveValue('Which spool is the grey one?')
     await expect(dialog).toBeVisible()
+  })
+})
+
+// #795 — a fork's row, with Rename and Done beside it, fits the panel at phone width.
+test.describe('the session switcher at 390 px (#795)', () => {
+  test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('keeps a fork row and its actions on screen', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /^Tune the gridfinity bin/ }).click()
+    await panel.getByRole('button', { name: 'Fork', exact: true }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Tune the gridfinity bin (fork)')
+    await panel.getByRole('button', { name: 'Sessions (2)' }).click()
+
+    const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+    for (const name of ['Rename Tune the gridfinity bin (fork)', 'Mark Tune the gridfinity bin (fork) done']) {
+      const box = (await sessions.getByRole('button', { name }).boundingBox())!
+      expect(box.x + box.width, name).toBeLessThanOrEqual(390)
+    }
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
   })
 })
 

@@ -177,6 +177,11 @@ export const SessionSummarySchema = z.object({
   origin: OriginSchema,
   owner: OwnerSchema,
   status: SessionStatusSchema,
+  /** #795 — for the switcher: its parent (forks nest under it), last activity, and spend; absent from an older agent. */
+  parentId: z.string().nullable().optional(),
+  updatedAt: z.string().optional(),
+  costUsd: z.number().nonnegative().optional(),
+  budgetUsd: z.number().positive().optional(),
 })
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
 

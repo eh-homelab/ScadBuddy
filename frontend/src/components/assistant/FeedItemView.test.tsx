@@ -404,6 +404,15 @@ describe('the done summary (#815 §4)', () => {
     expect(onAnswer).toHaveBeenCalledWith('done1', ['Dismiss'])
   })
 
+  it('labels its button with the option it sends', async () => {
+    const user = userEvent.setup()
+    const onAnswer = post({
+      questions: [{ question: 'Done.', header: 'Done', multiSelect: false, options: [{ label: 'Got it', description: '' }] }],
+    })
+    await user.click(screen.getByRole('button', { name: 'Got it' }))
+    expect(onAnswer).toHaveBeenCalledWith('done1', ['Got it'])
+  })
+
   it('once dismissed or replaced, says so and keeps the record', () => {
     post({ state: 'answered', answers: ['Dismiss'], by: you })
     expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument()

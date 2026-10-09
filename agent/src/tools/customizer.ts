@@ -205,6 +205,18 @@ export const customizerTools: Tool[] = [
         submitted = accepted.job_id
         await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
         job = await waitForJob(ctx, accepted.job_id)
+      } catch (err) {
+        if (submitted === undefined) throw err
+        // The job exists however the wait ended (#1072): answer its id, so the model
+        // can poll it and the session records it as made (#931).
+        const reason =
+          err instanceof ToolError ? err : ctx.signal?.aborted ? new ToolError('the call was interrupted before the render settled') : undefined
+        if (!reason) throw err
+        ctx.report?.({ detail: reason.message })
+        return {
+          ...json({ job_id: submitted, status: null, error: toolErrorText(reason, 'render_model'), note: 'poll get_render_job with this job_id' }),
+          isError: true,
+        }
       } finally {
         if (submitted !== undefined && (job === undefined || !settled(job.status))) {
           void holdUntilSettled(ctx, submitted, limiter.limits.holdMs).finally(release)
