@@ -28,7 +28,7 @@ export function SessionModePicker({
       ? 'Default (Durable, Classic for now)'
       : `Default (${LABEL[current.mode]})`
   const unavailable = value === 'durable' && current && !current.durable_available
-  return (
+  const picker = (
     <details className="mb-1.5 text-[11.5px] text-muted">
       <summary className="cursor-pointer select-none">Session mode: {value ? LABEL[value] : defaultLabel}</summary>
       <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -44,13 +44,19 @@ export function SessionModePicker({
         </select>
         <span>Durable chats keep running through a restart of the assistant, and cannot be forked.</span>
       </div>
+    </details>
+  )
+  // Outside the disclosure, so a remembered Durable that would be refused is seen closed.
+  return (
+    <>
+      {picker}
       {unavailable && (
-        <p className="mt-1 text-warn" data-testid="session-mode-picker-unavailable">
+        <p className="mb-1.5 text-[11.5px] text-warn" data-testid="session-mode-picker-unavailable">
           Durable sessions cannot start right now
           {current.durable_unavailable_reason ? `: ${current.durable_unavailable_reason}` : ''}. Pick Default or
-          Classic to chat.
+          Classic under Session mode to chat.
         </p>
       )}
-    </details>
+    </>
   )
 }
