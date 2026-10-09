@@ -39,7 +39,7 @@ A backend table `jobs` (new migration):
 |---|---|
 | `id` | `<source>:<source_id>`, stable |
 | `kind` | a registered key, e.g. `render`, `operation.model_import`, `print_run`, `agent.operation.<kind>` |
-| `principal` | from `X-ScadBuddy-Agent-Author`; `browser` when absent; `system` for schedules |
+| `principal` | from `X-ScadBuddy-Agent-Author`; for a headless-browser request (`X-ScadBuddy-Agent-Session`, `api/agent_actor.py`), the owner of that session (`ai_sessions`); `browser` when neither is present; `system` for schedules |
 | `session` | the agent session, when there is one |
 | `via_tool` | the tool that started it, when an agent did (a #1953 tool) |
 | `subject` | what it acts on: a model slug, an output id, a printer |
@@ -69,11 +69,15 @@ Each feature exports `JOB_KINDS` from `scadbuddy/<feature>/jobs.py`, found like
 - `links(row)`: what the job made (an output, a version, a print).
 
 Every `OperationKind` yields a job kind without its own `jobs.py`. The agent's kinds are
-data, not code: at start the agent sends `PUT /api/v1/internal/job-kinds` with one entry
-per agent operation kind from its tool manifest (`dist/tools.json`): key, label, title
-template, facets. The backend keeps them in a `job_kinds` table beside the code-registered
-ones. A new tool or agent operation therefore needs no backend edit. Agent jobs carry their
-detail in the row (request, result, error), since their source is `ai_operations`.
+data, not code: at start the agent upserts one row per agent operation kind from its tool
+manifest (`dist/tools.json`) into its own table `ai_job_kinds` (key, label, title template,
+facets, `retired_at`), and sets `retired_at` on rows it no longer declares. The backend
+reads that table, as it already reads `ai_*` tables for the headless-grant gate
+(`api/agent_actor.py` `GRANT_SQL`), and never writes it. A retired kind still labels and
+filters its old jobs; it is left out of `/jobs/facets` once none of its jobs remain. Agent
+keys are `agent.`-prefixed, and a code-registered key may not start with `agent.`
+(checked at discovery), so the two never collide. A new tool or agent operation needs no
+backend edit.
 
 ## 5. Writers
 
@@ -84,7 +88,12 @@ Each source writes its job at the one place it already writes its own record:
 | renders | the `project` activity (`render/projection.py`) |
 | operations | the insert and finish activities (`workflows/operation_activities.py`) |
 | print runs | the status upsert (`workflows/printing.py`) |
-| agent operations | `AgentOperation`'s record activities, through `PUT /api/v1/internal/jobs/{id}` (the agent cannot write backend tables) |
+| agent operations | read from `ai_operations` by the backend: `AgentOperation`'s record activities send `NOTIFY ai_operations` with the row id, and the backend's listener upserts the job |
+
+The agent writes no backend table and the backend gains no write route: `/api/v1/internal/*`
+has no authentication (README "Deploying"), so a write route there would let anyone who
+reaches the UI forge jobs. `ai_operations` gains `principal`, `session` and `via_tool`
+columns (an agent migration), filled from the tool call's principal.
 
 Each write is an upsert keyed by `id` and sends `NOTIFY jobs`. A failed job write never
 fails the job: it is logged and counted (a `core/metrics.py` counter), and the repair pass
@@ -114,9 +123,15 @@ Under `/api/v1`, feature `scadbuddy/jobs/`, routes `api/jobs.py`:
 - Agent principals go through the agent's tools `jobs_list`, `jobs_get` and `jobs_watch`
   (in `ALL_TOOLS`, so in-process and on `/mcp`, `read` tier). They pin
   `principal=<caller>` unless the caller holds `outward`.
-- Defence in depth: when `X-ScadBuddy-Agent-Author` is present, the backend refuses a
-  `principal` filter other than that header's, or none, unless the agent also sends that
-  the caller holds `outward`.
+- The agent's headless browser can open the Jobs page itself. Its requests carry the
+  agent-actor marker (`X-ScadBuddy-Agent-Session`), which the agent's request guard adds
+  and a page cannot replace (`api/agent_actor.py`). For such a request the jobs routes pin
+  `principal` to that session's owner unless the owner is the browser user, so a
+  `read`-tier token's session cannot list other principals' jobs through the UI.
+- The backend does not otherwise check tiers. `X-ScadBuddy-Agent-Author` labels a
+  request; it does not authenticate it (`core/authorship.py`: "Neither header is
+  authentication"). The pinning in the agent's tools is the boundary for `/mcp` callers.
+  The backend adds no tier header and trusts none.
 
 ## 8. Retention and repair
 
@@ -151,7 +166,9 @@ A top-level **Jobs** page and a bell.
 
 - A job whose source row is gone shows `source gone` in its detail; it is not an error.
 - A job write failure: see §5.
-- An unknown filter or facet: 400 naming it.
+- Every error is an RFC 9457 problem (`core/problems.py`). An unknown query parameter, or
+  a facet no selected kind declares, answers 400 with a problem naming it, not FastAPI's
+  default 422.
 
 ## 11. Testing
 
@@ -159,14 +176,20 @@ A top-level **Jobs** page and a bell.
   - each writer upserts its job;
   - the status mapping per source;
   - an unknown facet answers 400;
-  - an agent-authored request cannot filter another principal without `outward`;
+  - a headless-browser request (the agent-actor marker) for a token-owned session sees only
+    that owner's jobs;
+  - the `ai_operations` listener upserts an agent job, and the repair pass restores one it
+    missed;
+  - a code-registered kind key starting with `agent.` fails discovery;
   - SSE resumes from `Last-Event-ID`;
   - the sweep deletes, and the repair pass restores a missed row.
 - Agent:
   - the `jobs_*` tools pin the caller;
   - `outward` sees every principal;
   - `test/coverage.test.ts` covers the new operations;
-  - `AgentOperation` writes its job.
+  - `AgentOperation` records `principal`, `session` and `via_tool` and sends its NOTIFY;
+  - `ai_job_kinds` is upserted from the manifest at start, and an undeclared kind is
+    retired.
 - Frontend:
   - the filter bar renders from facets, including a kind the client has never seen;
   - live updates;
