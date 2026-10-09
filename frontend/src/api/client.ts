@@ -20,6 +20,7 @@ import type {
   FontFamily,
   HeadlessBrowserSetting,
   HttpRequestSetting,
+  ImageSettings,
   AiSessionView,
   SessionLimits,
   SessionResource,
@@ -1477,6 +1478,15 @@ export const api = {
     request<HttpRequestSetting>('/ai/settings/http-request', {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
+    }),
+
+  /** The long edge the assistant panel scales attached images to, served by the agent service. */
+  getImageSettings: () => request<ImageSettings>('/ai/settings/images'),
+
+  putImageSettings: (longEdge: number) =>
+    request<ImageSettings>('/ai/settings/images', {
+      method: 'PUT',
+      body: JSON.stringify({ long_edge: longEdge }),
     }),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */

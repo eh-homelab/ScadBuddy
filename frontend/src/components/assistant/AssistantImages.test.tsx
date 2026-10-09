@@ -3,12 +3,17 @@ import { Route, Routes } from 'react-router'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { renderPage } from '../../test/utils'
+import { server } from '../../mocks/server'
+import { HttpResponse, http } from 'msw'
 import { AppShell } from '../AppShell'
 import type * as Images from '../../agent/chat/images'
 
 // #1866 — images pasted, dropped or attached in the assistant's composer.
 
 vi.mock('../../agent/chat/availability', () => ({ useAiAvailability: () => ({ available: true }) }))
+
+// The edge each preparation was asked to scale to.
+const edges = vi.hoisted(() => [] as (number | undefined)[])
 
 // jsdom has no canvas: the preparation itself is images.test.ts's; here it encodes the name.
 vi.mock('../../agent/chat/images', async (importOriginal) => {
@@ -20,14 +25,16 @@ vi.mock('../../agent/chat/images', async (importOriginal) => {
   }
   return {
     ...actual,
-    prepareImage: (file: File) =>
-      file.type === 'image/svg+xml'
+    prepareImage: (file: File, _codec?: unknown, edge?: number) => {
+      edges.push(edge)
+      return file.type === 'image/svg+xml'
         ? Promise.reject(new Error(`${file.name} is not a PNG, JPEG, GIF or WebP image.`))
         : Promise.resolve(remembered({
             mediaType: 'image/png' as const,
             data: btoa(file.name),
             preview: { mediaType: 'image/jpeg' as const, data: btoa(`preview of ${file.name}`) },
-          })),
+          }))
+    },
   }
 })
 
@@ -65,6 +72,25 @@ function paste(target: Element, files: File[], text = '') {
 const queued = () => screen.queryByRole('list', { name: 'Images to send' })
 
 describe('assistant images (#1866)', () => {
+  it('scales to the long edge stored in Settings', async () => {
+    let served = () => {}
+    const read = new Promise<void>((resolve) => (served = resolve))
+    server.use(
+      http.get('/api/v1/ai/settings/images', () => {
+        served()
+        return HttpResponse.json({ long_edge: 2000, min: 200, max: 2576 })
+      }),
+    )
+    edges.length = 0
+    const { box } = await openComposer()
+    // Read when the panel opens; an image pasted once it has answered is scaled to it.
+    await read
+    await new Promise((r) => setTimeout(r, 50))
+    paste(box, [png()])
+    await screen.findByRole('list', { name: 'Images to send' })
+    expect(edges).toEqual([2000])
+  })
+
   it('takes a pasted image into the composer and sends it with the message', async () => {
     const { view, box } = await openComposer()
     paste(box, [png()])

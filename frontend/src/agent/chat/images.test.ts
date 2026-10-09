@@ -1,7 +1,7 @@
 import {
   FULL_SIZES_MAX,
   IMAGE_DATA_MAX,
-  IMAGE_EDGE,
+  DEFAULT_IMAGE_EDGE,
   PREVIEW_EDGE,
   composerImages,
   forgetFullSizes,
@@ -52,12 +52,26 @@ describe('prepareImage (#1866)', () => {
     expect(drawn).toEqual([{ width: PREVIEW_EDGE, height: PREVIEW_EDGE / 2, type: 'image/jpeg' }])
   })
 
-  it('scales an image larger than IMAGE_EDGE down, keeping its type', async () => {
+  it('scales an image larger than DEFAULT_IMAGE_EDGE down, keeping its type', async () => {
     const { codec, drawn } = fakeCodec(4000, 2000, () => 5000)
     const image = await prepareImage(file(PNG_HEAD, 9000, 'image/png'), codec)
-    expect(drawn[0]).toEqual({ width: IMAGE_EDGE, height: IMAGE_EDGE / 2, type: 'image/png' })
+    expect(DEFAULT_IMAGE_EDGE).toBe(1568)
+    expect(drawn[0]).toEqual({ width: DEFAULT_IMAGE_EDGE, height: DEFAULT_IMAGE_EDGE / 2, type: 'image/png' })
     expect(image.mediaType).toBe('image/png')
     expect(atob(image.data).length).toBe(5000)
+  })
+
+  it('scales to the edge it is given (the stored setting)', async () => {
+    const { codec, drawn } = fakeCodec(4000, 2000, () => 5000)
+    await prepareImage(file(PNG_HEAD, 9000, 'image/png'), codec, 2576)
+    expect(drawn[0]).toEqual({ width: 2576, height: 1288, type: 'image/png' })
+  })
+
+  it('sends an image within the given edge as it is, though it is past the default', async () => {
+    const { codec, drawn } = fakeCodec(2000, 1000)
+    const image = await prepareImage(file(PNG_HEAD, 1000, 'image/png'), codec, 2576)
+    expect(atob(image.data).length).toBe(1000)
+    expect(drawn.map((d) => d.type)).toEqual(['image/jpeg'])
   })
 
   it('falls back to a JPEG when the scaled image is still too large', async () => {

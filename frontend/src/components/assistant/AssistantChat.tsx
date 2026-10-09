@@ -168,6 +168,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const [imageErrors, setImageErrors] = useState<string[]>([])
   const [dropping, setDropping] = useState(false)
   const filePicker = useRef<HTMLInputElement>(null)
+  // The long edge images are scaled to, from Settings; the default until it answers, or if it cannot.
+  const imageEdge = useAsync(() => api.getImageSettings(), []).data?.long_edge
   const addImages = async (files: File[]) => {
     if (files.length === 0) return
     const room = Math.max(0, IMAGES_MAX - attachedNow.current.length - preparingNow.current)
@@ -177,7 +179,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       .map((file) => `At most ${IMAGES_MAX} images per message: ${file.name} was not added.`)
     preparingNow.current += taken.length
     setPreparing(preparingNow.current)
-    const results = await Promise.allSettled(taken.map((file) => prepareImage(file)))
+    const results = await Promise.allSettled(taken.map((file) => prepareImage(file, undefined, imageEdge)))
     preparingNow.current -= taken.length
     setPreparing(preparingNow.current)
     const added: Attached[] = []
