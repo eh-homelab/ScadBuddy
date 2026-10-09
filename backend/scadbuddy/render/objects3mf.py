@@ -312,6 +312,8 @@ class _Reader:
             or not len(arrays.faces)
         ):
             return
+        # The budget counts what the arrays already hold: it bounds the work below, not
+        # the parse. The archive's size cap (`MAX_UNCOMPRESSED_BYTES`) bounds that.
         self._spend(triangles=len(arrays.faces))
         points = arrays.vertices
         if not np.isfinite(points).all():
