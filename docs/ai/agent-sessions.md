@@ -272,7 +272,20 @@ output (`/edit/{id}`); picking a session opens it in the assistant panel
 `AssistantOpener`). It shows nothing when no session touched the resource, or the
 assistant is off. On a model's page the assistant panel's session picker offers
 **Only sessions that changed {slug}**, which narrows its list to the sessions the same
-route returns for that model, read again each time the picker opens.
+route returns for that model (`AssistantChat.tsx`, #1340):
+
+- **When it reads:** each time the picker opens or the box is ticked, and while both
+  stay so, again on the model's realtime changes (`model:<slug>`) and on every tool
+  result the panel sees, so a session that changes the model meanwhile is listed.
+- **While it loads:** the picker shows "Finding the sessions that changed {slug}…", not
+  the unfiltered list.
+- **When the agent cannot answer:** an alert gives its reason and the list is shown
+  unfiltered, saying so. Reopening the picker asks again.
+- **At the cap:** it asks for the route's maximum, 500 sessions, most recently updated
+  first. At 500 it says it checked only those; a session that changed the model and is
+  not among the panel's loaded sessions is not listed, and with none loaded it says
+  "None of the loaded sessions changed {slug}" rather than "No session".
+- **Per page:** the box starts unticked on every model page, the one just left included.
 
 ### 4.2 Forks and the session switcher in the panel (#792)
 

@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
@@ -112,13 +113,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
   const pageModel = pageContext(pathname).modelSlug ?? null
-  // The model the filter was turned on for: on another model's page it is off.
+  // The model the filter was turned on for. Every page starts unfiltered, a page left and
+  // come back to included (#1340).
   const [filteredModel, setFilteredModel] = useState<string | null>(null)
+  const [filterPage, setFilterPage] = useState(pageModel)
+  if (filterPage !== pageModel) {
+    setFilterPage(pageModel)
+    setFilteredModel(null)
+  }
   const filterBy = pageModel !== null && filteredModel === pageModel ? pageModel : null
-  // Read again each time the picker opens or the filter is turned on, so it is current.
+  const filtering = filterBy !== null && pickerOpen
+  // Read again each time the picker opens or the filter is turned on, and while it is open,
+  // on the model's changes and on every tool result the panel sees, so a session that
+  // changes the model meanwhile is listed (#1340).
   const touching = useAsync(
     async () =>
-      filterBy && pickerOpen
+      filtering
         ? new Set(
             (await api.listAiResourceSessions({ type: 'model', id: filterBy }, PICKER_FILTER_LIMIT)).sessions.map(
               (s) => s.id,
@@ -126,7 +136,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           )
         : null,
     [filterBy, pickerOpen],
+    filtering ? [`model:${filterBy}`] : [],
   )
+  const toolResults = useMemo(
+    () =>
+      Object.values(state.sessions).reduce(
+        (count, s) => count + (s?.items.filter((item) => item.kind === 'tool' && item.result).length ?? 0),
+        0,
+      ),
+    [state.sessions],
+  )
+  const refreshTouching = touching.refresh
+  useEffect(() => {
+    if (filtering) refreshTouching()
+    // Only a new tool result re-reads; opening the picker or the filter reads through `touching`'s deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolResults])
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
