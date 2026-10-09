@@ -285,7 +285,8 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(dialog).toBeVisible()
   })
 
-  // #1897 — the assistant closed when the dialog opened: its toggle is above the overlay.
+  // #1897 — a click on the toggle closed the dialog instead: the dialog's overlay covered
+  // it. The toggle is above the overlay now.
   test('opens from its button while the Print dialog is open', async ({ page }) => {
     await page.setViewportSize({ width: 1100, height: 800 })
     await page.goto('/m/name-keychain')
@@ -311,6 +312,14 @@ test.describe('the assistant beside a dialog (#798)', () => {
     expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(panelBox.x)
     await composer.fill('Which spool is the grey one?')
     await expect(composer).toHaveValue('Which spool is the grey one?')
+    await expect(dialog).toBeVisible()
+
+    // Clicked again beside the dialog, it brings the focus back to the chat rather than
+    // closing it (AppShell's `open && besideDialog`): the click itself took the focus.
+    await dialog.getByRole('button').first().focus()
+    await page.getByRole('button', { name: 'Assistant', exact: true }).click()
+    await expect(composer).toBeFocused()
+    await expect(panel).toBeVisible()
     await expect(dialog).toBeVisible()
   })
 })
