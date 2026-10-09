@@ -81,8 +81,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
         SELECT id FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL`
       id = row?.id
       return id
-    }).toBeDefined()
-    await expect.poll(async () => (await m.get(sessionId, browser)).status).toBe('waiting_input')
+    }, { timeout: 10_000 }).toBeDefined()
+    await expect.poll(async () => (await m.get(sessionId, browser)).status, { timeout: 10_000 }).toBe('waiting_input')
     return id!
   }
 

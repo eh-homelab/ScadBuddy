@@ -86,7 +86,7 @@ test.describe('real agent (#249)', () => {
     await expect(card).toBeVisible({ timeout: 60_000 })
     await expect(panel.getByTestId('agent-status')).toHaveText('Waiting for approval')
     const tool = panel.getByTestId('agent-tool').first()
-    await expect(tool).toContainText('set_print_options')
+    await expect(tool).toContainText('Set print options')
     await expect(tool).toContainText('outward')
 
     await card.getByRole('button', { name: 'Approve' }).click()

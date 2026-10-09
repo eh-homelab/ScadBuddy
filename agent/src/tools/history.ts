@@ -91,6 +91,7 @@ export const historyTools: Tool[] = [
     input: z.object({ slug, commit }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/versions/{commit}/restore'],
+    title: ({ slug, commit }) => `Restore ${slug} to ${commit.slice(0, 7)}`,
     handler: async ({ slug, commit }, ctx) =>
       json(
         await command(ctx, `restore ${slug}@${commit}`, (headers) =>

@@ -184,12 +184,20 @@ describe('assistant panel', () => {
   })
 
   it('streams text, shows the tool call with its risk, sources and version', async () => {
-    await openAndSend()
+    const { user } = await openAndSend()
     const log = screen.getByRole('log', { name: 'Conversation' })
     expect(within(log).getByText(/make the/)).toBeInTheDocument()
     expect(within(log).getByText('name', { selector: 'strong' })).toBeInTheDocument()
-    const [write, send] = screen.getAllByTestId('agent-tool')
-    expect(within(write!).getByText('set_parameters')).toBeInTheDocument()
+    // #782: the write and the render view are one group, closed once both are done.
+    const steps = await screen.findByRole('button', { name: /2 steps/ })
+    await waitFor(() => expect(steps).toHaveAttribute('aria-expanded', 'false'))
+    expect(screen.getByRole('img', { name: 'Look at the render (iso)' })).toHaveAttribute(
+      'src',
+      expect.stringMatching(/^\/api\/v1\/ai\/sessions\/[^/]+\/blobs\/[0-9a-f]{64}\.png$/),
+    )
+    await user.click(steps)
+    const [write, , send] = screen.getAllByTestId('agent-tool')
+    expect(within(write!).getByText('Set text_size → 14 mm')).toBeInTheDocument()
     expect(within(write!).getByText('write')).toBeInTheDocument()
     expect(within(write!).getByText('Why? 2 sources')).toBeInTheDocument()
     expect(within(write!).getByRole('link', { name: 'OpenSCAD customizer parameters' })).toHaveAttribute(
@@ -201,7 +209,8 @@ describe('assistant panel', () => {
       '/m/name-keychain/versions',
     )
     expect(within(send!).getByText('outward')).toBeInTheDocument()
-    expect(within(send!).getByText('running…')).toBeInTheDocument()
+    expect(within(send!).getByText('Print name-keychain × 2')).toBeInTheDocument()
+    expect(within(send!).getByTestId('agent-tool-status')).toHaveTextContent('Waiting for approval')
   })
 
   it('shows tool arguments only in Advanced, and remembers the switch per browser', async () => {
@@ -251,7 +260,11 @@ describe('assistant panel', () => {
     // Through the one respond route (#815), not the socket.
     expect(respondRequests()).toEqual([{ id: expect.stringMatching(/^approval:/), body: { kind: 'approval', decision: 'approve' } }])
     expect(sentOf('approval.decision')).toEqual([])
-    await screen.findByText('Queued 2 copies in the Keychains project.')
+    // #782: the call says it is done; what it returned is behind its Details.
+    const print = () => screen.getAllByTestId('agent-tool').find((t) => t.textContent?.includes('Print name-keychain × 2'))
+    await waitFor(() => expect(print()).toHaveAttribute('data-status', 'done'))
+    await user.click(within(print()!).getByRole('button', { name: /^Details/ }))
+    expect(within(print()!).getByTestId('agent-tool-result')).toHaveTextContent('Queued 2 copies in the Keychains project.')
     await screen.findByText('Sent. Two copies are in the queue.')
     expect(within(card).getByText('Approved by You.')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))

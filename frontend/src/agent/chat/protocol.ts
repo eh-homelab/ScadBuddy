@@ -215,6 +215,21 @@ export const UserImageSchema = z.object({
 })
 export type UserImage = z.infer<typeof UserImageSchema>
 
+/**
+ * #782 — an image a tool result carried, by name: the agent keeps the bytes (agent
+ * `src/sessions/blobs.ts`) and serves them on the panel's own origin (`blobUrl`).
+ */
+export const ToolImageSchema = z.object({
+  name: z.string().regex(/^[0-9a-f]{64}\.(png|jpg|gif|webp)$/),
+  mediaType: z.enum(IMAGE_MEDIA_TYPES),
+})
+export type ToolImage = z.infer<typeof ToolImageSchema>
+
+/** Where the agent serves one of a session's tool images (agent `GET /api/v1/ai/sessions/:id/blobs/:name`). */
+export function blobUrl(sessionId: string, name: string): string {
+  return `/api/v1/ai/sessions/${encodeURIComponent(sessionId)}/blobs/${encodeURIComponent(name)}`
+}
+
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1)
 
@@ -272,6 +287,12 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     risk: RiskSchema,
     /** A subagent's call (#1108): the id of the session's `Agent` call that spawned it. */
     parent: z.string().min(1).optional(),
+    /**
+     * #782 — what the call does, in words, as the tool itself declares it (agent
+     * `src/tools/registry.ts` `ToolSpec.title`). Absent for a tool outside ScadBuddy's
+     * registry, which the panel names itself (`labels.ts` `toolTitle`).
+     */
+    title: z.string().min(1).max(200).optional(),
   }),
   z.object({
     v,
@@ -282,6 +303,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     summary: z.string(),
     sources: z.array(SourceSchema).optional(),
     version: VersionLinkSchema.optional(),
+    /** #782 — the images the result carried, each served by the agent's `blobUrl` route. */
+    images: z.array(ToolImageSchema).max(16).optional(),
   }),
   z.object({
     v,

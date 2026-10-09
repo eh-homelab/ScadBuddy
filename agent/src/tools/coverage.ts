@@ -17,6 +17,12 @@ const LIBRARY_PRINT_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/print/library/{file_id}/objects',
+    reason:
+      "The Arrange dialog's list of a library file's objects, with a count each (#1863). The arrange " +
+      'tool names a whole file (`library_file_id`, part omitted), which places every object at its own count.',
+  },
+  {
     operation: 'GET /api/v1/models/{slug}/ui/{path}',
     reason:
       "Serves a template's own UI module and assets to the browser (#425). An agent reads the `ui` " +

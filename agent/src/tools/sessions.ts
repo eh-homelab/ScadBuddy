@@ -12,6 +12,7 @@ import type { LoggedEvent } from '../sessions/eventLog.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
 import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
+import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveImageRefs } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
 // Agent-to-agent control (#300; spec §6 "Agent-to-agent", §8.1, §8.2): the
@@ -205,9 +206,10 @@ export function condense(rows: readonly LoggedEvent[], viewer?: Pick<Owner, 'kin
       continue
     }
     const { v: _v, sessionId: _s, ...rest } = event as typeof event & { sessionId?: string }
-    // A turn's image previews (#1866) as their count: the bytes are the panel's to show.
+    // A turn's image previews (#1866), and a result's images (#782), as their count:
+    // the images are the panel's to show (a tool caller got a result's in the result).
     const row: Record<string, unknown> =
-      rest.type === 'user.turn' && rest.images ? { ...rest, images: rest.images.length } : rest
+      (rest.type === 'user.turn' || rest.type === 'tool.result') && rest.images ? { ...rest, images: rest.images.length } : rest
     out.push({ seq, ...(viewer ? principalsSeenBy(viewer, row) : row) })
   }
   return out
@@ -398,17 +400,22 @@ export const sessionTools: Tool[] = [
       'Add a user message to a session this caller owns and start its turn. One turn at a time: while a turn ' +
       'is running this is refused; wait, or sessions_interrupt it. An outward action in the turn waits for a ' +
       "decision in the ScadBuddy UI or by sessions_approve/sessions_deny (the approval grant). Read the reply with " +
-      'sessions_get or sessions_attach from after_seq.',
+      'sessions_get or sessions_attach from after_seq. Images go by reference (`images`), never inline.',
     input: z.object({
       session_id: sessionId,
       text: z.string().min(1).max(MESSAGE_MAX),
+      // #1894: references only. The agent fetches each from the backend as the
+      // turn starts (imageRefs.ts), so the call's input, which the event log, the
+      // /mcp audit and an approval summary record, never holds image bytes.
+      images: ImageRefsSchema.optional().describe(IMAGE_REFS_DESCRIPTION),
       wait_seconds: waitSeconds,
     }),
     risk: 'write',
     routes: [],
     source: TRANSCRIPT_SOURCE,
-    summarize: ({ session_id }) => `send a message to session ${session_id}`,
-    handler: async ({ session_id, text, wait_seconds }, ctx) => {
+    summarize: ({ session_id, images }) =>
+      `send a message${images ? ` with ${images.length} image${images.length === 1 ? '' : 's'}` : ''} to session ${session_id}`,
+    handler: async ({ session_id, text, images, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
       const owner = ownerOf(ctx.principal)
       // Where the reply starts: the log's end before this turn's first event.
@@ -416,7 +423,11 @@ export const sessionTools: Tool[] = [
         await sessions.get(session_id, owner)
         return sessions.events.lastSeq(session_id)
       })
-      const turn = await refusals(() => sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers }))
+      // Resolved after the session check, so a caller cannot use an unknown session to probe images.
+      const resolved = images ? await resolveImageRefs(images, ctx.backend) : undefined
+      const turn = await refusals(() =>
+        sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers, ...(resolved ? { images: resolved } : {}) }),
+      )
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session_id, owner))
       return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: before })

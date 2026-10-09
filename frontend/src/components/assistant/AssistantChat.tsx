@@ -23,6 +23,7 @@ import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
 import { isDone, type UserImage } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
+import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
@@ -31,6 +32,7 @@ import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
+import { ToolGroup } from './ToolGroup'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -168,6 +170,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const [imageErrors, setImageErrors] = useState<string[]>([])
   const [dropping, setDropping] = useState(false)
   const filePicker = useRef<HTMLInputElement>(null)
+  // The long edge images are scaled to, from Settings; the default until it answers, or if it cannot.
+  const imageEdge = useAsync(() => api.getImageSettings(), []).data?.long_edge
   const addImages = async (files: File[]) => {
     if (files.length === 0) return
     const room = Math.max(0, IMAGES_MAX - attachedNow.current.length - preparingNow.current)
@@ -177,7 +181,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       .map((file) => `At most ${IMAGES_MAX} images per message: ${file.name} was not added.`)
     preparingNow.current += taken.length
     setPreparing(preparingNow.current)
-    const results = await Promise.allSettled(taken.map((file) => prepareImage(file)))
+    const results = await Promise.allSettled(taken.map((file) => prepareImage(file, undefined, imageEdge)))
     preparingNow.current -= taken.length
     setPreparing(preparingNow.current)
     const added: Attached[] = []
@@ -521,16 +525,29 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             {state.notice}
           </p>
         )}
-        {active?.items.map((item) => (
-          <FeedItemView
-            key={`${item.kind}-${item.id}`}
-            item={item}
-            advanced={advanced}
-            askedBy={item.kind === 'question' ? askedBy(active.items, item) : undefined}
-            onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
-            onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
-          />
-        ))}
+        {active &&
+          feedBlocks(active.items).map((block) =>
+            block.kind === 'tools' ? (
+              // #782 — consecutive calls as one group; every other item keeps its own card.
+              <ToolGroup
+                key={`tools-${block.id}`}
+                calls={block.calls}
+                statuses={block.calls.map((call) => toolStatus(call, active.items, { settled: !busy }))}
+                sessionId={active.id}
+                advanced={advanced}
+              />
+            ) : (
+              <FeedItemView
+                key={`${block.item.kind}-${block.item.id}`}
+                item={block.item}
+                advanced={advanced}
+                sessionId={active.id}
+                askedBy={block.item.kind === 'question' ? askedBy(active.items, block.item) : undefined}
+                onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
+                onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
+              />
+            ),
+          )}
         {itemCount === 0 && !busy && advanced && (
           // #1488 — an empty chat has no feed for Advanced to change, so say what it will do.
           <p className="text-[12px] text-muted">
