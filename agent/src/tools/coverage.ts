@@ -204,3 +204,20 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
 export const PENDING_ROUTES: readonly { operation: string; pr: number; tool: string; reason: string }[] = [
   // Empty: #320's and #324's routes have merged and have their tools.
 ]
+
+/**
+ * The agent service's own routes that an agent needs a tool for (spec 2026-10-01 §6.6,
+ * plan 5b Task 10): each names its tool, or gives the reason it has none.
+ * test/coverage.test.ts checks every tool exists and every route is served. Only the
+ * pending-input routes are listed so far; the agent's other routes predate the check.
+ */
+export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: string }[] = [
+  { route: 'GET /api/v1/ai/pending-input', tool: 'pending_input_list' },
+  { route: 'GET /api/v1/ai/sessions/{id}/pending-input', tool: 'sessions_pending_input' },
+  {
+    route: 'POST /api/v1/ai/pending-input/{request_id}',
+    reason:
+      'Browser-only for `answer` kinds (only the user answers a question); an `approval` is decided through ' +
+      'sessions_approve / sessions_deny, which take every approval id, durable ones included.',
+  },
+]

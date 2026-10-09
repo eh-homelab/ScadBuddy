@@ -3,7 +3,9 @@ import { ownerOf } from '../approvals/mcp.js'
 import { ApprovalError, type ApprovalRecord } from '../approvals/service.js'
 import type { Principal } from '../auth/principal.js'
 import { approvalView, type ApprovalView, BROWSER_USER } from '../routes/approvals.js'
-import { RespondError, respond } from '../routes/pendingInput.js'
+import { WorkflowNotFoundError } from '@temporalio/common'
+import { DurableUnavailable } from '../gate/durable.js'
+import { pendingInput, type PendingInputEntry, RespondError, respond, sessionPendingInput } from '../routes/pendingInput.js'
 import { sessionView } from '../routes/sessions.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import type { LoggedEvent } from '../sessions/eventLog.js'
@@ -626,6 +628,53 @@ export const sessionTools: Tool[] = [
     },
   }),
 
+  // spec §6.6 "Reads", plan 5b ruling 10: the two pending-input reads for principals
+  // other than the browser user, under the approvals' visibility rules.
+  defineTool({
+    name: 'pending_input_list',
+    description:
+      'Every tool call parked on a person that this caller may see, approvals and answers alike, across classic and ' +
+      'durable sessions: every pending approval for a token with the approval grant, else those of its own sessions ' +
+      'and its own requests, and the questions of the sessions it owns. Each entry has the id sessions_approve and ' +
+      'sessions_deny take for an approval; only the user in the ScadBuddy UI answers a question.',
+    input: z.object({}),
+    risk: 'read',
+    routes: [],
+    source: 'the pending records: their summaries and prompts quote what the requesting agents wrote',
+    handler: async (_args, ctx) => {
+      const page = await refusals(() => pendingInput(manager(ctx), ownerOf(ctx.principal)))
+      return json({ ...page, entries: page.entries.map((e) => entrySeenBy(viewerOf(ctx), e)) })
+    },
+  }),
+  defineTool({
+    name: 'sessions_pending_input',
+    description:
+      "One session's parked tool calls, as pending_input_list shows them. A durable session's are read from its " +
+      'workflow, the source of truth; this fails while its worker does not answer, and can be retried.',
+    input: z.object({ session_id: z.string().min(1) }),
+    risk: 'read',
+    routes: [],
+    source: 'the pending records: their summaries and prompts quote what the requesting agents wrote',
+    handler: async ({ session_id }, ctx) => {
+      const page = await (async () => {
+        try {
+          return await sessionPendingInput(manager(ctx), ownerOf(ctx.principal), session_id)
+        } catch (err) {
+          if (err instanceof DurableUnavailable) throw new ToolError(err.message, 503)
+          if (err instanceof WorkflowNotFoundError) throw new ToolError(`session ${session_id} has no running workflow`, 404)
+          throw err
+        }
+      })()
+      if (!page) throw new ToolError(`no session ${session_id}`, 404)
+      return json({ ...page, entries: page.entries.map((e) => entrySeenBy(viewerOf(ctx), e)) })
+    },
+  }),
+
   decideTool(true),
   decideTool(false),
 ]
+
+/** An entry as `viewer` may see it: another principal's requester by label only. */
+function entrySeenBy(viewer: Pick<Owner, 'kind' | 'id'>, e: PendingInputEntry): Omit<PendingInputEntry, 'requested_by'> & { requested_by: SeenOwner | null } {
+  return { ...e, requested_by: e.requested_by ? ownerSeenBy(viewer, e.requested_by) : null }
+}

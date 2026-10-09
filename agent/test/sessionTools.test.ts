@@ -25,6 +25,7 @@ describe('the sessions_* tools', () => {
       sessions_resources: 'read',
       sessions_attach: 'read',
       sessions_list_approvals: 'read',
+      sessions_pending_input: 'read',
       sessions_start: 'write',
       sessions_send: 'write',
       sessions_fork: 'write',
