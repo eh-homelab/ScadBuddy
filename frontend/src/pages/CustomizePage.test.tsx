@@ -249,6 +249,33 @@ describe('CustomizePage', () => {
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
   })
 
+  it("says the revision's source is still uploading, not that the queue is full (#1422)", async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: "the revision's snapshot is still uploading",
+              retry_after: 1,
+              code: 'snapshot_pending',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent("Uploading this revision's source; retrying in 1 s.")
+    expect(busy).not.toHaveTextContent('queue is full')
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
   it('says it cannot reach the render service, not that the queue is full', async () => {
     server.use(
       http.post(

@@ -82,6 +82,8 @@ function renderBusyText({ seconds, reason }: RenderBusy): string {
       return `ScadBuddy did not answer; this preview will be retried in ${seconds} s.`
     case 'queue-full':
       return `The render queue is full; this preview will be retried in ${seconds} s.`
+    case 'snapshot-pending':
+      return `Uploading this revision's source; retrying in ${seconds} s.`
   }
 }
 
