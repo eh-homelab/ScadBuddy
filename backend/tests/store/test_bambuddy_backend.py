@@ -573,13 +573,16 @@ async def test_first_uploads_to_more_templates_than_connections_do_not_starve_th
 
 
 def _advisory_locks(conninfo: str, key: int) -> int:
-    """Held or awaited locks on `key` in the whole cluster: a bigint key is split into
-    `classid` (high half) and `objid` (low half)."""
+    """Held or awaited locks on `key` in this database: a bigint key is split into
+    `classid` (high half) and `objid` (low half). `pg_locks` covers the whole cluster,
+    and under pytest-xdist every worker has a database of its own taking the same
+    keys, so without the filter another worker's upload is counted here (#1987)."""
     unsigned = key & 0xFFFFFFFFFFFFFFFF
     with psycopg.connect(conninfo) as conn:
         row = conn.execute(
             "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
-            " AND classid = %s AND objid = %s AND objsubid = 1",
+            " AND classid = %s AND objid = %s AND objsubid = 1"
+            " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
             (unsigned >> 32, unsigned & 0xFFFFFFFF),
         ).fetchone()
     assert row is not None
