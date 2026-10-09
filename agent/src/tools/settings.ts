@@ -132,11 +132,14 @@ export const settingsTools: Tool[] = [
   defineTool({
     name: 'set_print_options',
     description:
-      'Remember print options for one scope (global, a printer, or a model). A settings write, so it needs a ' +
-      'human approval.',
+      'Remember print options for one scope (global, a printer, or what is printed: a model, or a Bambuddy ' +
+      'library file as scope "model" with key "library:<file id>"). A settings write, so it needs a human approval.',
     input: z.object({
       scope: z.enum(['global', 'printer', 'model']),
-      key: z.string().optional().describe('The printer id or model slug; omitted for global'),
+      key: z
+        .string()
+        .optional()
+        .describe('The printer id, the model slug, or "library:<file id>" for a library file; omitted for global'),
       options: printOptions,
     }),
     risk: 'outward',

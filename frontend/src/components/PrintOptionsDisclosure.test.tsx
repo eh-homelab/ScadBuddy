@@ -6,14 +6,17 @@ import { describe, expect, it } from 'vitest'
 import type { PrintOptions } from '../api/types'
 import { printOptions as printOptionsFixture } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import type { OptionsSubject } from '../lib/printSource'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 
-function Harness({ printerId }: { printerId?: number | null } = {}) {
+const MODEL: OptionsSubject = { key: 'name-keychain', noun: 'model' }
+
+function Harness({ printerId, subject = MODEL }: { printerId?: number | null; subject?: OptionsSubject } = {}) {
   const [value, setValue] = useState<PrintOptions>({})
   return (
     <>
       <PrintOptionsDisclosure
-        slug="name-keychain"
+        subject={subject}
         printerId={printerId}
         value={value}
         onChange={setValue}
@@ -144,6 +147,42 @@ describe('PrintOptionsDisclosure', () => {
 
     await waitFor(() => expect(screen.getByText('Remembered for this model.')).toBeInTheDocument())
     expect(within(row('Timelapse')).getByText(/On · from this model/)).toBeInTheDocument()
+  })
+
+  it("offers a library file its own scope and remembers under the file's key (#1754)", async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({
+          ...printOptionsFixture,
+          models: { 'library:89': { quantity: 2 }, 'name-keychain': { quantity: 4 } },
+        }),
+      ),
+    )
+    const puts: unknown[] = []
+    server.use(
+      http.put('/api/v1/settings/print-options', async ({ request }) => {
+        const body = (await request.json()) as { options: PrintOptions }
+        puts.push(body)
+        return HttpResponse.json({
+          defaults: printOptionsFixture.defaults,
+          global_options: {},
+          printers: {},
+          models: { 'library:89': body.options },
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<Harness subject={{ key: 'library:89', noun: 'file' }} />)
+    await open(user)
+
+    expect(within(row('Quantity')).getByText(/2 · from this file/)).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'This model' })).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+    await user.selectOptions(screen.getByLabelText('Remember for'), 'This file')
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+
+    await waitFor(() => expect(screen.getByText('Remembered for this file.')).toBeInTheDocument())
+    expect(puts).toEqual([{ scope: 'model', key: 'library:89', options: { quantity: 2, timelapse: true } }])
   })
 
   it('keeps what a scope already remembered when a second option is saved to it', async () => {

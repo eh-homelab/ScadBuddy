@@ -1007,7 +1007,7 @@ async def plan_run(
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here rather than half-applied.
     print_options = resolve_print_options(
-        settings, source.options_slug, printer_id, request_scope(request.copies, request.options)
+        settings, source.options_scope, printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 

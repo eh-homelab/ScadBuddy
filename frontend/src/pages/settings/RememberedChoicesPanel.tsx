@@ -5,6 +5,7 @@ import type { BambuddyTargets, ModelPrintChoices, PrintOptions, ProjectChoices, 
 import { ALGORITHM_LABELS } from '../../components/print/rackLabels'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
+import { libraryFileOfScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
 
 type Row = {
@@ -33,6 +34,12 @@ function describeOptions(options: PrintOptions): string {
       .map(([name, value]) => `${name.replaceAll('_', ' ')}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`)
       .join(', ') || 'Options remembered'
   )
+}
+
+/** A model's id as it is, a library file's scope as the file. */
+function scopeName(scope: string): string {
+  const fileId = libraryFileOfScope(scope)
+  return fileId === null ? scope : `Library file ${fileId}`
 }
 
 function isEmptyOptions(options: PrintOptions | undefined): boolean {
@@ -64,13 +71,15 @@ export function RememberedChoicesPanel({
   const remembered: RememberedChoices | undefined = state.data
   const rows: Row[] = []
   if (remembered) {
-    for (const [slug, choices] of Object.entries(remembered.model_print_choices ?? {})) {
+    for (const [scope, choices] of Object.entries(remembered.model_print_choices ?? {})) {
+      // #1754: a library file's are in the same map, under `library:<file id>`.
+      const fileId = libraryFileOfScope(scope)
       rows.push({
-        key: `choices:${slug}`,
+        key: `choices:${scope}`,
         kind: 'Printer and spools',
-        subject: slug,
+        subject: scopeName(scope),
         value: describeChoices(choices, printerName),
-        forget: () => api.putModelChoices(slug, {}),
+        forget: () => (fileId === null ? api.putModelChoices(scope, {}) : api.putLibraryChoices(fileId, {})),
       })
     }
     for (const [printerId, bed] of Object.entries(remembered.printer_bed_types ?? {})) {
@@ -120,13 +129,13 @@ export function RememberedChoicesPanel({
         forget: () => api.putPrintOptions({ scope: 'printer', key: printerId, options: {} }),
       })
     }
-    for (const [slug, options] of Object.entries(remembered.model_print_options ?? {})) {
+    for (const [scope, options] of Object.entries(remembered.model_print_options ?? {})) {
       rows.push({
-        key: `options:model:${slug}`,
+        key: `options:model:${scope}`,
         kind: 'Print options',
-        subject: slug,
+        subject: scopeName(scope),
         value: describeOptions(options),
-        forget: () => api.putPrintOptions({ scope: 'model', key: slug, options: {} }),
+        forget: () => api.putPrintOptions({ scope: 'model', key: scope, options: {} }),
       })
     }
   }
