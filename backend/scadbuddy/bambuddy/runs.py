@@ -232,6 +232,14 @@ class PrintRunStore:
         anything (#1831), in one query: what ``/progress`` reports as the failure."""
         return await asyncio.to_thread(self._failed_before_queueing, output_ids)
 
+    async def superseded(self, run_subject: str) -> bool:
+        """Whether ``run_subject``'s newest run failed before it queued anything: then that
+        failure, not an older print, is its progress, and a follow of the older print
+        publishes nothing over it (#1837). ``False`` without a database."""
+        if not self.available:
+            return False
+        return run_subject in await self.failed_before_queueing([run_subject])
+
     async def insert_accepted(
         self,
         run_id: str,

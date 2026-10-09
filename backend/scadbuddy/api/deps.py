@@ -389,6 +389,7 @@ def _build_core(settings: Settings) -> AppState:
                 client, subject, print_links, uploads=uploads if pool is not None else None
             )
 
+    runs = PrintRunStore(pool, events=transactional_events(events))
     return AppState(
         settings=settings,
         config=config,
@@ -418,9 +419,10 @@ def _build_core(settings: Settings) -> AppState:
             read=read_progress,
             read_library=read_library,
             events=events,
+            superseded=runs.superseded,
         ),
         print_runs=PrintCommands(
-            store=PrintRunStore(pool, events=transactional_events(events)),
+            store=runs,
             client=temporal,
             task_queue=settings.temporal_task_queue_bambuddy,
             search_attributes=settings.temporal_search_attributes,

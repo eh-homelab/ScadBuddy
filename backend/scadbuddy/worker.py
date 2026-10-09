@@ -671,6 +671,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     outputs = RemoteOutputs(settings.api_internal_url)
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)
+    runs = PrintRunStore(pool, events=events)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
         # As the API's: the follow links archives too (#306), which the rack's settle
@@ -689,6 +690,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         read_library=read_library,
         events=events,
         on_settled=[settle_hook(rack, links, settings_store.load)],
+        superseded=runs.superseded,
     )
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,
@@ -703,7 +705,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             outputs=outputs,
             prints=OutputPrintStore(pool),
             uploads=uploads,
-            store=PrintRunStore(pool, events=events),
+            store=runs,
             observer=observer,
             rack=rack,
             links=links,

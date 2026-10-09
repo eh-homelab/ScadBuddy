@@ -610,3 +610,46 @@ def test_a_library_print_bambuddy_no_longer_has_ends_the_follow(paths: DataPaths
 def test_without_a_library_reader_a_library_follow_ends_at_once(paths: DataPaths) -> None:
     follower, _ = follower_for(paths, Script(None))
     assert asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5)) == "gone"
+
+
+def test_a_print_superseded_by_a_run_that_failed_before_queueing_publishes_nothing(
+    paths: DataPaths,
+) -> None:
+    """#1837: once the output's newest run failed before it queued anything, ``/progress``
+    reports that failure (``route: "run"``). A follow still reading the older print must
+    not publish that print's progress over it, or the two would alternate. It keeps
+    following, so the older print's settled hooks still run when it ends."""
+    write_output(paths)
+    follower, seen = follower_for(
+        paths,
+        Script(progress("queued"), progress("running"), progress("done", settled=True, done=1)),
+    )
+    asked: list[str] = []
+
+    async def superseded(run_subject: str) -> bool:
+        asked.append(run_subject)
+        return True
+
+    follower.superseded = superseded
+    heard: list[str] = []
+
+    async def hook(subject: PrintSubject) -> None:
+        heard.append(subject.id)
+
+    follower.on_settled.append(hook)
+    assert follow(follower) == "settled"
+    assert kinds(seen) == []
+    assert heard == [OUTPUT]
+    assert set(asked) == {OUTPUT}
+
+
+def test_a_superseded_check_that_fails_publishes_as_before(paths: DataPaths) -> None:
+    write_output(paths)
+    follower, seen = follower_for(paths, Script(progress("done", settled=True, done=1)))
+
+    async def superseded(run_subject: str) -> bool:
+        raise OSError("database down")
+
+    follower.superseded = superseded
+    assert follow(follower) == "settled"
+    assert kinds(seen) == ["print.progress", "print.settled"]

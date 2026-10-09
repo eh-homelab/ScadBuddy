@@ -117,6 +117,7 @@ class Follower:
         on_settled: Sequence[SettledHook] = (),
         settle_timeout: float = SETTLE_TIMEOUT,
         read_library: LibraryReader | None = None,
+        superseded: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -135,6 +136,11 @@ class Follower:
         #: concurrently (a poke's old attempt reads until its next heartbeat).
         self.on_settled: list[SettledHook] = list(on_settled)
         self.settle_timeout = settle_timeout
+        #: Whether a run subject's newest run failed before it queued anything. Then
+        #: ``/progress`` reports that failure (``route: "run"``), so this follow, still
+        #: reading an older print, publishes nothing over it: the two would alternate
+        #: (#1837). It keeps following, so the older print's settled hooks still run.
+        self.superseded = superseded
 
     async def follow(
         self,
@@ -153,6 +159,7 @@ class Follower:
             return "gone"
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
+        last_quiet: PrintProgress | None = None
         while True:
             if read_now:
                 read_now = False
@@ -179,7 +186,10 @@ class Follower:
                 failure = (error.status, error.detail)
                 if failure != last_failure:
                     last_failure = failure
-                    emit(self.events, PrintEvent(kind="print.progress", output_id=key, slug=slug))
+                    if not await self._is_superseded(key):
+                        emit(
+                            self.events, PrintEvent(kind="print.progress", output_id=key, slug=slug)
+                        )
                 if error.status == 404:
                     return "gone"
                 interval = self.error_interval
@@ -190,7 +200,11 @@ class Follower:
                 interval = self.error_interval
                 continue
             last_failure = None
-            changed = self.observer.observe_subject(key, slug, progress)
+            if await self._is_superseded(key):
+                changed = progress != last_quiet
+                last_quiet = progress
+            else:
+                changed = self.observer.observe_subject(key, slug, progress)
             if progress is not None and progress.settled:
                 # After observe, so print.settled is already published (#836). Not on
                 # progress None: a print never queued has no picks.
@@ -200,6 +214,19 @@ class Follower:
             if changed:
                 active = self.now()
             interval = self.min_interval if changed else min(self.max_interval, interval * 2)
+
+    async def _is_superseded(self, run_subject: str) -> bool:
+        if self.superseded is None:
+            return False
+        try:
+            return await self.superseded(run_subject)
+        except Exception as exc:
+            # Unreadable runs: publish as before rather than go quiet.
+            logger.warning(
+                "could not read the print's newest run",
+                extra={"subject": run_subject, "error": type(exc).__name__},
+            )
+            return False
 
     async def _read(
         self, subject: PrintSubject

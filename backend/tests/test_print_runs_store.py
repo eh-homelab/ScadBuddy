@@ -136,6 +136,24 @@ async def test_a_failure_before_any_enqueue_may_not_have_queued(store: PrintRunS
     assert not failed.may_have_queued
 
 
+async def test_a_subject_is_superseded_only_while_its_newest_run_failed_before_queueing(
+    store: PrintRunStore,
+) -> None:
+    """#1837: what a print follow asks before publishing an older print's progress."""
+    assert not await store.superseded(OUTPUT)  # never run
+    first = await accept(store, "k1", run_id="r1", wf_run="w1")
+    await store.start_enqueue(first.id)
+    await store.fail(first.id, "demo", REFUSED)
+    assert not await store.superseded(OUTPUT)  # it may have queued: its print is the progress
+    second = await accept(store, "k2", run_id="r2", wf_run="w2")
+    assert not await store.superseded(OUTPUT)  # still running
+    await store.fail(second.id, "demo", REFUSED)
+    assert await store.superseded(OUTPUT)
+    third = await accept(store, "k3", run_id="r3", wf_run="w3")
+    await store.succeed(third.id, "demo", RESULT)
+    assert not await store.superseded(OUTPUT)
+
+
 async def test_find_with_a_request_id_returns_a_failed_run_of_any_age(
     jobs: JobProjection, events: Events
 ) -> None:
