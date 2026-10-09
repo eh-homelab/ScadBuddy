@@ -35,6 +35,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.workflow_streams import WorkflowStreamClient
 from temporalio.worker import Worker
 
+from scadbuddy.workflows.flow_entries import flow_entry_timeout
 from scadbuddy.workflows.flows_client import connect_flows, harness_plugins
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
 from tests.flows.harness_probe import (
@@ -176,7 +177,7 @@ async def probe(temporal_address: str) -> AsyncIterator[Probe]:
         client,
         task_queue=queue,
         workflows=[ProbeWorkflow, ProbeChild],
-        activities=[probe_close],
+        activities=[probe_close, flow_entry_timeout],
         plugins=harness_plugins(PROBE_TOOLS),
     ):
         yield Probe(client, queue)
@@ -260,7 +261,9 @@ async def test_a_denial_reaches_the_script_as_an_exception(probe: Probe, effects
     assert _effects(effects) == []
 
 
-# 7
+# 7: the harness's callback gate keeps a cancelled call's entry, and accepts a late
+# answer to it, so a per-call timeout resolves the entry with the harness's own Update
+# (scadbuddy/workflows/flow_entries.py, plan Ruling 11 as revised).
 async def test_a_timed_out_wait_leaves_no_pending_callback(probe: Probe) -> None:
     wf_id, _ = await probe.start(
         _script(

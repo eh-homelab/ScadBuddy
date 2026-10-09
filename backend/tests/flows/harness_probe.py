@@ -5,7 +5,6 @@ No `from __future__ import annotations`: the harness reads tool and model annota
 at import (its own convention for tool modules).
 """
 
-import asyncio
 import json
 import os
 from datetime import timedelta
@@ -24,6 +23,8 @@ with workflow.unsafe.imports_passed_through():
         ToolApprovalPolicy,
     )
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
+
+    from scadbuddy.workflows.flow_entries import run_callback
 
 #: The file each tool appends its effect to, one JSON object per line.
 EFFECTS_ENV = "SCADBUDDY_TEST_PROBE_EFFECTS"
@@ -75,8 +76,8 @@ async def wait(
     question: str, timeout_s: int, runner: agent.Injected[AgentWorkflowRunner]
 ) -> HumanAnswer:
     """Ask `question`; raise TimeoutError after `timeout_s` seconds with no answer."""
-    result: HumanAnswer = await asyncio.wait_for(
-        runner.run_tool(str(workflow.uuid4()), human_answer, question=question), timeout_s
+    result: HumanAnswer = await run_callback(
+        runner.run_tool, human_answer, timeout_s, question=question
     )
     return result
 
