@@ -77,6 +77,10 @@ import { redact } from '../secrets.js'
 //     the bank, the document id, the count, the timing and the outcome, never
 //     the query or a memory. A report is not awaited by the turn, and a
 //     failing one is logged like the hooks' other failures.
+//   - Recall runs once per hooks, that is per user message (#1896): a
+//     credential fallback resumes with a continuation prompt, which fires
+//     UserPromptSubmit again (harness/fallback.ts drops the hook there; the
+//     hook itself also answers a repeat from its first recall).
 //   - The PostToolUse matcher is anchored (`^(?:a|b)$`); upstream's bare
 //     alternation also matches tool names that merely contain one.
 //
@@ -550,8 +554,22 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
         },
       }
     }
+    // One recall per hooks, which serve one user message (#1896; the session
+    // manager builds them per turn). harness/fallback.ts already gives a
+    // resumed attempt no UserPromptSubmit hook; this is the backstop. The same
+    // prompt again is a rerun of the message in a fresh context (an attempt
+    // that never reached a transcript) and gets the same memories without
+    // asking the bank again; any other prompt continues the message, whose
+    // memories are already in context, and gets nothing.
+    let recalled: { prompt: string; output: Promise<HookJSONOutput> } | undefined
+    const recallOnce: HookCallback = (input, toolUseId, context) => {
+      if (input.hook_event_name !== 'UserPromptSubmit') return Promise.resolve({})
+      if (recalled) return recalled.prompt === input.prompt ? recalled.output : Promise.resolve({})
+      recalled = { prompt: input.prompt, output: recall(input, toolUseId, context) }
+      return recalled.output
+    }
     // The SDK's own limit, a little past ours, in case the pinned request ignores its signal.
-    hooks.UserPromptSubmit = [{ hooks: [recall], timeout: Math.ceil(recallTimeoutMs / 1000) + 2 }]
+    hooks.UserPromptSubmit = [{ hooks: [recallOnce], timeout: Math.ceil(recallTimeoutMs / 1000) + 2 }]
   }
 
   if (cfg.autoRetain) {

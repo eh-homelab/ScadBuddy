@@ -328,6 +328,51 @@ def test_a_retired_value_is_kept_on_its_select_only() -> None:
     assert [o.value for o in by_name["kind"].options] == ["auto", "png_threshold"]
 
 
+def test_a_plate_annotation_bounds_a_number_by_the_printer() -> None:
+    """`// plate <name> = x|y|z` (#81): the widget's max follows the printer's plate."""
+    source = (
+        "width = 120; // [10:400]\n"
+        "depth = 80;\n"
+        "tall = 10; // [1:50]\n"
+        'label = "x";\n'
+        "// plate width = x\n"
+        "// plate depth = Y\n"
+        "  //plate   tall=z\n"
+        "// plate label = x\n"
+        "// plate nothing = x\n"
+        "// plate depth = w\n"
+    )
+    param_json = {
+        "parameters": [
+            {"name": "width", "type": "number", "initial": 120, "min": 10, "max": 400},
+            {"name": "depth", "type": "number", "initial": 80},
+            {"name": "tall", "type": "number", "initial": 10, "min": 1, "max": 50},
+            {"name": "label", "type": "string", "initial": "x"},
+        ]
+    }
+    by_name = {p.name: p for p in build_schema(param_json, source).parameters}
+    assert by_name["width"].plate_max == "x"
+    assert by_name["depth"].plate_max == "y"
+    assert by_name["tall"].plate_max == "z"
+    # Only a number can be bounded by the plate.
+    assert by_name["label"].plate_max is None
+    # The declared range is kept: the plate only narrows it, in the browser.
+    assert (by_name["width"].min, by_name["width"].max) == (10, 400)
+
+
+def test_a_cache_entry_from_before_plate_bounds_is_rederived(tmp_path: Path) -> None:
+    source = "width = 120;\n// plate width = x\n"
+    schema = build_schema(
+        {"parameters": [{"name": "width", "type": "number", "initial": 120}]}, source
+    )
+    cache = tmp_path / "schema.json"
+    store_cached_schema(cache, schema)
+    body = json.loads(cache.read_text(encoding="utf-8"))
+    body["format"] = 4
+    cache.write_text(json.dumps(body), encoding="utf-8")
+    assert load_cached_schema(cache, source_sha256(source)) is None
+
+
 MODELS = Path(__file__).resolve().parents[2] / "models"
 
 

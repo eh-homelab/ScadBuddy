@@ -7,7 +7,7 @@ import { slotChoice } from './print.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
 
 // Arrange (#1864, spec 2026-09-27 §7): objects from saved outputs of any template,
-// and Bambuddy library files ScadBuddy uploaded, laid out together on shared plates
+// and Bambuddy library files (#1863: any 3MF or STL), laid out together on shared plates
 // for a goal, then saved as one output. Route: backend/scadbuddy/api/outputs.py
 // `arrange_outputs`.
 
@@ -20,13 +20,13 @@ const arrangeObject = z
       .min(1)
       .optional()
       .describe(
-        "A Bambuddy library file's `id`, in place of output_id; the library listing's `output_id` says whether it can be arranged",
+        "A Bambuddy library file's `id` (a 3MF or STL), in place of output_id",
       ),
     part: z
       .string()
       .min(1)
       .optional()
-      .describe("A `manifest` entry's `part` (get_output); omit for every object of the source"),
+      .describe("A `manifest` entry's `part` (get_output) of an output; omit for every object of the source"),
     count: z
       .number()
       .int()
@@ -50,17 +50,18 @@ export const arrangeTools: Tool[] = [
     name: 'arrange',
     description:
       'Lay objects out again on shared plates, with no re-render, and save the result as a new output. ' +
-      'Sources mix freely: outputs of any template (`output_id`), and Bambuddy library files ScadBuddy ' +
-      'uploaded (`library_file_id`; the library listing names their `output_id`). Each object is one ' +
-      "`part` of a source's manifest, or the whole source with part omitted; objects naming the same thing " +
+      'Sources mix freely: outputs of any template (`output_id`), and Bambuddy library files ' +
+      '(`library_file_id`): one ScadBuddy uploaded stands for its output, any other 3MF or STL is read ' +
+      'from the file (each build item an object, with its count). Each object is one ' +
+      "`part` of an output's manifest, or the whole source with part omitted; objects naming the same thing " +
       'twice (an output and its library file, say) are placed twice. `goal` picks the layout; ' +
       '`printer_id` packs for that printer\'s plate (omit for the configured one); `filament_plan` is the ' +
       "same spool-per-slot plan print_output takes, slots numbered by `colours` (omit for the first source's " +
-      "colours, then any the others add). The result is filed under `slug`, one of the sources' templates " +
-      "(omit for the first object's). Waits for the job; if it outlasts the wait, the still-running job " +
+      "colours, then any the others add). The result is filed under `slug`, one of the outputs' templates " +
+      "(omit for the first object's); with library files alone, slug is required and may be any template. Waits for the job; if it outlasts the wait, the still-running job " +
       'is returned: poll it with get_render_job, then save_output under its slug. An output saved before ' +
-      'Arrange existed is refused: the user re-renders it from Arrange in History. A library file ScadBuddy ' +
-      'did not make cannot be arranged yet.',
+      'Arrange existed is refused: the user re-renders it from Arrange in History. A sliced library file, ' +
+      'or one painted in several colours, cannot be arranged.',
     input: z.object({
       objects: z.array(arrangeObject).min(1).max(200),
       goal: goal.default('fewest_plates'),
@@ -70,7 +71,9 @@ export const arrangeTools: Tool[] = [
         .optional(),
       colours: z.array(z.string().regex(/^#[0-9A-Fa-f]{6}$/)).max(32).optional(),
       name: z.string().max(200).optional(),
-      slug: slug.optional().describe("The template the result is filed under, one of the sources'"),
+      slug: slug
+        .optional()
+        .describe("The template the result is filed under: one of the outputs'; required with library files alone"),
     }),
     risk: 'write',
     bambuddyScope: ['Read Status'],
@@ -100,8 +103,8 @@ export const arrangeTools: Tool[] = [
       }
       if (problem.code === 'library_file_not_arrangeable') {
         throw new ToolError(
-          `not arranged: library file(s) ${(problem.library_file_ids ?? []).join(', ')} were not made by ` +
-            'ScadBuddy, so nothing records their objects; arranging such a file is not supported yet. Leave them out.',
+          `not arranged: library file(s) ${(problem.library_file_ids ?? []).join(', ')} cannot be arranged ` +
+            `(${(sent.error as { detail?: string }).detail ?? 'their objects could not be read'}). Leave them out.`,
         )
       }
       const started = await ok(Promise.resolve(sent), 'arrange')

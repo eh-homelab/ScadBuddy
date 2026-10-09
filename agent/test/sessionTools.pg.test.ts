@@ -16,6 +16,10 @@ import { InMemoryTokenStore } from './support/memoryTokens.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import type { HarnessRun } from '../src/harness/run.js'
+import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import { createBackendClient } from '../src/api/backend.js'
+import type { ToolServices } from '../src/tools/registry.js'
+import { BACKEND } from './helpers/mcp.js'
 
 // The `sessions_*` tools (#300) end to end: real /mcp clients with bearer
 // tokens, a real SessionManager on Postgres (with a scripted stand-in for the
@@ -72,7 +76,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
       return l
     }
 
-    async function setup(turns: (run: HarnessRun) => FakeTurn = () => ({ reply: 'hello from the agent' })) {
+    async function setup(
+      turns: (run: HarnessRun) => FakeTurn = () => ({ reply: 'hello from the agent' }),
+      extra: Partial<ToolServices> = {},
+    ) {
       const tokens = new InMemoryTokenStore()
       const publisher = new SessionEventPublisher(db.sql, { throttleMs: 10 })
       const { runner, runs } = scriptedRunner(turns)
@@ -96,7 +103,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         hub.close()
         publisher.close()
       })
-      const svc = services({ sessions, pending: new ApprovalActions(sessions.approvals) })
+      const svc = services({ sessions, pending: new ApprovalActions(sessions.approvals), ...extra })
       const t = testApp({ tokens, services: svc, mcp: { resources: hub } })
       async function agent(tier: Tier, options: { approvalGrant?: boolean } = {}) {
         const { token, record } = await tokens.mint({ name: `agent ${tier}`, tier, ...options })
@@ -148,6 +155,66 @@ describe.skipIf(!TEST_DATABASE_URL)(
       )
       // Browser-owned turns use the browser's own tiers (no override).
       expect(principals.at(-1)).toEqual({})
+    })
+
+    it('sends images by reference: fetched from the backend, given to the model before the text (#1894)', async () => {
+      const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+      const OUT = 'a'.repeat(32)
+      const backend = createBackendClient(BACKEND, (request) => {
+        const path = new URL((request as Request).url).pathname
+        if (path === `/api/v1/outputs/${OUT}/thumbnail`) {
+          return Promise.resolve(new Response(new Uint8Array(PNG), { headers: { 'content-type': 'image/png' } }))
+        }
+        // Says it is a PNG; its bytes say otherwise.
+        return Promise.resolve(new Response('<svg/>', { headers: { 'content-type': 'image/png' } }))
+      })
+      const { agent, runs } = await setup(undefined, { backend })
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'pics' }))
+
+      const sent = ok<{ turn: { finished: boolean } }>(
+        await a.call('sessions_send', {
+          session_id: session.id,
+          text: 'what is this?',
+          images: [{ kind: 'output_thumbnail', output_id: OUT }],
+          wait_seconds: 10,
+        }),
+      )
+      expect(sent.turn).toMatchObject({ finished: true })
+      expect(runs).toHaveLength(1)
+      const messages: SDKUserMessage[] = []
+      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
+      const content = messages[0]!.message.content as { type: string; source?: { data: string; media_type: string } }[]
+      expect(content.map((c) => c.type)).toEqual(['image', 'text'])
+      expect(content[0]!.source).toMatchObject({ media_type: 'image/png', data: PNG.toString('base64') })
+
+      // The MCP transcript shows the count, never the bytes.
+      const got = ok<{ transcript: Record<string, unknown>[] }>(await a.call('sessions_get', { session_id: session.id }))
+      expect(got.transcript).toContainEqual(expect.objectContaining({ type: 'user.turn', text: 'what is this?', images: 1 }))
+      expect(JSON.stringify(got)).not.toContain(PNG.toString('base64'))
+
+      // A reference whose bytes are not an image is refused, and no turn starts.
+      const refused = errorText(
+        await a.call('sessions_send', {
+          session_id: session.id,
+          text: 'and this?',
+          images: [{ kind: 'model_thumbnail', slug: 'keychain' }],
+        }),
+      )
+      expect(refused).toMatch(/images\[0\].*not a PNG, JPEG, GIF or WebP/)
+      expect(runs).toHaveLength(1)
+
+      // Inline bytes are not accepted at all.
+      expect(
+        errorText(
+          await a.call('sessions_send', {
+            session_id: session.id,
+            text: 'inline?',
+            images: [{ mediaType: 'image/png', data: PNG.toString('base64') }],
+          }),
+        ),
+      ).toMatch(/images/)
+      expect(runs).toHaveLength(1)
     })
 
     it("shows a caller only the sessions it may see; another agent's are 'no session'", async () => {

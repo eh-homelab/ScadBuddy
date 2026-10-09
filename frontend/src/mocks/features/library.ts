@@ -4,6 +4,7 @@ import type {
   ChoicesView,
   FilamentOptions,
   LibraryEntry,
+  LibraryFileObjects,
   LibraryFolderView,
   LibraryListing,
   ModelPrintChoices,
@@ -23,6 +24,7 @@ import {
   recordMockPrintRun,
   setMockLibraryChoices,
 } from '../handlers'
+import { SLICED_REASON, mockLibraryObjects } from '../libraryObjects'
 
 /**
  * #313 — printing a file already in Bambuddy's library: the listing, a file's plates and
@@ -159,6 +161,23 @@ export const handlers = [
       },
       model_choices: remembered,
     } satisfies ChoicesView)
+  }),
+
+  // #1863 — the objects Arrange reads from the file's 3MF; a sliced file is refused.
+  http.get(`${base}/print/library/:id/objects`, ({ params }) => {
+    const fileId = Number(params['id'])
+    const file = libraryFiles.find((row) => row.id === fileId)
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${fileId}`)
+    const objects = mockLibraryObjects(fileId)
+    if (!objects) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `1 library file(s) cannot be arranged: ${file.filename}: ${SLICED_REASON}`,
+        { code: 'library_file_not_arrangeable', library_file_ids: [fileId] },
+      )
+    }
+    return HttpResponse.json({ file_id: fileId, filename: file.filename, objects } satisfies LibraryFileObjects)
   }),
 
   http.put(`${base}/print/library/:id/choices`, async ({ params, request }) => {
