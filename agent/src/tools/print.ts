@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { command, reattach } from './command.js'
+import { ACCEPTING_MS, command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
@@ -536,6 +536,8 @@ export const printTools: Tool[] = [
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
+    // Its own wait for the print run, after the backend has accepted it.
+    waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async (args, ctx) => {
       const { backend } = ctx
       const source = sourceOf(args)
