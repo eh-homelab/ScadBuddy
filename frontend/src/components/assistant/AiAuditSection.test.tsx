@@ -109,6 +109,45 @@ describe('AiAuditSection', () => {
     expect(screen.getByRole('option', { name: 'HTTP requests' })).toBeInTheDocument()
   })
 
+  it("shows each turn's cost, and flags one Claude Code never priced (#1922)", async () => {
+    const turn = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({
+      ...AUDIT_FIXTURES[3]!,
+      id,
+      kind: 'turn' as const,
+      tier: null,
+      input_summary: null,
+      duration_ms: null,
+      ...fields,
+    })
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            turn('4', { action: 'failed', outcome: 'error', cost_usd: 0, cost_priced: false, cost_estimated_usd: 0, detail: 'exited with code 1' }),
+            turn('3', { action: 'interrupted', outcome: 'refused', cost_usd: 0.06006, cost_priced: false, cost_estimated_usd: 0.06006 }),
+            turn('2', { action: 'interrupted', outcome: 'refused', cost_usd: 0.1, cost_priced: true, cost_estimated_usd: 0.06 }),
+            turn('1', { action: 'success', outcome: 'ok', cost_usd: 0.0123, cost_priced: true, cost_estimated_usd: 0 }),
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(4))
+    const [failed, cut, mixed, priced] = rows()
+    expect(priced).toHaveTextContent('Turn success')
+    expect(priced).toHaveTextContent('$0.0123')
+    expect(priced).not.toHaveTextContent('not priced')
+    expect(mixed).toHaveTextContent('$0.1000 (incl. ~$0.0600 estimated)')
+    // Never a priced zero: the estimate, flagged.
+    expect(cut).toHaveTextContent('not priced by Claude Code · ~$0.0601 estimated')
+    expect(failed).toHaveTextContent('not priced by Claude Code')
+    expect(failed).not.toHaveTextContent('$0.0000')
+    expect(failed).toHaveTextContent('exited with code 1')
+    expect(screen.getByRole('option', { name: 'Turns' })).toBeInTheDocument()
+  })
+
   it('lists the log newest first: who, what, tier, outcome and the scrubbed input', async () => {
     renderPage(<AiAuditSection />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))

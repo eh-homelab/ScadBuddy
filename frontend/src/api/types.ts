@@ -271,6 +271,24 @@ export interface HttpRequestSetting {
 }
 
 /**
+ * #1911 — the agent service's switch for the assistant's `get_printer_camera` tool
+ * (`GET/PUT /api/v1/ai/settings/printer-camera`, agent `src/routes/printerCamera.ts`).
+ * On by default; while off, every call to the tool is refused.
+ */
+export interface PrinterCameraSetting {
+  enabled: boolean
+}
+
+/**
+ * #1917 — the Claude model every assistant turn and the connection test use
+ * (`GET/PUT /api/v1/ai/settings/model`, agent `src/routes/model.ts`): an alias such as
+ * `opus` or a full model id; `null` is Claude Code's own default.
+ */
+export interface ModelSetting {
+  model: string | null
+}
+
+/**
  * #790 — what a new assistant session may spend in all (USD) and how many turns one
  * reply may take (`GET/PUT /api/v1/ai/settings/session-limits`, agent
  * `src/routes/sessionLimits.ts`). Applies to sessions started after a change.

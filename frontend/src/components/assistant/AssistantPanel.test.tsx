@@ -9,6 +9,7 @@ import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
+import { setMcpAuthMode } from '../../mocks/features/mcpTokens'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -132,6 +133,23 @@ describe('assistant panel', () => {
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Assistant' })).toHaveFocus()
+  })
+
+  it('banners the panel while MCP authentication is off, linking to Settings (#1921)', async () => {
+    setMcpAuthMode('disabled', 'read')
+    renderShell()
+    fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true })
+    const panel = await screen.findByRole('complementary', { name: 'Assistant' })
+    const banner = await within(panel).findByTestId('mcp-auth-banner')
+    expect(banner).toHaveTextContent('with read-only access')
+    expect(within(banner).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#assistant')
+  })
+
+  it('has no banner while /mcp needs a token (#1921)', async () => {
+    renderShell()
+    fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true })
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    expect(screen.queryByTestId('mcp-auth-banner')).not.toBeInTheDocument()
   })
 
   it('comes out of full screen for Ctrl+` rather than opening out of sight', async () => {
