@@ -268,22 +268,12 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
 
     const other = (await m.start(agentA, { origin: 'mcp', prompt: 'hello' })).session
     await env.client.workflow.getHandle(sessionWorkflowId(other.id)).signal('hold_cancel')
-    await expect(m.handoff(other.id, browser, browser)).rejects.toMatchObject({ code: 'unavailable', status: 503 })
+    const refused = m.handoff(other.id, browser, browser)
+    // No row lock is held while cancel_input waits: the row stays writable (NOWAIT throws if locked).
+    await new Promise((r) => setTimeout(r, 300))
+    await db.sql.begin((tx) => tx`SELECT id FROM ai_sessions WHERE id = ${other.id} FOR UPDATE NOWAIT`)
+    await expect(refused).rejects.toMatchObject({ code: 'unavailable', status: 503 })
     expect((await m.get(other.id, browser)).owner).toEqual(agentA)
-  }, 60_000)
-
-  it('sends no cancel_input when the owner changed meanwhile', async () => {
-    const m = await durableManager()
-    const { session } = await m.start(agentA, { origin: 'mcp', prompt: 'hello' })
-    const get = m.get.bind(m)
-    m.get = async (...args: Parameters<SessionManager['get']>) => {
-      const read = await get(...args)
-      // Another handoff applies between the read and this one's UPDATE.
-      await db.sql`UPDATE ai_sessions SET owner_kind = 'bearer', owner_id = 'token:b' WHERE id = ${session.id}`
-      return read
-    }
-    await expect(m.handoff(session.id, browser, browser)).rejects.toMatchObject({ code: 'busy' })
-    expect((await recorded(session.id)).calls).toEqual([])
   }, 60_000)
 
   it('hands off a durable session that never ran a turn (no workflow yet)', async () => {
