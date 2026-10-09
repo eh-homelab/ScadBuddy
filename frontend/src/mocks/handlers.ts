@@ -2504,6 +2504,7 @@ export const handlers = [
       params: renderParams,
       inputs,
       log_tail: [],
+      workflow_id: `render-${jobId}`,
     })
     runJob(jobId)
     // #904 — the caller's own normalised inputs, as `RenderAccepted.inputs` carries them.

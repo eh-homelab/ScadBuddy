@@ -63,6 +63,8 @@ def test_render_is_accepted_and_the_job_completes(
     assert job["parts"][0]["extruder"] == 1
     assert job["log_tail"] == logged
     assert job["preview_url"] == f"/api/v1/jobs/{accepted['job_id']}/preview.glb"
+    # #1293: the workflow, for the customizer's link into the Temporal UI.
+    assert job["workflow_id"].startswith("render-")
 
 
 def test_render_with_no_params_uses_the_model_defaults(client: TestClient, model: str) -> None:
