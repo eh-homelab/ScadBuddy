@@ -8,7 +8,7 @@ Status`` scope, which a 401/403 names (``bambuddy/errors.py``).
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
 
@@ -18,6 +18,10 @@ from scadbuddy.bambuddy.farm import ArchiveOutcome, InventoryView, QueueView, in
 from scadbuddy.bambuddy.models import ArchiveStats
 
 router = APIRouter(prefix="/farm", tags=["farm"])
+
+#: The states a queue item takes (Bambuddy's ``PrintQueueItem.status``); only these are
+#: forwarded, never the caller's own text.
+QueueStatus = Literal["pending", "printing", "completed", "failed", "cancelled"]
 
 PrinterFilter = Annotated[int | None, Query(description="One Bambuddy printer's id")]
 DateFrom = Annotated[date | None, Query(description="First day, inclusive (created_at)")]
@@ -30,14 +34,7 @@ async def get_queue(
     printer_id: Annotated[
         int | None, Query(description="One printer's items; -1 for items not assigned to one")
     ] = None,
-    status: Annotated[
-        str | None,
-        Query(
-            min_length=1,
-            max_length=32,
-            description="pending, printing, completed, failed or cancelled",
-        ),
-    ] = None,
+    status: Annotated[QueueStatus | None, Query(description="Only items in this state")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> QueueView:
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read

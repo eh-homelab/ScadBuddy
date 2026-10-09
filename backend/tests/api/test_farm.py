@@ -146,3 +146,19 @@ def test_the_inventory_lists_spools_and_loaded_slots(client: TestClient) -> None
     assert len(body["spools"]) == 12
     assert [slot["global_tray_id"] for slot in body["slots"]] == [1, 2, 3, 4, 8]
     assert body["slots"][3]["spool_id"] == 7
+
+
+@respx.mock
+@pytest.mark.parametrize("status", ["queued", "pending&printer_id=2", "../archives"])
+def test_a_queue_status_bambuddy_does_not_have_is_refused_before_bambuddy(
+    client: TestClient, status: str
+) -> None:
+    """The route forwards only a fixed set of values to its one fixed endpoint, never
+    the caller's free text (security review on #1912)."""
+    configure(client)
+    route = respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=[]))
+
+    response = client.get("/api/v1/farm/queue", params={"status": status})
+
+    assert response.status_code == 422
+    assert not route.called
