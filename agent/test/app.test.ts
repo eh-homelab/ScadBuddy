@@ -76,6 +76,17 @@ describe('GET /healthz', () => {
     }
   })
 
+  it("shows how ScadBuddy's UI origins last answered the headless browser, when it is wired", async () => {
+    const reports = [
+      { origin: 'https://sso.example', reach: 'sign-in' as const, detail: '302 to https://login.example', checked_at: '2026-10-08T12:00:00.000Z' },
+      { origin: 'https://internal.example', reach: 'ok' as const, checked_at: '2026-10-08T12:00:00.000Z' },
+    ]
+    const { status, body } = await health(createApp(deps({ browserReach: () => reports })))
+    expect(status).toBe(200)
+    expect(body.browser_origins).toEqual(reports)
+    expect((await health(createApp(deps()))).body).not.toHaveProperty('browser_origins')
+  })
+
   it('stays 200 and says why when the database or backend is down', async () => {
     const { status, body } = await health(createApp(deps({ database: { ping: down, ready: up }, backend: down })))
     expect(status).toBe(200)

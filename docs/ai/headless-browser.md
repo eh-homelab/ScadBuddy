@@ -104,8 +104,11 @@ In order, from the model outwards:
      which the ingress routes to the agent): denied, as is any spelling a proxy could
      normalise into one (`isAgentPath`: percent-escapes decoded, slashes merged, dot
      segments resolved, case folded);
+   - one of ScadBuddy's own origins that answered this turn's probe with a sign-in or
+     an error (next section): **denied**, naming the same path on one that answered
+     2xx, or, when none did, saying that none does;
    - the backend's origin when ScadBuddy's own are configured and it is not among
-     them: **denied**, naming the same path on the public URL to open instead;
+     them: **denied**, naming the same path on a reachable UI origin to open instead;
    - an origin `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` allows: **outward** until a human
      approves it for the session, then runs at the tool's tier (next section);
    - anything else is **denied** at any tier: `file:`, `data:`, `javascript:`, other
@@ -174,9 +177,19 @@ dev run, the tests) the backend's origin is the one ScadBuddy origin. Listing it
 
 So the agent pod must reach at least one of those origins without an interactive login.
 An origin behind SSO answers the browser with a redirect to its identity provider,
-which the request guard refuses like any off-origin redirect; list an origin the pod
-reaches directly (in this deployment, the internal one) first, as `SCADBUDDY_PUBLIC_URL`
-or in `SCADBUDDY_ALLOWED_ORIGINS`. Nothing about the safety model depends on the
+which the request guard refuses like any off-origin redirect. In production
+`SCADBUDDY_PUBLIC_URL` is such an origin (it answers `302` to Pomerium's sign-in), and
+`SCADBUDDY_ALLOWED_ORIGINS` also lists the internal one, which answers `200`. So each
+browser turn asks every UI origin's `/healthz`, following no redirect
+([`browserReach.ts`](../../agent/src/harness/browserReach.ts), each answer kept 30 s,
+2 s timeout): `2xx` is reachable, a redirect, `401` or `403` a sign-in, anything else
+unreachable. The UI origins are ordered reachable first, so every "open … instead"
+names one the browser can open, and a navigation to one that answered with a sign-in
+or an error is refused with the same path on a reachable one. When none is reachable
+the refusal says so, listing each origin's answer, instead of pointing at a login page.
+Every UI origin stays one for the request guard (a page may still load from it, with
+the marker). The last answers are on the agent's `/healthz` as `browser_origins`.
+Nothing about the safety model depends on the
 loopback address: the marker goes to every one of these origins, and the backend's gate
 judges it the same however the request arrives (Guards, 4).
 

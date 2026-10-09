@@ -14,6 +14,7 @@ import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { probeChromiumSandbox } from './harness/headlessSandbox.js'
+import { UiOriginProbe } from './harness/browserReach.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
 import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
@@ -203,6 +204,11 @@ const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cache
 const tokens =
   database && audit ? auditedTokenStore(new PostgresTokenStore(database.sql), audit) : new FailClosedTokenStore()
 
+// Which of ScadBuddy's UI origins the headless browser reaches without a
+// login (harness/browserReach.ts): asked on each browser turn, each answer kept
+// 30 s, the last ones shown on /healthz as `browser_origins`.
+const uiOriginProbe = new UiOriginProbe()
+
 // Whether the headless browser's Chromium can keep its sandbox in this pod
 // (harness/headlessSandbox.ts): probed once, on the first turn that uses the
 // browser, and said loudly either way.
@@ -282,6 +288,7 @@ const sessions =
           ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
           ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
           sandbox: chromiumSandbox,
+          probe: (origins) => uiOriginProbe.probe(origins),
         },
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
@@ -379,6 +386,7 @@ const app = createApp({
   upgradeWebSocket,
   tabs,
   ...(temporalWorker ? { temporal: () => temporalWorker.state() } : {}),
+  ...(sessions ? { browserReach: () => uiOriginProbe.last() } : {}),
   commands,
   remoteAddress: (c) => {
     try {

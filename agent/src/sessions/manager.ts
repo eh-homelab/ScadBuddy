@@ -34,7 +34,8 @@ import {
   SETTING_HTTP_REQUEST,
 } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
-import { loadApprovedOrigins, rememberApprovedOrigin } from '../harness/browserOrigins.js'
+import { browserOrigins, loadApprovedOrigins, rememberApprovedOrigin } from '../harness/browserOrigins.js'
+import type { UiReachMap } from '../harness/browserReach.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import {
@@ -576,6 +577,12 @@ export type SessionManagerDeps = {
     executablePath?: string
     /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
     sandbox?: () => Promise<boolean>
+    /**
+     * Asks each of the turn's UI origins whether it answers without a login
+     * (harness/browserReach.ts `UiOriginProbe`), once per turn, so the browser
+     * is sent to one that does. Left out, the origins are taken as configured.
+     */
+    probe?: (origins: readonly string[]) => Promise<UiReachMap>
   }
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
@@ -897,6 +904,24 @@ export class SessionManager {
   ): Promise<AsyncGenerator<LoggedEvent>> {
     await this.get(id, principal)
     return this.events.follow(id, options.afterSeq ?? 0, options.signal)
+  }
+
+  /**
+   * How the turn's UI origins answer the browser (harness/browserReach.ts), or
+   * undefined when they could not be worked out (materializeHeadlessBrowser then
+   * reports the configuration error) or the probe failed.
+   */
+  private async probeUiOrigins(
+    hb: NonNullable<SessionManagerDeps['headlessBrowser']>,
+    livePublicUrl: string | undefined,
+  ): Promise<UiReachMap | undefined> {
+    let ui: readonly string[]
+    try {
+      ui = browserOrigins({ backendUrl: hb.backendUrl, publicUrl: hb.publicUrl, livePublicUrl, uiOrigins: hb.uiOrigins }).ui
+    } catch {
+      return undefined
+    }
+    return hb.probe?.(ui).catch(() => undefined)
   }
 
   // -- writes ------------------------------------------------------------------
@@ -1377,6 +1402,7 @@ export class SessionManager {
             : false
         const livePublicUrl =
           hb?.livePublicUrl && browserSetting === true ? await hb.livePublicUrl().catch(() => undefined) : undefined
+        const uiReach = hb?.probe && browserSetting === true ? await this.probeUiOrigins(hb, livePublicUrl) : undefined
         const browser =
           hb && browserSetting === true
             ? {
@@ -1385,6 +1411,7 @@ export class SessionManager {
                 backendUrl: hb.backendUrl,
                 ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
                 ...(livePublicUrl ? { livePublicUrl } : {}),
+                ...(uiReach ? { uiReach } : {}),
                 ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
                 ...(hb.browserAllowedOrigins
                   ? {

@@ -421,6 +421,10 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
   unreachable database or backend is *reported*, not failed on, so a Postgres blip
   does not restart the container (comment in `createApp()`).
 - The body is `{ status: "ok", ai, database, backend, secret_key, credential }` (type `Health`).
+- With sessions, it also carries `browser_origins`: how each of ScadBuddy's UI origins
+  last answered the headless browser's probe (`ok`, `sign-in` or `unreachable`, with
+  a `detail` and `checked_at`; [headless-browser.md](headless-browser.md), "Beyond the
+  backend"). Empty until a browser turn has run.
 - `ai` is `"enabled"` only when every prerequisite holds. Otherwise it names the
   **first** one missing, in the order an operator has to fix them (`aiStatus()`):
 
