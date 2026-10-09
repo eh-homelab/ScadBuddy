@@ -196,6 +196,21 @@ describe('extractors', () => {
     ])
   })
 
+  it('records a library file printed, filed or remembered by its subject (#1756)', () => {
+    expect(
+      touches('print_output', { library_file_id: 42 }, { id: 'r1', status: 'done', result: { queue_item_ids: [12] } }, 'outward'),
+    ).toEqual([
+      { type: 'print_run', id: 'r1', action: 'created', before: 'library:42' },
+      { type: 'print', id: '12', action: 'created', before: 'library:42' },
+    ])
+    expect(touches('file_output_under_project', { library_file_id: 42 }, { project_id: 9 }, 'outward')).toEqual([
+      { type: 'project', id: '9', action: 'modified', before: 'library:42' },
+    ])
+    expect(touches('remember_model_print_choices', { library_file_id: 42, tier: 'fine' }, {})).toEqual([
+      { type: 'setting', id: 'print_choices:library:42', action: 'modified', model: null },
+    ])
+  })
+
   it('records a fetched asset as an upload does', () => {
     expect(touches('fetch_asset', { slug: 'box', url: 'https://x.test/a.png' }, { id: 'f'.repeat(64), kind: 'image' }, 'outward')).toEqual([
       { type: 'asset', id: 'f'.repeat(64), action: 'created', model: 'box' },

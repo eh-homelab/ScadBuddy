@@ -117,6 +117,7 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "POST /api/v1/fonts/install",
     "POST /api/v1/settings/test",
     "PUT /api/v1/print/models/{slug}/choices",
+    "PUT /api/v1/print/library/{file_id}/choices",
     "PUT /api/v1/print/printers/{printer_id}/bed-type",
     "PUT /api/v1/print/projects/last",
 )

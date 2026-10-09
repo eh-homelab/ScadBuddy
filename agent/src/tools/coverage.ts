@@ -9,11 +9,6 @@ const ANALYZERS_LATER =
   'Recording a decision or applying a fix writes only to ScadBuddy (write tier) and sends nothing; ' +
   'a send that consumes accepted diffs must go through the outward approval flow (AI spec §8.2).'
 
-const LIBRARY_PRINT_LATER =
-  'Printing a file already in Bambuddy\'s library (#313) lands UI-first; an agent tool for it is a ' +
-  'follow-up (spec 2026-09-28 §6). A run slices and queues a real print, so the tool must go through ' +
-  'the outward approval flow (AI spec §8.2) when it is written.'
-
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
@@ -164,18 +159,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
         "come with it. The check clones from the model's pinned URL, so its tier follows repin_library's.",
     }),
   ),
-  ...(
-    [
-      'GET /api/v1/print/library',
-      'GET /api/v1/print/library/{file_id}/plates',
-      'GET /api/v1/print/library/{file_id}/choices',
-      'PUT /api/v1/print/library/{file_id}/choices',
-      'GET /api/v1/print/library/{file_id}/filaments',
-      'POST /api/v1/print/library/{file_id}/run',
-      'GET /api/v1/print/library/{file_id}/progress',
-      'POST /api/v1/print/library/{file_id}/project',
-    ] as const
-  ).map((operation) => ({ operation, reason: LIBRARY_PRINT_LATER })),
   ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(
     (operation) => ({
       operation,
@@ -193,15 +176,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
   })),
-  ...(['GET /api/v1/print/library/{file_id}/preview.glb', 'GET /api/v1/print/library/{file_id}/file'] as const).map(
-    (operation) => ({
-      operation,
-      reason:
-        "A library print's preview mesh and the file itself, for the print detail page (#1753). The " +
-        "agent's library print tools are #1749's step 8, after which these get one as an output's " +
-        'preview.glb has get_output_preview.',
-    }),
-  ),
   {
     operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
     reason:
