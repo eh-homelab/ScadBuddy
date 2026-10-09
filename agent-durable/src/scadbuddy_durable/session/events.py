@@ -26,6 +26,7 @@ from typing import Any
 import psycopg
 from temporalio import activity
 from temporalio.claude_agent_sdk import follow_agent
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.gate.store import PROTOCOL_VERSION, _append
 from scadbuddy_durable.session import tools
@@ -156,6 +157,21 @@ class SessionEvents:
     async def follow_session(self, args: FollowArgs) -> FollowResult:
         start = await self._start(args.session_id)
         tiers = {e.name: e.tier for e in tools.manifest()}
+        at = [start]
+        failed: str | None = None
+        try:
+            return await self._follow(args, at, tiers)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            # An error here may quote what it failed on (a driver error quotes the row,
+            # a decode error the payload). The worker logs, the failure and its span get
+            # only the type and the offset, never the message; it is raised outside this
+            # block so the original is not even its context (security review of 5c).
+            failed = type(err).__name__
+        raise ApplicationError(f"follow_session failed at offset {at[0]}: {failed}", type=failed)
+
+    async def _follow(self, args: FollowArgs, at: list[int], tiers: dict[str, str]) -> FollowResult:
         written = 0
 
         async def beat() -> None:
@@ -165,11 +181,11 @@ class SessionEvents:
 
         beater = asyncio.create_task(beat())
         try:
-            async for event in follow_agent(activity.client(), args.workflow_id, from_offset=start):
-                offset = int(event["offset"])
+            async for event in follow_agent(activity.client(), args.workflow_id, from_offset=at[0]):
+                at[0] = int(event["offset"])
                 translated = translate(args.session_id, event, tiers)
                 async with self._connect() as conn:
-                    if await append_from(conn, args.session_id, offset, translated):
+                    if await append_from(conn, args.session_id, at[0], translated):
                         written += len(translated)
                 if event.get("type") in LAST:
                     return FollowResult(ended=str(event["type"]), events=written)

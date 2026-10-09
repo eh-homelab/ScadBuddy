@@ -123,10 +123,10 @@ async def harness(temporal_env: WorkflowEnvironment, connect: Connect) -> AsyncI
             for handle in h.handles:
                 with contextlib.suppress(Exception):
                     await handle.terminate("test over")
-            if h.agent is agent:
+            # Only the worker still running: shutting down one that never ran (or ran
+            # and stopped) waits forever.
+            if agent.is_running:
                 await agent.shutdown()
-            else:
-                await h.agent.shutdown()
             task.cancel()
 
 
@@ -360,7 +360,6 @@ async def test_interrupt_ends_the_turn_even_while_the_worker_is_down(
     await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
     async with harness.restart_agent():
         assert await settled(connect, sid) == "idle"
-    harness.agent = harness.restart_agent()  # the fixture shuts one down
     log = await events(agent_db, sid)
     errors = [e for e in log if e["type"] == "error"]
     assert [e["code"] for e in errors] == ["interrupted"]

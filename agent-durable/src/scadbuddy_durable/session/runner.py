@@ -20,7 +20,6 @@ from ``ai_session_blobs`` as image blocks (Ruling 5). The plugin's prompt is tex
 from __future__ import annotations
 
 import base64
-import logging
 import os
 import re
 from collections.abc import Callable
@@ -40,8 +39,6 @@ from scadbuddy_durable.session.models import (
     SEGMENT_CONTEXT_QUERY,
     SegmentContext,
 )
-
-log = logging.getLogger(__name__)
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 

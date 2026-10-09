@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import cast
+
+import psycopg
 import pytest
 from session_support import Conn, events, insert_session
+from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 
+from scadbuddy_durable.session import events as events_module
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.events import (
     INPUT_MAX,
     REDACTED,
+    SessionEvents,
     append_from,
     logged_input,
     translate,
 )
-from scadbuddy_durable.session.models import FinishTurn
+from scadbuddy_durable.session.models import FinishTurn, FollowArgs
 from scadbuddy_durable.worker import config_from_env
 
 SID = "0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
@@ -109,3 +118,40 @@ def test_the_worker_names_what_it_misses_and_never_shows_the_database_url() -> N
     assert cfg.cwd == "/srv/agent"
     assert cfg.namespace == "default"
     assert "pw" not in repr(cfg)
+
+
+SECRET = "the user's private words, a token sk-ant-xyz"
+
+
+@pytest.mark.requires_postgres
+async def test_a_failure_carries_no_event_content(
+    agent_db: Conn,
+    connect: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Security review of 5c (sensitive-to-observability): an error while writing an
+    event (a driver error can quote the row it refused) leaves the activity with its
+    type and the offset only, so no worker log, failure message or span carries content."""
+    sid = await insert_session(agent_db)
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        yield {"type": "text", "text": SECRET, "offset": 7}
+
+    async def refuse(*_: object) -> bool:
+        raise psycopg.DataError(f'invalid input: "{SECRET}"')
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    monkeypatch.setattr(events_module, "append_from", refuse)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    with pytest.raises(ApplicationError) as failed:
+        await env.run(acts.follow_session, FollowArgs(session_id=sid, workflow_id=f"session-{sid}"))
+    err = failed.value
+    shown = f"{err} {err.details} {err.__cause__} {err.__context__}"
+    assert SECRET not in shown
+    assert err.__cause__ is None
+    assert err.__context__ is None
+    assert "offset 7" in str(err)
+    assert "DataError" in str(err)
+    assert SECRET not in caplog.text
