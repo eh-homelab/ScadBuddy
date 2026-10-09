@@ -343,8 +343,9 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
     args,
     {
       ...ctx,
+      // Merged: confirm_action reports the approval and the tool, and the tool it ran may add its own detail.
       report: (r) => {
-        reported = r
+        reported = { ...reported, ...r }
       },
     },
     executed,

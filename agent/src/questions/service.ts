@@ -6,6 +6,7 @@ import { ATTENTION_TOOL, parseQuestions, type QuestionGate, type QuestionRequest
 import type { SettingsReader } from '../approvals/service.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { loadDoneSummary } from './doneSummary.js'
+import { isDoneSummary, isNotDoneSummary } from './waiting.js'
 import { inputRequested, inputResolved, questionEntry } from '../gate/classic.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
@@ -297,14 +298,14 @@ export class QuestionService {
              q.created_at, q.expires_at
       FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
       WHERE s.owner_kind = ${principal.kind} AND s.owner_id = ${principal.id}
-        AND q.outcome IS NULL AND (q.attention_reason IS DISTINCT FROM 'done' OR q.expires_at IS NOT NULL)
+        AND q.outcome IS NULL AND ${isNotDoneSummary(this.deps.sql, 'q')}
       ORDER BY q.created_at, q.id LIMIT ${PENDING_CAP}`
     const done = await this.deps.sql<Pending[]>`
       SELECT q.id, q.session_id, q.kind, q.tool, q.tool_use_id, q.questions, q.attention_reason, q.on_timeout, q.summary,
              q.created_at, q.expires_at
       FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
       WHERE s.owner_kind = ${principal.kind} AND s.owner_id = ${principal.id}
-        AND q.outcome IS NULL AND q.attention_reason = 'done' AND q.expires_at IS NULL
+        AND q.outcome IS NULL AND ${isDoneSummary(this.deps.sql, 'q')}
       ORDER BY q.created_at DESC, q.id DESC LIMIT ${PENDING_CAP + 1}`
     const summariesTruncated = done.length > PENDING_CAP
     const questions = [...waiting, ...done.slice(0, PENDING_CAP)].map((r) => ({
@@ -341,7 +342,7 @@ export class QuestionService {
           updated_at = now()
       WHERE id = ${sessionId} AND status = 'waiting_input'
         AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
-                        AND (attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL))
+                        AND ${isNotDoneSummary(tx)})
       RETURNING status`
       return { value: undefined, events: row ? [event({ type: 'session.status', sessionId, status: row.status })] : [] }
     })
@@ -534,7 +535,7 @@ export class QuestionService {
         WHERE session_id = ${sessionId} AND outcome IS NULL
           AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
-          AND (${questionId}::uuid IS NOT NULL OR attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL)
+          AND (${questionId}::uuid IS NOT NULL OR ${isNotDoneSummary(tx)})
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
@@ -829,7 +830,7 @@ export class QuestionService {
             const [recent] = await tx<{ n: number }[]>`
               SELECT count(*)::int AS n FROM ai_questions
               WHERE kind = 'attention' AND tool = ${ATTENTION_TOOL}
-                AND (attention_reason <> 'done' OR expires_at IS NOT NULL)
+                AND ${isNotDoneSummary(tx)}
                 AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
             if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) {
               return {

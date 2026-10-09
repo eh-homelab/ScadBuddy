@@ -1,4 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -203,13 +204,22 @@ describe('extractors', () => {
 
   it("records a library pin as the model's revision and the library, by name", () => {
     const record = { slug: 'box', version: C2 }
-    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, record)).toEqual([
+    // A pin answers whether the model pinned that name before it (#1307): a re-pin is `modified`.
+    const fresh = { ...record, pinned_before: false }
+    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, fresh)).toEqual([
       { type: 'revision', id: C2, action: 'created', model: 'box', before: null, after: C2 },
       { type: 'library', id: 'BOSL2', action: 'created', model: 'box' },
     ])
-    expect(touches('pin_library_from_url', { slug: 'box', name: 'lib', url: 'https://g.test/x.git', ref: 'v1' }, record, 'outward')[1]).toEqual(
+    expect(touches('pin_library_from_url', { slug: 'box', name: 'lib', url: 'https://g.test/x.git', ref: 'v1' }, fresh, 'outward')[1]).toEqual(
       { type: 'library', id: 'lib', action: 'created', model: 'box' },
     )
+    for (const name of ['pin_library', 'pin_library_from_url']) {
+      expect(touches(name, { slug: 'box', name: 'BOSL2' }, { ...record, pinned_before: true })[1], name).toEqual(
+        { type: 'library', id: 'BOSL2', action: 'modified', model: 'box' },
+      )
+      // An answer that cannot say is recorded as a change, as a Bambuddy file is.
+      expect(touches(name, { slug: 'box', name: 'BOSL2' }, record)[1], name).toEqual({ type: 'library', id: 'BOSL2', action: 'modified', model: 'box' })
+    }
     for (const name of ['repin_library', 'repin_library_from_pinned_url']) {
       expect(touches(name, { slug: 'box', name: 'BOSL2' }, record)[1], name).toEqual({ type: 'library', id: 'BOSL2', action: 'modified', model: 'box' })
     }
@@ -338,6 +348,15 @@ describe('extractors', () => {
     expect(failed('apply_patch', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
     expect(failed('edit_file', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
     expect(failed('set_print_options', { scope: 'global' }, {})).toEqual([])
+  })
+
+  it('records a failed print_output that may have queued as its run (#1017)', () => {
+    const failed = (answer: CallToolResult) =>
+      touchesOf({ name: 'print_output', risk: 'outward' }, { output_id: 'o1' }, { ...answer, isError: true }, false)
+    const run = { id: 'r1', status: 'failed', may_have_queued: true, error: { status: 504 }, result: null }
+    expect(failed(result(run, 'print_output'))).toEqual([{ type: 'print_run', id: 'r1', action: 'created', before: 'o1' }])
+    // A run that failed before it tried to queue answers plain text: nothing went out.
+    expect(failed({ content: [{ type: 'text', text: 'print o1 failed (HTTP 422): no spool' }] })).toEqual([])
   })
 
   it('records nothing it cannot name, rather than a row with no id', () => {

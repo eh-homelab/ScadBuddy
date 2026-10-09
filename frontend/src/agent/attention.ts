@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { type PendingInput, PendingInputSchema } from './chat/protocol'
+import { isDoneSummary, PendingInputSchema } from './chat/protocol'
 
 /**
  * #815 — whether the assistant is waiting on the user, for the header outside the
@@ -56,12 +56,6 @@ export async function fetchPendingInput(timeoutMs = ATTENTION_TIMEOUT_MS): Promi
   }
 }
 
-// A `done` summary has no timer. An older replica's done row with one is an ordinary
-// attention request its turn is parked on (agent questions/service.ts), so it waits.
-const isDone = (attention: PendingAttention): boolean => attention.reason === 'done' && attention.on_timeout === null
-
-type PendingAttention = NonNullable<PendingInput['entries'][number]['attention']>
-
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
     const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
@@ -75,7 +69,7 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
       // (a summary when its reason is `done`).
       if (entry.kind === 'approval') counts.approvals += 1
       else if (entry.attention === undefined) counts.questions += 1
-      else if (isDone(entry.attention)) counts.summaries += 1
+      else if (isDoneSummary(entry.attention.reason, entry.attention.on_timeout !== null)) counts.summaries += 1
       else counts.attention += 1
     }
     if (parsed.data.summaries_truncated !== undefined) counts.summariesTruncated = parsed.data.summaries_truncated

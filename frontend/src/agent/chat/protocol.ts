@@ -148,8 +148,16 @@ export type Attention = z.infer<typeof AttentionSchema>
 /** A `done` summary's attention block. */
 export type DoneAttention = Extract<Attention, { summary: string }>
 
+/**
+ * #1383 — the one rule for "a `done` summary, not a wait": reason `done` and no timer. An
+ * older replica's timed `done` row is an attention request its turn is parked on. The
+ * agent's own copy is its `src/questions/waiting.ts`.
+ */
+export const isDoneSummary = (reason: string, timed: boolean): boolean => reason === 'done' && !timed
+
 /** Whether `a` is a `done` summary, which is dismissed rather than answered. */
-export const isDone = (a: Attention | undefined): a is DoneAttention => a !== undefined && 'summary' in a
+export const isDone = (a: Attention | undefined): a is DoneAttention =>
+  a !== undefined && isDoneSummary(a.reason, 'onTimeout' in a)
 
 /**
  * #1200 — `GET /api/v1/ai/pending-input`'s body as the badge reads it (agent
