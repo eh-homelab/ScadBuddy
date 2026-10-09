@@ -198,6 +198,7 @@ async def test_a_failing_sweep_fails_its_activity(
         config=SimpleNamespace(job_ttl=60.0),
         catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
         paths=SimpleNamespace(claims=None),
+        events=None,
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (

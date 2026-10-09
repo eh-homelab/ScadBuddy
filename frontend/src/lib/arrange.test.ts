@@ -44,6 +44,12 @@ function jobsRunUntilFinished() {
 
 const idle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/** An event on `topic` to its latest follower (`fakeRealtime`), on real timers. */
+function send(topic: string, kind: string, data: Record<string, unknown>) {
+  const call = vi.mocked(getRealtime().subscribe).mock.calls.findLast(([t]) => t === topic)
+  call?.[1]({ id: 'e', kind, topics: [topic], data })
+}
+
 describe('runArrange follows its job over the socket (#1909)', () => {
   it('reads the job on each event for it, not on a timer', async () => {
     const jobs = jobsRunUntilFinished()
@@ -89,7 +95,7 @@ afterEach(() => vi.restoreAllMocks())
 describe('backfillOutputs (#902)', () => {
   it('follows each re-render over the socket, not on a timer (#1909)', async () => {
     // The fake client, so the mock render's own events do not reach this wait.
-    fakeRealtime()
+    const realtime = fakeRealtime()
     const jobs = jobsRunUntilFinished()
     const backfilling = backfillOutputs([nova], { pollMs: 20 })
     await vi.waitFor(() => expect(jobs.reads).toHaveLength(1))
@@ -99,8 +105,46 @@ describe('backfillOutputs (#902)', () => {
     const [topic, listener] = vi.mocked(getRealtime().subscribe).mock.calls[0]!
     expect(topic).toBe(`job:${jobs.reads[0]!}`)
     listener({ id: 'e', kind: 'job.done', topics: [topic], data: {} })
+    await vi.waitFor(() => expect(realtime.following()).toEqual(['outputs']))
+    send('outputs', 'output.updated', { output_id: nova.id })
     await backfilling
     expect(jobs.reads).toHaveLength(2)
+  })
+
+  it('reads the output on its output.updated, not on a timer (#1970)', async () => {
+    fakeRealtime()
+    const jobs = jobsRunUntilFinished()
+    jobs.finish()
+    // Waiting on the re-render until the test says it is attached.
+    let attached = false
+    let reads = 0
+    const done = { ...nova, manifest: [{ part: 'p', file: 'f', slug: nova.slug, revision: null }], backfill: null }
+    server.use(
+      http.get('/api/v1/outputs/:id', () => {
+        reads++
+        return HttpResponse.json(attached ? done : { ...nova, backfill: { job_id: 'j', error: null } })
+      }),
+    )
+    const backfilling = backfillOutputs([nova], { pollMs: 20 })
+    // The subscription's confirmation reads once.
+    await vi.waitFor(() => expect(reads).toBe(1))
+    await idle(200)
+    send('outputs', 'output.created', { output_id: 'someone-else' })
+    await idle(50)
+    expect(reads).toBe(1)
+    attached = true
+    send('outputs', 'output.updated', { output_id: nova.id })
+    expect((await backfilling).ready).toEqual([done])
+    expect(reads).toBe(2)
+  })
+
+  it('reads the output on a timer while the socket is unavailable (#1970)', async () => {
+    const realtime = fakeRealtime({ confirm: false })
+    realtime.setStatus('unavailable')
+    const jobs = jobsRunUntilFinished()
+    jobs.finish()
+    const { ready } = await backfillOutputs([nova], { pollMs: 10 })
+    expect(ready[0]?.manifest).toHaveLength(1)
   })
 
   it('reads the output again while the finished re-render is not yet attached', async () => {
