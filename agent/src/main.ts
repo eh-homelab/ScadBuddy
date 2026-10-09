@@ -261,11 +261,23 @@ const sessions =
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         // The headless browser (#349): on for a turn only when the
         // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
-        // It opens the backend, which serves the SPA; the UI's public origins
-        // are rewritten onto it, and SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what
-        // else a human may let it open (harness/browserOrigins.ts).
+        // It opens ScadBuddy's own origins as they are (#983): the public URL
+        // (the variable, and the backend's stored setting read each turn) and
+        // SCADBUDDY_ALLOWED_ORIGINS, or the backend when none is configured;
+        // SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what else a human may let it
+        // open (harness/browserOrigins.ts).
         headlessBrowser: {
           backendUrl: config.backendUrl,
+          livePublicUrl: async () => {
+            try {
+              const { data, response } = await backend.GET('/api/v1/settings')
+              if (!data) console.warn(`headless browser: GET /api/v1/settings answered ${response.status}; the stored public_url is left out this turn`)
+              return data?.public_url ?? undefined
+            } catch (err) {
+              console.warn(`headless browser: could not read the stored public_url, left out this turn: ${String(err)}`)
+              return undefined
+            }
+          },
           ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
           ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
           ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),

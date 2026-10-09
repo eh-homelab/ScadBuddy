@@ -557,15 +557,19 @@ export type SessionManagerDeps = {
   /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
-   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA;
-   * `publicUrl` and `uiOrigins` (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS)
-   * are rewritten onto it; `browserAllowedOrigins`
+   * by default. `publicUrl`, `livePublicUrl` and `uiOrigins`
+   * (SCADBUDDY_PUBLIC_URL, the backend's stored `public_url`, read once per
+   * turn, and SCADBUDDY_ALLOWED_ORIGINS) are ScadBuddy's own origins, which it
+   * opens as they are (#983); `backendUrl` (SCADBUDDY_BACKEND_URL) is the one
+   * it opens when none is configured; `browserAllowedOrigins`
    * (SCADBUDDY_BROWSER_ALLOWED_ORIGINS) is what else a human may let it open,
    * once per origin per session (harness/browserOrigins.ts, `ai_browser_origins`).
    */
   headlessBrowser?: {
     backendUrl: string
     publicUrl?: string
+    /** The backend's `public_url` setting now; a failed read leaves it out for the turn. */
+    livePublicUrl?: () => Promise<string | undefined>
     uiOrigins?: string
     browserAllowedOrigins?: string
     /** Tests only: a Chromium other than the pinned one. */
@@ -1371,6 +1375,8 @@ export class SessionManager {
           this.deps.headlessBrowser?.sandbox && browserSetting === true
             ? await this.deps.headlessBrowser.sandbox()
             : false
+        const livePublicUrl =
+          hb?.livePublicUrl && browserSetting === true ? await hb.livePublicUrl().catch(() => undefined) : undefined
         const browser =
           hb && browserSetting === true
             ? {
@@ -1378,6 +1384,7 @@ export class SessionManager {
                 sessionId: id,
                 backendUrl: hb.backendUrl,
                 ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
+                ...(livePublicUrl ? { livePublicUrl } : {}),
                 ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
                 ...(hb.browserAllowedOrigins
                   ? {
