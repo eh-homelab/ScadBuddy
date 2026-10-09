@@ -594,7 +594,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); and `mcp_oidc`, the
+  ([§12](#12-the-http-request-tool-827)); `image_long_edge`, the long edge in pixels the
+  assistant panel scales an attached image to (default 1568, the Messages API's
+  standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
+  later), which Settings → Assistant images writes through
+  `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `model` and `approval_expiry_seconds` have no
   route yet.
