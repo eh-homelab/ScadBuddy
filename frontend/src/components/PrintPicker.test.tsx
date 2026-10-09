@@ -1496,6 +1496,32 @@ describe('PrintPicker · Projects', () => {
     expect(screen.getByTestId('print-progress')).toBeInTheDocument()
   })
 
+  it("files the print under the run's project when the list was never read (#1830)", async () => {
+    // #1045: an unread list leaves `project_id` out of the run, and the server files the
+    // print under the remembered project. The run's result says which: that is the one
+    // the queue entries go to.
+    await fetch('/api/v1/print/projects/last', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: 2 }),
+    })
+    const runs = watch('POST', '/run')
+    const { bodies } = watch('POST', '/project')
+    server.use(
+      http.get('/api/v1/print/projects', () => HttpResponse.json({ detail: 'down' }, { status: 500 })),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.queuedSliceProgress, settled: true }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(runs.bodies[0]).not.toHaveProperty('project_id')
+    expect(bodies[0]).toEqual({ project_id: 2, queue_item_ids: [4471] })
+  })
+
   it('does not file a print that was sent without a project', async () => {
     const { bodies } = watch('POST', '/project')
     server.use(
