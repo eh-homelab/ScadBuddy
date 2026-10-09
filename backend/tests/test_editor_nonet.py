@@ -75,7 +75,7 @@ def test_the_program_keeps_its_arguments_and_exit_status() -> None:
 
 
 def test_an_unknown_architecture_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(nonet.platform, "machine", lambda: "riscv64")
+    monkeypatch.setattr(platform, "machine", lambda: "riscv64")
     with pytest.raises(SystemExit) as stopped:
         nonet.main(["nonet", "/bin/true"])
     assert stopped.value.code != 0

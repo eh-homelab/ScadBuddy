@@ -1255,7 +1255,10 @@ this document are the ones its design depends on.
 - **On top of that, up to `SCADBUDDY_LSP_SESSIONS` (default 4) `openscad-lsp`
   processes** (#95): one per open source editor, held for as long as the editor stays
   open. Past the cap an editor is refused a language server and works without
-  completion and hover.
+  completion and hover. One client holds at most 2 of them
+  (`editor/component.py` `LSP_SESSIONS_PER_CLIENT`, a client counted as the telemetry
+  relay counts one), and each runs under `editor/nonet.py`'s seccomp filter, so it can
+  open no network socket.
 - `clusters/prod/scadbuddy/`: HTTPRoute `scadbuddy.internal.nullreference.io`
   on the internal Envoy gateway, `OnePasswordItem` for the Bambuddy API key
   (item `scadbuddy-bambuddy-api-key`), env from it.

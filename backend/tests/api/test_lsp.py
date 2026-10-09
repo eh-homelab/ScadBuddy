@@ -19,10 +19,15 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
-from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.editor import nonet
+from scadbuddy.editor.component import (
+    LANGUAGE_SERVER_CLIENTS,
+    LSP_SESSIONS_PER_CLIENT,
+    LanguageServerClients,
+)
 from scadbuddy.library import lsp
 from scadbuddy.library.lsp import DEFAULT_CLIENT_ROOT, frame, read_message
 from scadbuddy.main import create_app
@@ -446,6 +451,77 @@ def test_sessions_past_the_cap_are_refused(settings: Settings, model: str) -> No
         with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect(route):
             pass
         assert refused.value.code == 1013
+
+
+PROXY = "10.0.0.1"
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+def test_one_client_cannot_take_every_session(settings: Settings, model: str, which: int) -> None:
+    """Past its own share a client is refused while another still gets one, and a
+    closed session gives its share back."""
+    app: FastAPI = create_app(
+        settings.model_copy(update={"lsp_sessions": 4, "trusted_proxies": PROXY})
+    )
+    route = _lsp_routes(model)[which]
+    alice = {"x-forwarded-for": "192.0.2.10"}
+    bob = {"x-forwarded-for": "192.0.2.20"}
+    with TestClient(app, client=(PROXY, 40000)) as client, contextlib.ExitStack() as open_:
+        held = [
+            open_.enter_context(client.websocket_connect(route, headers=alice))
+            for _ in range(LSP_SESSIONS_PER_CLIENT)
+        ]
+        for session in held:
+            _initialize(session)
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route, headers=alice),
+        ):
+            pass
+        assert refused.value.code == 1013
+        with client.websocket_connect(route, headers=bob) as other:
+            _initialize(other)
+        held[0].close()
+        assert _wait_until(lambda: _clients(app).sessions("192.0.2.10") < LSP_SESSIONS_PER_CLIENT)
+        with client.websocket_connect(route, headers=alice) as again:
+            _initialize(again)
+
+
+def test_an_untrusted_peer_cannot_name_another_client(settings: Settings, model: str) -> None:
+    """``X-Forwarded-For`` from a peer outside ``SCADBUDDY_TRUSTED_PROXIES`` is not
+    believed, so a fresh value per socket is no way past the per-client limit."""
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 4}))
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app, client=("192.0.2.30", 40000)) as client, contextlib.ExitStack() as open_:
+        for n in range(LSP_SESSIONS_PER_CLIENT):
+            _initialize(
+                open_.enter_context(
+                    client.websocket_connect(route, headers={"x-forwarded-for": f"198.51.100.{n}"})
+                )
+            )
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route, headers={"x-forwarded-for": "198.51.100.99"}),
+        ):
+            pass
+        assert refused.value.code == 1013
+
+
+def test_a_refused_socket_takes_no_share(settings: Settings, model: str) -> None:
+    """A socket refused at the global cap leaves its client's count where it was."""
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app) as client, client.websocket_connect(route) as first:
+        _initialize(first)
+        for _ in range(3):
+            with pytest.raises(WebSocketDisconnect), client.websocket_connect(route):
+                pass
+        assert _clients(app).sessions("testclient") == 1
+
+
+def _clients(app: FastAPI) -> LanguageServerClients:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    return state.components.get(LANGUAGE_SERVER_CLIENTS)
 
 
 def test_a_wedged_server_is_killed_and_its_slot_freed(
