@@ -192,13 +192,20 @@ function projectFile(result: unknown, output: string | null, project: string | n
 }
 
 /** A library pin: the model's new revision, and the library by name. */
-function libraryPin(action: ResourceAction): Extractor {
+function libraryPin(action: ResourceAction | ((result: unknown) => ResourceAction)): Extractor {
   return (input, result) => {
     const name = str(input.name)
     const model = str(field(result, 'slug')) ?? str(input.slug)
-    return [...revision(input, result), ...(name ? [{ type: 'library' as const, id: name, action, model }] : [])]
+    const done = typeof action === 'function' ? action(result) : action
+    return [...revision(input, result), ...(name ? [{ type: 'library' as const, id: name, action: done, model }] : [])]
   }
 }
+
+/**
+ * A pin replaces one of the same name (#1307): new only when the answer says the model did
+ * not pin it before (tools/libraries.ts `pinAnswer`), else a change, as `bambuddyFile` does.
+ */
+const pinned = libraryPin((result) => (field(result, 'pinned_before') === false ? 'created' : 'modified'))
 
 /** A stored setting, by what it is for. */
 function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
@@ -298,8 +305,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     ]
   },
   // Libraries and fonts.
-  pin_library: libraryPin('created'),
-  pin_library_from_url: libraryPin('created'),
+  pin_library: pinned,
+  pin_library_from_url: pinned,
   repin_library: libraryPin('modified'),
   repin_library_from_pinned_url: libraryPin('modified'),
   unpin_library: libraryPin('deleted'),

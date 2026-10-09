@@ -1012,6 +1012,7 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     const puts: unknown[] = []
     server.use(
       http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json({ slug: 'box', libraries: [] })),
       http.put(`${BACKEND}/api/v1/models/box/libraries/BOSL2`, async ({ request }) => {
         puts.push(await request.json())
         return HttpResponse.json({ slug: 'box' })
@@ -1024,6 +1025,20 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
       { ref: null, url: null },
       { ref: 'v2.1.0', url: null },
     ])
+  })
+
+  it('a pin answers whether the model pinned that name before it, so a re-pin is not recorded as new (#1307)', async () => {
+    let libraries: { name: string }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json({ slug: 'box', libraries })),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })),
+    )
+    const fromUrl = { slug: 'box', name: 'BOSL2', url: 'https://g.example/x.git', ref: 'v1' }
+    expect(firstText(await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({ slug: 'box', pinned_before: false })
+    expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: false })
+    libraries = [{ name: 'MCAD' }, { name: 'BOSL2' }]
+    expect(firstText(await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({ pinned_before: true })
+    expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: true })
   })
 
   it('pin_library refuses a non-catalogue URL and points to the outward tool', async () => {

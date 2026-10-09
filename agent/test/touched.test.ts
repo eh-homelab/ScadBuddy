@@ -204,13 +204,22 @@ describe('extractors', () => {
 
   it("records a library pin as the model's revision and the library, by name", () => {
     const record = { slug: 'box', version: C2 }
-    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, record)).toEqual([
+    // A pin answers whether the model pinned that name before it (#1307): a re-pin is `modified`.
+    const fresh = { ...record, pinned_before: false }
+    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, fresh)).toEqual([
       { type: 'revision', id: C2, action: 'created', model: 'box', before: null, after: C2 },
       { type: 'library', id: 'BOSL2', action: 'created', model: 'box' },
     ])
-    expect(touches('pin_library_from_url', { slug: 'box', name: 'lib', url: 'https://g.test/x.git', ref: 'v1' }, record, 'outward')[1]).toEqual(
+    expect(touches('pin_library_from_url', { slug: 'box', name: 'lib', url: 'https://g.test/x.git', ref: 'v1' }, fresh, 'outward')[1]).toEqual(
       { type: 'library', id: 'lib', action: 'created', model: 'box' },
     )
+    for (const name of ['pin_library', 'pin_library_from_url']) {
+      expect(touches(name, { slug: 'box', name: 'BOSL2' }, { ...record, pinned_before: true })[1], name).toEqual(
+        { type: 'library', id: 'BOSL2', action: 'modified', model: 'box' },
+      )
+      // An answer that cannot say is recorded as a change, as a Bambuddy file is.
+      expect(touches(name, { slug: 'box', name: 'BOSL2' }, record)[1], name).toEqual({ type: 'library', id: 'BOSL2', action: 'modified', model: 'box' })
+    }
     for (const name of ['repin_library', 'repin_library_from_pinned_url']) {
       expect(touches(name, { slug: 'box', name: 'BOSL2' }, record)[1], name).toEqual({ type: 'library', id: 'BOSL2', action: 'modified', model: 'box' })
     }

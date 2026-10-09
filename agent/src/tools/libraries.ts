@@ -26,6 +26,19 @@ export function sameRepository(first: string, second: string): boolean {
   return bare(first) === bare(second)
 }
 
+/**
+ * A pin's answer, plus whether the model pinned `name` before it (`pinned_before`), which
+ * the ModelRecord cannot say: the session records a re-pin as one, not as a new library
+ * (#1307, sessions/touched.ts). Left out when the read before it was refused, so the pin
+ * itself is never held up by it.
+ */
+async function pinAnswer(ctx: ToolContext, slug: string, name: string, pin: () => Promise<unknown>) {
+  const { data } = await ctx.backend.GET('/api/v1/models/{slug}', { params: { path: { slug } }, signal: ctx.signal })
+  const before = data ? { pinned_before: (data.libraries ?? []).some((library) => library.name === name) } : {}
+  const answer = await pin()
+  return json(answer !== null && typeof answer === 'object' ? { ...answer, ...before } : answer)
+}
+
 // The pin writes are commands (#1054): one key per call, and a clone past the backend's
 // deadline is followed to the model.
 function repin(ctx: ToolContext, slug: string, name: string, ref: string | undefined) {
@@ -82,7 +95,7 @@ export const libraryTools: Tool[] = [
         .describe("Only the catalogue's own URL for this library is accepted here"),
     }),
     risk: 'write',
-    // Also reads GET /api/v1/libraries (list_libraries) when `url` is given.
+    // Also reads GET /api/v1/libraries (list_libraries) when `url` is given, and the model first.
     routes: ['PUT /api/v1/models/{slug}/libraries/{name}'],
     handler: async ({ slug, name, ref, url }, ctx) => {
       const { backend } = ctx
@@ -98,8 +111,8 @@ export const libraryTools: Tool[] = [
           )
         }
       }
-      return json(
-        await command(ctx, `pin ${name} to ${slug}`, (headers) =>
+      return pinAnswer(ctx, slug, name, () =>
+        command(ctx, `pin ${name} to ${slug}`, (headers) =>
           ctx.backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
             params: { path: { slug, name } },
             // The catalogue's URL is the backend's default; not sending it keeps
@@ -130,8 +143,8 @@ export const libraryTools: Tool[] = [
     routes: ['PUT /api/v1/models/{slug}/libraries/{name}'],
     summarize: ({ slug, name, url, ref }) => `Clone ${url} at ${ref} and pin it to model "${slug}" as ${name}`,
     handler: async ({ slug, name, url, ref }, ctx) =>
-      json(
-        await command(ctx, `pin ${name} from ${url} to ${slug}`, (headers) =>
+      pinAnswer(ctx, slug, name, () =>
+        command(ctx, `pin ${name} from ${url} to ${slug}`, (headers) =>
           ctx.backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
             params: { path: { slug, name } },
             body: { ref, url },
