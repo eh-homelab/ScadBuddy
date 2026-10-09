@@ -27,6 +27,7 @@ import type {
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  LibraryFileObjects,
   LibraryListing,
   LibraryPinRequest,
   InstalledLibrary,
@@ -1274,6 +1275,9 @@ export const api = {
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
 
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
+
+  /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
+  getLibraryObjects: (fileId: number) => request<LibraryFileObjects>(`/print/library/${fileId}/objects`),
 
   getLibraryChoices: (fileId: number, printerId?: number | null) => {
     const search = new URLSearchParams()

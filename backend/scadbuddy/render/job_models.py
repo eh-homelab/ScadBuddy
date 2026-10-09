@@ -137,6 +137,8 @@ class ManifestObject(BaseModel):
     bom_piece: str | None = None
     #: The output an arranged object came from.
     source_output: str | None = None
+    #: The Bambuddy library file an arranged object was read from (#1863).
+    library_file_id: int | None = None
     notes: list[str] = Field(default_factory=list)
 
 
