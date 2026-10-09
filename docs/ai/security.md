@@ -22,7 +22,9 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
   other tool paths are the harness's in-process `scadbuddy` server (every session's
   queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)) and
   the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
-  Nothing starts a session over HTTP yet (#266, #300).
+  Sessions start from the panel's chat socket, `POST /api/v1/ai/sessions`
+  ([`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)) and the
+  `sessions_*` tools (#300).
 
 ## MCP bearer tokens
 
@@ -46,7 +48,7 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
 - **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
-  where `useAiAvailability()` says AI is available, so not in a production build yet)
+  where `useAiAvailability()` says AI is available, that is, once a Claude credential is saved)
   ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
   over `/api/v1/ai/mcp-tokens`
   ([`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts);
@@ -1148,11 +1150,11 @@ From the merged code and PR bodies:
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Plugins are vetted, but no production turn runs yet.** `main.ts` gives the
+7. **Plugins are vetted before every turn.** `main.ts` gives the
    `SessionManager` ScadBuddy's registry tools, the enabled remote plugins, plugin
    packages and the headless browser's vendored plugin (when enabled, see
-   [headless-browser.md](headless-browser.md)) for each turn, but nothing starts a session
-   over HTTP yet (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
+   [headless-browser.md](headless-browser.md)) for each turn, however the session was
+   started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).

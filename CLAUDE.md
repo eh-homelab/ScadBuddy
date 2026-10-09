@@ -474,8 +474,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
     `SCADBUDDY_TEST_DATABASE_URL` is set, as in the backend; the `agent` CI job sets it. The design is
-  `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
-  `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
+  `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
   §4, "Architecture") describes the backend container; the
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
