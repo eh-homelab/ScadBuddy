@@ -67,8 +67,14 @@ export function EditSourcePage() {
   const [source, setSource] = useState<string | null>(null)
 
   const initial = merge ? merge.merged : upstream.loading ? undefined : loaded.data?.source
+  // What the buffer was last set to from `initial`. When `initial` moves ahead (an
+  // untouched buffer following a #269 change), the buffer still holds this until the
+  // effect runs, which is not an edit (#1683).
+  const [synced, setSynced] = useState<string | null>(null)
   useEffect(() => {
-    if (initial !== undefined) setSource(initial)
+    if (initial === undefined) return
+    setSource(initial)
+    setSynced(initial)
   }, [initial])
 
   // #269 — the source changed elsewhere (another tab, an agent). An untouched buffer
@@ -243,7 +249,7 @@ export function EditSourcePage() {
           primary
         />
       }
-      dirty={!builtin && initial !== undefined && source !== initial}
+      dirty={!builtin && initial !== undefined && source !== initial && source !== synced}
       onSave={save}
     />
   )
