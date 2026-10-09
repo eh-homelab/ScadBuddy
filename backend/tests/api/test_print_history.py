@@ -688,3 +688,73 @@ def test_the_list_answers_when_linking_a_library_print_fails_on_the_database(
 
     assert listed.status_code == 200, listed.text
     assert listed.json()["items"] == []
+
+
+def link_library(client: TestClient, file_id: int, archive_id: int) -> None:
+    asyncio.run(
+        state(client).print_links.record(
+            PrintSubject.library(file_id),
+            PrintLink(archive_id=archive_id, matched_by="queue_item", plate_id=2),
+        )
+    )
+
+
+def library_file_route(file_id: int, *, deleted: bool = False) -> None:
+    respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=(
+            httpx.Response(404, json={"detail": "File not found"})
+            if deleted
+            else httpx.Response(
+                200,
+                json={
+                    "id": file_id,
+                    "filename": "bracket.3mf",
+                    "file_type": "3mf",
+                    "file_size": 1234,
+                },
+            )
+        )
+    )
+
+
+@respx.mock
+def test_a_library_prints_files_name_the_file_and_its_preview(client: TestClient) -> None:
+    """#1753 (H5, F8): the file printed, and a preview of the plate printed, as an
+    output's print lists its 3MF and preview."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    files = {file["kind"]: file for file in detail.json()["files"]}
+    assert files["library_file"] == {
+        "kind": "library_file",
+        "name": "bracket.3mf",
+        "size": 1234,
+        "url": "/api/v1/print/library/89/file",
+    }
+    assert files["preview_glb"] == {
+        "kind": "preview_glb",
+        "name": "bracket.glb",
+        "size": None,
+        "url": "/api/v1/print/library/89/preview.glb?plate=2",
+    }
+    assert {"sliced", "source"} <= files.keys()
+
+
+@respx.mock
+def test_a_library_print_whose_file_is_gone_lists_bambuddys_files_alone(
+    client: TestClient,
+) -> None:
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, timelapse_path=None)
+    library_file_route(89, deleted=True)
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}

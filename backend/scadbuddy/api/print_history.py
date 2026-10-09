@@ -55,6 +55,7 @@ from scadbuddy.bambuddy.models import (
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.print_links import LinkedPrint
+from scadbuddy.bambuddy.print_source import printable
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -170,7 +171,9 @@ class PrintProvenance(_Response):
 
 
 class PrintFile(_Response):
-    kind: Literal["output_3mf", "sliced", "source", "preview_glb"]
+    #: ``library_file`` is the Bambuddy library file a library print was made from
+    #: (#1753); ``preview_glb`` is the output's preview, or the library file's plate.
+    kind: Literal["output_3mf", "sliced", "source", "preview_glb", "library_file"]
     name: str
     size: int | None
     url: str
@@ -596,9 +599,12 @@ async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
 
 
 def _files(
-    outputs: OutputStore, meta: OutputMeta | None, archive: ArchiveDetail | None
+    outputs: OutputStore,
+    meta: OutputMeta | None,
+    archive: ArchiveDetail | None,
+    library: list[PrintFile],
 ) -> list[PrintFile]:
-    files = [] if meta is None else _output_files(outputs, meta)
+    files = library if meta is None else _output_files(outputs, meta)
     if archive is None:
         return files
     files.append(
@@ -616,6 +622,39 @@ def _files(
                 name=PurePosixPath(archive.source_3mf_path).name,
                 size=None,
                 url=_prints_url(archive.id, "files/source"),
+            )
+        )
+    return files
+
+
+async def _library_files(
+    client: BambuddyClient, link: LinkedPrint, archive: ArchiveDetail | None
+) -> list[PrintFile]:
+    """A library print's own files, as an output's print lists its 3MF and preview
+    (#1753): the library file it was made from, and a preview of the plate printed,
+    read from that file as a print of it reads it. None once the file is gone."""
+    file_id = link.library_file_id
+    if file_id is None:
+        return []
+    try:
+        file = await client.library_file(file_id)
+    except ApiError as error:
+        if error.status == status.HTTP_404_NOT_FOUND:
+            return []
+        raise
+    base = f"/api/v1/print/library/{file_id}"
+    files = [
+        PrintFile(kind="library_file", name=file.filename, size=file.file_size, url=f"{base}/file")
+    ]
+    if printable(file.file_type):
+        plate = (archive.plate_id if archive is not None else None) or link.plate_id or 1
+        stem = PurePosixPath(file.filename).stem or f"library-{file_id}"
+        files.append(
+            PrintFile(
+                kind="preview_glb",
+                name=f"{stem}.glb",
+                size=None,
+                url=f"{base}/preview.glb?plate={plate}",
             )
         )
     return files
@@ -768,7 +807,8 @@ async def get_print(
             summary = summary.model_copy(update={"printer_name": _printer_name(runs)})
             if printer_media:
                 on_printer = await client.printer_media(archive_id)
-        files = await asyncio.to_thread(_files, outputs, meta, archive)
+        library = await _library_files(client, link, archive) if meta is None else []
+        files = await asyncio.to_thread(_files, outputs, meta, archive, library)
         bambuddy_url = client.config.web_url(ARCHIVES_PAGE) if archive is not None else None
 
     return PrintDetail(

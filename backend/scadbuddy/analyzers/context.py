@@ -163,10 +163,13 @@ def base_profile(
 
 @dataclass
 class AnalysisContext:
-    slug: str
+    #: The template; ``None`` for a library file's print (``library_file_id``).
+    slug: str | None
     params: dict[str, ParamValue]
     request: AnalysisRequest
     output: OutputMeta | None = None
+    #: The Bambuddy library file judged, when that is the print's subject (#1753).
+    library_file_id: int | None = None
     #: The output's ``model.3mf`` on disk, for checks that read the file itself.
     model_3mf: Path | None = None
     geometry: GeometryAnalysis | None = None
@@ -196,8 +199,14 @@ class AnalysisContext:
 
     @property
     def subject(self) -> str:
-        """What a decision or a preview is about: the output, else the configuration."""
-        return self.output.id if self.output else configuration_key(self.slug, self.params)
+        """What a decision or a preview is about: the output, the library file, else the
+        configuration."""
+        if self.output is not None:
+            return self.output.id
+        if self.library_file_id is not None:
+            return library_key(self.library_file_id)
+        assert self.slug is not None, "a configuration names its template"
+        return configuration_key(self.slug, self.params)
 
     def scopes(self) -> list[ScopeRef]:
         """Every scope a decision about this print can be stored at, broadest first.
@@ -215,14 +224,22 @@ class AnalysisContext:
             found.append(ScopeRef(kind="printer", key=f"model:{scope_token(model)}"))
         if self.printer is not None:
             found.append(ScopeRef(kind="printer", key=f"id:{self.printer.id}"))
-        found.append(ScopeRef(kind="template", key=self.slug))
-        if self.output is not None and self.output.model_version:
+        if self.slug is not None:
+            found.append(ScopeRef(kind="template", key=self.slug))
+            if self.output is not None and self.output.model_version:
+                found.append(
+                    ScopeRef(
+                        kind="template_version", key=f"{self.slug}@{self.output.model_version}"
+                    )
+                )
             found.append(
-                ScopeRef(kind="template_version", key=f"{self.slug}@{self.output.model_version}")
+                ScopeRef(kind="configuration", key=configuration_key(self.slug, self.params))
             )
-        found.append(ScopeRef(kind="configuration", key=configuration_key(self.slug, self.params)))
         if self.output is not None:
             found.append(ScopeRef(kind="print", key=self.output.id))
+        elif self.library_file_id is not None:
+            # A library file has no template: its own prints are its narrowest scope.
+            found.append(ScopeRef(kind="print", key=library_key(self.library_file_id)))
         return found
 
     def scopes_for(self, slots: list[int]) -> list[ScopeRef]:
@@ -244,6 +261,11 @@ _ATTRIBUTE: dict[InputName, str] = {
     "filaments": "filaments",
     "inventory": "filament_options",
 }
+
+
+def library_key(file_id: int) -> str:
+    """``library:<file id>``: a library file's prints, as its print subject keys them."""
+    return f"library:{file_id}"
 
 
 def configuration_key(slug: str, params: dict[str, ParamValue]) -> str:

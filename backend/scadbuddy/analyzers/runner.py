@@ -68,7 +68,10 @@ class AnalysisSummary(BaseModel):
 
 class AnalysisReport(BaseModel):
     output_id: str | None
-    slug: str
+    #: The template judged; ``None`` for a library file (``library_file_id``).
+    slug: str | None
+    #: The Bambuddy library file judged, when that is what prints (#1753).
+    library_file_id: int | None
     detail: Detail
     summary: AnalysisSummary
     diagnostics: list[AnalyzerDiagnostic]
@@ -256,6 +259,7 @@ def build_report(
     return AnalysisReport(
         output_id=context.output.id if context.output else None,
         slug=context.slug,
+        library_file_id=context.library_file_id,
         detail=detail,
         summary=summary,
         diagnostics=diagnostics,
