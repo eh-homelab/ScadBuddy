@@ -52,6 +52,14 @@ from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
 logger = logging.getLogger(__name__)
 
 THREE_MF_MEDIA_TYPE = "model/3mf"
+#: #1280: the whole Bambuddy exchange a download makes for its default printer. Past it
+#: the stored file is served, as when Bambuddy does not answer at all: each call has its
+#: own 30 s timeout, but a slow Bambuddy across a dozen calls held a plain download for
+#: minutes.
+DOWNLOAD_TIMEOUT = 20.0
+#: Within that, naming the presets (thousands of them, plus a call per spool). Past it the
+#: file is still re-plated for the printer, on the placeholder names.
+PRESETS_TIMEOUT = 10.0
 
 _SIZES: tuple[str, ...] = get_args(NozzleSize)
 
@@ -155,21 +163,22 @@ async def for_default_printer(
     if settings.printer_id is None:
         return None
     try:
-        async with client_for(settings) as client:
+        async with asyncio.timeout(DOWNLOAD_TIMEOUT), client_for(settings) as client:
             # The plate the send path fits a file to, for the same printer.
             target = await target_for(client, settings, printer_id=settings.printer_id)
             try:
-                presets = await _presets(client, meta, settings, settings.printer_id)
-            except (ApiError, ValueError) as error:
+                async with asyncio.timeout(PRESETS_TIMEOUT):
+                    presets = await _presets(client, meta, settings, settings.printer_id)
+            except (ApiError, ValueError, TimeoutError) as error:
                 logger.info(
                     "download keeps the preset placeholders",
-                    extra={"output_id": meta.id, "reason": str(error)},
+                    extra={"output_id": meta.id, "reason": str(error) or type(error).__name__},
                 )
                 presets = None
-    except (ApiError, ValueError) as error:
+    except (ApiError, ValueError, TimeoutError) as error:
         logger.info(
             "download served as stored: the default printer is unreadable",
-            extra={"output_id": meta.id, "reason": str(error)},
+            extra={"output_id": meta.id, "reason": str(error) or type(error).__name__},
         )
         return None
     # A file that does not fit the plate is handled in `_rewrite`; a malformed one
