@@ -3548,7 +3548,8 @@ export const handlers = [
     } else {
       const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
       if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
-      // #1754: a model's id (`MODEL_ID_PATTERN`), or a library file's `library:<file id>`;
+      // #1754: a model's id (`MODEL_ID_PATTERN` in backend/scadbuddy/library/slugs.py, with
+      // its MAX_SLUG_LENGTH of 100; keep the two in step), or a library file's `library:<file id>`;
       // a forget goes through for any key, as on the server.
       if (
         body.scope === 'model' &&

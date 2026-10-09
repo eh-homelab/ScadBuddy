@@ -186,6 +186,8 @@ def bambuddy_kinds_over(
             "printer_id": printer_id,
             "plate_id": plate_id,
             "options_scope": options_scope(subject, slug),
+            # What an image from before #1754 reads, should it run this check's run.
+            "slug": slug,
         }
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
