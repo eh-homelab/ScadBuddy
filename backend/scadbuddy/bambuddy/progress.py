@@ -17,7 +17,6 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable
-from datetime import timedelta
 from typing import Literal
 
 import psycopg
@@ -441,14 +440,6 @@ async def progress_for(
     return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url, linker=linker)
 
 
-#: How long before a library file's newest send its older sends still count as part of
-#: the print being followed (#1073): a library file has no record of its last print, so
-#: the sends of one run (each plate's, each recorded as it is queued) are told apart from
-#: an earlier run's by when they were recorded. One within this of the newest is
-#: followed with it; reading a settled one again costs a read and changes nothing.
-LIBRARY_PRINT_WINDOW = timedelta(hours=24)
-
-
 async def library_progress(
     client: BambuddyClient,
     subject: PrintSubject,
@@ -457,20 +448,13 @@ async def library_progress(
     uploads: BambuddyUploadStore | None = None,
 ) -> PrintProgress | None:
     """The progress of a library file's print (#1073), read as an output's is: each of
-    its recent sends' queue items, as one progress over its plates. ``None`` when the
-    file has no send. Each item that names its archive is linked to the file on the way,
-    so the settle hooks find it (`linking.link_library_prints` does the same for the
-    prints list); one Bambuddy no longer has reads as done, as an output's does, and
-    with ``uploads`` has the file's archives looked for by hash (#1755), as an output's
-    gone item does."""
-    sends = await links.sends_for(subject)
-    newest = max((send.first_seen for send in sends if send.first_seen is not None), default=None)
-    if newest is not None:
-        sends = [
-            send
-            for send in sends
-            if send.first_seen is None or newest - send.first_seen <= LIBRARY_PRINT_WINDOW
-        ]
+    its last run's queue items (`PrintLinkStore.last_run`, #1751), as one progress over
+    its plates. ``None`` when the file has no send. Each item that names its archive is
+    linked to the file on the way, so the settle hooks find it
+    (`linking.link_library_prints` does the same for the prints list); one Bambuddy no
+    longer has reads as done, as an output's does, and with ``uploads`` has the file's
+    archives looked for by hash (#1755), as an output's gone item does."""
+    sends = await links.last_run(subject)
     if not sends:
         return None
     url = client.config.web_url(QUEUE_PATH)
@@ -545,22 +529,33 @@ class ProgressObserver:
 
     def started(self, meta: OutputMeta) -> None:
         """A print of ``meta`` was just started: whatever was seen before is stale."""
+        self.started_subject(meta.id, meta.slug)
+
+    def started_subject(self, key: str, slug: str) -> None:
+        """A print of the run subject ``key`` (an output's id, or ``library:<file id>``,
+        #1751) was just started: whatever was seen before is stale."""
         with self._lock:
-            self._seen.pop(meta.id, None)
-        emit(self.events, PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug))
+            self._seen.pop(key, None)
+        emit(self.events, PrintEvent(kind="print.progress", output_id=key, slug=slug))
 
     def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> bool:
         """Publish what changed since the last read of ``meta``; True if anything did."""
+        return self.observe_subject(meta.id, meta.slug, progress)
+
+    def observe_subject(self, key: str, slug: str, progress: PrintProgress | None) -> bool:
+        """Publish what changed since the last read of the run subject ``key`` (an
+        output's id, or ``library:<file id>``, #1751) on ``print:<key>``; True if
+        anything did."""
         if progress is None:
             return False
         fingerprint = progress.model_dump_json()
         # Compare, decide and record under one hold of the lock, so two reads of the
-        # same output racing each other (two tabs polling) cannot both decide they are
+        # same print racing each other (two tabs polling) cannot both decide they are
         # the first to see it settled. Only the publishing happens outside it.
         kinds: list[Literal["print.progress", "print.settled"]] = []
         with self._lock:
-            previous = self._seen.pop(meta.id, None)
-            self._seen[meta.id] = (fingerprint, progress.settled)
+            previous = self._seen.pop(key, None)
+            self._seen[key] = (fingerprint, progress.settled)
             while len(self._seen) > self.capacity:
                 self._seen.popitem(last=False)
             if previous is None or previous[0] != fingerprint:
@@ -569,5 +564,5 @@ class ProgressObserver:
                 if progress.settled and not was_settled:
                     kinds.append("print.settled")
         for kind in kinds:
-            emit(self.events, PrintEvent(kind=kind, output_id=meta.id, slug=meta.slug))
+            emit(self.events, PrintEvent(kind=kind, output_id=key, slug=slug))
         return bool(kinds)

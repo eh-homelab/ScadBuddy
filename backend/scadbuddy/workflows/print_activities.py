@@ -43,7 +43,7 @@ from scadbuddy.bambuddy.print_run import (
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
-from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
@@ -283,6 +283,7 @@ class PrintActivities:
                 input.outcome,
                 input.project_id,
                 input.sent,
+                run_id=input.run_id,
             )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
@@ -333,6 +334,10 @@ class PrintActivities:
                 self.d.observer.started(meta)
             except Exception:
                 logger.exception("could not follow print run %s", input.run_id)
+        elif spec.kind == "library" and spec.file_id is not None:
+            # As an output's (#1751): its progress, on `print:library:<file id>`, is new.
+            subject = PrintSubject.library(spec.file_id)
+            self.d.observer.started_subject(subject.run_subject, library_slug(subject))
         return run
 
     @activity.defn(name="print_fail")

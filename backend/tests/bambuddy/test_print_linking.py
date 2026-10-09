@@ -789,3 +789,46 @@ async def test_a_library_print_follows_its_newest_run_not_one_long_settled(
 
     progress = await library_progress(bambuddy, PrintSubject.library(89), links)
     assert progress is not None and progress.queue_item_id == 51 and not progress.settled
+
+
+@respx.mock
+async def test_a_library_print_follows_its_own_run_not_an_earlier_one_that_never_settles(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    """#1751: an earlier run's queue item that never settles does not hold a later run's
+    follow open: the follow reads the newest run's own sends."""
+    await links.record_sends(
+        PrintSubject.library(89), [PrintSend(queue_item_id=50, plate_id=1, run_id="run-a")]
+    )
+    await links.record_sends(
+        PrintSubject.library(89), [PrintSend(queue_item_id=51, plate_id=1, run_id="run-b")]
+    )
+    respx.get(f"{API}/queue/50").mock(
+        return_value=httpx.Response(200, json=queue_item(50, status="pending", archive_id=None))
+    )
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="completed", archive_id=91))
+    )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.queue_item_id == 51 and progress.settled
+
+
+@respx.mock
+async def test_a_library_runs_plates_are_followed_together(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    await links.record_sends(
+        PrintSubject.library(89),
+        [
+            PrintSend(queue_item_id=51, plate_id=1, run_id="run-b"),
+            PrintSend(queue_item_id=52, plate_id=2, run_id="run-b"),
+        ],
+    )
+    for item in (51, 52):
+        respx.get(f"{API}/queue/{item}").mock(
+            return_value=httpx.Response(200, json=queue_item(item, status="printing"))
+        )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.copies == 2

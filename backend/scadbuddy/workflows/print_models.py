@@ -132,6 +132,9 @@ class RecordInput(BaseModel):
     outcome: QueueOutcome
     project_id: int | None = None
     sent: list[PlateSend] = Field(default_factory=list)
+    #: The run that queued the plate (#1751), recorded with its sends so a library file's
+    #: follow reads its own run's. ``None`` in the histories of runs before it.
+    run_id: str | None = None
 
 
 class FinishInput(BaseModel):

@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import MAX_SETTINGS_BYTES, layout_of, write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_progress import watched as watched  # the fixture, shared
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
@@ -535,6 +537,7 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     [summary] = listed.json()["items"]
     assert summary["archive_id"] == 90
     assert summary["library_file_id"] == 89
+    assert summary["queue_item_id"] == 51
     assert summary["output_id"] is None and summary["slug"] is None
     assert summary["output_name"] == "Bambu Spool Lock or shim UPDATED"
     assert summary["status"] == "printing"
@@ -566,6 +569,85 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     assert reprint.status_code == 201, reprint.text
     sent = json.loads(queued_again.calls.last.request.content)
     assert sent["archive_id"] == 90 and sent["printer_id"] == 1
+
+
+# --- #1751: a library print's progress, as an output's -------------------------------------
+
+
+def queue_item_answer(item_id: int, status: str) -> respx.Route:
+    return respx.get(f"{API}/queue/{item_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": item_id, "printer_id": 1, "printer_name": "H2C", "status": status}
+        )
+    )
+
+
+@respx.mock
+def test_a_library_file_never_printed_has_no_progress(
+    client: TestClient, watched: list[str]
+) -> None:
+    configure(client)
+    response = client.get("/api/v1/print/library/89/progress")
+    assert response.status_code == 200, response.text
+    assert response.json() is None
+    assert watched == []
+
+
+@respx.mock
+def test_a_library_print_s_progress_is_its_newest_run_s_and_is_followed(
+    client: TestClient, watched: list[str]
+) -> None:
+    """R10, and the #1947 leftover: a second run of the file is read on its own, so the
+    first run's queue item that never settles holds nothing open."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    slice_routes()
+    plan = {"filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+    queue_item_answer(51, "pending")
+    queue_item_answer(52, "printing")
+    queue_route(item_id=51)
+    first = run_library(client, 89, json={**body(), **plan, "request_id": "first"})
+    assert first.status_code == 200, first.text
+    # The second run slices the copy the first uploaded, as `…_is_reused` does.
+    payload = _uploaded_3mf(upload)
+    row = {"id": 141, "filename": uploaded_name(upload), "file_type": "3mf"}
+    flow_copy_routes([{**row, "file_size": len(payload)}])
+    respx.get(f"{API}/library/files/141").mock(
+        return_value=httpx.Response(
+            200, json={**row, "file_hash": hashlib.sha256(payload).hexdigest()}
+        )
+    )
+    queue_route(item_id=52)
+    second = run_library(client, 89, json={**body(), **plan, "request_id": "second"})
+    assert second.status_code == 200, second.text
+
+    progress = client.get("/api/v1/print/library/89/progress")
+
+    assert progress.status_code == 200, progress.text
+    answer = progress.json()
+    assert answer["queue_item_id"] == 52 and answer["stage"] == "running"
+    assert [copy["queue_entry_id"] for copy in answer["copies_detail"]] == [52]
+    # Still moving, so the read makes sure it is followed, in the background.
+    deadline = time.monotonic() + 5
+    while not watched and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert watched == ["library:89"]
+
+    queue_item_answer(52, "completed")
+    done = client.get("/api/v1/print/library/89/progress").json()
+    assert done["settled"] and done["stage"] == "done"
+
+    # F2: filed under a project as an output's print is, its newest run by default.
+    added = respx.post(f"{API}/projects/7/add-queue").mock(return_value=httpx.Response(200))
+    attached = client.post(
+        "/api/v1/print/library/89/project", json={"project_id": 7}, headers=press()
+    )
+    assert attached.status_code == 200, attached.text
+    assert attached.json()["queue_item_ids"] == [52]
+    assert json.loads(added.calls.last.request.content) == {"queue_item_ids": [52]}
 
 
 # --- #484: the flow chosen for a library file Bambuddy slices -----------------------------

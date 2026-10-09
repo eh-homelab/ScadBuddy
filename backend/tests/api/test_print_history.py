@@ -100,6 +100,7 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "slug": model,
         "library_file_id": None,
         "library_file_name": None,
+        "queue_item_id": None,
         "output_name": "Elan",
         "status": "completed",
         "printer_id": 1,

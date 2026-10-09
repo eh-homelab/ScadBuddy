@@ -396,6 +396,7 @@ class PrintRunWorkflow:
                     outcome=outcome,
                     project_id=planned.project_id,
                     sent=sent,
+                    run_id=accepted.run.id,
                 ),
                 result_type=list[PlateSend],
                 start_to_close_timeout=SHORT,

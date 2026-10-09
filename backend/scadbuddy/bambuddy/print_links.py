@@ -71,6 +71,8 @@ class PrintSend(BaseModel):
     printer_id: int | None = None
     project_id: int | None = None
     slice_job_id: int | None = None
+    #: The print run that queued it (#1751); None for a send recorded before.
+    run_id: str | None = None
     #: When it was recorded; set by the database.
     first_seen: datetime | None = None
 
@@ -100,6 +102,30 @@ _UNLINKED = (
     " (SELECT 1 FROM print_links l WHERE l.queue_item_id = print_sends.queue_item_id"
     "  AND l.subject = print_sends.subject)"
 )
+
+
+#: For sends recorded before their run was (#1073, #1751), how long before the newest
+#: one an older one still counts as the same run: such sends are told apart from an
+#: earlier run's only by when they were recorded.
+LEGACY_RUN_WINDOW = timedelta(hours=24)
+
+
+def _last_run(sends: list[PrintSend]) -> list[PrintSend]:
+    """``sends`` (in the order recorded) of the newest one's run; a newest send with no
+    ``run_id`` has those within `LEGACY_RUN_WINDOW` of it that have none either."""
+    if not sends:
+        return []
+    newest = sends[-1]
+    if newest.run_id is not None:
+        return [send for send in sends if send.run_id == newest.run_id]
+    legacy = [send for send in sends if send.run_id is None]
+    if newest.first_seen is None:
+        return legacy
+    return [
+        send
+        for send in legacy
+        if send.first_seen is None or newest.first_seen - send.first_seen <= LEGACY_RUN_WINDOW
+    ]
 
 
 def _linked_print(row: dict[str, Any]) -> LinkedPrint:
@@ -182,6 +208,11 @@ class PrintLinkStore:
     async def sends_for(self, subject: PrintSubject) -> list[PrintSend]:
         """The subject's sends, in the order they were recorded."""
         return await asyncio.to_thread(self._sends_for, subject)
+
+    async def last_run(self, subject: PrintSubject) -> list[PrintSend]:
+        """The sends of the subject's newest run (#1751), as an output's last print is
+        its own run's plates: an earlier run, settled or not, is not among them."""
+        return _last_run(await self.sends_for(subject))
 
     async def pending_library(self, limit: int, *, max_age: timedelta) -> list[PendingLibraryPrint]:
         """The library files' queue items whose archive is not known yet and that are
@@ -268,8 +299,9 @@ class PrintLinkStore:
         with self._require().connection() as conn, conn.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO print_sends"
-                " (queue_item_id, subject, plate_id, printer_id, project_id, slice_job_id)"
-                " VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (queue_item_id) DO NOTHING",
+                " (queue_item_id, subject, plate_id, printer_id, project_id, slice_job_id,"
+                " run_id) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (queue_item_id) DO NOTHING",
                 [
                     (
                         send.queue_item_id,
@@ -278,6 +310,7 @@ class PrintLinkStore:
                         send.printer_id,
                         send.project_id,
                         send.slice_job_id,
+                        send.run_id,
                     )
                     for send in sends
                 ],
@@ -287,7 +320,7 @@ class PrintLinkStore:
         with self._require().connection() as conn:
             rows = conn.execute(
                 "SELECT queue_item_id, plate_id, printer_id, project_id, slice_job_id,"
-                " first_seen FROM print_sends WHERE subject = %s"
+                " run_id, first_seen FROM print_sends WHERE subject = %s"
                 " ORDER BY first_seen, queue_item_id",
                 (subject.key,),
             ).fetchall()
