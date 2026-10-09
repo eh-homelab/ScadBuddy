@@ -414,6 +414,18 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
     `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
     The `@temporalio/*` packages are pinned exactly, all one version.
+  - The tool-call gate (#1056 phase 5b, spec 2026-10-01 §6.6, plan
+    `docs/superpowers/plans/2026-10-08-durable-phase-5b-tool-call-gate.md`) is
+    `src/gate/`: request ids (`ids.ts`: `approval:`, `question:`, `durable:<session>:<run>:<tool_use_id>`),
+    the `respond` validator shared with agent-durable (`validate.ts`; `role.ts`;
+    `test/fixtures/pending-input-vectors.json` pins the two languages together),
+    the classic entries (`classic.ts`), the durable projection read (`projection.ts`,
+    `ai_pending_input`), the Temporal client of a session's gate handlers (`durable.ts`
+    `DurableGate`), the answer tools' results (`answers.ts`) and the orphan sweep
+    (`sweep.ts`). `routes/pendingInput.ts` serves both reads and `respond`; the
+    durable-only `ask_user` / `wait_for_user` are `tools/answerTools.ts` (manifest only,
+    never /mcp). `input.requested` / `input.resolved` are logged in both modes and never
+    sent on the chat socket (`routes/chat.ts` `sentToPanel`).
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
@@ -459,6 +471,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   only; the agent alone writes it); `check_cli_version.py` is the build's bundled-CLI
   check (Python `claude-agent-sdk` pinned exactly; it bundles a Claude Code of its own,
   not the TypeScript SDK's). Phase 5a serves `/healthz` on 8082 only; the worker is 5c.
+  `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
+  validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
+  activities that write `ai_pending_input`, `ai_input_responses`, the session's events
+  and the approval audit row (`store.py`, mirroring `eventLog.ts`).
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
   `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in
