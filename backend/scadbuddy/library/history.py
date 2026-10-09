@@ -564,6 +564,22 @@ class ModelHistory:
         assert isinstance(completed.stdout, str)
         return completed.returncode == 0 and completed.stdout.strip() == commit
 
+    def tree(self, commit: str, path: str) -> str | None:
+        """The object id of ``path`` at ``commit`` (a directory's is its tree id);
+        ``None`` where it is absent."""
+        completed = self._run("rev-parse", "--verify", "--quiet", f"{commit}:{path}", check=False)
+        assert isinstance(completed.stdout, str)
+        return completed.stdout.strip() or None if completed.returncode == 0 else None
+
+    def clean(self, path: str) -> bool:
+        """Whether the working tree under ``path`` is as HEAD has it: nothing edited,
+        staged, deleted or untracked."""
+        completed = self._run(
+            "status", "--porcelain", "--untracked-files=all", "--", path, check=False
+        )
+        assert isinstance(completed.stdout, str)
+        return completed.returncode == 0 and not completed.stdout.strip()
+
     def last_commit(self, slug: str) -> str | None:
         """The revision a model is currently at: the last commit that touched it.
 

@@ -1,9 +1,13 @@
 import {
+  FULL_SIZES_MAX,
   IMAGE_DATA_MAX,
   IMAGE_EDGE,
   PREVIEW_EDGE,
   composerImages,
+  forgetFullSizes,
+  fullSizeOf,
   prepareImage,
+  rememberFullSize,
   type ImageCodec,
 } from './images'
 
@@ -90,5 +94,33 @@ describe('composerImages (#1866)', () => {
     expect(composerImages(data)).toEqual([png])
     expect(composerImages({ files: [], items: [] } as unknown as DataTransfer)).toEqual([])
     expect(composerImages(null)).toEqual([])
+  })
+})
+
+describe('the full-size images this tab sent (#1891)', () => {
+  afterEach(() => forgetFullSizes())
+
+  it('remembers each prepared image under its preview', async () => {
+    const { codec } = fakeCodec(100, 50)
+    const image = await prepareImage(file(PNG_HEAD, 10, 'image/png'), codec)
+    expect(fullSizeOf(image.preview)).toBe(`data:image/png;base64,${image.data}`)
+    expect(fullSizeOf({ mediaType: 'image/jpeg', data: 'c29tZXRoaW5nIGVsc2U=' })).toBeUndefined()
+  })
+
+  it('keeps at most FULL_SIZES_MAX of base64, dropping the oldest first', () => {
+    // Two fit together with their `data:` prefixes; a third does not.
+    const big = 'A'.repeat(FULL_SIZES_MAX / 2 - 64)
+    const image = (n: number) => ({
+      mediaType: 'image/png' as const,
+      data: `${n}${big}`,
+      preview: { mediaType: 'image/jpeg' as const, data: `preview${n}` },
+    })
+    rememberFullSize(image(1))
+    rememberFullSize(image(2))
+    expect(fullSizeOf(image(1).preview)).toBeDefined()
+    rememberFullSize(image(3))
+    expect(fullSizeOf(image(1).preview)).toBeUndefined()
+    expect(fullSizeOf(image(2).preview)).toBeDefined()
+    expect(fullSizeOf(image(3).preview)).toBeDefined()
   })
 })

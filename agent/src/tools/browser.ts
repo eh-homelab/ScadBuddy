@@ -369,7 +369,8 @@ export const browserTools: Tool[] = [
     description:
       PREFIX +
       'in the customizer, save the settled render as an output (the Generate button). Needed before the print ' +
-      'or send dialog can open.',
+      'or send dialog can open. A result with superseded: true was saved, but the template UI state moved ' +
+      'while it saved, so it is not the output on screen: generate again once the inputs are settled.',
     input: z.object({ timeout_ms: waitMs(120_000, 30_000) }),
     risk: 'write',
   }),

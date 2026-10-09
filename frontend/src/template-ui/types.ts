@@ -26,6 +26,13 @@ export interface MountContext {
   api: number
 }
 
+/** What `host.generate()` answers; `superseded` only when the output was left behind as it saved. */
+export interface GenerateResult {
+  jobId: string
+  outputId: string
+  superseded?: true
+}
+
 /** Host API v1 (spec 2026-09-27 §4.3). */
 export interface Host {
   readonly api: number
@@ -38,14 +45,25 @@ export interface Host {
      * number, string or boolean. Ranges, options and formats are the render's job:
      * it refuses an invalid value with a 422 naming the parameter, as the generated
      * form's widgets already rely on.
+     *
+     * Every key but `params` is the UI's saved state, and an output is saved with it:
+     * a write that changes any of them leaves the output on screen behind, as a
+     * parameter change does, and Generate has to run again (#848). Keep transient
+     * state ("generating", a hover, an open panel) in the UI's own variables, never
+     * in `inputs`.
      */
     set(patch: JsonObject): void
     subscribe(fn: (inputs: JsonObject) => void): () => void
   }
   schema(file?: string): Promise<CustomizerSchema>
   files: { url(path: string): string }
-  /** Waits for the render of the current inputs, then keeps it as an output. */
-  generate(): Promise<{ jobId: string; outputId: string }>
+  /**
+   * Waits for the render of the current inputs, then keeps it as an output. A write
+   * to the UI state (`inputs.set` of any key but `params`) while it saves leaves that
+   * output behind: it is still saved, and the result says `superseded: true`; it is
+   * not the one on screen, so `openPrint` refuses it until a new `generate()`.
+   */
+  generate(): Promise<GenerateResult>
   openPrint(outputId: string): void
   presets: {
     list(): Promise<ParamPreset[]>

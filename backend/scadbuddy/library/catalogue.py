@@ -235,6 +235,8 @@ class InvalidModelMetaError(ValueError):
         self.slug = slug
 
 
+#: A template's own interface: the directory its `ui` module and files live in.
+UI_DIR = "ui"
 #: `ui/` plus a relative path whose segments never start with a dot, ending `.js`
 #: or `.mjs`: no `..`, no hidden file, nothing outside the template's `ui/`.
 UI_MODULE_PATTERN = r"^ui/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.m?js$"
@@ -631,6 +633,9 @@ class Catalogue:
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: Each template's `ui_version` and the HEAD it was read at: the walk it takes
+        #: is made once per commit, not on every record of the template (#1469).
+        self._ui_versions: dict[str, tuple[str, str | None]] = {}
 
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
@@ -711,14 +716,26 @@ class Catalogue:
             return None
 
     def ui_version(self, slug: str) -> str | None:
-        """The last commit that touched ``slug``'s ``ui/`` directory (#846)."""
+        """The last commit that touched ``slug``'s ``ui/`` directory (#846); none when
+        that commit deleted it (#1469)."""
         if self.history is None or not self.history.available:
             return None
+        ui = f"{model_path(slug)}/{UI_DIR}"
         try:
-            return self.history.last_commit(f"{model_path(slug)}/ui")
+            head = self.history.head()
+            if head is None:
+                return None
+            cached = self._ui_versions.get(slug)
+            if cached is not None and cached[0] == head:
+                return cached[1]
+            commit = self.history.last_commit(ui)
+            if commit is not None and self.history.tree(commit, ui) is None:
+                commit = None
         except (GitError, OSError):
             logger.exception("could not read the interface's revision", extra={"slug": slug})
             return None
+        self._ui_versions[slug] = (head, commit)
+        return commit
 
     def versions(self) -> dict[str, str]:
         """Every model's revision in one git call, for listing the catalogue."""

@@ -99,7 +99,7 @@ export function ReviewParts({ review }: { review: PackageReview }) {
           <dd>
             <ul className="mt-1 list-disc space-y-0.5 pl-5" aria-label={`What the rules refuse in ${review.name}`}>
               {review.refused!.map((problem) => (
-                <li key={problem} className="break-all">
+                <li key={problem} className="[overflow-wrap:anywhere]">
                   {problem}
                 </li>
               ))}
@@ -417,7 +417,7 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
           {problems.length > 0 && (
             <ul className="mt-1 list-disc space-y-0.5 pl-5" aria-label="Why the package was refused">
               {problems.map((p) => (
-                <li key={p} className="sb-num break-all">
+                <li key={p} className="[overflow-wrap:anywhere]">
                   {p}
                 </li>
               ))}
