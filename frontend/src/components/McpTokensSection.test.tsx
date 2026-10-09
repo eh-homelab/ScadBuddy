@@ -71,7 +71,7 @@ describe('McpTokensSection', () => {
     const { user } = renderPage(<McpTokensSection publicUrl="https://scadbuddy.example" />)
     await listed()
     const snippet = () => screen.getByTestId('mcp-snippet-claude-code').textContent ?? ''
-    expect(snippet()).toContain('https://scadbuddy.example/mcp --header "Authorization: Bearer <your token>"')
+    expect(snippet()).toContain("'https://scadbuddy.example/mcp' --header 'Authorization: Bearer <your token>'")
 
     await user.type(screen.getByLabelText('Token name'), 'Claude Code')
     await user.click(screen.getByRole('button', { name: 'Create token' }))
@@ -88,7 +88,7 @@ describe('McpTokensSection', () => {
     renderPage(<McpTokensSection publicUrl="https://scadbuddy.example" />)
     await listed()
     expect(screen.getByTestId('mcp-snippet-claude-code').textContent).toBe(
-      'claude mcp add --transport http scadbuddy https://scadbuddy.example/mcp',
+      "claude mcp add --transport http scadbuddy 'https://scadbuddy.example/mcp'",
     )
   })
 
