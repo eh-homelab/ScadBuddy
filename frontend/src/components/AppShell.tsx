@@ -235,7 +235,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
                   aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
                   title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
-                  className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                  // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
+                  // opens beside a dialog that is already open, as the shortcut does.
+                  className={`relative z-[60] inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                     open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
                   }`}
                 >
