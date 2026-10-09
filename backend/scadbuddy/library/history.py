@@ -593,6 +593,16 @@ class ModelHistory:
             return None
         return completed.stdout.strip() or None
 
+    def previous_commit(self, slug: str) -> str | None:
+        """The commit before :meth:`last_commit` in the model's own history (#1071):
+        what its current revision was made from. None for its first commit."""
+        completed = self._run("log", "-2", "--format=%H", "--", slug, check=False)
+        assert isinstance(completed.stdout, str)
+        if completed.returncode != 0:
+            return None
+        commits = completed.stdout.split()
+        return commits[1] if len(commits) > 1 else None
+
     def seed_commit(self, slug: str) -> str | None:
         """The ``Seed … from the image`` commit ``slug`` as it stands was copied in by.
 

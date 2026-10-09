@@ -23,15 +23,15 @@ afterEach(() => {
 describe('fetchPendingInput', () => {
   it('counts what the agent lists as parked on the user, by kind', async () => {
     setPendingApprovals(2)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false })
     setPendingAnswers(1, 3)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false })
   })
 
   it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
     setPendingAnswers(1, 1, 2)
     const counts = await fetchPendingInput()
-    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2 })
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false })
     expect(totalOf(counts!)).toBe(2)
     expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
     expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
