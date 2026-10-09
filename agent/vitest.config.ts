@@ -14,5 +14,12 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
+    // #1746: polls wait on background turns and Postgres round trips, which a
+    // loaded CI runner slows about tenfold (measured: 0.2 s tests took 2 s
+    // beside the rest of the suite). vitest's own 1 s poll default was never a
+    // chosen limit, and the polls that did choose one chose 5 s, so that is the
+    // default. A test may poll several times, so it gets room for a few.
+    expect: { poll: { timeout: 5000 } },
+    testTimeout: 20_000,
   },
 })
