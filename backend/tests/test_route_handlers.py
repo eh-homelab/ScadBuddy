@@ -28,7 +28,7 @@ async def test_the_colour_breakdown_reads_its_job_off_the_event_loop(
     monkeypatch.setattr(jobs_api, "require_job", missing)
     none = cast(Any, None)
     with pytest.raises(ApiError):
-        await jobs_api.get_job_colours("j", none, none, none, none)
+        await jobs_api.get_job_colours("j", none, none, none, none, None)
     assert seen and seen[0] is not loop_thread
 
 

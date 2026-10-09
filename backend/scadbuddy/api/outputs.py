@@ -34,6 +34,7 @@ from scadbuddy.api.jobs import (
     SNAPSHOT_UNAVAILABLE,
     JobStatus,
     RenderRequest,
+    ViewCamera,
     ViewSize,
     _job_status,
     preview_view,
@@ -807,10 +808,11 @@ def get_output_thumbnail(output_id: OutputIdPath, outputs: OutputsDep) -> FileRe
     "/outputs/{output_id}/views/{view}.png",
     response_class=Response,
     responses={200: {"content": {PNG_MEDIA_TYPE: {}}}},
-    summary="Output preview from a named view",
+    summary="Output preview from a named view or a camera",
     description=(
         "The saved output's preview mesh drawn from `view` (iso, front, back, left, "
-        "right, top, bottom) as a shaded PNG."
+        "right, top, bottom) as a shaded PNG, turned and framed further by the camera "
+        "parameters, as the job view route's."
     ),
 )
 async def get_output_view(
@@ -818,6 +820,7 @@ async def get_output_view(
     view: ViewName,
     outputs: OutputsDep,
     config: ConfigDep,
+    camera: ViewCamera,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
     require_output(outputs, output_id)
@@ -827,6 +830,7 @@ async def get_output_view(
         size,
         config=config,
         owner=f"output {output_id!r}",
+        camera=camera,
     )
 
 

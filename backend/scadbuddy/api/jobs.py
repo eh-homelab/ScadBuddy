@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.client import WorkflowUpdateFailedError
@@ -64,10 +64,14 @@ from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
     BREAKDOWN_TILE_SIZE,
+    MAX_AZIMUTH,
     MAX_BREAKDOWN_TILE_SIZE,
+    MAX_ELEVATION,
     MAX_VIEW_SIZE,
+    MAX_ZOOM,
     MIN_VIEW_SIZE,
     PLATE_PNG_SIZE,
+    Camera,
     ColourBreakdown,
     ViewName,
     render_colour_breakdown,
@@ -106,6 +110,67 @@ ViewSize = Annotated[
         description="Edge of the square PNG, in pixels",
     ),
 ]
+
+
+def _target(axis: str) -> Any:
+    return Query(
+        allow_inf_nan=False,
+        description=(
+            f"{axis.upper()} of the point the view centres on, in model mm; the bounding "
+            "box's centre when left out"
+        ),
+    )
+
+
+def view_camera(
+    azimuth: Annotated[
+        float | None,
+        Query(
+            ge=-MAX_AZIMUTH,
+            le=MAX_AZIMUTH,
+            description=(
+                "Degrees around +Z (OpenSCAD's Z-up mm) from the front view: 0 stands at -Y "
+                "looking +Y (`front`), 90 at +X (`right`), 180 at +Y (`back`), -90 or 270 "
+                "at -X (`left`). Counter-clockwise seen from above. Left out, the named "
+                "view's (`iso` is about 28)"
+            ),
+        ),
+    ] = None,
+    elevation: Annotated[
+        float | None,
+        Query(
+            ge=-MAX_ELEVATION,
+            le=MAX_ELEVATION,
+            description=(
+                "Degrees above the XY plane: 90 looks straight down (`top`), -90 straight "
+                "up (`bottom`). Left out, the named view's (`iso` is about 49)"
+            ),
+        ),
+    ] = None,
+    zoom: Annotated[
+        float,
+        Query(
+            ge=1,
+            le=MAX_ZOOM,
+            description=(
+                "Magnification of the fitted frame: 1 holds the whole model around the "
+                "target, 2 half its width. The view is orthographic, so this is the distance"
+            ),
+        ),
+    ] = 1.0,
+    target_x: Annotated[float | None, _target("x")] = None,
+    target_y: Annotated[float | None, _target("y")] = None,
+    target_z: Annotated[float | None, _target("z")] = None,
+) -> Camera | None:
+    """The camera the view routes take besides their named view (#830): the named
+    view's own when nothing is given, so an existing caller draws what it did."""
+    target = (target_x, target_y, target_z)
+    if azimuth is None and elevation is None and zoom == 1.0 and target == (None, None, None):
+        return None
+    return Camera(azimuth=azimuth, elevation=elevation, zoom=zoom, target=target)
+
+
+ViewCamera = Annotated[Camera | None, Depends(view_camera)]
 
 
 class RenderRequest(BaseModel):
@@ -529,13 +594,19 @@ async def get_model_diagnostics(
     )
 
 
-def _draw_view(glb: Path, view: ViewName, size: int) -> bytes | None:
+def _draw_view(glb: Path, view: ViewName, size: int, camera: Camera | None) -> bytes | None:
     parts = read_glb(glb)
-    return render_view(parts, view, size) if parts else None
+    return render_view(parts, view, size, camera) if parts else None
 
 
 async def preview_view(
-    glb: Path, view: ViewName, size: int, *, config: Config, owner: str
+    glb: Path,
+    view: ViewName,
+    size: int,
+    *,
+    config: Config,
+    owner: str,
+    camera: Camera | None = None,
 ) -> Response:
     """``glb`` drawn from ``view`` as a PNG, with the plate cover's rasteriser.
 
@@ -546,7 +617,8 @@ async def preview_view(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
     try:
         png = await asyncio.wait_for(
-            asyncio.to_thread(_draw_view, glb, view, size), timeout=config.render_timeout
+            asyncio.to_thread(_draw_view, glb, view, size, camera),
+            timeout=config.render_timeout,
         )
     except TimeoutError:
         raise ApiError(
@@ -562,10 +634,13 @@ async def preview_view(
     "/jobs/{job_id}/views/{view}.png",
     response_class=Response,
     responses={200: {"content": {PNG_MEDIA_TYPE: {}}}},
-    summary="Render job preview from a named view",
+    summary="Render job preview from a named view or a camera",
     description=(
         "The job's preview mesh drawn from `view` (iso, front, back, left, right, top, "
-        "bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer."
+        "bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer. "
+        "`azimuth`, `elevation`, `zoom` and `target_*` turn and frame it further: an angle "
+        "left out is the named view's, so `front` with `elevation=30` looks down at 30 "
+        "degrees from the front."
     ),
 )
 async def get_job_view(
@@ -575,6 +650,7 @@ async def get_job_view(
     paths: PathsDep,
     config: ConfigDep,
     state: StateDep,
+    camera: ViewCamera,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
     job = await asyncio.to_thread(require_job, render, job_id)
@@ -584,7 +660,12 @@ async def get_job_view(
         )
     await materialize_result(state.store.blobs, job.result)
     return await preview_view(
-        paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
+        paths.root / job.result.preview_glb,
+        view,
+        size,
+        config=config,
+        owner=f"job {job_id!r}",
+        camera=camera,
     )
 
 
@@ -637,10 +718,17 @@ COLUMNS_HEADER = "X-ScadBuddy-Colour-Columns"
 
 
 def _draw_breakdown(
-    glb: Path, view: ViewName, size: int, order: list[str], deadline: float
+    glb: Path,
+    view: ViewName,
+    size: int,
+    order: list[str],
+    deadline: float,
+    camera: Camera | None,
 ) -> ColourBreakdown | None:
     parts = read_glb(glb)
-    return render_colour_breakdown(parts, view, size, order, deadline=deadline) if parts else None
+    if not parts:
+        return None
+    return render_colour_breakdown(parts, view, size, order, deadline=deadline, camera=camera)
 
 
 @router.get(
@@ -668,7 +756,7 @@ def _draw_breakdown(
         "light grey, so a vision model can check which colour goes where (#252). "
         f"`{COLOURS_HEADER}` names the tiles, row by row, in the job's `colors` "
         f"(extruder) order, and `{COLUMNS_HEADER}` how many are in a row. At "
-        "most 16 colours (422 above)."
+        "most 16 colours (422 above). The camera parameters are the view route's."
     ),
 )
 async def get_job_colours(
@@ -677,6 +765,7 @@ async def get_job_colours(
     paths: PathsDep,
     config: ConfigDep,
     state: StateDep,
+    camera: ViewCamera,
     view: ViewName = "iso",
     size: Annotated[
         int,
@@ -697,7 +786,9 @@ async def get_job_colours(
     deadline = time.monotonic() + config.render_timeout
     try:
         drawn = await asyncio.wait_for(
-            asyncio.to_thread(_draw_breakdown, glb, view, size, job.result.colors, deadline),
+            asyncio.to_thread(
+                _draw_breakdown, glb, view, size, job.result.colors, deadline, camera
+            ),
             timeout=config.render_timeout,
         )
     except TimeoutError:

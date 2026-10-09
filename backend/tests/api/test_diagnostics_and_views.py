@@ -130,6 +130,46 @@ def test_a_view_that_is_not_one_is_a_422(client: TestClient, model: str, paths: 
     assert too_big.status_code == 422
 
 
+def test_a_job_view_takes_an_explicit_camera(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#830: azimuth 90 from the front is the right side, so the bar is end-on; the
+    zoom and target are taken too."""
+    job_id = _render(client, model)
+    _real_preview(client, job_id)
+
+    turned = client.get(
+        f"/api/v1/jobs/{job_id}/views/front.png",
+        params={"size": 128, "azimuth": 90, "elevation": 0},
+    )
+    closer = client.get(
+        f"/api/v1/jobs/{job_id}/views/front.png",
+        params={"size": 128, "zoom": 2, "target_x": 20},
+    )
+
+    assert turned.status_code == 200, turned.text
+    rows, cols = np.nonzero(read_png(turned.content)[..., 3] == 255)
+    assert abs(int(cols.max() - cols.min()) - int(rows.max() - rows.min())) <= 2
+    assert closer.status_code == 200, closer.text
+    _, cols = np.nonzero(read_png(closer.content)[..., 3] == 255)
+    # Centred on the bar's +X end: all of it is left of the middle.
+    assert cols.max() <= 64 + 1
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"elevation": 91}, {"azimuth": -361}, {"zoom": 0.5}, {"zoom": 65}],
+)
+def test_a_camera_out_of_range_is_a_422(
+    client: TestClient, model: str, paths: DataPaths, params: dict[str, float]
+) -> None:
+    job_id = _render(client, model)
+    _real_preview(client, job_id)
+
+    assert client.get(f"/api/v1/jobs/{job_id}/views/iso.png", params=params).status_code == 422
+    assert client.get(f"/api/v1/jobs/{job_id}/colours.png", params=params).status_code == 422
+
+
 def test_a_failed_job_has_no_views(client: TestClient, model: str) -> None:
     job_id = _render(client, model, FAIL_WIDTH)
 
@@ -149,9 +189,16 @@ def test_a_saved_output_is_drawn_from_a_named_view(
     output_id = created.json()["id"]
 
     response = client.get(f"/api/v1/outputs/{output_id}/views/top.png")
+    turned = client.get(
+        f"/api/v1/outputs/{output_id}/views/top.png",
+        params={"size": 128, "azimuth": 90, "elevation": 0},
+    )
 
     assert response.status_code == 200, response.text
     assert read_png(response.content).shape == (512, 512, 4)
+    assert turned.status_code == 200, turned.text
+    rows, cols = np.nonzero(read_png(turned.content)[..., 3] == 255)
+    assert abs(int(cols.max() - cols.min()) - int(rows.max() - rows.min())) <= 2
     assert client.get(f"/api/v1/outputs/{'0' * 32}/views/top.png").status_code == 404
 
 
@@ -203,6 +250,23 @@ def test_a_breakdown_has_one_tile_per_colour_named_in_order(client: TestClient, 
         assert (coloured.argmax(axis=1) == channel).all(), tile
         greys = solid[(solid.max(axis=1) - solid.min(axis=1)) <= 1]
         assert len(greys) > len(coloured), tile
+
+
+def test_a_breakdown_takes_the_same_camera_as_a_view(client: TestClient, model: str) -> None:
+    """#830: seen from the right (azimuth 90), the three boxes along X hide behind
+    the nearest, so each tile is one box's outline wide, not three."""
+    job_id = _render(client, model)
+    _three_colours(client, job_id)
+
+    response = client.get(
+        f"/api/v1/jobs/{job_id}/colours.png",
+        params={"size": 64, "azimuth": 90, "elevation": 0},
+    )
+
+    assert response.status_code == 200, response.text
+    tile = read_png(response.content)[:64, :64]
+    rows, cols = np.nonzero(tile[..., 3] == 255)
+    assert abs(int(cols.max() - cols.min()) - int(rows.max() - rows.min())) <= 2
 
 
 def test_a_breakdown_of_a_failed_job_is_a_404(client: TestClient, model: str) -> None:
