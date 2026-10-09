@@ -353,6 +353,9 @@ const payloadKeys =
     ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
     : undefined
 const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
+if (temporal && !payloadKeys) {
+  console.warn('agent-tools worker: no secret key, so durable payloads cannot be sealed; no durable session is started')
+}
 // The worker also moves failures' messages into payloads, so the codec seals them (5c Ruling 11).
 const workerDataConverter = dataConverter
   ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }

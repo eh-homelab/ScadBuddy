@@ -38,6 +38,9 @@ export const payloadKeyContext = (subject: string): string => `dek:ai_payload_ke
 /** The context a payload is sealed in under its subject's key. */
 export const payloadContext = (subject: string): string => `payload:${subject}`
 
+/** The advisory lock key creation and forgetSubject take for a subject (Ruling 11). */
+export const payloadKeyLock = (subject: string): string => `scadbuddy:ai_payload_keys:${subject}`
+
 /** The subject's payloads cannot be decoded: its key was deleted (forgetSubject). */
 export class SubjectForgotten extends Error {
   override name = 'SubjectForgotten'
@@ -138,11 +141,16 @@ export class PgPayloadKeys implements PayloadKeys {
       try {
         const sealed = sealBytes(this.#kek.key, dek, payloadKeyContext(subject))
         // Never for a forgotten subject: its payloads stay unreadable, new ones included.
-        await this.#sql`
-          INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)
-          SELECT ${subject}, ${sealed}, ${this.#kek.id}
-          WHERE NOT EXISTS (SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject})
-          ON CONFLICT (subject) DO NOTHING`
+        // Under the subject's lock, which forgetSubject also takes, so the tombstone
+        // check never reads from before a forget that is committing.
+        await this.#sql.begin(async (tx) => {
+          await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
+          await tx`
+            INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)
+            SELECT ${subject}, ${sealed}, ${this.#kek.id}
+            WHERE NOT EXISTS (SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject})
+            ON CONFLICT (subject) DO NOTHING`
+        })
       } finally {
         dek.fill(0)
       }
@@ -154,6 +162,9 @@ export class PgPayloadKeys implements PayloadKeys {
     const kek = row.kek_id === this.#kek.id ? this.#kek : row.kek_id === this.#previous?.id ? this.#previous : undefined
     if (!kek) throw new SealError(`the payload key of ${subject} was sealed with key ${row.kek_id}, which is not mounted`)
     const key = openBytes(kek.key, row.dek_sealed, payloadKeyContext(subject))
+    // Expired keys go now, not when their subject is next asked for.
+    const now = Date.now()
+    for (const [held, entry] of this.#cache) if (entry.until <= now) this.forget(held)
     if (this.#cache.size >= this.#cacheMax) {
       const oldest = this.#cache.keys().next().value
       if (oldest !== undefined) this.forget(oldest)

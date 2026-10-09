@@ -238,7 +238,7 @@ describe('tool activities', () => {
 
   it('refuses a workflow that is not a known session, and runs nothing', async () => {
     const h = harness()
-    for (const workflowId of [`session-${'1'.repeat(8)}-0000-4000-8000-000000000000`, 'flow-abc', 'session-not-a-uuid']) {
+    for (const workflowId of [`session-${'1'.repeat(8)}-0000-4000-8000-000000000000`, 'flow-abc', 'session-not-a-uuid', `session-${SESSION.toUpperCase()}`]) {
       const refused = await failure(env(workflowId).run(h.activities.whoami!, {}))
       expect(refused.nonRetryable).toBe(true)
       expect(refused.type).toBe('UnknownSession')

@@ -60,6 +60,11 @@ def payload_key_context(subject: str) -> str:
     return f"dek:ai_payload_keys:{subject}"
 
 
+def payload_key_lock(subject: str) -> str:
+    """The advisory lock key creation and forgetSubject take (payloadCodec.ts payloadKeyLock)."""
+    return f"scadbuddy:ai_payload_keys:{subject}"
+
+
 def payload_context(subject: str) -> str:
     return f"payload:{subject}"
 
@@ -146,13 +151,20 @@ class PgPayloadKeys:
                 sealed = seal_bytes(
                     self._kek.key, os.urandom(KEK_BYTES), payload_key_context(subject)
                 )
-                await conn.execute(
-                    # Never for a forgotten subject: its payloads stay unreadable, new ones too.
-                    "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id) SELECT %s, %s, %s"
-                    " WHERE NOT EXISTS (SELECT 1 FROM ai_forgotten_subjects WHERE subject = %s)"
-                    " ON CONFLICT (subject) DO NOTHING",
-                    (subject, sealed, self._kek.id, subject),
-                )
+                # Never for a forgotten subject: its payloads stay unreadable, new ones too.
+                # Under the subject's lock, which forgetSubject also takes, so the
+                # tombstone check never reads from before a forget that is committing.
+                async with conn.transaction():
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s))", (payload_key_lock(subject),)
+                    )
+                    await conn.execute(
+                        "INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)"
+                        " SELECT %s, %s, %s WHERE NOT EXISTS"
+                        " (SELECT 1 FROM ai_forgotten_subjects WHERE subject = %s)"
+                        " ON CONFLICT (subject) DO NOTHING",
+                        (subject, sealed, self._kek.id, subject),
+                    )
                 # Whoever inserted first, this is the key every encoder of the subject uses.
                 row = await self._row(conn, subject)
         if row is None:
@@ -167,6 +179,10 @@ class PgPayloadKeys:
         else:
             raise SealError(f"the payload key of {subject} was sealed with key {kek_id}")
         key = open_bytes(kek.key, dek_sealed, payload_key_context(subject))
+        # Expired keys go now, not when their subject is next asked for.
+        now = time.monotonic()
+        for held in [s for s, (_, until) in self._cache.items() if until <= now]:
+            del self._cache[held]
         if len(self._cache) >= self._cache_max:
             self._cache.popitem(last=False)
         self._cache[subject] = (key, time.monotonic() + self._cache_s)

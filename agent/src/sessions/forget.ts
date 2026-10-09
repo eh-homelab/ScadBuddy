@@ -1,7 +1,7 @@
 import type { Client } from '@temporalio/client'
 import { WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
-import { subjectOf } from '../temporal/payloadCodec.js'
+import { payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
 // deletion of a durable session or a flow run goes through. In this order:
@@ -45,6 +45,9 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
   const keys = await deps.sql.begin(async (tx) => {
+    // The lock key creation takes (payloadCodec.ts), so no encoder's tombstone check
+    // reads from before this commits.
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
     await tx`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject}) ON CONFLICT (subject) DO NOTHING`
     return tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
   })

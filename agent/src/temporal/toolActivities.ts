@@ -105,12 +105,13 @@ function resultText(content: readonly { type: string; text?: string }[]): string
   return content.map((block) => (block.type === 'text' ? (block.text ?? '') : DURABLE_IMAGE_NOTE)).join('\n')
 }
 
-const SESSION_WORKFLOW = /^session-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+// Lowercase only, as the codec's subjects are (payloadCodec.ts): a session's payloads are sealed.
+const SESSION_WORKFLOW = /^session-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
 const DEFAULT_HEARTBEAT_MS = 10_000
 
 /** The session a workflow ID names, or undefined for any other workflow. */
 export function sessionOf(workflowId: string | undefined): string | undefined {
-  return workflowId === undefined ? undefined : SESSION_WORKFLOW.exec(workflowId)?.[1]?.toLowerCase()
+  return workflowId === undefined ? undefined : SESSION_WORKFLOW.exec(workflowId)?.[1]
 }
 
 /** The text a non-ok run shows the model: the error result's text blocks. */
