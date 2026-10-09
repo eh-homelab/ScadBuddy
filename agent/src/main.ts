@@ -41,10 +41,11 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
-import { gateActivities, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
+import { PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
@@ -120,6 +121,13 @@ const database = config.databaseUrl
           console.log(
             `secret key rotation: re-wrapped ${rewrapped} credential(s) from key ${previousKek.kek.id} to ${kek.kek.id}` +
               (failed ? `; ${failed} could not be opened with the previous key and were left as they are` : ''),
+          )
+        }
+        const payloadKeys = await rewrapPayloadKeys(sql, previousKek.kek, kek.kek)
+        if (payloadKeys.rewrapped || payloadKeys.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${payloadKeys.rewrapped} payload key(s)` +
+              (payloadKeys.failed ? `; ${payloadKeys.failed} could not be opened with the previous key` : ''),
           )
         }
         const plugins = await new PluginStore(sql).rewrapFrom(previousKek.kek, kek.kek)
@@ -345,6 +353,21 @@ if (config.temporalAddress && !database) console.error('agent-tools worker: not 
 if (temporal) Runtime.install({ shutdownSignals: [] })
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
+// Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
+// that encodes or decodes them carries the codec, which needs the KEK. Without one, a
+// session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
+const payloadKeys =
+  temporal && kek.ok
+    ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
+    : undefined
+const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
+if (temporal && !payloadKeys) {
+  console.warn('agent-tools worker: no secret key, so durable payloads cannot be sealed; no durable session is started')
+}
+// The worker also moves failures' messages into payloads, so the codec seals them (5c Ruling 11).
+const workerDataConverter = dataConverter
+  ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }
+  : undefined
 const temporalWorker =
   temporal && operationStore
     ? AgentWorker.start({
@@ -354,12 +377,14 @@ const temporalWorker =
           ...toolActivities(DURABLE_TOOLS, {
             services: toolServices,
             sessions: new PgSessionOwners(temporal.sql),
+            approvals: new PgApprovalRecords(temporal.sql),
             audit,
             answers: new PgAnswers(temporal.sql),
           }),
-          ...gateActivities({ audit }),
+          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
         },
+        ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
@@ -369,7 +394,11 @@ const temporalWorker =
 // Routes start commands, and reach durable sessions' gates, through a lazy client: a
 // Temporal that is down answers 503.
 const temporalClient = temporal
-  ? new Client({ connection: Connection.lazy({ address: temporal.address }), namespace: config.temporalNamespace })
+  ? new Client({
+      connection: Connection.lazy({ address: temporal.address }),
+      namespace: config.temporalNamespace,
+      ...(dataConverter ? { dataConverter } : {}),
+    })
   : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)

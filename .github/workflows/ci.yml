@@ -635,6 +635,8 @@ jobs:
       # credentials.ts fails one job or the other. Runs every
       # agent/test/fixtures/pending-input-vectors.json vector against the gate's
       # validator port, as the agent job runs them against agent/src/gate/validate.ts.
+      # Opens and re-seals agent/test/fixtures/payload-vectors.json, which the agent
+      # job regenerates from agent/src/temporal/payloadCodec.ts.
       - name: Tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
