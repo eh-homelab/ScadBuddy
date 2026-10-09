@@ -574,7 +574,7 @@ class SettingsStore:
         # but never unset.
         changes = patch.model_dump(mode="json", exclude_unset=True)
         reset = changes.pop("reset", [])
-        for secret in ("bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"):
+        for secret in SECRET_FIELDS:
             if changes.get(secret) == "":
                 changes[secret] = None
         if changes.get("store_backend") == "bambuddy":
@@ -834,7 +834,8 @@ def _sealed(kek: Kek | None, name: str, value: object) -> object:
     }
 
 
-#: The sealed values `_opened` has already warned about, by setting and a digest.
+#: The sealed values `_opened` has already warned about, by setting and a digest. At
+#: most one per secret field per value stored while this process runs: no bound needed.
 _UNOPENED: set[tuple[str, str]] = set()
 
 
