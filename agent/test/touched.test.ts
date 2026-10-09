@@ -236,6 +236,10 @@ describe('extractors', () => {
     expect(touches('set_print_options', { scope: 'model', key: 'box', options: {} }, {}, 'outward')).toEqual([
       { type: 'setting', id: 'print_options:model:box', action: 'modified', model: 'box' },
     ])
+    // #1754: a library file's own scope is not a model.
+    expect(touches('set_print_options', { scope: 'model', key: 'library:89', options: {} }, {}, 'outward')).toEqual([
+      { type: 'setting', id: 'print_options:model:library:89', action: 'modified', model: null },
+    ])
     // A printer or model scope names its key; without one there is no setting to name.
     expect(touches('set_print_options', { scope: 'printer', options: {} }, {}, 'outward')).toEqual([])
     expect(touches('remember_model_print_choices', { slug: 'box', tier: 'fast' }, {})).toEqual([

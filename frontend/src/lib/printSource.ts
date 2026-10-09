@@ -49,6 +49,37 @@ export function sourceKey(source: PrintSource | undefined): string | undefined {
   return source.kind === 'output' ? `output:${source.output.id}` : `library:${source.file.id}`
 }
 
+/**
+ * #1754 — what a print's own options and remembered choices are kept under, in the one
+ * store (`backend/scadbuddy/bambuddy/options.py` `options_scope`): an output's model, which
+ * its every output shares, or a library file's `library:<file id>`. The `model` scope of
+ * `PUT /settings/print-options` takes either as its key.
+ */
+export interface OptionsSubject {
+  key: string
+  /** What "This …" names in the dialog. */
+  noun: 'model' | 'file'
+}
+
+const LIBRARY_SCOPE = /^library:(\d+)$/
+
+export function libraryOptionsScope(fileId: number): string {
+  return `library:${fileId}`
+}
+
+/** The library file a scope key names, or null for a model's. */
+export function libraryFileOfScope(key: string): number | null {
+  const match = LIBRARY_SCOPE.exec(key)
+  return match ? Number(match[1]) : null
+}
+
+export function optionsSubject(source: PrintSource | undefined): OptionsSubject | undefined {
+  if (!source) return undefined
+  return source.kind === 'output'
+    ? { key: source.output.slug, noun: 'model' }
+    : { key: libraryOptionsScope(source.file.id), noun: 'file' }
+}
+
 /** Looked up at call time, so a test's `vi.spyOn(api, …)` still sees every call. */
 export function sourceApi(source: PrintSource): SourceApi {
   if (source.kind === 'output') {

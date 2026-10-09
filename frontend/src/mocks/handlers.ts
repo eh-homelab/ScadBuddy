@@ -130,10 +130,11 @@ const state = {
   lastArrange: null as ArrangeRequest | null,
   /** #1864 — the output each library file ScadBuddy uploaded is a copy of. */
   libraryOutputs: new Map(INITIAL_LIBRARY_OUTPUTS),
-  /** #78 — per-model printer and spools, the store's `model_print_choices`. */
+  /**
+   * #78 — per-model printer and spools, the store's `model_print_choices`; a library
+   * file's (#313) under `library:<file id>`, as the store keeps them since #1754.
+   */
   modelChoices: {} as Record<string, ModelPrintChoices>,
-  /** #313 — per library-file choices, the store's `library_print_choices`. */
-  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
@@ -292,7 +293,6 @@ export function resetMockState(): void {
   state.lastArrange = null
   state.libraryOutputs = new Map(INITIAL_LIBRARY_OUTPUTS)
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
@@ -763,7 +763,6 @@ export function forgetMockProjectTarget(projectId: string): void {
 /** #322 — "Forget all": every remembered choice, and none of the settings. */
 export function forgetMockRemembered(): void {
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.printOptions.global_options = {}
@@ -777,13 +776,13 @@ export function forgetMockRemembered(): void {
  * all" (`forgetMockRemembered`) drops it too.
  */
 export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
-  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+  return { ...NO_MODEL_CHOICES, ...state.modelChoices[`library:${fileId}`] }
 }
 
 /** Remembers one library file's choices; the empty choice forgets them, as the store does. */
 export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
-  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
-  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  if (isNoModelChoices(choices)) delete state.modelChoices[`library:${fileId}`]
+  else state.modelChoices[`library:${fileId}`] = { ...NO_MODEL_CHOICES, ...choices }
   return mockLibraryChoices(fileId)
 }
 
@@ -3543,6 +3542,10 @@ export const handlers = [
     } else {
       const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
       if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
+      // #1754: a model's id, or a library file's `library:<file id>`.
+      if (body.scope === 'model' && !/^((builtin:)?[a-z0-9][a-z0-9-]*|library:\d+)$/.test(body.key)) {
+        return problem(422, 'Unprocessable', `${body.key} is neither a model nor a library file`)
+      }
       if (empty) delete map[body.key]
       else map[body.key] = options
     }
