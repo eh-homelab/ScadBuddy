@@ -9,9 +9,10 @@ import contextlib
 import logging
 import os
 import signal
+import time
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -452,11 +453,15 @@ class _HealthServer(uvicorn.Server):
 def _allocated_bytes(root: Path) -> int:
     """Bytes allocated to everything under ``root``, directories included and a file
     with several links once, as ``du`` (and so kubelet, measuring an emptyDir) counts
-    them. An entry removed while it is walked is skipped."""
+    them. A symlink to a directory counts its own blocks, not its target's, as ``du``
+    does without ``-L``. An entry removed while it is walked is skipped."""
     seen: set[tuple[int, int]] = set()
     total = 0
-    for directory, _, files in os.walk(root):
-        for path in (directory, *(os.path.join(directory, name) for name in files)):
+    for directory, dirs, files in os.walk(root):
+        # `os.walk` lists a symlinked directory in `dirs` but never walks it.
+        links = (name for name in dirs if os.path.islink(os.path.join(directory, name)))
+        names = (*files, *links)
+        for path in (directory, *(os.path.join(directory, name) for name in names)):
             with contextlib.suppress(FileNotFoundError):
                 stat = os.lstat(path)
                 if stat.st_nlink > 1:
@@ -467,12 +472,37 @@ def _allocated_bytes(root: Path) -> int:
     return total
 
 
-async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data_dir: Path) -> None:
+#: Seconds one walk of the data directory answers the scraper for (#2020). The walk
+#: covers libraries, fonts and the piece cache, so a 15-30 s scrape would otherwise
+#: walk all of it each time; the API keeps its store walk as long (`STORE_USAGE_MAX_AGE`).
+#: The gauge feeds an eviction alert that fires over minutes, so a minute stale is fine.
+DATA_USAGE_MAX_AGE = 60.0
+
+
+@dataclass
+class _DataUsage:
+    """``_allocated_bytes(root)``, walked again only once ``max_age`` has passed."""
+
+    root: Path
+    max_age: float = DATA_USAGE_MAX_AGE
+    clock: Callable[[], float] = time.monotonic
+    _value: int | None = field(default=None, init=False)
+    _read_at: float = field(default=0.0, init=False)
+
+    async def read(self) -> int:
+        now = self.clock()
+        if self._value is None or now - self._read_at >= self.max_age:
+            self._value = await asyncio.to_thread(_allocated_bytes, self.root)
+            self._read_at = now
+        return self._value
+
+
+async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _DataUsage) -> None:
     """The store gauges this process owns: its whole data directory, which is an
     emptyDir evicted past its sizeLimit (#1785), first, since it needs no database; then
     its piece cache and the key it holds. The store's usage is the API's to export (one
     database, one set of numbers)."""
-    metrics.render_data_bytes.set(await asyncio.to_thread(_allocated_bytes, data_dir))
+    metrics.render_data_bytes.set(await data.read())
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
@@ -483,6 +513,7 @@ def _health_app(
     settings: Settings, metrics: Metrics, store: StoreBundle | None, task_queue: str
 ) -> Starlette:
     """``store`` is the render worker's; the print worker holds none (#1060)."""
+    data = _DataUsage(settings.data_dir)
 
     async def healthz(_: Request) -> JSONResponse:
         body: dict[str, Any] = {"ok": True, "build_id": settings.revision, "task_queue": task_queue}
@@ -493,7 +524,7 @@ def _health_app(
     async def exposition(_: Request) -> Response:
         if store is not None:
             try:
-                await _refresh_store_metrics(metrics, store, settings.data_dir)
+                await _refresh_store_metrics(metrics, store, data)
             except Exception:
                 # Like the API's: keep the last values, never fail the scrape.
                 logger.exception("could not read the store's gauges")
