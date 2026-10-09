@@ -16,7 +16,14 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import * as fixtures from '../mocks/fixtures'
-import { setMockJobOutputs, setMockPlates, setMockPresets, setMockRenderColors } from '../mocks/handlers'
+import {
+  mockSettings,
+  setMockJobOutputs,
+  setMockPlates,
+  setMockPresets,
+  setMockRenderColors,
+  setMockSettings,
+} from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
@@ -406,6 +413,44 @@ describe('CustomizePage', () => {
     const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
     expect(log).toHaveTextContent(CANCELLED_ERROR)
     expect(log).not.toHaveTextContent('Compilation failed')
+  })
+
+  describe('links a render to its workflow in the Temporal UI (#1293)', () => {
+    const link = () => screen.queryByRole('link', { name: 'Open workflow ↗' })
+
+    it('on a failed render, under the deployment\'s namespace', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      const { user } = render()
+      await firstRender()
+
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'boom')
+
+      await screen.findByTestId('render-log', {}, { timeout: 4000 })
+      const href = (await screen.findByRole('link', { name: 'Open workflow ↗' })).getAttribute('href')
+      expect(href).toMatch(/^https:\/\/temporal\.example\/namespaces\/default\/workflows\/render-[0-9a-f]+$/)
+      expect(link()).toHaveAttribute('target', '_blank')
+    })
+
+    it('not once the render is done', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      render()
+      await firstRender()
+      expect(link()).not.toBeInTheDocument()
+    })
+
+    it('not when Settings has no Temporal UI URL', async () => {
+      const { user } = render()
+      await firstRender()
+
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'boom')
+
+      await screen.findByTestId('render-log', {}, { timeout: 4000 })
+      expect(link()).not.toBeInTheDocument()
+    })
   })
 
   it('disables Generate while a render is in flight', async () => {

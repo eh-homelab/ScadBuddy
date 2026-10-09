@@ -53,8 +53,10 @@ import { TemplateUi } from '../template-ui/TemplateUi'
 import type { GenerateResult, TemplateUiFailure, UiDeclaration } from '../template-ui/types'
 import { boundByPlate, fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import type { SnapshotOptions } from '../lib/snapshot'
+import { NEW_TAB } from '../lib/embed'
 import { useDisplayUnit } from '../lib/units'
 import { useSubscription } from '../lib/realtime'
+import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
@@ -354,6 +356,13 @@ export function CustomizePage() {
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  // #1293 — a render still running or one that failed links to its workflow in the
+  // Temporal UI, when Settings knows where that is.
+  const settings = useAsync(() => api.getSettings(), []).data
+  const workflowUrl =
+    job?.status === 'pending' || job?.status === 'running' || job?.status === 'failed'
+      ? temporalWorkflowUrl(settings, job.workflow_id)
+      : null
   // #938 — the colours the latest finished render used and the values it ran with, kept
   // while the next one runs so the extruder labels do not fall back to a guess and back
   // on every change. Kept per model, so another model's render never labels this one's.
@@ -1268,6 +1277,13 @@ export function CustomizePage() {
                   </Button>
                 </>
               )}
+            </p>
+          )}
+          {workflowUrl && (
+            <p data-testid="render-workflow" className="border-t border-line px-3 py-2 text-[12px] text-muted">
+              <a href={workflowUrl} {...NEW_TAB} className="text-accent underline">
+                Open workflow ↗
+              </a>
             </p>
           )}
           </div>
