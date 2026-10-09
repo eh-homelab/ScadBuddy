@@ -505,6 +505,23 @@ async def test_an_output_run_starts_its_follow(client: Client, worker: str, fake
     assert [f.output_id for f in fake.follows] == [arg.source.output_id]
 
 
+async def test_a_library_run_starts_its_follow(client: Client, worker: str, fake: Fake) -> None:
+    """#1073: a library file's print is followed as an output's is, by its run subject."""
+    file_id = uuid.uuid4().int % 1_000_000
+    arg = run_input().model_copy(
+        update={
+            "subject": f"library:{file_id}",
+            "source": SourceSpec(kind="library", file_id=file_id),
+        }
+    )
+    await start(client, worker, arg)
+    run = await ended(client, arg)
+    assert run.status == "succeeded"
+    follow = client.get_workflow_handle(follow_id(f"library:{file_id}"))
+    assert await follow.result() == "settled"
+    assert [f.output_id for f in fake.follows] == [f"library:{file_id}"]
+
+
 async def test_a_second_run_pokes_the_follow_already_running(
     client: Client, worker: str, fake: Fake
 ) -> None:

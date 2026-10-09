@@ -119,8 +119,6 @@ class EnqueueInput(BaseModel):
     planned: PlannedRun
     plate: PlatePlan
     sliced: int
-    #: Only an output's print is ever settled, so only its picks are saved (#836).
-    credit: bool = False
 
     @property
     def plate_id(self) -> int:

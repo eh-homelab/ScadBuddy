@@ -16,6 +16,8 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Awaitable
+from datetime import timedelta
 from typing import Literal
 
 import psycopg
@@ -437,6 +439,78 @@ async def progress_for(
             bambuddy_url=url,
         )
     return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url, linker=linker)
+
+
+#: How long before a library file's newest send its older sends still count as part of
+#: the print being followed (#1073): a library file has no record of its last print, so
+#: the sends of one run (each plate's, each recorded as it is queued) are told apart from
+#: an earlier run's by when they were recorded. One within this of the newest is
+#: followed with it; reading a settled one again costs a read and changes nothing.
+LIBRARY_PRINT_WINDOW = timedelta(hours=24)
+
+
+async def library_progress(
+    client: BambuddyClient, subject: PrintSubject, links: PrintLinkStore
+) -> PrintProgress | None:
+    """The progress of a library file's print (#1073), read as an output's is: each of
+    its recent sends' queue items, as one progress over its plates. ``None`` when the
+    file has no send. Each item that names its archive is linked to the file on the way,
+    so the settle hooks find it (`linking.link_library_prints` does the same for the
+    prints list); one Bambuddy no longer has reads as done, as an output's does."""
+    sends = await links.sends_for(subject)
+    newest = max((send.first_seen for send in sends if send.first_seen is not None), default=None)
+    if newest is not None:
+        sends = [
+            send
+            for send in sends
+            if send.first_seen is None or newest - send.first_seen <= LIBRARY_PRINT_WINDOW
+        ]
+    if not sends:
+        return None
+    url = client.config.web_url(QUEUE_PATH)
+
+    async def linked(work: Awaitable[None], queue_item_id: int) -> None:
+        # As an output's read: a link that cannot be recorded never fails the read.
+        try:
+            await work
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a library print's queue item",
+                extra={"subject": subject.key, "queue_item_id": queue_item_id},
+            )
+
+    async def read(queue_item_id: int) -> PrintProgress:
+        try:
+            item = await client.queue_item(queue_item_id)
+        except ApiError as error:
+            if error.status != 404:
+                raise
+            await linked(links.library_gone(queue_item_id), queue_item_id)
+            return PrintProgress(
+                route="slice_queue",
+                stage="done",
+                settled=True,
+                queue_item_id=queue_item_id,
+                copies_completed=1,
+                bambuddy_url=url,
+            )
+        if item.archive_id is not None:
+            await linked(
+                links.link_library(queue_item_id, item.archive_id, item.library_file_name),
+                queue_item_id,
+            )
+        return from_queue(item, bambuddy_url=url)
+
+    plates = await asyncio.gather(*(read(send.queue_item_id) for send in sends))
+    if len(plates) == 1:
+        return plates[0]
+    return from_plates(
+        list(plates),
+        [send.plate_id or 1 for send in sends],
+        slice_job_id=sends[-1].slice_job_id,
+        queue_item_id=sends[-1].queue_item_id,
+        bambuddy_url=url,
+    )
 
 
 #: Outputs whose last observed progress :class:`ProgressObserver` remembers.

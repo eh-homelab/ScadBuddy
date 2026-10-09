@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
     from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, QueuedPlate
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
+    from scadbuddy.bambuddy.subject import PrintSubject
     from scadbuddy.library.outputs import PlateSend
     from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
     from scadbuddy.workflows.print_models import (
@@ -153,6 +154,9 @@ PLATES_PATCH = "print-cancel-records-every-plate"
 FAIL_PATCH = "print-cancel-waits-for-fail"
 #: ``workflow.patched`` id of the follow after a run succeeds (#1053, §4.4).
 FOLLOW_PATCH = "follow-print"
+#: ``workflow.patched`` id of a library file's follow (#1073): a library print is followed
+#: and settled as an output's is. A library run from before it replays unfollowed.
+LIBRARY_FOLLOW_PATCH = "follow-library-print"
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -363,7 +367,6 @@ class PrintRunWorkflow:
                     planned=planned,
                     plate=plate,
                     sliced=sliced,
-                    credit=accepted.source.kind == "output",
                 ),
                 result_type=QueuedPlate,
                 start_to_close_timeout=SHORT,
@@ -434,18 +437,23 @@ class PrintRunWorkflow:
         )
         # Patched: a run started on a build without the follow replays without it
         # (review #1061); `PrintRun` runs in the wild since #1061 merged.
-        if (
-            workflow.patched(FOLLOW_PATCH)
-            and input.source.kind == "output"
-            and input.source.output_id is not None
-        ):
-            await self._follow(input.source.output_id)
+        if workflow.patched(FOLLOW_PATCH):
+            source = input.source
+            if source.kind == "output" and source.output_id is not None:
+                await self._follow(source.output_id)
+            elif (
+                source.kind == "library"
+                and source.file_id is not None
+                and workflow.patched(LIBRARY_FOLLOW_PATCH)
+            ):
+                await self._follow(PrintSubject.library(source.file_id).run_subject)
         return finished
 
     async def _follow(self, output_id: str) -> None:
         """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives
-        this run, or a poke to the one already following the output (a child start has
-        no id-conflict policy). A poke that finds it closed in between starts it once more."""
+        this run, or a poke to the one already following the subject (a child start has
+        no id-conflict policy). A poke that finds it closed in between starts it once more.
+        ``output_id`` is the run subject: an output's id, or ``library:<file id>``."""
         for _ in range(2):
             try:
                 await workflow.start_child_workflow(
