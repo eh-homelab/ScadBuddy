@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
-from fastapi import Depends, Path, status
+from fastapi import Depends, Path
 from psycopg import Connection
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
@@ -39,7 +39,6 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
-from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
@@ -158,7 +157,7 @@ class AppState:
     projection: JobProjection
     refs: BlobRefs
     #: Default-render previews: the thumbnail of a model with none and no output.
-    #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
+    #: None when they are off (SCADBUDDY_PREVIEW_RENDERS).
     previews: PreviewScheduler | None
     #: Where every state change is published (spec §7): `PgNotifyEventBus` on
     #: #241's database, or `InProcessEventBus` in a test that builds one itself.
@@ -299,7 +298,7 @@ def _build_core(settings: Settings) -> AppState:
     metrics.build_info.labels(settings.version, settings.revision).set(1)
     # Nothing connects here: the projection's pool opens in the lifespan, and the
     # event bus's in `PgNotifyEventBus.start`. The previews share the projection's
-    # pool (#454, #401).
+    # pool (#454).
     projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
     pool = projection.pool
     # One LISTEN connection per process: the bus shares the projection's.
@@ -373,21 +372,17 @@ def _build_core(settings: Settings) -> AppState:
             return await progress_for(
                 client,
                 meta,
-                uploads=uploads if pool is not None else None,
+                uploads=uploads,
                 # Load-bearing for the rack settle hook (#836): without ``links=`` a fast
                 # print's archive is never linked, so its rack use goes uncounted, and
                 # no test catches it (the P3 settle test builds its own reader).
-                links=print_links if print_links.available else None,
+                links=print_links,
             )
 
     async def read_library(subject: PrintSubject) -> PrintProgress | None:
-        # A library print is linked by its sends (#1073): without a database it has none.
-        if not print_links.available:
-            return None
+        # A library print is linked by its sends (#1073).
         async with client_for(settings_store.load()) as client:
-            return await library_progress(
-                client, subject, print_links, uploads=uploads if pool is not None else None
-            )
+            return await library_progress(client, subject, print_links, uploads=uploads)
 
     return AppState(
         settings=settings,
@@ -442,8 +437,8 @@ def build_previews(
     config: Config,
 ) -> PreviewScheduler | None:
     """The preview scheduler, hooked to every change that can call for a new preview;
-    ``None`` without a database, where there is nowhere to keep one. A preview is a
-    render on Temporal like any other (`RenderService.render_preview`)."""
+    ``None`` for a catalogue with no preview store, where there is nowhere to keep one.
+    A preview is a render on Temporal like any other (`RenderService.render_preview`)."""
     if catalogue.previews is None:
         return None
     previews = PreviewScheduler(
@@ -539,18 +534,7 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
-#: Problem ``type`` for a route that needs the database when none is configured.
-DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
-
-
-def require_print_runs(state: StateDep) -> PrintCommands:
-    """The print runs, or a 503 naming what is missing: runs live only in Postgres."""
-    if not state.print_runs.store.available:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "print runs are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
-            type_=DATABASE_REQUIRED_PROBLEM,
-        )
+def get_print_runs(state: StateDep) -> PrintCommands:
     return state.print_runs
 
 
@@ -589,7 +573,7 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 RenderDep = Annotated[RenderService, Depends(get_render)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
-PrintRunsDep = Annotated[PrintCommands, Depends(require_print_runs)]
+PrintRunsDep = Annotated[PrintCommands, Depends(get_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[InstallPermits, Depends(get_installs)]
 DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]

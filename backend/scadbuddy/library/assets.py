@@ -313,7 +313,8 @@ def sniff(data: bytes) -> AssetKind:
 
 
 class AssetStoreUnavailableError(RuntimeError):
-    """The upload store's metadata lives in Postgres, and this store has no pool."""
+    """The upload store's metadata lives in Postgres, and this store has no pool: only
+    a template's pipeline check (`workflows/verify_pipeline.py`) builds one without."""
 
     def __init__(self) -> None:
         super().__init__(

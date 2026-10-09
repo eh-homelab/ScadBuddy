@@ -21,6 +21,7 @@ from scadbuddy.library.catalogue import (
     meta_from_raw,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.support.media import MemoryMediaStore
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 
@@ -145,7 +146,7 @@ def _catalogue(tmp_path: Path, meta: dict[str, object]) -> Catalogue:
     paths.model_dir("demo").mkdir(parents=True)
     paths.model_source("demo").write_text("cube(1);\n", encoding="utf-8")
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
-    return Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
+    return Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
 
 def test_the_catalogue_answers_a_templates_print_settings(tmp_path: Path) -> None:

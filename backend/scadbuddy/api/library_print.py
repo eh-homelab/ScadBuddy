@@ -344,9 +344,8 @@ async def get_library_progress(
 ) -> PrintProgress | None:
     """As ``/print/outputs/{id}/progress`` (#1751): the file's newest run, its queue
     items read off Bambuddy until it is ``settled``. ``null`` when ScadBuddy never
-    queued the file, or has no database to have recorded it in. A newest run that failed
-    before it queued anything is that failure (``route: "run"``). Changes are published
-    on ``print:library:<file id>``."""
+    queued the file. A newest run that failed before it queued anything is that failure
+    (``route: "run"``). Changes are published on ``print:library:<file id>``."""
     subject = PrintSubject.library(file_id)
     key = subject.run_subject
     failed = await failed_before_queueing(state, key)
@@ -354,7 +353,7 @@ async def get_library_progress(
     async with client_for(store.load()) as client:
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
-        elif links.available:
+        else:
             progress = await library_progress(client, subject, links, uploads=uploads)
     observer.observe_subject(key, library_slug(subject), progress)
     # As an output's: a print someone is looking at that is still moving is followed.

@@ -308,18 +308,6 @@ def no_model(slug: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
-#: Until #401 makes the database required, a deployment may run without one.
-NO_DATABASE = (
-    "template media needs a database: set SCADBUDDY_DATABASE_URL. Without one, only "
-    "the thumbnail is shown"
-)
-
-
-#: Every media write's answer when there is no database.
-NO_DATABASE_RESPONSE: dict[int | str, dict[str, Any]] = {
-    503: {"description": "No database: SCADBUDDY_DATABASE_URL is unset"}
-}
-
 #: A write to an item a built-in ships.
 READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
     403: {"description": "The item is one a built-in template ships, and is read-only"}
@@ -332,13 +320,6 @@ def read_only(slug: str, item_id: str) -> ApiError:
         f"{item_id!r} is shipped with the built-in template {slug!r} and is read-only; "
         "only the media added to it can change",
     )
-
-
-def require_media_store(catalogue: Catalogue) -> None:
-    """503 before anything is read or written, so an upload is refused on its
-    headers rather than after a gigabyte of body."""
-    if catalogue.media_store is None:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NO_DATABASE)
 
 
 def no_item(slug: str, item_id: str) -> ApiError:
@@ -689,7 +670,6 @@ async def get_media_thumbnail(
     "/models/{slug}/media",
     response_model=ModelRecord,
     responses={
-        **NO_DATABASE_RESPONSE,
         409: {"description": f"The template already holds {MAX_MEDIA_ITEMS} items"},
         413: {
             "description": "Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB"
@@ -726,7 +706,6 @@ async def upload_media(
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_model_exists(catalogue, slug)
-    require_media_store(catalogue)
     received = await _receive(request, catalogue.paths.cache)
     claims = ClaimStore(catalogue.paths.claims)
     held: list[Held] = []
@@ -779,7 +758,7 @@ async def upload_media(
 @router.patch(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
+    responses={**READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Caption a media item",
 )
 async def patch_media(
@@ -806,7 +785,7 @@ async def _edit(
     request: dict[str, Any],
     idempotency_key: str | None,
 ) -> ModelRecord | JSONResponse:
-    """A media edit as its operation (#1054); the check makes the 404 and the 503, so a
+    """A media edit as its operation (#1054); the check makes the 404, so a
     re-send gets its recorded answer whatever has changed since (review 3e final M1)."""
     result = await run_operation(
         ops,
@@ -822,7 +801,7 @@ async def _edit(
 @router.put(
     "/models/{slug}/media/order",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
+    responses={**OPERATION_RESPONSES},
     summary="Reorder the media",
     description=(
         "Puts the items in the order given, which must name every item exactly once "
@@ -850,7 +829,7 @@ async def reorder_media(
 @router.put(
     "/models/{slug}/media/cover",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
+    responses={**OPERATION_RESPONSES},
     summary="Choose the cover",
     description=(
         "Makes one item the cover. A template of mine's cover is its first item, so "
@@ -880,7 +859,7 @@ async def put_media_cover(
 @router.delete(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
+    responses={**READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Remove a media item",
     description=(
         "Removes one item and its files, as one revision. An entry whose file is "

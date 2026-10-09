@@ -1051,8 +1051,6 @@ async def test_a_cancel_while_the_enqueue_is_recorded_as_started_agrees_with_the
 
 
 class _Sends:
-    available = True
-
     def __init__(self) -> None:
         self.recorded: list[tuple[PrintSubject, list[int]]] = []
 

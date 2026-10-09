@@ -31,6 +31,7 @@ from scadbuddy.library.history import (
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.support.media import MemoryMediaStore
 
 pytestmark = pytest.mark.requires_git
 
@@ -721,7 +722,7 @@ def catalogue(tmp_path: Path) -> Catalogue:
     paths.ensure()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
-    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
+    return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
 
 def test_every_catalogue_action_is_exactly_one_commit(catalogue: Catalogue) -> None:
@@ -745,7 +746,9 @@ def _with_ui(catalogue: Catalogue, slug: str, body: str) -> str | None:
 def test_ui_version_is_none_without_history(tmp_path: Path) -> None:
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
-    catalogue = Catalogue(paths, None, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(
+        paths, None, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
     catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
     assert catalogue.ui_version("keychain") is None
 
