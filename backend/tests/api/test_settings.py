@@ -345,13 +345,27 @@ def test_an_unreachable_bambuddy_is_reported_not_raised(client: TestClient) -> N
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is False
     assert "ConnectError" in body["detail"]
-    # What went wrong, as httpx said it (#1542).
+    # What went wrong, in ScadBuddy's words (#1542).
     assert body["upstream"] == {
         "status": None,
         "retry_after": None,
         "detail": None,
-        "error": "ConnectError: no route to host",
+        "error": "ConnectError: could not connect",
     }
+
+
+@respx.mock
+def test_a_test_never_passes_on_what_a_non_http_peer_sent(client: TestClient) -> None:
+    """#2021 review: pointed at another TCP service, h11 quotes that service's first
+    line in its error. The URL is a setting, so that text must not come back."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(
+        side_effect=httpx.RemoteProtocolError("illegal status line: bytearray(b'-ERR secret')")
+    )
+
+    body = client.post("/api/v1/settings/test").json()
+    assert "secret" not in json.dumps(body)
+    assert body["upstream"]["error"] == "RemoteProtocolError: the server did not answer in HTTP"
 
 
 @respx.mock

@@ -8,6 +8,10 @@ signal. Each client call therefore declares the API-key scope it needs, and a
 
 from __future__ import annotations
 
+import os
+import re
+import socket
+import ssl
 from enum import StrEnum
 from typing import Any
 
@@ -68,10 +72,6 @@ def upstream_body(response: httpx.Response) -> Any:
         return response.json()
     except ValueError:
         return None
-
-
-#: The most of a transport error's text `UpstreamAnswer` keeps.
-MAX_ANSWER_CHARS = 2000
 
 
 class UpstreamAnswer(BaseModel):
@@ -196,5 +196,48 @@ def map_transport(error: httpx.HTTPError, *, what: str) -> ApiError:
             f"could not reach Bambuddy to {what}: {type(error).__name__}",
             type_=UNAVAILABLE_PROBLEM,
         ),
-        UpstreamAnswer(error=f"{type(error).__name__}: {error}"[:MAX_ANSWER_CHARS]),
+        UpstreamAnswer(error=f"{type(error).__name__}: {_transport_reason(error)}"),
     )
+
+
+#: What each transport failure means, in ScadBuddy's words; the first match wins.
+_TRANSPORT_REASONS: tuple[tuple[type[httpx.HTTPError], str], ...] = (
+    (httpx.ConnectTimeout, "timed out connecting"),
+    (httpx.ReadTimeout, "timed out waiting for the answer"),
+    (httpx.WriteTimeout, "timed out sending the request"),
+    (httpx.PoolTimeout, "timed out waiting for a free connection"),
+    (httpx.RemoteProtocolError, "the server did not answer in HTTP"),
+    (httpx.ConnectError, "could not connect"),
+    (httpx.ReadError, "the connection failed while reading the answer"),
+    (httpx.WriteError, "the connection failed while sending the request"),
+)
+
+#: An OpenSSL reason code, such as CERTIFICATE_VERIFY_FAILED: a constant, never peer text.
+_TLS_REASON = re.compile(r"[A-Z0-9_]{1,64}")
+
+
+def _transport_reason(error: httpx.HTTPError) -> str:
+    """Why the call failed, never in the exception's own words. For a peer that does
+    not speak HTTP, h11 quotes the bytes it received in its message (``illegal status
+    line: bytearray(b'...')``), and the URL is a setting: passing that text on would
+    let whoever sets the URL read the first line of any port this server can reach.
+    What the local socket or TLS layer said is kept, as a constant: the OS's text for
+    the errno, or OpenSSL's reason code."""
+    seen: set[int] = set()
+    cause = error.__cause__ or error.__context__
+    # A chain can loop back on itself, through a handler that re-raises.
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, ssl.SSLError):
+            reason = getattr(cause, "reason", None)
+            reason = reason if isinstance(reason, str) else ""
+            return f"TLS failed ({reason})" if _TLS_REASON.fullmatch(reason) else "TLS failed"
+        if isinstance(cause, socket.gaierror):
+            return "the host name could not be resolved"
+        if isinstance(cause, OSError) and cause.errno:
+            return os.strerror(cause.errno)
+        cause = cause.__cause__ or cause.__context__
+    for kind, reason in _TRANSPORT_REASONS:
+        if isinstance(error, kind):
+            return reason
+    return "the call failed"
