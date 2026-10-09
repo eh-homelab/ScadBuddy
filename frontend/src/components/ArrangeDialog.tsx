@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { ArrangeRequest, LibraryEntry, Output } from '../api/types'
+import type { ArrangeRequest, LibraryEntry, LibraryFileObjects, ModelSummary, Output } from '../api/types'
 import {
   backfillFailures,
   backfillIds,
@@ -42,10 +42,11 @@ function listed(names: string[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
-/** Why these library files are left out, in one sentence (#1863 reads them). */
-function plainNote(files: LibraryEntry[]): string {
-  const one = files.length === 1
-  return `${listed(files.map((f) => f.filename))} ${one ? 'was' : 'were'} not made by ScadBuddy, so ${one ? 'it' : 'they'} cannot be arranged yet.`
+/** #1863 — each object read from a library file ScadBuddy did not make, as a row. */
+function fileRowsOf(files: { file: LibraryEntry; read: LibraryFileObjects }[]) {
+  return files.flatMap(({ file, read }) =>
+    read.objects.map((object) => ({ file, object, key: `library:${file.id}:${object.part}` })),
+  )
 }
 
 /** The templates of `outputs`, first seen first: what the result can be filed under. */
@@ -58,8 +59,9 @@ function templatesOf(outputs: Output[]): string[] {
  * object of each source is a row with its copies; Arrange lays them out for the goal on
  * the configured printer's plate, with no re-render, and saves the result. #1864 — the
  * sources mix outputs of any template and library files: a file ScadBuddy uploaded
- * arranges through the output it is a copy of, any other is shown as not arrangeable
- * yet. Add files and Add from a model add more before the run. An output saved before
+ * arranges through the output it is a copy of, and #1863 any other through the objects
+ * the server reads from its 3MF; one it cannot read (a sliced file) is left out, saying
+ * why. Add files and Add from a model add more before the run. An output saved before
  * Arrange has no objects: Arrange asks to re-render it first, then arranges with it (#902).
  */
 export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Props) {
@@ -68,6 +70,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const [adding, setAdding] = useState<'files' | 'model' | null>(null)
   /** The output behind each library file, read by id, or why it could not be read. */
   const [read, setRead] = useState<Record<string, Output | { error: string }>>({})
+  /** #1863 — the objects of each library file ScadBuddy did not make, or why not. */
+  const [objects, setObjects] = useState<Record<number, LibraryFileObjects | { error: string }>>({})
+  /** Every template, for a result of library files alone to be filed under. */
+  const [models, setModels] = useState<ModelSummary[] | null>(null)
   /** Outputs re-rendered here, read back with their objects. */
   const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
@@ -82,10 +88,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     return true
   })
   const named = new Map(sources.flatMap((s) => (s.kind === 'output' ? [[s.output.id, s.output] as const] : [])))
-  const plain: LibraryEntry[] = []
+  const plain: { file: LibraryEntry; read: LibraryFileObjects }[] = []
   const reading: LibraryEntry[] = []
   /** Files ScadBuddy made whose output could not be read, each with why. */
   const unread: string[] = []
+  /** #1863 — files whose objects could not be read from the 3MF, each with why. */
+  const unreadable: string[] = []
   const behind: Output[] = []
   for (const source of sources) {
     if (source.kind === 'output') {
@@ -93,9 +101,15 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       continue
     }
     const id = source.file.output_id
-    const output = id ? (named.get(id) ?? read[id]) : null
+    if (!id) {
+      const found = objects[source.file.id]
+      if (found === undefined) reading.push(source.file)
+      else if ('error' in found) unreadable.push(found.error)
+      else plain.push({ file: source.file, read: found })
+      continue
+    }
+    const output = named.get(id) ?? read[id]
     if (output === undefined) reading.push(source.file)
-    else if (output === null) plain.push(source.file)
     else if ('error' in output) unread.push(`${source.file.filename}: ${output.error}`)
     else behind.push(output)
   }
@@ -103,7 +117,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const outputs = [...new Map(behind.map((o) => [o.id, refreshed[o.id] ?? o])).values()]
   const unusable = outputs.filter((output) => needsBackfill(output) || flagged.includes(output.id))
   const rows = rowsOf(outputs.filter((output) => !unusable.includes(output)))
-  const templates = templatesOf(outputs.filter((output) => !unusable.includes(output)))
+  const fileRows = fileRowsOf(plain)
+  const ownTemplates = templatesOf(outputs.filter((output) => !unusable.includes(output)))
+  // Library files alone: filed under any template the user picks.
+  const anyTemplate = ownTemplates.length === 0 && outputs.length === 0 && fileRows.length > 0
+  const templates = anyTemplate ? (models ?? []).map((model) => model.slug) : ownTemplates
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
   const [name, setName] = useState('')
@@ -126,6 +144,40 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       ),
     ),
   ].join(',')
+  // #1863 — read the objects of each file ScadBuddy did not make once, whoever added it.
+  const toList = [
+    ...new Set(
+      sources.flatMap((s) => (s.kind === 'library' && !s.file.output_id && !(s.file.id in objects) ? [s.file.id] : [])),
+    ),
+  ].join(',')
+  useEffect(() => {
+    if (!open || !toList) return
+    let live = true
+    for (const id of toList.split(',').map(Number)) {
+      api
+        .getLibraryObjects(id)
+        .then((found) => live && setObjects((known) => ({ ...known, [id]: found })))
+        .catch((cause: unknown) => {
+          const error = cause instanceof ApiError ? cause.detail : 'its objects could not be read'
+          if (live) setObjects((known) => ({ ...known, [id]: { error } }))
+        })
+    }
+    return () => {
+      live = false
+    }
+  }, [open, toList])
+  useEffect(() => {
+    if (!open || !anyTemplate || models !== null) return
+    let live = true
+    api
+      .listModels()
+      .then((found) => live && setModels(found))
+      .catch(() => live && setModels([]))
+    return () => {
+      live = false
+    }
+  }, [open, anyTemplate, models])
+
   useEffect(() => {
     if (!open || !toRead) return
     let live = true
@@ -156,6 +208,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       setFiling(null)
       // A read that failed (a network error, say) is tried again.
       setRead((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
+      setObjects((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
       return
     }
     running.current?.abort()
@@ -183,7 +236,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
         const why = backfillFailures(failed)
         // Every output that can be arranged is, the ones that never needed a re-render too.
-        if (ready.length === 0 && usable.length === 0) {
+        if (ready.length === 0 && usable.length === 0 && fileRows.length === 0) {
           setFailures(`${why} Nothing was arranged.`)
           return
         }
@@ -199,15 +252,24 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         )
       }
       // The chosen template, unless every output of it was left out: then the first one's.
+      // Library files alone go under the template picked from every one (#1863).
       const kept = templatesOf(usable)
-      const slug = filing && kept.includes(filing) ? filing : kept[0]
+      const choices = kept.length > 0 ? kept : templates
+      const slug = filing && choices.includes(filing) ? filing : choices[0]
       if (!slug) throw new Error('Nothing to arrange.')
       const body: ArrangeRequest = {
-        objects: rowsOf(usable).map(({ output, object, key }) => ({
-          output_id: output.id,
-          part: object.part,
-          count: countOf(key, object.count),
-        })),
+        objects: [
+          ...rowsOf(usable).map(({ output, object, key }) => ({
+            output_id: output.id,
+            part: object.part,
+            count: countOf(key, object.count),
+          })),
+          ...fileRows.map(({ file, object, key }) => ({
+            library_file_id: file.id,
+            part: object.part,
+            count: countOf(key, object.count),
+          })),
+        ],
         goal,
         name: name.trim() || null,
         slug,
@@ -242,9 +304,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             {backfillNote(unusable)}
           </p>
         )}
-        {plain.length > 0 && (
-          <p role="status" className="text-[12px] text-muted">
-            {plainNote(plain)}
+        {unreadable.length > 0 && (
+          <p role="status" className="text-[12px] text-warn">
+            {`Left out: ${unreadable.join('; ')}.`}
           </p>
         )}
         {unread.length > 0 && (
@@ -256,25 +318,31 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           <p className="text-[12px] text-faint">{`Reading ${listed(reading.map((f) => f.filename))}…`}</p>
         )}
         <ul className="flex flex-col gap-1.5">
-          {rows.map(({ output, object, key }) => {
-            const label = `${object.bom_piece ?? object.file} — ${output.name ?? output.id}`
-            return (
-              <li key={key} className="flex items-center justify-between gap-2 text-[13px]">
-                <span>{label}</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={500}
-                  aria-label={`Copies of ${label}`}
-                  value={countOf(key, object.count)}
-                  onChange={(event) =>
-                    setCounts({ ...counts, [key]: Math.max(0, Number(event.target.value) || 0) })
-                  }
-                  className="sb-field sb-num w-20"
-                />
-              </li>
-            )
-          })}
+          {[
+            ...rows.map(({ output, object, key }) => ({
+              key,
+              label: `${object.bom_piece ?? object.file} — ${output.name ?? output.id}`,
+              count: object.count,
+            })),
+            ...fileRows.map(({ file, object, key }) => ({
+              key,
+              label: `${object.name} — ${file.filename}`,
+              count: object.count,
+            })),
+          ].map(({ key, label, count }) => (
+            <li key={key} className="flex items-center justify-between gap-2 text-[13px]">
+              <span>{label}</span>
+              <input
+                type="number"
+                min={0}
+                max={500}
+                aria-label={`Copies of ${label}`}
+                value={countOf(key, count)}
+                onChange={(event) => setCounts({ ...counts, [key]: Math.max(0, Number(event.target.value) || 0) })}
+                className="sb-field sb-num w-20"
+              />
+            </li>
+          ))}
         </ul>
         {adding === null && (
           <div className="flex flex-wrap gap-2">
@@ -306,7 +374,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             onCancel={() => setAdding(null)}
           />
         )}
-        {templates.length > 1 && (
+        {(templates.length > 1 || anyTemplate) && templates.length > 0 && (
           <>
             <label htmlFor="arrange-filing" className="text-[12px] text-muted">
               File under
@@ -363,7 +431,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         )}
         <Button
           onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}
-          disabled={busy || asking || reading.length > 0 || (rows.length === 0 && unusable.length === 0)}
+          disabled={
+            busy ||
+            asking ||
+            reading.length > 0 ||
+            (anyTemplate && templates.length === 0) ||
+            (rows.length === 0 && fileRows.length === 0 && unusable.length === 0)
+          }
           aria-busy={busy}
         >
           Arrange

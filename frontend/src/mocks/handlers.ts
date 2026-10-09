@@ -73,6 +73,7 @@ import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 import { UI_MODULES } from './templateUi'
+import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
 
@@ -2577,27 +2578,33 @@ export const handlers = [
   http.post(`${base}/outputs/arrange`, async ({ request }) => {
     const body = (await request.json()) as ArrangeRequest
     state.lastArrange = body
-    // #1864 — a library file stands for the output it is a copy of; one ScadBuddy did not
-    // make is refused, every such file named at once.
-    const plain = [
+    // #1864 — a library file stands for the output it is a copy of; #1863 — any other is
+    // read from its 3MF, and one that cannot be (the sliced file) is refused, every such
+    // file named at once.
+    const isPlain = (o: ArrangeRequest['objects'][number]) =>
+      o.library_file_id != null && !state.libraryOutputs.has(o.library_file_id)
+    const refused = [
       ...new Set(
         body.objects.flatMap((o) =>
-          o.library_file_id != null && !state.libraryOutputs.has(o.library_file_id) ? [o.library_file_id] : [],
+          isPlain(o) && !mockLibraryObjects(o.library_file_id ?? 0) ? [o.library_file_id ?? 0] : [],
         ),
       ),
     ]
-    if (plain.length > 0) {
+    if (refused.length > 0) {
       return problem(
         422,
         'Unprocessable Content',
-        `${plain.length} library file(s) were not made by ScadBuddy, so nothing records their objects; arranging such a file is not supported yet`,
-        { code: 'library_file_not_arrangeable', library_file_ids: plain },
+        `${refused.length} library file(s) cannot be arranged: ${refused.map((id) => `file ${id}: ${SLICED_REASON}`).join('; ')}`,
+        { code: 'library_file_not_arrangeable', library_file_ids: refused },
       )
     }
-    const objects = body.objects.map((o) => ({
-      ...o,
-      output_id: o.output_id ?? state.libraryOutputs.get(o.library_file_id ?? 0) ?? '',
-    }))
+    const library = body.objects.filter(isPlain)
+    const objects = body.objects
+      .filter((o) => !isPlain(o))
+      .map((o) => ({
+        ...o,
+        output_id: o.output_id ?? state.libraryOutputs.get(o.library_file_id ?? 0) ?? '',
+      }))
     // #902 — every output saved before Arrange, named at once, as the API does.
     const chosen = [...new Set(objects.map((o) => o.output_id))]
     const missing = chosen.find((id) => !state.outputs.some((o) => o.id === id))
@@ -2637,25 +2644,60 @@ export const handlers = [
         if (count > 0) manifest.push({ ...entry, count, source_output: entry.source_output ?? source.id })
       }
     }
-    if (manifest.length === 0) {
-      return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
+    if (slugs.length === 0 && body.slug == null) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        'a result of library files alone is filed under a template: name one in slug',
+      )
     }
-    if (body.slug != null && !slugs.includes(body.slug)) {
+    if (slugs.length > 0 && body.slug != null && !slugs.includes(body.slug)) {
       return problem(
         422,
         'Unprocessable Content',
         `the result is filed under one of its objects' templates (${slugs.join(', ')}), not ${body.slug}`,
       )
     }
+    const filed = body.slug ?? slugs[0]!
+    for (const object of library) {
+      const fileId = object.library_file_id ?? 0
+      const read = mockLibraryObjects(fileId) ?? []
+      const entries = object.part == null ? read : read.filter((m) => m.part === object.part)
+      if (entries.length === 0) {
+        return problem(422, 'Unprocessable Content', `library file ${fileId} has no object ${object.part}`)
+      }
+      for (const entry of entries) {
+        const count = object.count ?? entry.count
+        const [x, y, z] = entry.size
+        if (count > 0) {
+          manifest.push({
+            part: entry.part,
+            file: entry.name,
+            slug: filed,
+            revision: null,
+            bbox: { min: [0, 0, 0], max: [x, y, z], size: [x, y, z] },
+            footprint: [x, y],
+            colours: entry.colours,
+            count,
+            plates: 1,
+            library_file_id: fileId,
+          })
+        }
+      }
+    }
+    if (manifest.length === 0) {
+      return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
+    }
     const first = state.outputs.find((o) => o.id === objects[0]?.output_id)
-    if (!first?.bbox_mm) return problem(409, 'Conflict', 'the output has no dimensions')
-    const colors = body.colours ?? first.colors ?? []
+    const bbox = first ? first.bbox_mm : manifest[0]!.bbox
+    if (!bbox) return problem(409, 'Conflict', 'the output has no dimensions')
+    const fromFiles = manifest.filter((m) => m.library_file_id != null).flatMap((m) => m.colours)
+    const colors = body.colours ?? [...new Set([...(first?.colors ?? []), ...fromFiles])]
     const copies = manifest.reduce((sum, m) => sum + m.count, 0)
-    const bbox = first.bbox_mm
     const jobId = nextHexId()
     const job: Job = {
       id: jobId,
-      slug: body.slug ?? first.slug,
+      slug: filed,
       status: 'done',
       created_at: new Date().toISOString(),
       finished_at: new Date().toISOString(),

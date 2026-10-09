@@ -168,6 +168,9 @@ export type OutputPlate = Schemas['OutputPlate']
 export type LibraryListing = Schemas['LibraryListing']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
+/** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
+export type LibraryFileObjects = Schemas['LibraryFileObjects']
+export type LibraryFileObject = Schemas['LibraryFileObject']
 
 /**
  * #89 — run tracking.
