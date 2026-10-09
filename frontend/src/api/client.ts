@@ -21,6 +21,7 @@ import type {
   HeadlessBrowserSetting,
   HttpRequestSetting,
   ImageSettings,
+  AttachmentView,
   AiSessionView,
   SessionLimits,
   SessionResource,
@@ -1483,6 +1484,14 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
+
+  /** #1941 — uploads an image the user attached in the assistant panel; its message then sends the id. */
+  uploadAttachment: (image: { mediaType: string; data: string; preview: { mediaType: string; data: string } }) =>
+    request<AttachmentView>('/ai/attachments', { method: 'POST', body: JSON.stringify(image) }),
+
+  /** #1941 — deletes an upload the user removed from the composer before sending it. */
+  deleteAttachment: (id: string) =>
+    request<void>(`/ai/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   /** The long edge the assistant panel scales attached images to, served by the agent service. */
   getImageSettings: () => request<ImageSettings>('/ai/settings/images'),

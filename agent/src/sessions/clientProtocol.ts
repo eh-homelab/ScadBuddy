@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
+import { type AttachmentRef, AttachmentRefsSchema } from '../attachments/store.js'
 import { UserImagesSchema } from './images.js'
 import { PROTOCOL_VERSION } from './protocol.js'
 
@@ -42,8 +43,13 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      * one that is not a string of at most 256 characters is dropped here.
      */
     traceparent: z.string().max(256).optional().catch(undefined),
-    /** #1866: images for the model, each with the preview its `user.turn` shows (images.ts). */
-    images: UserImagesSchema.optional(),
+    /**
+     * Images for the model: the ids of images the panel uploaded (#1941,
+     * routes/attachments.ts), or, from a tab loaded before that, the images
+     * themselves with their previews (#1866, images.ts). Inline images are
+     * accepted for one release more, within CHAT_FRAME_MAX (routes/chat.ts).
+     */
+    images: z.union([AttachmentRefsSchema, UserImagesSchema]).optional(),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (questions/service.ts).
@@ -63,6 +69,13 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ v, type: z.literal('tab.bind'), tabId: z.string().regex(/^[A-Za-z0-9_-]{22,64}$/) }),
 ])
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
+
+export type UserMessageImages = Extract<ClientMessage, { type: 'user.message' }>['images']
+
+/** Whether a message's images are uploads named by id (#1941) rather than inline. */
+export function isAttachmentRefs(images: NonNullable<UserMessageImages>): images is AttachmentRef[] {
+  return images.every((i) => 'kind' in i)
+}
 
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string }
 

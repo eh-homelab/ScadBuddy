@@ -3,8 +3,10 @@ import { z } from 'zod'
 
 // Images the user pastes, drops or attaches in the assistant panel (#1866).
 //
-// A `user.message` frame may carry them beside its text: each the full image,
-// base64, for the model, and a small preview the panel made of it. The model
+// The panel uploads each one (#1941, routes/attachments.ts, checked with
+// UserImageSchema below) and its `user.message` names them by id; a tab loaded
+// before that sent them inline in the frame. Either way an image is the full
+// image, base64, for the model, and a small preview the panel made of it. The model
 // gets the full images as `image` content blocks in the turn's user message
 // (`userPrompt`), so they are kept only where Claude Code keeps the turn: the
 // SDK transcript (ai_session_entries), which resume reads and no watcher is sent.

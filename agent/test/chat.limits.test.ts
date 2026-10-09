@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { ChatConnection, type ChatConnectionOptions } from '../src/routes/chat.js'
+import { CHAT_FRAME_MAX, ChatConnection, type ChatConnectionOptions, MAX_QUEUED_FRAMES } from '../src/routes/chat.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { event, type ServerEvent } from '../src/sessions/protocol.js'
@@ -236,27 +236,10 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
-  it('caps the bytes queued as well as the frames, so large image frames cannot pile up (#1866)', async () => {
-    const fake = fakeManager({ holdStart: true })
-    const out: ServerEvent[] = []
-    const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
-      log: () => {},
-      limits: { maxQueuedBytes: 2500 },
-    })
-    await connection.open()
-    const frame = JSON.stringify({ v: 1, type: 'user.message', text: 'x'.repeat(1000), context: { route: '/' } })
-    const handled = Array.from({ length: 5 }, () => connection.receive(frame))
-    await settle()
-    // Two frames of about 1 KB fit under 2.5 KB; the rest are busy.
-    expect(fake.started()).toBe(1)
-    expect(errors(out, 'busy')).toBe(3)
-    fake.release()
-    await Promise.all(handled)
-    expect(fake.started()).toBe(2)
-    // Their bytes are given back once handled.
-    await connection.receive(frame)
-    expect(fake.started()).toBe(3)
-    connection.close()
+  it('holds at most MAX_QUEUED_FRAMES frames of CHAT_FRAME_MAX, now that images are uploaded, not framed (#1941)', () => {
+    expect(CHAT_FRAME_MAX).toBe(256 * 1024)
+    // The frame cap alone bounds a connection's queue; #1866's byte cap went with the 9 MiB frames.
+    expect(MAX_QUEUED_FRAMES * CHAT_FRAME_MAX).toBeLessThanOrEqual(8 * 1024 * 1024)
   })
 
   it('refuses a flood of malformed frames past the queue cap with busy, like valid ones', async () => {

@@ -909,21 +909,51 @@ they are stored:
 Full payloads stay only in the SDK transcript (`ai_session_entries`), which is never
 sent to watchers.
 
-## Images in the chat (#1866)
+## Images in the chat (#1866, #1941)
 
-The panel's `user.message` may carry up to four images
-([`agent/src/sessions/images.ts`](../../agent/src/sessions/images.ts)): PNG, JPEG, GIF
-or WebP, at most 5 MiB of base64 each and 8 MiB together, each with a preview of at
-most 64 KiB (PNG, JPEG or WebP). A frame is refused as `invalid` when an image's bytes
-do not start with its type's signature, and the refusal never quotes them. The model
-gets the full images as `image` blocks in the turn's user message; Claude Code
+The panel uploads each image when the user attaches it, and its `user.message` names
+up to four of them by id, `{ kind: 'attachment', id }`. No image travels in the chat
+socket.
+
+**The upload.** `POST /api/v1/ai/attachments`
+([`agent/src/routes/attachments.ts`](../../agent/src/routes/attachments.ts)) passes the
+same UI check as the other browser writes (`guard.ts` `uiRequestProblem`: the HTTPS
+ingress and the one origin allowlist in `http/origins.ts`), takes JSON only, and caps
+the body at one image and its preview before reading it. The image is checked by
+[`agent/src/sessions/images.ts`](../../agent/src/sessions/images.ts): PNG, JPEG, GIF
+or WebP, at most 5 MiB of base64, its bytes starting with its type's signature, and a
+preview of at most 64 KiB (PNG, JPEG or WebP). A refusal names fields and caps, never
+the bytes. The answer is `{ id, preview }`. `DELETE /api/v1/ai/attachments/:id` (same
+check) removes one the user took out of the composer.
+
+**The store.** `ai_attachments`
+([`agent/src/attachments/store.ts`](../../agent/src/attachments/store.ts)) is a staging
+area per owner (the browser user for the panel). Every query names the owner, so
+another owner's id reads as unknown. A row expires an hour after upload
+(`ATTACHMENT_TTL_MS`) and a sweep deletes expired rows every five minutes. One owner
+holds at most 24 rows and 40 MiB (`OWNER_ROWS_MAX`, `OWNER_BYTES_MAX`); past either,
+an upload is refused with 429, so the route cannot fill the database. The bytes are
+plaintext, as in `ai_session_blobs`.
+
+**The turn.** The chat socket, and `sessions_send` for an MCP caller
+(`tools/imageRefs.ts`, where `attachment` is a member of #1906's reference union), read
+the attachments a message names for the principal sending it. An id that is unknown,
+expired or another owner's refuses the message as `invalid` before any turn starts.
+The model gets the images as `image` blocks in the turn's user message. Claude Code
 re-encodes them and keeps a copy under its own temp directory in the agent's state, as
-it does for any pasted image. The `user.turn` event keeps only the previews, and an MCP
-transcript (`sessions_get`) only their count. Nothing logs or traces the bytes.
+it does for any pasted image. Once the turn has started, the attachments move into the
+session: their bytes go to `ai_session_blobs` through `SessionBlobs.put`, named
+`<sha256>.<ext>`, and the staging rows are deleted. The session's own lifetime governs
+them from then on (deleting the session cascades). A durable session (#1056) reads
+images from that table by name in an activity, so no image enters a Temporal payload.
+The `user.turn` event keeps only the previews, and an MCP transcript (`sessions_get`)
+only their count. Nothing logs or traces the bytes.
 
-The chat socket takes frames up to 9 MiB (`CHAT_FRAME_MAX`) and holds at most 18 MiB of
-unhandled frames per connection (`MAX_QUEUED_BYTES`), past which a frame is `busy`; the
-tab socket keeps its 256 KiB cap (`BRIDGE_FRAME_MAX`).
+**The socket.** The chat socket takes frames up to 256 KiB (`CHAT_FRAME_MAX`), the
+same as the tab socket (`BRIDGE_FRAME_MAX`), and at most 32 unhandled frames per
+connection. For one release it still parses inline images from a tab loaded before
+#1941, but only within that cap. A larger frame closes the socket with 1009, and the
+old tab reconnects without that message.
 
 ## Audit log (#258)
 

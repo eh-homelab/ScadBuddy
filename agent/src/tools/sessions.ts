@@ -14,7 +14,7 @@ import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
 import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
-import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveImageRefs } from './imageRefs.js'
+import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveSendImages } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
 // Agent-to-agent control (#300; spec §6 "Agent-to-agent", §8.1, §8.2): the
@@ -430,10 +430,15 @@ export const sessionTools: Tool[] = [
         return sessions.events.lastSeq(session_id)
       })
       // Resolved after the session check, so a caller cannot use an unknown session to probe images.
-      const resolved = images ? await resolveImageRefs(images, ctx.backend) : undefined
+      // An `attachment` resolves only for the principal that uploaded it (#1941).
+      const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
+      const resolved = images ? await resolveSendImages(images, ctx.backend, attachments) : undefined
       const turn = await refusals(() =>
-        sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers, ...(resolved ? { images: resolved } : {}) }),
+        sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers, ...(resolved ? { images: resolved.images } : {}) }),
       )
+      // The turn has the bytes; the uploads move into the session (attachments/store.ts `claim`).
+      // A failed move is not the send's: the turn runs, and the staging rows expire.
+      if (resolved?.attached.length) await ctx.attachments?.claim(session_id, owner, resolved.attached).catch(() => {})
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session_id, owner))
       return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: before })

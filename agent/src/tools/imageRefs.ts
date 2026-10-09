@@ -1,6 +1,13 @@
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import {
+  AttachmentError,
+  type AttachmentRef,
+  AttachmentRefSchema,
+  type AttachmentStore,
+  type ResolvedAttachment,
+} from '../attachments/store.js'
+import {
   IMAGE_DATA_MAX,
   IMAGES_DATA_TOTAL_MAX,
   IMAGES_MAX,
@@ -11,6 +18,7 @@ import {
   type UserImage,
   UserImagesSchema,
 } from '../sessions/images.js'
+import type { Owner } from '../sessions/protocol.js'
 import { readCapped } from './binary.js'
 import { outputId, slug, VIEW } from './common.js'
 import { ToolError } from './registry.js'
@@ -36,6 +44,13 @@ import { ToolError } from './registry.js'
 // fetching a URL a caller chose is outward (spec §8.2) and sessions_send is
 // `write`. A web image comes in through fetch_asset (approved, and held to
 // the Settings allowlist, #844) and is then sent as `{ kind: 'asset' }`.
+//
+// One kind is not the backend's: `attachment` (#1941), an image its owner
+// uploaded to the agent's attachment store (POST /api/v1/ai/attachments,
+// attachments/store.ts). Only that owner can send it, so over /mcp it resolves
+// only for the principal that uploaded it; the panel's uploads are the browser
+// user's. Its preview is the one uploaded with it, and once the turn has
+// started its bytes move into the session (`AttachmentStore.claim`).
 //
 // Previews (the `user.turn` event's, which the panel shows) come from the
 // backend: a view's own 128 px drawing, a media item's thumbnail, or the image
@@ -75,6 +90,7 @@ export const ImageRefSchema = z.discriminatedUnion('kind', [
     archive_id: archiveId,
     plate: z.number().int().min(1).optional(),
   }),
+  AttachmentRefSchema,
 ])
 export type ImageRef = z.infer<typeof ImageRefSchema>
 
@@ -85,7 +101,8 @@ export const IMAGE_REFS_DESCRIPTION =
   `Up to ${IMAGES_MAX} images ScadBuddy already holds, by reference, sent to the model before the text: ` +
   "`output_thumbnail` (an output's thumbnail, or a plate's cover with `plate`), `output_view` (a drawn view " +
   "of an output), `model_thumbnail`, `model_media` (a template's media item), `asset` (an uploaded file; " +
-  'bring a web image in with fetch_asset first) and `print_thumbnail`. Each must be a PNG, JPEG, GIF or WebP ' +
+  'bring a web image in with fetch_asset first), `print_thumbnail`, and `attachment` (an image this caller ' +
+  'uploaded to the assistant\'s attachment store; only its uploader may send it). Each must be a PNG, JPEG, GIF or WebP ' +
   `of at most ${(IMAGE_DATA_MAX / 4) * 3} bytes, and together at most ${(IMAGES_DATA_TOTAL_MAX / 4) * 3} bytes. ` +
   'No inline image data is accepted.'
 
@@ -109,7 +126,7 @@ async function fetchCapped(pending: Pending, cap: number): Promise<Fetched> {
   return { ok: true, data: Buffer.from(read.bytes).toString('base64') }
 }
 
-function label(ref: ImageRef): string {
+function label(ref: BackendRef): string {
   switch (ref.kind) {
     case 'output_thumbnail':
       return `output ${ref.output_id}${ref.plate === undefined ? ' thumbnail' : ` plate ${ref.plate}`}`
@@ -126,7 +143,9 @@ function label(ref: ImageRef): string {
   }
 }
 
-function image(backend: BackendClient, ref: ImageRef): Pending {
+type BackendRef = Exclude<ImageRef, { kind: 'attachment' }>
+
+function image(backend: BackendClient, ref: BackendRef): Pending {
   const stream = { parseAs: 'stream' as const }
   switch (ref.kind) {
     case 'output_thumbnail':
@@ -168,7 +187,7 @@ function view(backend: BackendClient, output_id: string, name: z.infer<typeof VI
 }
 
 /** The backend's own small copy of `ref`, where it draws one. */
-function smallCopy(backend: BackendClient, ref: ImageRef): Pending | undefined {
+function smallCopy(backend: BackendClient, ref: BackendRef): Pending | undefined {
   if (ref.kind === 'output_view') return view(backend, ref.output_id, ref.view, VIEW_PREVIEW_SIZE)
   if (ref.kind === 'model_media') {
     return backend.GET('/api/v1/models/{slug}/media/{item_id}/thumbnail', {
@@ -185,7 +204,7 @@ function asPreview(data: string): ImagePreview | undefined {
   return { mediaType: type as ImagePreview['mediaType'], data }
 }
 
-async function preview(backend: BackendClient, ref: ImageRef, data: string): Promise<ImagePreview> {
+async function preview(backend: BackendClient, ref: BackendRef, data: string): Promise<ImagePreview> {
   const small = smallCopy(backend, ref)
   if (small) {
     // A preview is best effort: a missing or odd small copy falls back, never fails the send.
@@ -196,7 +215,7 @@ async function preview(backend: BackendClient, ref: ImageRef, data: string): Pro
   return asPreview(data) ?? NO_PREVIEW
 }
 
-async function resolveOne(backend: BackendClient, ref: ImageRef, index: number): Promise<UserImage> {
+async function resolveOne(backend: BackendClient, ref: BackendRef, index: number): Promise<UserImage> {
   const where = `images[${index}] (${label(ref)})`
   const fetched = await fetchCapped(image(backend, ref), IMAGE_BYTES_MAX)
   if (!fetched.ok) {
@@ -209,19 +228,54 @@ async function resolveOne(backend: BackendClient, ref: ImageRef, index: number):
   return { mediaType, data: fetched.data, preview: await preview(backend, ref, fetched.data) }
 }
 
+/** Where `attachment` references are read, and for whom: the principal sending the turn. */
+export type AttachmentSource = { store: AttachmentStore; owner: Owner }
+
+/** A send's images, and the attachments among them to claim once its turn has started. */
+export type ResolvedImages = { images: UserImage[]; attached: ResolvedAttachment[] }
+
+async function attachmentAt(source: AttachmentSource | undefined, ref: AttachmentRef, index: number): Promise<ResolvedAttachment> {
+  if (!source) throw new ToolError(`images[${index}]: attachments cannot be sent here`, 400)
+  try {
+    const [one] = await source.store.resolve(source.owner, [ref])
+    return one!
+  } catch (err) {
+    if (err instanceof AttachmentError) throw new ToolError(err.message.replace('images[0]', `images[${index}]`), 404)
+    throw err
+  }
+}
+
 /**
- * The images `refs` name, fetched from the backend and checked as the panel's
- * are (sessions/images.ts UserImagesSchema). A refusal names the reference and
- * why, never the bytes.
+ * The images `refs` name: the backend's fetched, attachments read for
+ * `attachments.owner`, each checked as the panel's are (sessions/images.ts
+ * UserImagesSchema). A refusal names the reference and why, never the bytes.
  */
-export async function resolveImageRefs(refs: readonly ImageRef[], backend: BackendClient): Promise<UserImage[]> {
+export async function resolveSendImages(
+  refs: readonly ImageRef[],
+  backend: BackendClient,
+  attachments?: AttachmentSource,
+): Promise<ResolvedImages> {
   const images: UserImage[] = []
+  const attached: ResolvedAttachment[] = []
   // One at a time: at most IMAGES_MAX, and a refusal stops before the rest are read.
-  for (const [index, ref] of refs.entries()) images.push(await resolveOne(backend, ref, index))
+  for (const [index, ref] of refs.entries()) {
+    if (ref.kind === 'attachment') {
+      const one = await attachmentAt(attachments, ref, index)
+      attached.push(one)
+      images.push(one.image)
+    } else {
+      images.push(await resolveOne(backend, ref, index))
+    }
+  }
   const checked = UserImagesSchema.safeParse(images)
   if (!checked.success) {
     // Messages from images.ts name fields and caps only: they never quote the bytes.
     throw new ToolError(`images: ${checked.error.issues.map((i) => `${i.path.join('.') || 'images'}: ${i.message}`).join('; ')}`, 400)
   }
-  return checked.data
+  return { images: checked.data, attached }
+}
+
+/** resolveSendImages's images, for a caller with no attachment store: an `attachment` reference is refused. */
+export async function resolveImageRefs(refs: readonly ImageRef[], backend: BackendClient): Promise<UserImage[]> {
+  return (await resolveSendImages(refs, backend)).images
 }
