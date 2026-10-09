@@ -166,7 +166,9 @@ class Follower:
                 return "deleted"
             except Exception:
                 # A disk blip or a half-written meta.json: keep following, slowly.
-                logger.exception("could not read the output", extra={"subject": subject.key})
+                logger.exception(
+                    "could not read the print's subject", extra={"subject": subject.key}
+                )
                 interval = self.error_interval
                 continue
             try:

@@ -574,6 +574,21 @@ describe("a library file's print, as an output's (#1751)", () => {
     await waitFor(async () => expect(await shown()).toEqual(['90']))
     expect(screen.queryByRole('list', { name: 'Waiting for Bambuddy' })).not.toBeInTheDocument()
   })
+
+  it('takes a print found by its hash as the done run’s, so no Waiting row stays beside it', async () => {
+    const read = vi.fn()
+    server.use(
+      only([libraryPrint({ queue_item_id: null })]),
+      http.get('/api/v1/print/library/:id/progress', () => {
+        read()
+        return HttpResponse.json(queued(52, { stage: 'done', settled: true }))
+      }),
+    )
+    render('/prints?file=89')
+    await waitFor(() => expect(read).toHaveBeenCalled())
+    await waitFor(async () => expect(await shown()).toEqual(['90']))
+    expect(screen.queryByRole('list', { name: 'Waiting for Bambuddy' })).not.toBeInTheDocument()
+  })
 })
 
 describe('an output whose newest run failed before queueing (#1831)', () => {

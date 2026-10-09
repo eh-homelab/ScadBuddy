@@ -599,6 +599,28 @@ def test_a_library_file_never_printed_has_no_progress(
 
 
 @respx.mock
+def test_a_library_run_that_failed_before_queueing_is_its_progress(client: TestClient) -> None:
+    """As an output's (#1049): a run refused after its 202 queued nothing, and its
+    failure is the file's progress rather than "never printed"."""
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89)
+    run_routes()
+
+    started = client.post(
+        "/api/v1/print/library/89/run", json={**body(), "filament_plan": {"slots": []}}
+    )
+    assert started.status_code == 202, started.text
+    run = follow_run(client, started.json()["id"])
+    assert run["status"] == "failed"
+
+    answer = client.get("/api/v1/print/library/89/progress").json()
+    assert answer["route"] == "run" and answer["stage"] == "failed" and answer["settled"]
+    assert answer["error_message"] == run["error"]["detail"]
+
+
+@respx.mock
 def test_a_library_print_s_progress_is_its_newest_run_s_and_is_followed(
     client: TestClient, watched: list[str]
 ) -> None:

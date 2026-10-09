@@ -221,7 +221,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
         <Waiting slug={fixedSlug} prints={pages.items} complete={pages.next === null} />
       )}
       {waitingFile !== null && !pages.loading && !pages.error && (
-        <LibraryWaiting fileId={waitingFile} name={fileName} prints={pages.items} />
+        <LibraryWaiting fileId={waitingFile} name={fileName} prints={pages.items} complete={pages.next === null} />
       )}
 
       {pages.loading && (
@@ -377,13 +377,29 @@ function Waiting({ slug, prints, complete }: { slug: string; prints: PrintSummar
  * #1751 — a library file's newest print that no listed print came from yet, as an
  * output's is above: its queue items are what the prints it made are linked by.
  */
-function LibraryWaiting({ fileId, name, prints }: { fileId: number; name: string | null; prints: PrintSummary[] }) {
+function LibraryWaiting({
+  fileId,
+  name,
+  prints,
+  complete,
+}: {
+  fileId: number
+  name: string | null
+  prints: PrintSummary[]
+  /** Every page is loaded: the run's print may be on one that is not, until then. */
+  complete: boolean
+}) {
   const subject = libraryOptionsScope(fileId)
-  const { progress } = usePrintProgress(subject, true)
-  if (!progress) return null
+  const { progress } = usePrintProgress(subject, complete)
+  if (!complete || !progress) return null
   const items = new Set(progress.copies_detail?.map((copy) => copy.queue_entry_id) ?? [])
   if (progress.queue_item_id !== null && progress.queue_item_id !== undefined) items.add(progress.queue_item_id)
   if (prints.some((print) => print.queue_item_id !== null && items.has(print.queue_item_id))) return null
+  // Done once its queue item went, it was looked for by its sliced file's hash (#1755): a
+  // print linked that way names no queue item, so it is taken as this run's.
+  if (progress.settled && progress.stage === 'done' && prints.some((print) => print.queue_item_id === null)) {
+    return null
+  }
   return (
     <ul aria-label="Waiting for Bambuddy" className="mb-3 flex flex-col gap-2">
       <WaitingRow name={name ?? `Library file ${fileId}`} progress={progress} />
