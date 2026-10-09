@@ -88,6 +88,23 @@ def test_models_page_builds_only_its_own_records(
     assert built == ["bravo"]
 
 
+def test_a_model_left_out_does_not_shorten_its_page(client: TestClient, paths: DataPaths) -> None:
+    """A model whose ``model.json`` cannot be read is left out of the listing; the page
+    is filled past it, so a short page still means the end of the list."""
+    for slug in ("alpha", "bravo", "charlie", "delta"):
+        _create(client, slug)
+    every = [row["slug"] for row in client.get("/api/v1/models").json()]
+    broken = every[1]
+    paths.model_source(broken).with_name("model.json").write_text("{", encoding="utf-8")
+    listed = [slug for slug in every if slug != broken]
+
+    first = client.get("/api/v1/models", params={"limit": 2})
+    assert [row["slug"] for row in first.json()] == listed[:2]
+    assert first.headers["x-total-count"] == str(len(every))
+    rest = client.get("/api/v1/models", params={"limit": 2, "after": listed[1]})
+    assert [row["slug"] for row in rest.json()] == listed[2:4]
+
+
 def test_models_after_an_unknown_slug_is_a_conflict(client: TestClient) -> None:
     _create(client, "alpha")
     response = client.get("/api/v1/models", params={"after": "gone"})

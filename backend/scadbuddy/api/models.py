@@ -316,12 +316,25 @@ def list_models(
     after: PageAfter = None,
 ) -> list[ModelRecord]:
     """Mine, then the built-ins. `X-Total-Count` counts every template, one whose
-    ``model.json`` cannot be read (and so is left out of the list) too."""
+    ``model.json`` cannot be read (and so is left out of the list) too.
+
+    A page holds `limit` records whenever the list goes on past it: a model left out
+    of a window does not shorten the page, because the agent reads a short page as
+    the end of the list and would never list the models after it."""
     slugs = catalogue.slugs()
     response.headers[TOTAL_COUNT_HEADER] = str(len(slugs))
     if limit is None and after is None:
         return catalogue.list_models(slugs)
-    return catalogue.list_models(slugs[page_window(slugs, after, limit, "model")])
+    window = page_window(slugs, after, limit, "model")
+    if limit is None:
+        return catalogue.list_models(slugs[window])
+    records: list[ModelRecord] = []
+    start = window.start
+    while len(records) < limit and start < len(slugs):
+        chunk = slugs[start : start + limit - len(records)]
+        records.extend(catalogue.list_models(chunk))
+        start += len(chunk)
+    return records
 
 
 class PastedSource(BaseModel):
