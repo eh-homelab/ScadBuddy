@@ -1762,6 +1762,9 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     await call(gate)
     expect(asked[0]!.questions[0]!.question).not.toContain('browser_snapshot')
     expect(asked[0]!.questions[0]!.question).toMatch(/^I need your ScadBuddy tab, but it is not connected\./)
+    // #1356, #1382: says what is guaranteed, and that a reply of the user's own ends the turn's tab waits.
+    expect(asked[0]!.questions[0]!.question).toContain('A change that was waiting is not made on its own')
+    expect(asked[0]!.questions[0]!.question).toContain('a reply of your own words ends my waits for the tab this turn')
   })
 
   // #1308: a tab wait that joined the model's own card gets its replies.

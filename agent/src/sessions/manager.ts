@@ -253,8 +253,9 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         // opened it may stop waiting first (#1341). The row keeps the opener's id.
         message:
           'I need your ScadBuddy tab, but it is not connected. Open ScadBuddy (or reload it) and open ' +
-          'this chat in the assistant panel. When it is back I re-check the page before going on; without it I carry ' +
-          'on with what needs no tab.',
+          "this chat in the assistant panel. A change that was waiting is not made on its own when the tab is back. " +
+          "Answer I'm back to have me try again; a reply of your own words ends my waits for the tab this turn, and " +
+          'without the tab I carry on with what needs no tab.',
         options: [IM_BACK, CARRY_ON],
         timeout_s: TAB_WAIT_S,
       })
