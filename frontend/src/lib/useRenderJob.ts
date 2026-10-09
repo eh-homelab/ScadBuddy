@@ -37,6 +37,12 @@ export interface RenderState {
    */
   settledFor: ParamValues | undefined
   /**
+   * #1685 — the `params` object the shown `job` was submitted with, by identity. Unlike
+   * `settledFor` it does not move when a submit fails before making a job, which leaves
+   * the previous `job` on show: its `colors` belong to these values, not to the new ones.
+   */
+  jobFor: ParamValues | undefined
+  /**
    * Seconds until the submit is tried again, and why: a 503 with `retry_after` (a full
    * render queue, only when SCADBUDDY_RENDER_QUEUE_MAX is set; Temporal unavailable; the
    * request still being accepted; or no answer from ScadBuddy). Not an error: the
@@ -166,6 +172,7 @@ export function useRenderJob(
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
   const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
+  const [jobFor, setJobFor] = useState<ParamValues | undefined>(undefined)
   const [busy, setBusy] = useState<RenderBusy | undefined>(undefined)
   const [attempt, setAttempt] = useState(0)
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
@@ -235,6 +242,7 @@ export function useRenderJob(
           if (isStale()) return
           failures = 0
           setJob(next)
+          setJobFor(params)
           if (next.status === 'done' || next.status === 'failed' || next.status === 'cancelled') finish()
         } catch (cause) {
           if (isStale()) return
@@ -348,5 +356,5 @@ export function useRenderJob(
     }
   }, [slug, params, version, extraRef, attempt])
 
-  return { job, rendering, error, busy, retry, settledFor, stage }
+  return { job, rendering, error, busy, retry, settledFor, jobFor, stage }
 }
