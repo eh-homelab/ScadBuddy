@@ -210,6 +210,7 @@ class RackUsageStore:
                 "SELECT s.serial, seen.first_seen_at, count(p.archive_id) AS prints,"
                 " coalesce(sum(p.print_seconds), 0) AS print_seconds,"
                 " coalesce(sum(p.grams), 0) AS grams,"
+                " max(p.settled_at) AS last_used_at,"
                 # Open picks (#1079): no print row for the pick's item and group yet.
                 " (SELECT count(*) FROM rack_nozzle_picks AS k"
                 "  WHERE k.serial = s.serial AND k.picked_at > now() - %s"
@@ -229,6 +230,7 @@ class RackUsageStore:
                 grams=float(row["grams"]),
                 first_seen_at=row["first_seen_at"],
                 pending=int(row["pending"]),
+                last_used_at=row["last_used_at"],
             )
             for row in rows
         }

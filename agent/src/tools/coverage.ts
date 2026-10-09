@@ -183,6 +183,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'like the rest of the rack picker; an agent prints through print_output, which takes the ' +
       'remembered algorithm, and a tool for changing it is a follow-up.',
   },
+  {
+    operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
+    reason:
+      "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
+      "print time and open picks in the print check's rack options, for the hotends that job could use.",
+  },
 ]
 
 /**

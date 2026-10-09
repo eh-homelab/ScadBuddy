@@ -2,6 +2,7 @@ import { HttpResponse, http } from 'msw'
 import type {
   PrintCheck,
   PrinterRackAlgorithm,
+  PrinterRackUsage,
   RackAlgorithm,
   RackOption,
   RackSentPick,
@@ -51,6 +52,24 @@ export function mockRackPicks(manual: number | null, plates: number[]): RackSent
 }
 
 export const handlers = [
+  // #1298 — the mock rack's hotends, with the counts the check's options show.
+  http.get(`${base}/print/printers/:id/rack-usage`, ({ params }) =>
+    HttpResponse.json({
+      printer_id: Number(params['id']),
+      hotends: OPTIONS.map((option) => ({
+        position: option.position,
+        nozzle_diameter: option.nozzle_diameter,
+        nozzle_type: option.nozzle_type,
+        high_flow: option.flow === 'high_flow',
+        prints: option.prints,
+        print_seconds: option.print_seconds,
+        grams: 0,
+        pending: option.pending,
+        first_seen_at: null,
+        last_used_at: null,
+      })),
+    } satisfies PrinterRackUsage),
+  ),
   http.put(`${base}/print/printers/:id/rack-algorithm`, async ({ params, request }) => {
     const id = String(params['id'])
     const body = (await request.json()) as { algorithm: RackAlgorithm | null }
