@@ -829,7 +829,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(entries).toEqual([
       expect.objectContaining({ id: `question:${attId}`, kind: 'answer', session_id: session.id, tool: ATTENTION_TOOL, prompt: 'Load the PETG, please', responders: ['browser'], expires_at: expect.any(String), attention: { reason: 'blocked', on_timeout: 'proceed' } }),
       expect.objectContaining({ kind: 'approval', session_id: session.id, tool: 'mcp__stub__print', prompt: '', input_hash: expect.stringMatching(/^[0-9a-f]{64}$/), responders: ['browser', 'grant'] }),
-      expect.objectContaining({ id: `question:${qId}`, kind: 'answer', session_id: s2.id, tool: 'AskUserQuestion', prompt: 'Which colour?', expires_at: null }),
+      expect.objectContaining({ id: `question:${qId}`, kind: 'answer', session_id: s2.id, tool: 'AskUserQuestion', prompt: 'Which colour?', expires_at: expect.any(String) }),
     ])
     expect(entries[1]).not.toHaveProperty('attention')
     // Never the outward call's raw input.
@@ -911,7 +911,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         const query = Reflect.apply(target, thisArg, args) as Promise<unknown>
         const text = Array.isArray(args[0]) ? (args[0] as string[]).join('') : ''
         const race = racing
-        if (!race || !text.includes('SELECT questions, outcome FROM ai_questions')) return query
+        if (!race || !text.includes('SELECT questions, outcome,')) return query
         racing = undefined
         return query.then(async (rows) => {
           await race()

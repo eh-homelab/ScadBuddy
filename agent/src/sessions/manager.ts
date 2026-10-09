@@ -811,6 +811,7 @@ export class SessionManager {
       events: this.events,
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
       ...(deps.audit ? { audit: deps.audit } : {}),
+      ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS

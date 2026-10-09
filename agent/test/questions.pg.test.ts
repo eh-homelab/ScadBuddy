@@ -637,4 +637,58 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await turn!.done
     expect(verdicts[0]).toMatchObject({ answered: true })
   }, 15_000)
+
+  // spec 2026-10-01 §6.6 Timeouts: a question's timer cancels it, never answers it.
+  describe('question expiry', () => {
+    const expiry = (seconds: unknown) => ({ get: async <T,>(key: string) => (key === 'question_expiry_seconds' ? (seconds as T) : undefined) })
+
+    it('bounds question_expiry_seconds to 10–86 400, default 3600', async () => {
+      const at = (v: unknown) => new QuestionService({ sql: db.sql, events: {} as EventLog, settings: expiry(v) }).expirySeconds()
+      expect(await at(undefined)).toBe(3600)
+      expect(await at(5)).toBe(10)
+      expect(await at(100_000)).toBe(86_400)
+      expect(await at('soon')).toBe(3600)
+    })
+
+    it('a parked question whose timer fires is cancelled, and the call is told nobody answered', async () => {
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, settings: expiry(10) })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+      const id = await pendingQuestion(m, session.id)
+      const [row] = await db.sql<{ ttl: number }[]>`
+        SELECT round(extract(epoch FROM expires_at - created_at))::int AS ttl FROM ai_questions WHERE id = ${id}`
+      expect(row?.ttl).toBe(10)
+      await turn!.done
+      expect(verdicts[0]).toMatchObject({ answered: false })
+      expect((verdicts[0] as { message: string }).message).toMatch(/nobody answered in time/)
+      const [after] = await db.sql<{ outcome: string; answers: unknown }[]>`SELECT outcome, answers FROM ai_questions WHERE id = ${id}`
+      expect(after).toEqual({ outcome: 'cancelled', answers: null })
+      expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved')).toHaveLength(1)
+    }, 40_000)
+
+    it('the sweep cancels an expired question once, and an answer after the timer is refused', async () => {
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+      const id = await pendingQuestion(m, session.id)
+      await db.sql`UPDATE ai_questions SET expires_at = now() - interval '1 second' WHERE id = ${id}`
+      await expect(m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))).rejects.toMatchObject({ code: 'conflict' })
+      const [first, second] = await Promise.all([m.questions.expireDue(), m.questions.expireDue()])
+      expect(first + second).toBe(0)
+      await turn!.done
+      const [row] = await db.sql<{ outcome: string; reason: string }[]>`SELECT outcome, reason FROM ai_questions WHERE id = ${id}`
+      expect(row).toEqual({ outcome: 'cancelled', reason: 'nobody answered in time' })
+      expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved')).toHaveLength(1)
+      expect(verdicts[0]).toMatchObject({ answered: false })
+    })
+
+    it('the sweep cancels an expired question once', async () => {
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+      const id = await pendingQuestion(m, session.id)
+      await db.sql`UPDATE ai_questions SET expires_at = now() - interval '1 second' WHERE id = ${id}`
+      expect(await m.questions.expireDue()).toBe(1)
+      expect(await m.questions.expireDue()).toBe(0)
+      await turn!.done
+      expect(verdicts[0]).toMatchObject({ answered: false })
+    })
+  })
 })
