@@ -428,6 +428,9 @@ async def test_a_slow_first_pin_stops_the_request_waiting_and_stores_behind_it(
     await asyncio.wait_for(asyncio.gather(*behind), 5)
     assert not api._storing  # the done-callback let it go
     assert content.index.get(snapshot_key("demo", rev)) is not None
+    # The retry only has to find the stored snapshot, but on a loaded runner that alone
+    # can outlast 0.1 s and read as pending again; what it checks is that it is stored.
+    api.pin_timeout = 5
     assert await asyncio.wait_for(api.pin("demo", rev), 5) == rev
 
 
