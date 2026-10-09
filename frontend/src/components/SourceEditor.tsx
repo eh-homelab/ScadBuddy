@@ -26,6 +26,10 @@ export interface SourceEditHandle {
   element: () => HTMLElement | null
 }
 
+
+/** #997 — how to leave the editor by keyboard, since Tab indents in it. */
+const LEAVE_HINT = 'Esc, then Tab, to leave the editor'
+
 interface Props {
   value: string
   onChange: (next: string) => void
@@ -290,7 +294,8 @@ export function SourceEditor({
             })
             instance.onDidBlurEditorText(() => instance.updateOptions({ tabFocusMode: false }))
             instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => latest.current.onSave?.())
-            instance.updateOptions({ ariaLabel: label })
+            // #1672 — the way out is part of the name, so a screen reader says it on focus.
+            instance.updateOptions({ ariaLabel: `${label}. ${LEAVE_HINT}` })
             applyMarkers()
             setTextModel(instance.getModel())
             // Only the model's own source: a definition shown read-only has no session.
@@ -305,8 +310,9 @@ export function SourceEditor({
           loading={<span className="text-[13px] text-muted">Loading the editor</span>}
         />
       </div>
-      <p className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
-        Esc, then Tab, to leave the editor
+      {/* Read as part of the editor's name (#1672), so hidden here from screen readers. */}
+      <p aria-hidden="true" className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
+        {LEAVE_HINT}
       </p>
     </div>
   )
