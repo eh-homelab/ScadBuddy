@@ -207,6 +207,31 @@ describe('useRenderJob', () => {
     expect(result.current.error).toBeUndefined()
   })
 
+  it('says a snapshot still uploading is why it waits, and waits it out as long as it lasts (#1422)', async () => {
+    const pending = () =>
+      new ApiError({
+        title: 'Service Unavailable',
+        status: 503,
+        detail: "demo@abc: the revision's snapshot is still uploading",
+        retry_after: 2,
+        code: 'snapshot_pending',
+      })
+    // More refusals than a transient outage is allowed: an upload is waited out, as a full queue is.
+    for (let i = 0; i < TRANSIENT_RETRIES + 2; i++) submit.mockRejectedValueOnce(pending())
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+
+    expect(result.current.busy).toEqual({ seconds: 2, reason: 'snapshot-pending' })
+    for (let i = 0; i < TRANSIENT_RETRIES + 2; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+    }
+    expect(submit).toHaveBeenCalledTimes(TRANSIENT_RETRIES + 3)
+    expect(result.current.error).toBeUndefined()
+    expect(result.current.busy).toBeUndefined()
+  })
+
   it('says why it waits: an unreachable render service, or a request still accepting', async () => {
     submit.mockRejectedValueOnce(
       new ApiError({
