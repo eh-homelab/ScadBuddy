@@ -463,6 +463,9 @@ export class ChatConnection {
           return
         }
         for await (const { event: e } of stream) {
+          // input.* drive notifications (spec §6.6); the panel's cards keep their own
+          // events, and a bundle that predates these types would call each a protocol error.
+          if (e.type === 'input.requested' || e.type === 'input.resolved') continue
           // Wait for the client to read what it has before sending more.
           if (!(await this.drained(controller.signal))) return
           this.emit(e)

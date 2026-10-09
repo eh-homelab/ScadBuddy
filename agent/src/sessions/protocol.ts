@@ -64,6 +64,36 @@ export type SessionSummary = {
 
 type V = { v: typeof PROTOCOL_VERSION }
 
+/**
+ * One tool call parked on a person (durable-agents spec §6.6), in the one shape both
+ * modes and both reads use. `id` is the `request_id` respond takes, opaque to clients:
+ * `approval:<uuid>`, `question:<uuid>` (a classic row) or
+ * `durable:<session id>:<workflow run id>:<tool_use_id>`.
+ */
+export type InputEntry = {
+  id: string
+  kind: 'approval' | 'answer'
+  session_id: string | null
+  tool: string
+  /** An approval's scrubbed summary; empty for an answer. Never the call's raw input. */
+  summary: string
+  input_hash: string | null
+  /** An answer's question or attention message, scrubbed; empty for an approval. */
+  prompt: string
+  /** Who asked for the approval; null for an answer (the session's agent). */
+  requested_by: Owner | null
+  /** Who may answer: the browser user, and for an approval also a grant holder. */
+  responders: ('browser' | 'grant')[]
+  created_at: string
+  /** When its timer fires; null for an entry with none (a `done` summary). */
+  expires_at: string | null
+  /** Set on an attention request (#815) only. */
+  attention?: { reason: string; on_timeout: string | null; summary?: string }
+}
+
+/** How a parked call ended (`ai_input_responses.outcome`). */
+export type InputOutcome = 'approved' | 'denied' | 'expired' | 'answered' | 'cancelled' | 'timed_out'
+
 export type ServerEvent = V &
   (
     | { type: 'sessions.snapshot'; sessions: SessionSummary[] }
@@ -132,6 +162,14 @@ export type ServerEvent = V &
         /** #815 §2: a `tab_disconnected` attention request ended because the session's tab is connected again. */
         reconnected?: true
       }
+    /**
+     * A call parked on a person, of any kind and in either mode (spec §6.6,
+     * "Notifications"): what notifications are driven by. Logged and announced on the
+     * bus beside the per-kind events the panel's cards use; never sent on the chat socket.
+     */
+    | { type: 'input.requested'; sessionId: string; entry: InputEntry }
+    /** The entry `id` ended: answered, decided, timed out or cancelled. */
+    | { type: 'input.resolved'; sessionId: string; id: string; kind: 'approval' | 'answer'; outcome: InputOutcome; reason?: string }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
     /** The budget changed (a raise, #790), or a send was refused because it is spent. */

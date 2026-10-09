@@ -16,7 +16,7 @@
 
 | 5b produces | 5c uses it for |
 |---|---|
-| `ai_pending_input`, `ai_input_responses`, `ai_audit.request_id` (migration `20261009T0100Z_pending_input.sql`) | nothing directly: only through the activities below |
+| `ai_pending_input`, `ai_input_responses`, `ai_audit.request_id` (migration `20261009T0052Z_pending_input.sql`) | nothing directly: only through the activities below |
 | `scadbuddy_durable.gate.ids.durable_request_id(session_id, run_id, tool_use_id)` | the entry's `id` in workflow state |
 | `scadbuddy_durable.gate.entry.build_entry(...) -> GateEntry` (refuses a prompt over 16 KiB with `PromptTooLarge`) | the state it keeps when the plugin's `pending_approvals()` gains a call |
 | `scadbuddy_durable.gate.validate.validate_respond(entry, request)` (raises `RespondRefused(code, message)`) | the `respond` Update's validator (plus the plugin's `validate_decision`) |
@@ -67,7 +67,7 @@
 ## File structure
 
 TypeScript (`agent/`):
-- Create `src/db/migrations/20261009T0100Z_pending_input.sql`: the two tables and `ai_audit.request_id`.
+- Create `src/db/migrations/20261009T0052Z_pending_input.sql`: the two tables and `ai_audit.request_id`.
 - Create `src/gate/ids.ts`: format and parse request ids.
 - Create `src/gate/validate.ts`: `GateEntry`, `RespondRequest`, `validateRespond`, `RespondRefusal`, `REFUSAL_STATUS`.
 - Create `src/gate/role.ts`: `roleOf`.
@@ -104,7 +104,7 @@ Docs: `CLAUDE.md` (layout lines for `agent/src/gate/` and `scadbuddy_durable/gat
 ### Task 1: The tables, and `input.*` in the protocol
 
 **Files:**
-- Create: `agent/src/db/migrations/20261009T0100Z_pending_input.sql`
+- Create: `agent/src/db/migrations/20261009T0052Z_pending_input.sql`
 - Modify: `agent/src/sessions/protocol.ts`, `agent/src/routes/chat.ts`
 - Test: `agent/test/pendingInput.migration.pg.test.ts`, `agent/test/chat.test.ts` (existing file, one case)
 
