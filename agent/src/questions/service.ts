@@ -6,6 +6,7 @@ import { ATTENTION_TOOL, parseQuestions, type QuestionGate, type QuestionRequest
 import type { SettingsReader } from '../approvals/service.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { loadDoneSummary } from './doneSummary.js'
+import { inputRequested, inputResolved, questionEntry } from '../gate/classic.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
@@ -365,7 +366,10 @@ export class QuestionService {
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: expired,
-        events: expired.map((r) => event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason })),
+        events: expired.flatMap((r) => [
+          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+        ]),
       }
     })
     if (rows.length === 0) return false
@@ -460,7 +464,13 @@ export class QuestionService {
           AND (kind <> 'question' OR expires_at IS NULL OR expires_at > now())
         RETURNING turn_id, tool, tool_use_id, created_at`
       return row
-        ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
+        ? {
+            value: row,
+            events: [
+              event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal }),
+              inputResolved(sessionId, `question:${id}`, 'answer', 'answered'),
+            ],
+          }
         : { value: undefined, events: [] }
     })
     if (!answered) {
@@ -523,7 +533,10 @@ export class QuestionService {
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
-        events: cancelled.map((r) => event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason })),
+        events: cancelled.flatMap((r) => [
+          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+        ]),
       }
     })
     if (rows.length === 0) return 0
@@ -575,9 +588,10 @@ export class QuestionService {
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: resolved,
-        events: resolved.map((r) =>
+        events: resolved.flatMap((r) => [
           event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
-        ),
+          inputResolved(sessionId, `question:${r.id}`, 'answer', 'reconnected', reason),
+        ]),
       }
     })
     if (rows.length === 0) return 0
@@ -687,7 +701,13 @@ export class QuestionService {
         WHERE id = ${id} AND outcome IS NULL
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return row
-        ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: false, reason })] }
+        ? {
+            value: row,
+            events: [
+              event({ type: 'question.resolved', sessionId, id, answered: false, reason }),
+              inputResolved(sessionId, `question:${id}`, 'answer', 'timed_out', reason),
+            ],
+          }
         : { value: undefined, events: [] }
     })
     if (resolved) {
@@ -755,6 +775,7 @@ export class QuestionService {
         const tail: ServerEvent[] = []
         let superseded: Resolved[] = []
         let expiresAt: Date | null = null
+        let createdAt = new Date()
         let summary: string | null = null
         const own = request.tool === ATTENTION_TOOL
         if (attention?.reason === 'tab_disconnected') {
@@ -832,30 +853,37 @@ export class QuestionService {
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
+            tail.push(inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', why))
           }
           if (attention.reason === 'done') {
             const done = await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt, context.secrets())
             summary = done.summary
-            await tx`
+            const [inserted] = await tx<{ created_at: Date }[]>`
               INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary,
                                         unattended)
               VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
-                      'attention', 'done', ${summary}, ${done.unattended})`
+                      'attention', 'done', ${summary}, ${done.unattended})
+              RETURNING created_at`
+            createdAt = inserted?.created_at ?? new Date()
           } else {
-            const [inserted] = await tx<{ expires_at: Date }[]>`
+            const [inserted] = await tx<{ created_at: Date; expires_at: Date }[]>`
               INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions,
                                         kind, attention_reason, on_timeout, expires_at)
               VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
                       'attention', ${attention.reason}, ${attention.onTimeout},
                       now() + make_interval(secs => ${until === undefined ? attention.timeoutS : Math.max(0, (until - performance.now()) / 1000)}))
-              RETURNING expires_at`
+              RETURNING created_at, expires_at`
             expiresAt = inserted?.expires_at ?? null
+            createdAt = inserted?.created_at ?? new Date()
           }
         } else {
-          await tx`
+          const [inserted] = await tx<{ created_at: Date; expires_at: Date }[]>`
             INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, expires_at)
             VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
-                    now() + make_interval(secs => ${questionTtl}))`
+                    now() + make_interval(secs => ${questionTtl}))
+            RETURNING created_at, expires_at`
+          createdAt = inserted?.created_at ?? new Date()
+          expiresAt = inserted?.expires_at ?? null
         }
         tail.push(
           event({
@@ -870,6 +898,20 @@ export class QuestionService {
                 ? { attention: { reason: attention.reason, onTimeout: attention.onTimeout, expiresAt: expiresAt.toISOString() } }
                 : {}),
           }),
+          inputRequested(
+            sessionId,
+            questionEntry({
+              id,
+              sessionId,
+              tool: request.tool,
+              questions,
+              attentionReason: attention?.reason ?? null,
+              onTimeout: attention && attention.reason !== 'done' ? attention.onTimeout : null,
+              summary,
+              createdAt: createdAt.toISOString(),
+              expiresAt: expiresAt?.toISOString() ?? null,
+            }),
+          ),
         )
         // A done summary waits for nobody: the session goes on as it was.
         if (attention?.reason === 'done') return { value: { ...none, asked: true, superseded }, events: tail }

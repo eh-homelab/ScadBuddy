@@ -1,5 +1,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { sentToPanel } from '../../src/routes/chat.js'
+import type { ServerEvent } from '../../src/sessions/protocol.js'
 
 // The panel's protocol module (frontend/src/agent/chat/protocol.ts, #340),
 // loaded as it is, so the agent's events are checked against the schema the
@@ -117,7 +119,8 @@ export async function frontendRespondBodies(): Promise<{
 /** Throws, naming the event, when the panel would drop it. */
 export async function expectPanelAccepts(events: readonly unknown[]): Promise<void> {
   const parse = await frontendParseServerEvent()
-  for (const e of events) {
+  // What the chat socket sends: input.* are logged but never sent (routes/chat.ts).
+  for (const e of events.filter((e) => sentToPanel(e as ServerEvent))) {
     const result = parse(e)
     if (!result.ok) throw new Error(`the panel would drop ${JSON.stringify(e)}: ${result.error}`)
   }

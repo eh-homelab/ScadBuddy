@@ -15,6 +15,7 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
+import { approvalEntry, inputRequested, inputResolved } from '../gate/classic.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
 import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
@@ -665,6 +666,7 @@ export class ApprovalService {
           summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
           risk: 'outward',
         }),
+        inputRequested(created.sessionId, approvalEntry(created)),
       ]
       // Only the parked turn itself moves the session to waiting_approval.
       if (request.turnId !== null) {
@@ -734,7 +736,10 @@ export class ApprovalService {
             ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
             ...(reason && (decision === 'expired' || decision === 'cancelled') ? { reason } : {}),
           })
-          const events = [scrubForLog(resolved, [])]
+          const events = [
+            scrubForLog(resolved, []),
+            inputResolved(settled.sessionId, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
+          ]
           logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
         }
         return settled

@@ -638,6 +638,26 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(verdicts[0]).toMatchObject({ answered: true })
   }, 15_000)
 
+  // spec 2026-10-01 §6.6 Notifications: one input.requested and one input.resolved per entry.
+  it('logs input.requested after question.asked, and input.resolved after its resolution', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    await m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+    const log = await events(m, session.id)
+    const types = log.map((e) => e.type)
+    expect(types.indexOf('input.requested')).toBe(types.indexOf('question.asked') + 1)
+    expect(types.indexOf('input.resolved')).toBe(types.indexOf('question.resolved') + 1)
+    expect(log.filter((e) => e.type.startsWith('input.'))).toEqual([
+      expect.objectContaining({
+        type: 'input.requested',
+        entry: expect.objectContaining({ id: `question:${id}`, kind: 'answer', prompt: QUESTIONS.map((q) => q.question).join('\n'), expires_at: expect.any(String) }),
+      }),
+      { v: PROTOCOL_VERSION, type: 'input.resolved', sessionId: session.id, id: `question:${id}`, kind: 'answer', outcome: 'answered' },
+    ])
+  })
+
   // spec 2026-10-01 §6.6 Timeouts: a question's timer cancels it, never answers it.
   describe('question expiry', () => {
     const expiry = (seconds: unknown) => ({ get: async <T,>(key: string) => (key === 'question_expiry_seconds' ? (seconds as T) : undefined) })
