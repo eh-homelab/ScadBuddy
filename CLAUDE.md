@@ -108,6 +108,10 @@ against a local fake Anthropic endpoint; `test/pg.test.ts` needs
 `SCADBUDDY_TEST_DATABASE_URL` (e.g. `docker run -d -e POSTGRES_PASSWORD=postgres
 -e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
 `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
+With it set, `pnpm test`'s globalSetup migrates a template database once and each
+Postgres test copies it (`test/support/postgres.ts`, #2018), so the test role needs
+`CREATEDB`, as the backend's does: without it the whole suite fails at setup, not
+only the Postgres tests.
 Evals (`agent/evals/`, `docs/ai/evals.md`): `test/evals.test.ts` replays each scenario
 against the fake endpoint in `pnpm test`; `pnpm evals` runs them live with the
 credential saved in Settings (or `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, CI only; the

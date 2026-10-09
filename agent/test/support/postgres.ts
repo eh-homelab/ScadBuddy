@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import postgres from 'postgres'
 import { connectDatabase, type Database } from '../../src/db.js'
 import { MIGRATIONS } from '../../src/db/migrations.js'
@@ -67,9 +68,14 @@ function databaseUrl(url: string, database: string): string {
   return u.toString()
 }
 
-// Named for the migrations it holds, so a changed or added migration builds a
-// new template rather than copying a stale one.
-const TEMPLATE = `test_template_${createHash('sha256').update(JSON.stringify(MIGRATIONS)).digest('hex').slice(0, 16)}`
+// Named for the migrations it holds and the code that applies them (its ledger
+// included), so a changed or added migration, or a change to how they are recorded,
+// builds a new template rather than copying a stale one.
+const TEMPLATE = `test_template_${createHash('sha256')
+  .update(JSON.stringify(MIGRATIONS))
+  .update(readFileSync(new URL('../../src/db/migrations.ts', import.meta.url)))
+  .digest('hex')
+  .slice(0, 16)}`
 // Distinct from MIGRATION_LOCK: it only orders the suites building the template.
 const TEMPLATE_LOCK = 0x5343_4144_5450_4c54n
 
