@@ -219,7 +219,7 @@ describe('scrubForLog', () => {
 
 describe('the agent’s protocol mirror', () => {
   const sample: ServerEvent[] = [
-    event({ type: 'sessions.snapshot', sessions: [{ sessionId: S, title: 't', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'A' }, status: 'idle' }] }),
+    event({ type: 'sessions.snapshot', sessions: [{ sessionId: S, title: 't', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'A' }, status: 'idle', parentId: null, updatedAt: '2026-10-09T00:00:00.000Z', costUsd: 0.25, budgetUsd: 1 }] }),
     event({ type: 'session.started', sessionId: S, origin: 'chat', owner: { kind: 'browser', id: 'browser', label: 'You' }, title: '', budgetUsd: 1 }),
     event({ type: 'session.owner', sessionId: S, owner: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'user.turn', sessionId: S, turnId: 't', text: 'hi', author: { kind: 'flow', id: 'analyzer', label: 'Analyzer' } }),

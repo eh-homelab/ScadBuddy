@@ -114,6 +114,13 @@ function budgetVerb(method: string, path: string): string | undefined {
   return method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/budget$/.test(path) ? 'session_budget_usd' : undefined
 }
 
+/** A fork of a session, or a rename or done (#792); successful forks are recorded by the manager (sessions/manager.ts fork). */
+function sessionWriteVerb(method: string, path: string): string | undefined {
+  if (method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/fork$/.test(path)) return 'session_fork'
+  if (method === 'PATCH' && /^\/api\/v1\/ai\/sessions\/[^/]+$/.test(path)) return 'session_update'
+  return undefined
+}
+
 /** Which plugin requests are writes; connection tests are not. */
 function pluginVerb(method: string, path: string): string | undefined {
   if (path.endsWith('/test')) return undefined
@@ -208,6 +215,8 @@ export function createApp(deps: AppDeps): AgentApp {
     // Refused or failed raises of a session's budget (#790); a raise that
     // lands is recorded by the manager (sessions/manager.ts raiseBudget).
     app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'settings', verb: budgetVerb, failuresOnly: true }))
+    // Refused or failed forks, renames and dones (#792).
+    app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'resource', verb: sessionWriteVerb, failuresOnly: true }))
   }
 
   const shutdown = new AbortController()

@@ -10,6 +10,7 @@ import { pendingInput, type PendingInputEntry, RespondError, respond, sessionPen
 import { sessionView } from '../routes/sessions.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import type { LoggedEvent } from '../sessions/eventLog.js'
+import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
 import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
@@ -534,14 +535,23 @@ export const sessionTools: Tool[] = [
     description:
       'Branch a session this caller may see into a new one it owns, with the conversation so far, to try an ' +
       'alternative without changing the original. The fork spends from the same budget as the original: a turn in ' +
-      'either uses it up for both, so a session that has spent its budget cannot be forked; only the user can raise a budget.',
-    input: z.object({ session_id: sessionId, title: z.string().max(200).optional() }),
+      'either uses it up for both, so a session that has spent its budget cannot be forked; only the user can raise a budget. ' +
+      "With up_to (the message_id of an assistant.text row from sessions_get or sessions_attach), the fork keeps the " +
+      'conversation through that reply and drops what came after it.',
+    input: z.object({
+      session_id: sessionId,
+      title: z.string().max(200).optional(),
+      up_to: z.string().min(1).max(MESSAGE_ID_MAX).optional(),
+    }),
     risk: 'write',
     routes: [],
-    summarize: ({ session_id }) => `fork session ${session_id}`,
-    handler: async ({ session_id, title }, ctx) => {
+    summarize: ({ session_id, up_to }) => `fork session ${session_id}${up_to === undefined ? '' : ` up to ${up_to}`}`,
+    handler: async ({ session_id, title, up_to }, ctx) => {
       const child = await refusals(() =>
-        manager(ctx).fork(session_id, ownerOf(ctx.principal), title === undefined ? {} : { title }),
+        manager(ctx).fork(session_id, ownerOf(ctx.principal), {
+          ...(title === undefined ? {} : { title }),
+          ...(up_to === undefined ? {} : { upTo: up_to }),
+        }),
       )
       return json(sessionView(child, viewerOf(ctx)))
     },
