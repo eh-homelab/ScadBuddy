@@ -450,25 +450,33 @@ class _HealthServer(uvicorn.Server):
 
 
 def _allocated_bytes(root: Path) -> int:
-    """Bytes allocated to everything under ``root``, as ``du`` (and so kubelet, measuring
-    an emptyDir) counts them. A file removed while it is walked is skipped."""
+    """Bytes allocated to everything under ``root``, directories included and a file
+    with several links once, as ``du`` (and so kubelet, measuring an emptyDir) counts
+    them. An entry removed while it is walked is skipped."""
+    seen: set[tuple[int, int]] = set()
     total = 0
     for directory, _, files in os.walk(root):
-        for name in files:
+        for path in (directory, *(os.path.join(directory, name) for name in files)):
             with contextlib.suppress(FileNotFoundError):
-                total += os.lstat(os.path.join(directory, name)).st_blocks * 512
+                stat = os.lstat(path)
+                if stat.st_nlink > 1:
+                    if (stat.st_dev, stat.st_ino) in seen:
+                        continue
+                    seen.add((stat.st_dev, stat.st_ino))
+                total += stat.st_blocks * 512
     return total
 
 
 async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data_dir: Path) -> None:
-    """The store gauges this process owns: its piece cache, the key it holds, and its
-    whole data directory, which is an emptyDir evicted past its sizeLimit (#1785). The
-    store's usage is the API's to export (one database, one set of numbers)."""
+    """The store gauges this process owns: its whole data directory, which is an
+    emptyDir evicted past its sizeLimit (#1785), first, since it needs no database; then
+    its piece cache and the key it holds. The store's usage is the API's to export (one
+    database, one set of numbers)."""
+    metrics.render_data_bytes.set(await asyncio.to_thread(_allocated_bytes, data_dir))
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
         metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
-    metrics.render_data_bytes.set(await asyncio.to_thread(_allocated_bytes, data_dir))
 
 
 def _health_app(
