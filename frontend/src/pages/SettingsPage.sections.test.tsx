@@ -38,6 +38,42 @@ function region(name: string): HTMLElement {
   return section
 }
 
+// #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list) opens
+// Settings scrolled to it, once the page has loaded.
+describe('SettingsPage section links (#1307)', () => {
+  /** jsdom has no scrollIntoView: the ids it is called on, in order. */
+  function stubScroll(): { scrolled: string[]; restore: () => void } {
+    const scrolled: string[] = []
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id)
+    }
+    return { scrolled, restore: () => delete (Element.prototype as Partial<Element>).scrollIntoView }
+  }
+
+  it('scrolls to the section the URL names once the page has loaded', async () => {
+    const { scrolled, restore } = stubScroll()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#libraries' })
+      await seeded()
+      await waitFor(() => expect(scrolled).toContain('libraries'))
+      expect(scrolled.filter((id) => id === 'libraries')).toHaveLength(1)
+    } finally {
+      restore()
+    }
+  })
+
+  it('leaves the page at the top without a hash', async () => {
+    const { scrolled, restore } = stubScroll()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings' })
+      await seeded()
+      expect(scrolled).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+})
+
 describe('SettingsPage sources (#322)', () => {
   it('badges each field with where its value comes from', async () => {
     renderPage(<SettingsPage />)
