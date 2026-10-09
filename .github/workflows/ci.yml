@@ -632,7 +632,9 @@ jobs:
 
       # Opens agent/test/fixtures/secret-vectors.json, which the agent job
       # regenerates and compares: a format change in agent/src/secrets.ts or
-      # credentials.ts fails one job or the other.
+      # credentials.ts fails one job or the other. Runs every
+      # agent/test/fixtures/pending-input-vectors.json vector against the gate's
+      # validator port, as the agent job runs them against agent/src/gate/validate.ts.
       - name: Tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
