@@ -863,6 +863,48 @@ describe('a dialog with no room beside the assistant (#798)', () => {
     expect(dialog.contains(document.activeElement)).toBe(true)
   })
 
+  it('opens under a dialog that will cover it without taking the focus, at phone width (#2013)', async () => {
+    // A phone: the panel lies over the page (AppShell's PANEL_OVERLAYS_QUERY).
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('max-width'),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+    try {
+      const view = renderShell('/m/name-keychain', <DialogPage />)
+      const toggle = screen.getByRole('button', { name: 'Assistant' })
+      // Not raised above the dialog's overlay: there it would only paint over the dialog.
+      expect(toggle.className).not.toContain('z-[60]')
+      // The panel, laid out once and closed, so the dialog measures it when it opens.
+      await view.user.click(toggle)
+      await screen.findByRole('textbox', { name: 'Message the assistant' })
+      narrow()
+      await view.user.click(screen.getByRole('button', { name: 'Close assistant' }))
+      await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+      const dialog = screen.getByRole('dialog', { name: 'Print' })
+      const copies = within(dialog).getByRole('textbox', { name: 'Copies' })
+      expect(copies).toHaveFocus()
+
+      // The shortcut: the panel opens under the dialog, and the focus stays in it.
+      pressShortcut()
+      await act(async () => {})
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+      expect(copies).toHaveFocus()
+
+      // A click that reaches the toggle (jsdom does not hit-test the overlay) does not
+      // send the focus into the covered composer either.
+      await view.user.click(toggle)
+      await view.user.click(toggle)
+      await act(async () => {})
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByRole('textbox', { name: 'Message the assistant', hidden: true })).not.toHaveFocus()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('owns Escape, even from the covered chat', async () => {
     const view = renderShell('/m/name-keychain', <DialogPage />)
     await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
