@@ -100,6 +100,19 @@ function getChoices(ctx: ToolContext, source: Source, printer_id: number | undef
       )
 }
 
+/** The source's plates: for an output its 3MF's, for a library file what Bambuddy reads from it. */
+export function getPlates(ctx: Pick<ToolContext, 'backend'>, source: Source) {
+  return source.kind === 'library'
+    ? ok(
+        ctx.backend.GET('/api/v1/print/library/{file_id}/plates', { params: { path: { file_id: source.id } } }),
+        `get plates of library file ${source.id}`,
+      )
+    : ok(
+        ctx.backend.GET('/api/v1/outputs/{output_id}/plates', { params: { path: { output_id: source.id } } }),
+        `get plates of ${source.id}`,
+      )
+}
+
 function getFilaments(ctx: ToolContext, source: Source, query: FilamentQuery) {
   return source.kind === 'library'
     ? ok(
@@ -235,8 +248,10 @@ export const printTools: Tool[] = [
       'Everything the print dialog offers for an output, or a Bambuddy library file (`library_file_id`), in ' +
       'one read: printers (and the one chosen), the installed nozzles, quality tiers and Bambu processes per ' +
       'nozzle size, filament presets per size, plate types with the one last printed on, the filament step ' +
-      "(as get_print_filaments), and the model's (or the file's) remembered choices. What print_output fills " +
-      'omitted choices from.',
+      "(as get_print_filaments), the model's (or the file's) remembered choices, and its plates by index and " +
+      'name (what each holds; `null` when nothing names it; empty when they cannot be read), which ' +
+      'print_output takes as `plate_id`. What ' +
+      'print_output fills omitted choices from.',
     input: withSource({ printer_id: z.number().int().optional() }),
     risk: 'read',
     source:
@@ -244,8 +259,22 @@ export const printTools: Tool[] = [
     // Printers, status and archives (Read Status); slicer presets and the 3MF's
     // filament requirements (Manage Library). backend/scadbuddy/bambuddy/choices.py.
     bambuddyScope: ['Read Status', 'Manage Library'],
-    routes: ['GET /api/v1/print/outputs/{output_id}/choices', 'GET /api/v1/print/library/{file_id}/choices'],
-    handler: async (args, ctx) => json(await getChoices(ctx, sourceOf(args), args.printer_id)),
+    routes: [
+      'GET /api/v1/print/outputs/{output_id}/choices',
+      'GET /api/v1/print/library/{file_id}/choices',
+      'GET /api/v1/outputs/{output_id}/plates',
+      'GET /api/v1/print/library/{file_id}/plates',
+    ],
+    handler: async (args, ctx) => {
+      const source = sourceOf(args)
+      // #986 — a plate by what it holds, so the agent can say "the lid", not "plate 2". The plates
+      // are extra: an unreadable list is empty, as in the dialog, and never fails the choices.
+      const [choices, plates] = await Promise.all([
+        getChoices(ctx, source, args.printer_id),
+        getPlates(ctx, source).catch(() => []),
+      ])
+      return json({ ...choices, plates: plates.map(({ index, name }) => ({ index, name: name || null })) })
+    },
   }),
 
   defineTool({

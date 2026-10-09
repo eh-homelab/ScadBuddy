@@ -1,4 +1,5 @@
-import type { PrintProgress, PrintRunResult } from '../../api/types'
+import type { OutputPlate, PrintProgress, PrintRunResult } from '../../api/types'
+import { plateLabel } from '../../lib/plate'
 import { WarningList } from '../FilamentPicker'
 import { PrintProgressPanel } from '../PrintProgressPanel'
 
@@ -7,10 +8,12 @@ type Props = {
   printerName: string | null
   progress: PrintProgress | null
   polling: boolean
+  /** #986 — the source's plates, so a plate is named by what it holds. */
+  plates?: readonly OutputPlate[]
 }
 
 /** What a started print shows in place of the steps: what was queued, and its progress (#89). */
-export function QueuedPanel({ result, printerName, progress, polling }: Props) {
+export function QueuedPanel({ result, printerName, progress, polling, plates = [] }: Props) {
   const items = result.queue_item_ids ?? []
   /** #836 — the rack position each sliced group went out with; positions only, never a serial. */
   const picks = result.rack_picks ?? []
@@ -44,14 +47,14 @@ export function QueuedPanel({ result, printerName, progress, polling }: Props) {
           {picks.map((pick) => (
             <li key={`${pick.plate_id}:${pick.group_id}`} data-testid="rack-pick">
               {manyPlates
-                ? `Plate ${pick.plate_id}: rack nozzle position ${pick.position}`
+                ? `${plateLabel(plates, pick.plate_id)}: rack nozzle position ${pick.position}`
                 : `Rack nozzle: position ${pick.position}`}
             </li>
           ))}
         </ul>
       )}
       <WarningList warnings={result.warnings ?? []} testId="run-warnings" />
-      <PrintProgressPanel progress={progress} polling={polling} />
+      <PrintProgressPanel progress={progress} polling={polling} plates={plates} />
     </div>
   )
 }

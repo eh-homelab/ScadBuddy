@@ -636,6 +636,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
           printerName={printer?.name ?? null}
           progress={progress}
           polling={polling}
+          plates={picker.plates}
         />
       ) : unanswered !== null ? (
         <p role="alert" className="text-[13px] text-warn" data-testid="run-unanswered">
@@ -774,6 +775,13 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                   overrides={overrides}
                   onChange={picker.setOverride}
                 />
+              )}
+
+              {/* #986 — one plate has no choice to make, but its name still says what prints. */}
+              {picker.plates.length === 1 && picker.plates[0]?.name && (
+                <p className="text-[13px]" data-testid="single-plate">
+                  <span className="text-muted">Plate:</span> {picker.plates[0].name}
+                </p>
               )}
 
               {picker.plates.length > 1 && source && (
