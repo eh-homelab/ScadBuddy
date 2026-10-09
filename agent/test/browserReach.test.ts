@@ -100,13 +100,24 @@ describe('UiOriginProbe', () => {
     expect(open.hits.length).toBe(before + 1)
   })
 
-  it('reports the last answer for each origin, for /healthz', async () => {
-    const probe = new UiOriginProbe({ now: () => Date.parse('2026-10-08T12:00:00Z') })
-    expect(probe.last()).toEqual([])
+  it('says on /healthz only whether any origin is reachable, and logs the details when an answer changes', async () => {
+    const lines: string[] = []
+    const probe = new UiOriginProbe({ log: (line) => lines.push(line) })
+    expect(probe.summary()).toBe('not checked')
+    await probe.probe([sso.origin])
+    expect(probe.summary()).toBe('none reachable')
+    expect(lines).toEqual([`headless browser: ${sso.origin} answers sign-in (302 to https://authenticate.sso.example)`])
     await probe.probe([sso.origin, open.origin])
-    expect(probe.last()).toEqual([
-      { origin: sso.origin, reach: 'sign-in', detail: '302 to https://authenticate.sso.example', checked_at: '2026-10-08T12:00:00.000Z' },
-      { origin: open.origin, reach: 'ok', checked_at: '2026-10-08T12:00:00.000Z' },
-    ])
+    expect(probe.summary()).toBe('reachable')
+    expect(lines.slice(1)).toEqual([`headless browser: ${open.origin} answers ok`])
   })
+
+  it('asks only a bare http(s) origin, at the fixed /healthz path', async () => {
+    const probe = new UiOriginProbe()
+    const before = open.hits.length
+    const reach = await probe.probe([`${open.origin}/evil?x=1`, `file:///etc/passwd`, `${open.origin}/`])
+    for (const r of Object.values(reach)) expect(r).toEqual({ reach: 'unreachable', detail: 'not an http(s) origin' })
+    expect(open.hits.length).toBe(before)
+  })
+
 })

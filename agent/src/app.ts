@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
 import type { AuditRepo } from './audit/log.js'
-import type { UiReachReport } from './harness/browserReach.js'
+import type { UiReachSummary } from './harness/browserReach.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import type { CredentialRepo } from './credentials.js'
 import { AGENT_ACTOR_HEADER } from './harness/headlessBrowser.js'
@@ -81,10 +81,12 @@ export interface AppDeps {
   /** The agent-tools worker's state (#1055, temporal/worker.ts); left out without SCADBUDDY_TEMPORAL_ADDRESS. */
   temporal?: (() => TemporalHealth) | undefined
   /**
-   * How ScadBuddy's UI origins last answered the headless browser's probe
-   * (harness/browserReach.ts `UiOriginProbe.last`); left out without the headless browser.
+   * Whether the headless browser's probe last found a UI origin it reaches
+   * without a login (harness/browserReach.ts `UiOriginProbe.summary`); left out
+   * without sessions. Only that: /healthz is unauthenticated, so the origins and
+   * their answers go to the log.
    */
-  browserReach?: (() => UiReachReport[]) | undefined
+  browserReach?: (() => UiReachSummary) | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
@@ -135,8 +137,8 @@ export type Health = {
   secret_key: 'ok' | 'not configured'
   credential: CredentialState
   temporal: TemporalHealth | 'not configured'
-  /** Which UI origins the headless browser reaches without a login, as last asked; only with the headless browser. */
-  browser_origins?: UiReachReport[]
+  /** Whether the headless browser reaches any UI origin without a login, as last asked; only with sessions. */
+  browser_origins?: UiReachSummary
 }
 
 /** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep, and every session event stream. */

@@ -206,7 +206,8 @@ const tokens =
 
 // Which of ScadBuddy's UI origins the headless browser reaches without a
 // login (harness/browserReach.ts): asked on each browser turn, each answer kept
-// 30 s, the last ones shown on /healthz as `browser_origins`.
+// 30 s; a changed answer is logged, and /healthz says only whether any is
+// reachable (`browser_origins`).
 const uiOriginProbe = new UiOriginProbe()
 
 // Whether the headless browser's Chromium can keep its sandbox in this pod
@@ -386,7 +387,7 @@ const app = createApp({
   upgradeWebSocket,
   tabs,
   ...(temporalWorker ? { temporal: () => temporalWorker.state() } : {}),
-  ...(sessions ? { browserReach: () => uiOriginProbe.last() } : {}),
+  ...(sessions ? { browserReach: () => uiOriginProbe.summary() } : {}),
   commands,
   remoteAddress: (c) => {
     try {

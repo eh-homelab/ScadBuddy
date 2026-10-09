@@ -188,7 +188,9 @@ names one the browser can open, and a navigation to one that answered with a sig
 or an error is refused with the same path on a reachable one. When none is reachable
 the refusal says so, listing each origin's answer, instead of pointing at a login page.
 Every UI origin stays one for the request guard (a page may still load from it, with
-the marker). The last answers are on the agent's `/healthz` as `browser_origins`.
+the marker). Only the configured UI origins are ever asked, never a URL from a tool's input. Each
+origin's answer is logged when it changes; the agent's `/healthz` says only whether any
+is reachable (`browser_origins`).
 Nothing about the safety model depends on the
 loopback address: the marker goes to every one of these origins, and the backend's gate
 judges it the same however the request arrives (Guards, 4).
