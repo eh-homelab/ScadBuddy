@@ -1081,11 +1081,14 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (to !== null && day !== null && day > to) return false
   const slug = query.get('slug')
   if (slug !== null && print.slug !== slug) return false
+  const file = query.get('library_file_id')
+  if (file !== null && print.library_file_id !== Number(file)) return false
   const q = query.get('q')?.toLowerCase()
   if (q) {
     const haystack = [
       print.output_name ?? '',
       print.slug ?? '',
+      print.library_file_name ?? '',
       archive?.print_name ?? '',
       JSON.stringify(print.provenance?.params ?? {}),
     ]
@@ -2879,6 +2882,9 @@ export const handlers = [
     const cursor = query.get('cursor')
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== null && !/^[1-9][0-9]*$/.test(cursor))) {
       return problem(422, 'Unprocessable Content', 'the request did not match the expected shape')
+    }
+    if (query.has('slug') && query.has('library_file_id')) {
+      return problem(422, 'Unprocessable Content', "a print is of a template's output or of a library file: filter by one")
     }
     const matches = fixtures.prints.filter((print) => printMatches(print, query))
     const after = cursor === null ? matches : matches.filter((print) => print.archive_id < Number(cursor))

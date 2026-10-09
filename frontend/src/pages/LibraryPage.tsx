@@ -4,6 +4,7 @@ import { api, ApiError } from '../api/client'
 import type { LibraryEntry, LibraryListing } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { PrintPicker } from '../components/PrintPicker'
+import { libraryPrintsPath } from '../components/prints/prints'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { arrangedNote, fromFiles, type Arranged } from '../lib/arrange'
@@ -220,6 +221,16 @@ export function LibraryPage() {
                       ? 'Sliced already. Print it from Bambuddy.'
                       : 'ScadBuddy cannot print this file type.'}
                   </p>
+                )}
+                {file.printable && (
+                  // #1755 — the file's own print history, as a template has its Prints tab.
+                  <Link
+                    to={libraryPrintsPath(file.id)}
+                    aria-label={`Prints of ${file.filename}`}
+                    className="text-center text-[12px] text-muted hover:text-ink"
+                  >
+                    Prints
+                  </Link>
                 )}
               </li>
             ))}
