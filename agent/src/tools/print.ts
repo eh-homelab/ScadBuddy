@@ -26,9 +26,9 @@ import { page, PAGED, pageInput } from './pagination.js'
 // - Farm context, read: printers and live status (get_print_targets in
 //   settings.ts), the print dialog's choices (get_print_choices), spools with
 //   per-slot remaining grams (get_print_filaments), print progress, and a
-//   printer's current camera frame (get_printer_camera, #796). The
-//   queue, the print archive and aggregate stats have no backend route yet, so
-//   they have no tool yet.
+//   printer's current camera frame (get_printer_camera, #796). The queue, the
+//   print archive, aggregate stats and the whole spool inventory are farm.ts
+//   (#1912).
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
 
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional()

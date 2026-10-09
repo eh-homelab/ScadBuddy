@@ -13,24 +13,21 @@ from tests.bambuddy.conftest import recording
 
 
 @respx.mock
-def test_the_queue_passes_its_filters_and_cuts_to_the_limit(client: TestClient) -> None:
+def test_the_queue_passes_its_filters(client: TestClient) -> None:
     configure(client)
     route = respx.get(f"{API}/queue/").mock(
         return_value=httpx.Response(200, json=recording("queue.json"))
     )
 
-    response = client.get(
-        "/api/v1/farm/queue", params={"printer_id": 1, "status": "failed", "limit": 2}
-    )
+    response = client.get("/api/v1/farm/queue", params={"printer_id": 1, "status": "failed"})
 
     assert response.status_code == 200
     params = route.calls.last.request.url.params
     assert (params["printer_id"], params["status"]) == ("1", "failed")
-    body = response.json()
-    assert body["total"] == 4
-    assert [item["id"] for item in body["items"]] == [257, 259]
-    assert body["items"][0]["archive_name"] == "Carrot Garden"
-    assert body["items"][0]["printer_name"] == "3DP-31B-598"
+    items = response.json()
+    assert [item["id"] for item in items] == [257, 259, 199, 205]
+    assert items[0]["archive_name"] == "Carrot Garden"
+    assert items[0]["printer_name"] == "3DP-31B-598"
 
 
 @respx.mock
@@ -118,8 +115,8 @@ def test_archives_are_every_archive_with_its_outcome_and_no_file_paths(
     assert "file_path" not in rows[0] and "thumbnail_path" not in rows[0]
 
 
-def test_an_archive_page_is_at_most_a_hundred(client: TestClient) -> None:
-    assert client.get("/api/v1/farm/archives", params={"limit": 101}).status_code == 422
+def test_an_archive_window_is_at_most_two_hundred(client: TestClient) -> None:
+    assert client.get("/api/v1/farm/archives", params={"limit": 201}).status_code == 422
 
 
 @respx.mock

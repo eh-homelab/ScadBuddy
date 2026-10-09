@@ -13,14 +13,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import ArchiveDetail, Printer, QueueItem, SlotMaterial
-
-
-class QueueView(BaseModel):
-    """The queue, in Bambuddy's order, cut to ``limit``; ``total`` is before the cut."""
-
-    items: list[QueueItem]
-    total: int
+from scadbuddy.bambuddy.models import ArchiveDetail, Printer, SlotMaterial
 
 
 class ArchiveOutcome(BaseModel):

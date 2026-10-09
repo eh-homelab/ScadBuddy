@@ -14,8 +14,8 @@ from fastapi import APIRouter, Query
 
 from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.farm import ArchiveOutcome, InventoryView, QueueView, inventory_view
-from scadbuddy.bambuddy.models import ArchiveStats
+from scadbuddy.bambuddy.farm import ArchiveOutcome, InventoryView, inventory_view
+from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
 
 router = APIRouter(prefix="/farm", tags=["farm"])
 
@@ -28,20 +28,18 @@ DateFrom = Annotated[date | None, Query(description="First day, inclusive (creat
 DateTo = Annotated[date | None, Query(description="Last day, inclusive (created_at)")]
 
 
-@router.get("/queue", response_model=QueueView, summary="Bambuddy's print queue")
+@router.get("/queue", response_model=list[QueueItem], summary="Bambuddy's print queue")
 async def get_queue(
     store: SettingsStoreDep,
     printer_id: Annotated[
         int | None, Query(description="One printer's items; -1 for items not assigned to one")
     ] = None,
     status: Annotated[QueueStatus | None, Query(description="Only items in this state")] = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
-) -> QueueView:
+) -> list[QueueItem]:
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read
     is mostly history: ask for ``status=pending`` or ``printing`` for what is to come."""
     async with client_for(store.load()) as client:
-        items = await client.queue(printer_id=printer_id, status=status)
-    return QueueView(items=items[:limit], total=len(items))
+        return await client.queue(printer_id=printer_id, status=status)
 
 
 @router.get("/stats", response_model=ArchiveStats, summary="The farm's print statistics")
@@ -63,7 +61,7 @@ async def get_archives(
     project_id: Annotated[int | None, Query(description="One Bambuddy project's id")] = None,
     date_from: DateFrom = None,
     date_to: DateTo = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    limit: Annotated[int, Query(ge=1, le=200)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ArchiveOutcome]:
     """Every archive Bambuddy has, ScadBuddy's or not (``GET /prints`` is ScadBuddy's
