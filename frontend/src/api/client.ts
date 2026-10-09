@@ -1306,6 +1306,18 @@ export const api = {
   runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
     followPrintRun(`/print/library/${fileId}/run`, body, signal, within),
 
+  /** #1751 — the file's newest print, as `getPrintProgress` is an output's; `null` when
+   * ScadBuddy never queued it. */
+  getLibraryPrintProgress: (fileId: number) =>
+    request<PrintProgress | null>(`/print/library/${fileId}/progress`),
+
+  /** #1751 — as `attachToProject`; without ids, the file's newest run is filed. */
+  attachLibraryToProject: (fileId: number, body: ProjectAttach) =>
+    command<AttachResult>(`/print/library/${fileId}/project`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
       method: 'POST',

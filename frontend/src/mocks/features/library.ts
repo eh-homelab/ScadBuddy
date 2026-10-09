@@ -1,6 +1,9 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  AttachResult,
   PrintCheck,
+  PrintProgress,
+  ProjectAttach,
   ChoicesView,
   FilamentOptions,
   LibraryEntry,
@@ -239,6 +242,35 @@ export const handlers = [
       repeated: false,
     }
     recordMockPrintRun(run)
+    lastQueued.set(fileId, result.queue_item_ids[0] ?? 0)
     return HttpResponse.json(run, { status: 202 })
   }),
+
+  /** #1751 — the file's newest print, queued and waiting, as an output's is. */
+  http.get(`${base}/print/library/:id/progress`, ({ params }) => {
+    const item = lastQueued.get(Number(params['id']))
+    if (item === undefined) return HttpResponse.json(null)
+    return HttpResponse.json({
+      ...fixtures.queuedSliceProgress,
+      queue_item_id: item,
+      copies_detail: (fixtures.queuedSliceProgress.copies_detail ?? []).map((copy) => ({ ...copy, queue_entry_id: item })),
+    } satisfies PrintProgress)
+  }),
+
+  http.post(`${base}/print/library/:id/project`, async ({ params, request }) => {
+    const body = (await request.json()) as ProjectAttach
+    const item = lastQueued.get(Number(params['id']))
+    return HttpResponse.json({
+      project_id: body.project_id ?? 0,
+      queue_item_ids: body.queue_item_ids?.length ? body.queue_item_ids : item === undefined ? [] : [item],
+      archive_ids: [],
+    } satisfies AttachResult)
+  }),
 ]
+
+/** #1751 — each library file's newest queue item, by the mocked run that queued it. */
+const lastQueued = new Map<number, number>()
+
+export function reset(): void {
+  lastQueued.clear()
+}

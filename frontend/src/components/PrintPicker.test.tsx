@@ -1469,6 +1469,33 @@ describe('PrintPicker · Projects', () => {
     expect(bodies[0]).toEqual({ project_id: 2, queue_item_ids: [4471] })
   })
 
+  it("follows a library file's print and files it under the chosen project, as an output's (#1751)", async () => {
+    const { bodies, urls } = watch('POST', '/project')
+    server.use(
+      http.get('/api/v1/print/library/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.queuedSliceProgress, settled: true }),
+      ),
+    )
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(urls[0]).toContain('/print/library/89/project')
+    expect(bodies[0]).toEqual({ project_id: 2, queue_item_ids: [4471] })
+    expect(screen.getByTestId('print-progress')).toBeInTheDocument()
+  })
+
   it('does not file a print that was sent without a project', async () => {
     const { bodies } = watch('POST', '/project')
     server.use(

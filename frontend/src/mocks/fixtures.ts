@@ -1437,6 +1437,7 @@ function printOf(
     slug: output.slug,
     library_file_id: null,
     library_file_name: null,
+    queue_item_id: null,
     output_name: output.name ?? null,
     printer_id: 1,
     printer_name: '3DP-31B-598',

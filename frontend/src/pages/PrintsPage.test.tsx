@@ -497,6 +497,85 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
   })
 })
 
+describe("a library file's print, as an output's (#1751)", () => {
+  const libraryPrint = (fields: Partial<PrintPage['items'][number]> = {}) => ({
+    ...summaryOf(35),
+    archive_id: 90,
+    output_id: null,
+    slug: null,
+    params_diff: null,
+    library_file_id: 89,
+    library_file_name: 'bracket.3mf',
+    queue_item_id: 51,
+    ...fields,
+  })
+  const only = (items: PrintPage['items']) =>
+    http.get('/api/v1/prints', () => HttpResponse.json({ items, next_cursor: null } satisfies PrintPage))
+  const queued = (item: number, fields: Partial<PrintProgress> = {}): PrintProgress => ({
+    ...queuedSliceProgress,
+    queue_item_id: item,
+    copies_detail: [{ ...queuedSliceProgress.copies_detail![0]!, queue_entry_id: item }],
+    ...fields,
+  })
+
+  it('shows where it is while it prints, from its own progress read (F7)', async () => {
+    const read: string[] = []
+    server.use(
+      only([libraryPrint({ status: 'printing', printer_name: null })]),
+      http.get('/api/v1/print/library/:id/progress', ({ params }) => {
+        read.push(String(params['id']))
+        return HttpResponse.json(
+          queued(51, {
+            stage: 'running',
+            copies_detail: [
+              { ...queuedSliceProgress.copies_detail![0]!, stage: 'running', message: 'Layer 7 of 90', waiting_reason: null },
+            ],
+          }),
+        )
+      }),
+    )
+    render()
+    const printing = await item(90)
+    expect(await within(printing).findByText('Layer 7 of 90')).toBeInTheDocument()
+    expect(read).toContain('89')
+  })
+
+  it("waits on the file's newest print until a listed print came from it, and follows it live (F9)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    let settled = false
+    server.use(
+      only([libraryPrint()]),
+      http.get('/api/v1/print/library/:id/progress', () =>
+        HttpResponse.json(settled ? queued(52, { stage: 'done', settled: true }) : queued(52)),
+      ),
+    )
+    render('/prints?file=89')
+    const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    expect(waiting).toHaveTextContent('bracket.3mf')
+    expect(waiting).toHaveTextContent('Waiting for Bambuddy')
+    await waitFor(() => expect(realtime.following()).toContain('print:library:89'))
+
+    settled = true
+    await realtime.signal('print:library:89', 'print.settled')
+    expect(await within(waiting).findByText('Completed in Bambuddy')).toBeInTheDocument()
+  })
+
+  it('shows no Waiting row once the newest print is listed, nor on every print', async () => {
+    server.use(
+      only([libraryPrint()]),
+      http.get('/api/v1/print/library/:id/progress', () => HttpResponse.json(queued(51))),
+    )
+    render('/prints?file=89')
+    await waitFor(async () => expect(await shown()).toEqual(['90']))
+    expect(screen.queryByRole('list', { name: 'Waiting for Bambuddy' })).not.toBeInTheDocument()
+  })
+})
+
 describe('an output whose newest run failed before queueing (#1831)', () => {
   it('has a row that says the print failed, and why', async () => {
     const refused: Output = {

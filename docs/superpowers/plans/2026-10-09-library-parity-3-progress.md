@@ -39,15 +39,16 @@ Agent: a `coverage.ts` entry only (library tools are #1756).
 
 - `usePrintProgress(subject)` takes the run subject (an output id or
   `library:<id>`), reading the matching route; the topic is `print:<subject>`.
-- `PrintPicker` follows a library run as an output's (F1). Attaching to a project
-  (F2) is `POST /outputs/{id}/project`, output-only: a library run is filed under its
-  project by the run itself (`project_id` on `print_enqueue`), so F2 is closed by the
-  same follow, nothing more.
+- `PrintPicker` follows a library run as an output's (F1), and files it under its
+  project once settled (F2) through `POST /print/library/{file_id}/project`, the same
+  `attach_project` operation kind with `library_file_id` in place of `output_id`.
 - `PrintItem` `PrintingNow` for a library print (F7).
 - `PrintHistory` per-file view (`?file=`): a Waiting row for the file's newest run
   while no listed print came from its queue items (F9). `PrintSummary` gains
   `queue_item_id`.
-- `LibraryPage` `onRan` (F6): checked; the dialog itself now follows the run.
+- `LibraryPage` `onRan` (F6): an output page reloads its outputs to show the new
+  print; nothing on the library page reads a file's print, and the dialog itself now
+  follows the run, so it stays a no-op.
 
 ## Checks
 
