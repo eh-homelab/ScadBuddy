@@ -355,11 +355,18 @@ module to_mm() {
         // Shrink, then regrow with rounded corners: pixels of one colour that
         // meet only at a corner pull apart instead of sharing an edge of four
         // faces, which no closed solid can hold (#1883). Pixels that share a
-        // side stay merged, and the size is unchanged.
-        offset(r = SEP) offset(delta = -SEP) children();
+        // side stay merged. Sides and concave corners come back where they
+        // were; each convex corner loses SEP²(1 - π/4), which is why verify.sh
+        // compares volumes within a tolerance rather than exactly. A radius of
+        // SEP needs no smooth arc: $fn = 8 keeps the polygon count of a large
+        // mosaic near its pixel count instead of ~12 segments a corner.
+        offset(r = SEP, $fn = 8) offset(delta = -SEP) children();
         if (pixel_gap > 0) grooves_2d();
     }
 }
+// Not rounded like to_mm: only the colour parts need corners pulled apart
+// (#1883). The backing and frame keep the exact pixel outline, so at a convex
+// corner they and the art no longer meet exactly; they differ by under SEP px.
 module to_mm_solid() { translate([-GW / 2, -GH / 2]) scale(PS) translate([0.5, 0.5]) children(); }
 
 // ===========================================================================
