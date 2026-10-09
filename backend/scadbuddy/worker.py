@@ -38,7 +38,7 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRunStore
+from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRunStore, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
@@ -705,6 +705,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         async with client_for(settings_store.load()) as client:
             return await library_progress(client, subject, links, uploads=uploads)
 
+    print_runs = PrintRunStore(pool, events=events)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -712,6 +713,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         read_library=read_library,
         events=events,
         on_settled=[settle_hook(rack, links, settings_store.load)],
+        newest_failed=newest_failed_from(print_runs, settings_store.load),
     )
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,
@@ -726,7 +728,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             outputs=outputs,
             prints=OutputPrintStore(pool),
             uploads=uploads,
-            store=PrintRunStore(pool, events=events),
+            store=print_runs,
             observer=observer,
             rack=rack,
             links=links,
