@@ -4,7 +4,8 @@ import { ApplicationFailure, condition, defineQuery, defineSignal, defineUpdate,
 // dispatch (src/sessions/durable.ts) sends it, kept for the test to read. The
 // `send_message` Update's validator refuses a second turn `busy`, as the real one does;
 // `cancel_input` and the `interrupt` Signal are recorded in the order they came. With
-// `hold_cancel` signalled, `cancel_input` never answers (a worker that is down).
+// `hold_cancel` signalled, `cancel_input` never answers (a worker that is down). The
+// `turn` Query names the turn it holds, None between turns, as the real one does.
 
 type Message = { turn_id: string; text: string; author: unknown; images: { name: string; mediaType: string }[] }
 
@@ -14,6 +15,7 @@ export const interrupt = defineSignal<[{ reason: string }]>('interrupt')
 export const holdCancel = defineSignal('hold_cancel')
 export const endTurn = defineSignal('end_turn')
 export const recorded = defineQuery<{ start: unknown; messages: Message[]; calls: string[] }>('recorded')
+export const turn = defineQuery<string | null>('turn')
 
 export async function DurableSession(start: unknown): Promise<void> {
   const messages: Message[] = []
@@ -21,6 +23,7 @@ export async function DurableSession(start: unknown): Promise<void> {
   let busy = false
   let hold = false
   setHandler(recorded, () => ({ start, messages, calls }))
+  setHandler(turn, () => (busy ? (messages.at(-1)?.turn_id ?? null) : null))
   setHandler(
     sendMessage,
     (message) => {

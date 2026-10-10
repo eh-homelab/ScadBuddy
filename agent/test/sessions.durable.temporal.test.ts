@@ -436,6 +436,59 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello again'])
   }, 60_000)
 
+  it('gives back a kept claim whose workflow is open between turns, and leaves one whose workflow holds the turn (#2078)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
+    await finishTurn(session.id, [
+      { type: 'session.result', costUsd: 0.1, turns: 1, budgetUsd: 5 },
+      { type: 'session.status', status: 'idle' },
+    ])
+    const live = (await m.start(browser, { origin: 'chat', prompt: 'still going' })).session
+    // A kept claim (Ruling 16) whose Update the open workflow never took: it holds no turn.
+    await db.sql`UPDATE ai_sessions SET status = 'running' WHERE id = ${session.id}`
+
+    expect(await sweepOf(m).sweep()).toEqual([session.id])
+    expect(await status(session.id)).toBe('idle')
+    expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
+      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/never reached/) },
+      { type: 'session.status', status: 'idle' },
+    ])
+    // The workflow holds the live session's turn: that turn's end is its own.
+    expect(await status(live.id)).toBe('running')
+    // The next send reaches the same workflow.
+    await m.send(session.id, browser, 'hello again')
+    expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello', 'hello again'])
+  }, 60_000)
+
+  it('refuses `closed`, and never starts an empty workflow, for a session whose workflow ran turns and was removed (#2078)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    // What the row keeps of a workflow that ran a turn (follow_session moved the offset
+    // past its output), then ended and was removed by namespace retention: Temporal no
+    // longer knows it. The dev server deletes too slowly to wait for here.
+    await db.sql`UPDATE ai_sessions SET durable_offset = 3 WHERE id = ${session.id}`
+    const workflowId = sessionWorkflowId(session.id)
+    const describe = durableDescriber(env.client)
+    expect(await describe(workflowId)).toBe('not_found')
+
+    await expect(m.send(session.id, browser, 'hello again')).rejects.toMatchObject({
+      code: 'closed',
+      message: expect.stringMatching(/continue in a new chat/),
+    })
+    expect(await describe(workflowId)).toBe('not_found')
+    expect(await status(session.id)).toBe('idle')
+
+    // A kept claim on it: the sweep says the workflow is gone, not that it never started.
+    await db.sql`UPDATE ai_sessions SET status = 'running' WHERE id = ${session.id}`
+    expect(await sweepOf(m).sweep()).toEqual([session.id])
+    expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
+      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/workflow is gone.*new chat/) },
+      { type: 'session.status', status: 'idle' },
+    ])
+    await expect(m.send(session.id, browser, 'and again')).rejects.toMatchObject({ code: 'closed' })
+    expect(await describe(workflowId)).toBe('not_found')
+  }, 60_000)
+
   it("leaves a turn that was claimed again while its workflow was described", async () => {
     const m = await durableManager()
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
