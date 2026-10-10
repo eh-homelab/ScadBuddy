@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ from scadbuddy.store.bambuddy import (
 )
 from scadbuddy.store.content import BlobMissingError, BlobScope
 from scadbuddy.store.index import Pool
-from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
+from tests.bambuddy.conftest import BASE_URL, recorded_schema, recording, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.store import store_pool
 
@@ -663,3 +664,93 @@ async def test_render_settings_are_cached_for_the_ttl_and_invalidate_rereads(
     key("c")
     source.invalidate()
     assert (await source.current()).api_key == "c"
+
+
+def work_folder(
+    pool: Pool, folder_id: int = 11, *, instance: str = HERE, slug: str = "dollhouse-kit"
+) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, %s, 'work', %s)",
+            (instance, INBOX, slug, folder_id),
+        )
+
+
+def blob_row(pool: Pool, backend_id: str) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_blobs (key, sha256, kind, backend, backend_id, size)"
+            " VALUES (%s, 'sha', 'piece', 'bambuddy', %s, 1)",
+            (f"piece:{backend_id}", backend_id),
+        )
+
+
+def listed(*files: tuple[int, str]) -> httpx.Response:
+    """``GET /library/files/?folder_id=``: a recorded row per file, with its id and
+    `created_at`."""
+    row = recording("library-files-folder.json")[0]
+    return httpx.Response(200, json=[{**row, "id": i, "created_at": at} for i, at in files])
+
+
+OLD = "2026-10-01T00:00:00"
+FRESH = "2026-10-09T23:59:00"
+#: Between `OLD` and `FRESH`: what `sweep_unrecorded` treats as older than the grace.
+CUTOFF = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+
+
+@respx.mock
+async def test_an_old_work_file_no_row_names_is_deleted(pool: Pool) -> None:
+    """#701: a crash between the upload and the `store_blobs` row leaves the file."""
+    work_folder(pool)
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=listed((600, OLD))
+    )
+    delete = respx.delete(f"{API}/library/files/600").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == ["600"]
+    assert delete.call_count == 1
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_fresh_unrecorded_file_and_a_recorded_one_are_kept(pool: Pool) -> None:
+    """A fresh one may be an upload whose row is about to be written."""
+    work_folder(pool)
+    blob_row(pool, "602")
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=listed((601, FRESH), (602, OLD))
+    )
+    delete = respx.delete(url__regex=rf"{API}/library/files/\d+")
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == []
+    assert not delete.called
+    await backend.aclose()
+
+
+@respx.mock
+async def test_only_work_folders_of_the_configured_bambuddy_are_swept(pool: Pool) -> None:
+    work_folder(pool, 31, instance=instance_key("http://elsewhere.example:8000"))
+    listing = respx.get(f"{API}/library/files/")
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == []
+    assert not listing.called
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_work_folder_gone_from_bambuddy_is_skipped(pool: Pool) -> None:
+    work_folder(pool, 11)
+    work_folder(pool, 12, slug="bookshelf")
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=httpx.Response(404, json={"detail": "gone"})
+    )
+    respx.get(f"{API}/library/files/", params={"folder_id": "12"}).mock(
+        return_value=listed((610, OLD))
+    )
+    respx.delete(f"{API}/library/files/610").mock(return_value=httpx.Response(404, json={}))
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == ["610"]
+    await backend.aclose()

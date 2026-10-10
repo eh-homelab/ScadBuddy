@@ -7,6 +7,7 @@ import type {
   SentImage,
   ServerEvent,
   SessionStatus,
+  SessionMode,
   SessionSummary,
   Source,
   ToolImage,
@@ -118,6 +119,15 @@ export interface SessionState {
   parentId?: string | null
   /** #795 — when it last changed (the agent's `updated_at`), for the switcher. */
   updatedAt?: string
+  /** Plan 5d — how it runs; absent from an older agent (classic). */
+  mode?: SessionMode
+  /** Plan 5d — why a session whose mode came from the default runs classic, not durable. */
+  modeFallback?: string
+  /**
+   * #1885 — archived by the user: left out of the switcher's list and read-only until
+   * unarchived. Known from a session route's answer; the snapshot lists only the others.
+   */
+  archived?: boolean
 }
 
 /**
@@ -133,9 +143,13 @@ export interface SessionPatch {
   updatedAt?: string
   costUsd?: number
   budgetUsd?: number
+  /** Plan 5d — classic or durable. */
+  mode?: SessionMode
   /** For a session new to the panel: where it came from and who holds it. */
   origin?: Origin
   owner?: Owner
+  /** #1885 — archived, or not. */
+  archived?: boolean
 }
 
 export interface ChatState {
@@ -199,8 +213,15 @@ function blankSession(summary: Pick<SessionState, 'id' | 'title' | 'origin' | 'o
  */
 function withListed(s: SessionState, summary: SessionSummary, live: boolean): SessionState {
   let next = s
+  // #1885 — the snapshot leaves archived sessions out, so a listed one was unarchived,
+  // unless the list was read before this panel's own archive landed (an archive moves
+  // `updatedAt`, so that list is older than what the panel knows).
+  if (s.archived && !(s.updatedAt && summary.updatedAt && summary.updatedAt <= s.updatedAt)) {
+    next = { ...next, archived: false }
+  }
   if (summary.parentId !== undefined) next = { ...next, parentId: summary.parentId }
   if (summary.updatedAt !== undefined) next = { ...next, updatedAt: summary.updatedAt }
+  if (summary.mode !== undefined) next = { ...next, mode: summary.mode }
   if (summary.costUsd !== undefined && summary.budgetUsd !== undefined && (!live || !next.budget)) {
     next = withBudget(next, summary.costUsd, summary.budgetUsd)
   }
@@ -293,10 +314,15 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         owner: event.owner,
         status: 'running',
       })
-      const next =
+      const budgeted =
         event.budgetUsd === undefined
           ? summarised
           : patchSession(summarised, event.sessionId, (s) => withBudget(s, 0, event.budgetUsd!))
+      const next = patchSession(budgeted, event.sessionId, (s) => ({
+        ...s,
+        ...(event.mode ? { mode: event.mode } : {}),
+        ...(event.modeFallback ? { modeFallback: event.modeFallback } : {}),
+      }))
       // Newest first (a replay on attach keeps its place); the panel's own new chat
       // becomes the active one.
       const order = known
@@ -512,6 +538,8 @@ function patched(state: ChatState, p: SessionPatch): ChatState {
   if (p.status !== undefined) s = { ...s, status: p.status }
   if (p.parentId !== undefined) s = { ...s, parentId: p.parentId }
   if (p.updatedAt !== undefined) s = { ...s, updatedAt: p.updatedAt }
+  if (p.mode !== undefined) s = { ...s, mode: p.mode }
+  if (p.archived !== undefined) s = { ...s, archived: p.archived }
   if (p.costUsd !== undefined && p.budgetUsd !== undefined) s = withBudget(s, p.costUsd, p.budgetUsd)
   return {
     ...state,

@@ -7,8 +7,8 @@ import { OriginBadge, OwnerBadge } from './badges'
 import { usd } from './SessionBudget'
 
 // #795 — the panel's session list: forks under their parent, each with its status,
-// spend and last activity; the user's own chats can be renamed and marked done.
-// Design: docs/superpowers/specs/2026-10-09-session-switcher-design.md §7, §8.
+// spend and last activity; the user's own chats can be renamed, marked done and
+// archived (#1885). Design: docs/superpowers/specs/2026-10-09-session-switcher-design.md §7, §8.
 
 interface Props {
   /** The sessions to list, in the panel's order (newest first). */
@@ -18,6 +18,8 @@ interface Props {
   /** Resolve once the agent took it; reject with what to show beside the row. */
   onRename: (id: string, title: string) => Promise<void>
   onDone: (id: string) => Promise<void>
+  /** #1885 — puts the chat away: out of this list, read-only, until it is unarchived. */
+  onArchive: (id: string) => Promise<void>
 }
 
 const RUNNING: ReadonlySet<SessionState['status']> = new Set(['running', 'waiting_approval', 'waiting_input'])
@@ -54,15 +56,31 @@ function grouped(sessions: SessionState[]): { root: SessionState; forks: Session
   })
 }
 
-export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone }: Props) {
+export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, onArchive }: Props) {
   return (
     <ul className="max-h-56 overflow-y-auto py-1">
       {grouped(sessions).map(({ root, forks }) => (
-        <SessionRow key={root.id} session={root} activeId={activeId} onOpen={onOpen} onRename={onRename} onDone={onDone}>
+        <SessionRow
+          key={root.id}
+          session={root}
+          activeId={activeId}
+          onOpen={onOpen}
+          onRename={onRename}
+          onDone={onDone}
+          onArchive={onArchive}
+        >
           {forks.length > 0 && (
             <ul aria-label={`Forks of ${root.title}`} className="ml-3 border-l border-line">
               {forks.map((fork) => (
-                <SessionRow key={fork.id} session={fork} activeId={activeId} onOpen={onOpen} onRename={onRename} onDone={onDone} />
+                <SessionRow
+                  key={fork.id}
+                  session={fork}
+                  activeId={activeId}
+                  onOpen={onOpen}
+                  onRename={onRename}
+                  onDone={onDone}
+                  onArchive={onArchive}
+                />
               ))}
             </ul>
           )}
@@ -78,6 +96,7 @@ function SessionRow({
   onOpen,
   onRename,
   onDone,
+  onArchive,
   children,
 }: Omit<Props, 'sessions'> & { session: SessionState; children?: ReactNode }) {
   const [editing, setEditing] = useState(false)
@@ -96,6 +115,8 @@ function SessionRow({
   const open = s.id === activeId
   const mine = isOwnedByBrowser(s)
   const canFinish = mine && s.status !== 'done' && !RUNNING.has(s.status)
+  // The agent refuses an archive while a turn runs or anything waits on the user (409).
+  const canArchive = mine && !RUNNING.has(s.status)
 
   const stopEditing = () => {
     refocus.current = true
@@ -129,10 +150,10 @@ function SessionRow({
     stopEditing()
   }
 
-  const finish = async () => {
+  const act = async (action: (id: string) => Promise<void>) => {
     setError(null)
     try {
-      await onDone(s.id)
+      await action(s.id)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
     }
@@ -191,9 +212,21 @@ function SessionRow({
                 aria-label={`Mark ${s.title} done`}
                 title="End this chat: it takes no more messages, and Fork still continues it"
                 data-agent-user-only=""
-                onClick={() => void finish()}
+                onClick={() => void act(onDone)}
               >
                 Done
+              </Button>
+            )}
+            {canArchive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Archive ${s.title}`}
+                title="Put this chat away: it leaves this list for Archived, read-only, until you unarchive it"
+                data-agent-user-only=""
+                onClick={() => void act(onArchive)}
+              >
+                Archive
               </Button>
             )}
           </span>

@@ -35,6 +35,7 @@ from scadbuddy.workflows.models import (
 from scadbuddy.workflows.outputs import manifest_of, placement_matrix
 from scadbuddy.workflows.pipeline_activities import PipelineActivities, pack_layout
 from tests.support.arrange import finished_job, saved_output
+from tests.test_objects3mf import at, bambu_project
 from tests.test_packing_and_outputs import _deps, _record, _render
 
 
@@ -296,3 +297,68 @@ async def test_a_library_files_object_is_placed_beside_a_rendered_part(tmp_path:
     with zipfile.ZipFile(paths.root / written.result.model_3mf) as archive:
         settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
     assert {"#FF0000", "#0000FF"} <= {c.upper() for c in settings["filament_colour"]}
+
+
+async def test_a_painted_library_object_keeps_its_painting_in_the_output(tmp_path: Path) -> None:
+    """#1965: a part painted in Bambu Studio is placed whole, its faces in their order,
+    and its painting renumbered to the output's filaments: here green moves from
+    extruder 2 to 1 and red, the part's own, from 1 to 3."""
+    deps, paths = _deps(tmp_path)
+    body = trimesh.creation.box(extents=(20, 10, 5))
+    payload = bambu_project(
+        items=[at(50, 50)],
+        parts={1: (body, "normal_part", 1)},
+        triangle_extra=' paint_color="8"',
+    )
+    read = read_objects(payload)
+    box = bounding_box(read[0].parts)
+    entry = ManifestObject(
+        part=piece_key("cd" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000", "#00FF00"],
+        count=1,
+        library_file_id=89,
+    )
+    await publish_library_pieces(deps.blobs, [entry], read)
+    library = part_of(entry)
+    planned = ["#00FF00", "#0000AA", "#FF0000"]
+    req = OutputRequest(
+        job_id="j7",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[LayoutPlate(items=[Placed(piece_key=library.piece_key, x=0, y=0, rot=90.0)])]
+        ),
+        parts=[library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([library.piece_key]),
+        provenance={entry.part: entry},
+        colours=planned,
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert written.result.colors == planned
+    # Green prints only where the part is painted, and the print dialog still asks for it.
+    assert [(p.colour, p.extruder) for p in written.result.parts] == [
+        ("#00FF00", 1),
+        ("#FF0000", 3),
+    ]
+    model = paths.root / written.result.model_3mf
+    with zipfile.ZipFile(model) as archive:
+        objects = [n for n in archive.namelist() if n.startswith("3D/Objects/")]
+        [painted] = [n for n in objects if b"paint_color" in archive.read(n)]
+        text = archive.read(painted).decode()
+        settings = archive.read("Metadata/model_settings.config").decode()
+    assert text.count('paint_color="4"') == len(body.faces)
+    assert 'paint_color="8"' not in text
+    assert '<metadata key="extruder" value="3"/>' in settings
+    # The output reads back as it was painted: a red part painted green.
+    [again] = read_objects(model.read_bytes())
+    [part] = again.parts
+    assert part.colour == "#FF0000"
+    assert part.paint is not None and part.paint.used() == ["#00FF00"]

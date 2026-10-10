@@ -302,6 +302,19 @@ export interface SessionLimits {
 }
 
 /**
+ * Plan 5d — the mode a new assistant session gets when whoever starts it names none
+ * (`GET/PUT /api/v1/ai/settings/session-mode`, agent `src/routes/sessionMode.ts`).
+ * `durable_available` says whether a durable session could start now; when not, a
+ * session that got durable from this default runs classic and says why
+ * (`durable_unavailable_reason`). The PUT sends `mode` only.
+ */
+export interface SessionModeSetting {
+  mode: 'classic' | 'durable'
+  durable_available: boolean
+  durable_unavailable_reason?: string
+}
+
+/**
  * The long edge, in pixels, the assistant panel scales an attached image to before
  * sending it (`GET/PUT /api/v1/ai/settings/images`, agent `src/routes/imageSettings.ts`).
  * `min` and `max` are the bounds the agent accepts; the PUT sends `long_edge` only.
@@ -323,6 +336,9 @@ export interface AttachmentView {
 }
 
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
+/** #795, #1885 — one edit `PATCH /api/v1/ai/sessions/:id` takes. */
+export type AiSessionEdit = { title: string } | { done: true } | { archived: boolean }
+
 export interface AiSessionView {
   id: string
   title: string
@@ -334,6 +350,11 @@ export interface AiSessionView {
   cost_usd: number
   budget_usd: number
   running: boolean
+  /** Plan 5d — absent from an older agent (classic). */
+  mode?: 'classic' | 'durable'
+  /** #1885 — archived by its owner: out of the panel's list, and read-only. Absent from an older agent. */
+  archived?: boolean
+  archived_at?: string | null
 }
 
 /**

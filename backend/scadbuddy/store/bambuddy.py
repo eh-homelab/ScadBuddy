@@ -28,6 +28,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -268,6 +269,43 @@ class BambuddyContentBackend:
             except ApiError as error:
                 if error.status != 404:
                     raise
+
+    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+        """Delete the files in this Bambuddy's recorded `Work/` folders that no
+        `store_blobs` row names and that were added before ``cutoff`` (#701): an upload
+        whose process died before `ContentStore.put` wrote its row. A newer one may be
+        an upload whose row is about to be written, so it stays. Returns the deleted ids."""
+        removed: list[str] = []
+        async with self._client() as (client, inbox):
+            for folder_id in sorted(await asyncio.to_thread(self._work_folders, inbox)):
+                try:
+                    files = await client.library_listing(folder_id=folder_id)
+                except ApiError as error:
+                    if error.status == 404:  # deleted in Bambuddy's UI; made again on use
+                        continue
+                    raise
+                for file in files:
+                    added = file.created_at
+                    if added is None or added.replace(tzinfo=UTC) > cutoff:
+                        continue
+                    if await asyncio.to_thread(self._recorded_id, str(file.id)):
+                        continue
+                    try:
+                        await client.delete_library_file(file.id)
+                    except ApiError as error:
+                        if error.status != 404:
+                            raise
+                    removed.append(str(file.id))
+        return removed
+
+    def _recorded_id(self, backend_id: str) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s)"
+                " AS recorded",
+                (self.backend, backend_id),
+            ).fetchone()
+        return bool(row and row["recorded"])
 
     # --- folders -------------------------------------------------------------
 

@@ -48,7 +48,7 @@ from scadbuddy.store.content_models import BlobScope
 #: A library piece's key prefix; the number moves when the reader changes what a file's
 #: objects are, so an older reading is never taken for the new one. It prefixes a kept
 #: object list's name too, for the same reason.
-LIBRARY_PIECE_PREFIX = "lib1"
+LIBRARY_PIECE_PREFIX = "lib2"
 #: Where the object lists are kept, under the data volume's cache.
 CACHE_DIRNAME = "library-objects"
 #: How many files' object lists are kept, newest first: each is a few hundred bytes.
@@ -165,7 +165,16 @@ async def read_library_objects(
                 revision=None,
                 bbox=box,
                 footprint=(box.size[0], box.size[1]),
-                colours=[part.colour for part in obj.parts],
+                colours=list(
+                    dict.fromkeys(
+                        colour
+                        for part in obj.parts
+                        for colour in [
+                            part.colour,
+                            *(part.paint.used() if part.paint is not None else []),
+                        ]
+                    )
+                ),
                 count=obj.count,
                 library_file_id=file_id,
                 notes=list(obj.notes),

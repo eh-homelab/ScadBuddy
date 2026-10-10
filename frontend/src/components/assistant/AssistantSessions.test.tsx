@@ -175,3 +175,79 @@ describe('the session switcher (#795)', () => {
     expect(within(row).getByText('Out of budget')).toBeInTheDocument()
   })
 })
+
+describe('archive (#1885)', () => {
+  const OWN = `${PARENT} (fork)`
+  const composerBox = () => screen.getByRole('textbox', { name: 'Message the assistant' })
+  const ownRow = () => within(picker()).queryByRole('button', { name: new RegExp(`^${OWN.replace(/[()]/g, '\\$&')}`) })
+
+  /** The panel on a chat of the user's own, forked from the desktop agent's, with the picker open. */
+  async function ownChat() {
+    const view = await openParent()
+    await view.user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    await view.user.click(screen.getByRole('button', { name: /^Sessions/ }))
+    return view
+  }
+
+  it("archives the user's chat from the switcher: it leaves the list, and the Archived view lists it to unarchive", async () => {
+    const { user } = await ownChat()
+    // The agent's chat cannot be archived: it is not the user's.
+    expect(within(picker()).queryByRole('button', { name: `Archive ${PARENT}` })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Sessions (2)' })).toBeInTheDocument()
+
+    await user.click(within(picker()).getByRole('button', { name: `Archive ${OWN}` }))
+    expect(sessionWrites().at(-1)).toEqual({ method: 'PATCH', path: expect.stringMatching(/^\/sessions\//), body: { archived: true } })
+    await waitFor(() => expect(ownRow()).toBeNull())
+    expect(screen.getByRole('button', { name: 'Sessions (1)' })).toBeInTheDocument()
+
+    await user.click(within(picker()).getByRole('button', { name: 'Archived' }))
+    expect(within(picker()).getByRole('button', { name: 'Archived' })).toHaveAttribute('aria-pressed', 'true')
+    const archived = await within(picker()).findByRole('list', { name: 'Archived chats' })
+    expect(within(archived).getByText(OWN)).toBeInTheDocument()
+    expect(within(archived).queryByText(PARENT)).toBeNull()
+
+    await user.click(within(archived).getByRole('button', { name: `Unarchive ${OWN}` }))
+    expect(sessionWrites().at(-1)).toMatchObject({ method: 'PATCH', body: { archived: false } })
+    expect(await within(picker()).findByText('No archived chats.')).toBeInTheDocument()
+    await user.click(within(picker()).getByRole('button', { name: 'Chats' }))
+    expect(within(picker()).getByRole('button', { name: `Archive ${OWN}` })).toBeInTheDocument()
+  })
+
+  it('opens an archived chat read-only: its transcript, the composer locked with a note, and Unarchive', async () => {
+    const { user } = await ownChat()
+    await user.click(within(picker()).getByRole('button', { name: `Archive ${OWN}` }))
+    // The open chat stays open, read-only.
+    await waitFor(() => expect(composerBox()).toBeDisabled())
+    expect(screen.getByText(/This chat is archived/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'New chat' }))
+    expect(composerBox()).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+    await user.click(within(picker()).getByRole('button', { name: 'Archived' }))
+    const archived = await within(picker()).findByRole('list', { name: 'Archived chats' })
+    await user.click(within(archived).getByRole('button', { name: `Open ${OWN}` }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    expect(await screen.findByText(PARENT_REPLY)).toBeInTheDocument()
+    expect(composerBox()).toBeDisabled()
+    expect(composerBox()).toHaveAccessibleDescription(/archived.*read-only/i)
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    // Fork still continues it, as it does a done chat.
+    expect(screen.getByRole('button', { name: 'Fork' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: 'Unarchive' }))
+    expect(sessionWrites().at(-1)).toMatchObject({ method: 'PATCH', body: { archived: false } })
+    await waitFor(() => expect(composerBox()).toBeEnabled())
+    expect(composerBox()).toHaveFocus()
+    expect(screen.queryByText(/This chat is archived/)).toBeNull()
+  })
+
+  it('offers no Archive while a turn runs', async () => {
+    const { user } = renderShell({ stepMs: 60_000 })
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'hello{Enter}')
+    await screen.findByRole('button', { name: 'Stop' })
+    await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+    expect(within(picker()).queryByRole('button', { name: /^Archive / })).toBeNull()
+  })
+})

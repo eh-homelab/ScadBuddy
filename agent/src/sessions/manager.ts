@@ -75,6 +75,7 @@ import {
   publicLabel,
   sameOwner,
   type ServerEvent,
+  type SessionMode,
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
@@ -87,6 +88,7 @@ import { type ImagePreview, previewsOf, userPrompt, type UserImage } from './ima
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { DurableGate } from '../gate/durable.js'
+import type { DurableTurns } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
@@ -165,6 +167,14 @@ import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 export const SETTING_MODEL = 'model'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
+/** Which mode a new session runs in when its creator names none: `durable` unless it says `classic` (plan 5d Ruling 1). */
+export const SETTING_SESSION_MODE = 'session_mode'
+export { SESSION_MODES, type SessionMode } from './protocol.js'
+
+/** The stored `session_mode` as a mode: `classic` only when it says so (plan 5d Ruling 1, the owner's default). */
+export function sessionModeOf(stored: unknown): SessionMode {
+  return stored === 'classic' ? 'classic' : 'durable'
+}
 
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
 export const MAX_SESSION_BUDGET_USD = 100
@@ -357,8 +367,12 @@ export type SessionErrorCode =
   | 'invalid'
   | 'no_transcript'
   | 'rate_limited'
+  /** A durable session's workflow cannot be reached, or this service has no Temporal or key for one. */
+  | 'unavailable'
+  /** The session is archived (#1885): read-only until it is unarchived. */
+  | 'archived'
 
-type SessionErrorStatus = 400 | 403 | 404 | 409 | 429
+type SessionErrorStatus = 400 | 403 | 404 | 409 | 429 | 503
 
 const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   not_found: 404,
@@ -369,6 +383,8 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   invalid: 400,
   no_transcript: 409,
   rate_limited: 429,
+  unavailable: 503,
+  archived: 409,
 }
 
 /**
@@ -408,6 +424,11 @@ export class SessionError extends Error {
   }
 }
 
+/** What a send or a handoff to an archived session is refused with (#1885). */
+export function archivedError(id: string): SessionError {
+  return new SessionError('archived', `session ${id} is archived, so it is read-only; unarchive it to continue it, or fork it`)
+}
+
 /** A pending handoff (`handoff`): who may accept it, and until when. */
 export type HandoffOffer = { to: Owner; until: string }
 
@@ -423,6 +444,8 @@ export type SessionRecord = {
   tags: string[]
   scope: Record<string, unknown>
   parentId: string | null
+  /** `classic` runs in this service's harness, `durable` as a DurableSession workflow; set at insert. */
+  mode: SessionMode
   maxTurns: number
   /** The budget this session spends from, shared with its forks and its parent's lineage (#823). */
   budgetUsd: number
@@ -435,6 +458,8 @@ export type SessionRecord = {
   turnActive: boolean
   createdAt: string
   updatedAt: string
+  /** When its owner archived it (#1885, edits.ts); null while it is not archived. */
+  archivedAt: string | null
 }
 
 /**
@@ -474,6 +499,12 @@ export type StartOptions = {
   images?: readonly UserImage[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
+  /**
+   * The session's mode. Named, it is kept or refused (`unavailable`). Omitted, the
+   * `session_mode` setting's applies, and a durable one this service cannot run now
+   * becomes classic, with the reason in `modeFallback` (plan 5d Ruling 2).
+   */
+  mode?: SessionMode
 }
 
 export type SendOptions = {
@@ -508,6 +539,11 @@ export type ListFilter = {
   limit?: number
   /** Only sessions whose tool calls touched it (#931, touched.ts `ResourceRef`). */
   resource?: ResourceRef
+  /**
+   * Archived sessions (#1885): left out (`exclude`, the default, as the panel's list
+   * leaves them out), the only ones listed (`only`, the archive view), or both (`include`).
+   */
+  archived?: 'exclude' | 'only' | 'include'
 }
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
@@ -658,6 +694,7 @@ type Row = {
   tags: string[]
   scope: Record<string, unknown>
   parent_id: string | null
+  mode: SessionMode
   max_turns: number
   budget_usd: number
   cost_usd: number
@@ -666,6 +703,7 @@ type Row = {
   turn_active: boolean
   created_at: Date
   updated_at: Date
+  archived_at: Date | null
 }
 
 /** A pending handoff offer, read as none once it has expired (the columns stay until the next change clears them). */
@@ -674,18 +712,18 @@ const LIVE_OFFER = 'pending_owner_until > now()'
 /** The session whose budget this one spends from: itself, or a fork's lineage root (#823). */
 const ROOT = 'coalesce(ai_sessions.budget_root_id, ai_sessions.id)'
 /** The budget a session spends from: its root's (20261006T0100Z_session_budget_root.sql). */
-const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHERE r.id = ${ROOT}), ai_sessions.budget_usd)`
+export const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHERE r.id = ${ROOT}), ai_sessions.budget_usd)`
 /** What every session spending from that budget has spent. Read at the statement's snapshot. */
-const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
+export const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
 
 const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_kind END AS offer_kind,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
+  status, title, tags, scope, parent_id, mode, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
   ${POOL_COST} AS pool_cost_usd, turns,
-  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at`
+  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at, archived_at`
 
 function record(row: Row): SessionRecord {
   return {
@@ -702,6 +740,7 @@ function record(row: Row): SessionRecord {
     tags: row.tags,
     scope: row.scope,
     parentId: row.parent_id,
+    mode: row.mode,
     maxTurns: row.max_turns,
     budgetUsd: row.budget_usd,
     costUsd: row.pool_cost_usd,
@@ -710,6 +749,7 @@ function record(row: Row): SessionRecord {
     turnActive: row.turn_active,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    archivedAt: row.archived_at?.toISOString() ?? null,
   }
 }
 
@@ -721,6 +761,16 @@ function positive(value: unknown, fallback: number): number {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * What every turn appends to Claude Code's own system prompt: the data/instruction
+ * boundary (#258, safety/untrusted.ts: only the user's messages are instructions, tool
+ * results are data), then which browser each browser_* tool drives. A durable turn has
+ * no headless browser (plan 5c Ruling 15).
+ */
+export function systemAppend(headlessBrowser: boolean): string {
+  return `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(headlessBrowser)}`
 }
 
 export const TITLE_MAX = 80
@@ -759,6 +809,8 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
     params.push(filter.origin)
     where.push(`origin = $${params.length}`)
   }
+  const archived = filter.archived ?? 'exclude'
+  if (archived !== 'include') where.push(archived === 'only' ? 'archived_at IS NOT NULL' : 'archived_at IS NULL')
   if (filter.resource) {
     // Served by ai_session_resources_model / _resource (20261001T1824Z_session_resources.sql).
     let match: string
@@ -809,6 +861,11 @@ export class SessionManager {
    * `interrupt`), when Temporal is configured; main.ts sets it.
    */
   durable: DurableGate | undefined
+  /**
+   * How a durable session's turns run (plan 5c PR 3), when Temporal and the secret key
+   * are both configured; main.ts sets it. Without it a durable session is refused.
+   */
+  durableTurns: DurableTurns | undefined
   private readonly deps: SessionManagerDeps
   private readonly run: QueryRunner
   private readonly leaseMs: number
@@ -849,7 +906,12 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
-    this.edits = new SessionEdits({ sql: deps.sql, events: this.events, get: (id, principal) => this.get(id, principal) })
+    this.edits = new SessionEdits({
+      sql: deps.sql,
+      events: this.events,
+      get: (id, principal) => this.get(id, principal),
+      ...(deps.audit ? { audit: deps.audit } : {}),
+    })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
@@ -913,6 +975,7 @@ export class SessionManager {
         updatedAt: s.updatedAt,
         costUsd: s.costUsd,
         budgetUsd: s.budgetUsd,
+        mode: s.mode,
       })),
     })
   }
@@ -965,7 +1028,14 @@ export class SessionManager {
   private async insert(
     id: string,
     principal: Owner,
-    fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
+    fields: {
+      origin: Origin
+      title: string
+      tags: string[]
+      scope: Record<string, unknown>
+      parentId: string | null
+      mode: SessionMode
+    },
     options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
     const { maxTurns, budgetUsd: fresh } = await this.limits()
@@ -976,10 +1046,10 @@ export class SessionManager {
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, max_turns, budget_usd, budget_root_id)
+                                 status, title, tags, scope, parent_id, mode, max_turns, budget_usd, budget_root_id)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd},
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.mode}, ${maxTurns}, ${budgetUsd},
                 ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null})`
     }
     if (options.rateLimited) {
@@ -997,6 +1067,33 @@ export class SessionManager {
     return session
   }
 
+  /** The `session_mode` setting (sessionModeOf). */
+  private async modeSetting(): Promise<SessionMode> {
+    return sessionModeOf(await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE))
+  }
+
+  /** Why a new durable session could not run now, or undefined when it could (plan 5d Ruling 2b). */
+  async durableUnready(): Promise<string | undefined> {
+    if (!this.durableTurns) {
+      return 'durable sessions need Temporal (SCADBUDDY_TEMPORAL_ADDRESS) and the secret key; this agent service has not got them'
+    }
+    return this.durableTurns.unready()
+  }
+
+  /**
+   * The mode a new session runs in (plan 5d Ruling 2). A durable session this service
+   * cannot run now (no Temporal, no key, no worker polling) is refused when the creator
+   * asked for it, and becomes classic, with the reason, when it came from the setting.
+   */
+  private async startMode(asked: SessionMode | undefined): Promise<{ mode: SessionMode; fallback?: string }> {
+    const mode = asked ?? (await this.modeSetting())
+    if (mode === 'classic') return { mode }
+    const why = await this.durableUnready()
+    if (why === undefined) return { mode }
+    if (asked) throw new SessionError('unavailable', why)
+    return { mode: 'classic', fallback: why }
+  }
+
   /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window. */
   private async withinNewSessionLimit(principal: Owner, sql: Sql): Promise<void> {
     const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
@@ -1012,16 +1109,21 @@ export class SessionManager {
     }
   }
 
-  async start(principal: Owner, options: StartOptions): Promise<{ session: SessionRecord; turn?: Turn }> {
+  async start(
+    principal: Owner,
+    options: StartOptions,
+  ): Promise<{ session: SessionRecord; turn?: Turn; modeFallback?: string }> {
     const prompt = options.prompt?.trim()
     const id = randomUUID()
     const title = options.title?.trim() || (prompt ? titleFrom(prompt) : '')
+    const { mode, fallback } = await this.startMode(options.mode)
     const session = await this.insert(id, principal, {
       origin: options.origin,
       title,
       tags: options.tags ?? [],
       scope: options.scope ?? {},
       parentId: null,
+      mode,
     }, { rateLimited: true })
     await this.events.append(id, [
       event({
@@ -1031,16 +1133,19 @@ export class SessionManager {
         owner: session.owner,
         title,
         budgetUsd: session.budgetUsd,
+        mode,
+        ...(fallback ? { modeFallback: fallback } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
-    if (!prompt) return { session }
+    const said = fallback ? { modeFallback: fallback } : {}
+    if (!prompt) return { session, ...said }
     const turn = await this.send(id, principal, prompt, {
       ...(options.context ? { context: options.context } : {}),
       ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
-    return { session: await this.get(id, principal), turn }
+    return { session: await this.get(id, principal), turn, ...said }
   }
 
   /**
@@ -1052,13 +1157,27 @@ export class SessionManager {
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
     if (this.draining) throw new SessionError('busy', RESTARTING)
     const before = await this.get(id, principal)
+    // Never unarchived by a send (#1885): unarchiving is the owner's explicit PATCH.
+    if (before.archivedAt !== null) throw archivedError(id)
     const turnId = randomUUID()
+    if (before.mode === 'durable') {
+      const turn = await this.durableOrRefuse().send(before, {
+        turnId,
+        prompt,
+        text: options.context ? `${prompt}\n\n${options.context}` : prompt,
+        author: principal,
+        images: options.images ?? [],
+        systemAppend: systemAppend(false),
+      })
+      if (!turn) throw await this.whyNotClaimed(id, principal, before)
+      return turn
+    }
     const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
-         AND (turn_id IS NULL OR lease_until <= now())
+       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
+         AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
@@ -1088,13 +1207,13 @@ export class SessionManager {
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
+       WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
-      return { resumed: false, reason: 'it is running another turn, is done, or has spent its budget' }
+      return { resumed: false, reason: 'it is running another turn, is done or archived, or has spent its budget' }
     }
     try {
       if (!(await this.approvals.bindResume(approval.id, turnId))) {
@@ -1127,6 +1246,15 @@ export class SessionManager {
     const now = this.deps.currentTiers ? await this.deps.currentTiers(session.owner) : undefined
     const tiers = now ? requested.filter((t) => now.includes(t)) : requested
     return tiers.length > 0 ? tiers : undefined
+  }
+
+  /** The durable dispatch, or `unavailable` when this service has none (no Temporal or no key). */
+  private durableOrRefuse(): DurableTurns {
+    if (this.durableTurns) return this.durableTurns
+    throw new SessionError(
+      'unavailable',
+      'this session is durable, and this agent service has no Temporal or secret key to run it; try again once it has',
+    )
   }
 
   /** Gives back a claim no turn ran on (a resume that could not start). */
@@ -1209,6 +1337,7 @@ export class SessionManager {
       )
     }
     if (now.status === 'done') return new SessionError('closed', `session ${id} is done`)
+    if (now.archivedAt !== null) return archivedError(id)
     if (now.costUsd >= now.budgetUsd) {
       return new SessionError(
         'budget_exhausted',
@@ -1518,10 +1647,7 @@ export class SessionManager {
           tierOf,
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
-          // The data/instruction boundary (#258, safety/untrusted.ts): only the
-          // user's messages are instructions; tool results are data. Then which
-          // browser each browser_* tool drives.
-          systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
+          systemPromptAppend: systemAppend(browser !== undefined),
           ...(browser ? { headlessBrowser: browser } : {}),
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
@@ -1915,6 +2041,9 @@ export class SessionManager {
    */
   async interrupt(id: string, principal: Owner): Promise<boolean> {
     const session = await this.get(id, principal)
+    if (session.mode === 'durable') {
+      return this.durableOrRefuse().interrupt(session, `interrupted by ${publicLabel(principal)}`)
+    }
     const local = this.active.get(id)
     if (local) {
       // Accurate, not optimistic: a turn whose result is already in is
@@ -1957,6 +2086,7 @@ export class SessionManager {
    */
   async handoff(id: string, actor: Owner, to: Owner): Promise<SessionRecord> {
     const session = await this.get(id, actor)
+    if (session.archivedAt !== null) throw archivedError(id)
     const isOwner = sameOwner(actor, session.owner)
     if (sameOwner(actor, to)) {
       if (actor.kind === 'browser') return this.transfer(session, to)
@@ -1987,6 +2117,7 @@ export class SessionManager {
    */
   async acceptHandoff(id: string, actor: Owner): Promise<SessionRecord> {
     const session = await this.get(id, actor)
+    if (session.archivedAt !== null) throw archivedError(id)
     if (!session.offer || !sameOwner(actor, session.offer.to)) {
       throw new SessionError('invalid', `session ${id} is not offered to you`)
     }
@@ -2031,6 +2162,8 @@ export class SessionManager {
   private async transfer(session: SessionRecord, to: Owner, options: { accepting?: boolean } = {}): Promise<SessionRecord> {
     const { id } = session
     if (sameOwner(session.owner, to) && session.owner.label === to.label && !session.offer) return session
+    // Refused before anything changes when this service cannot reach a durable session's workflow.
+    const durable = session.mode === 'durable' && !sameOwner(session.owner, to) ? this.durableOrRefuse() : undefined
     // Conditional on the owner read above (and, accepting, on the offer still
     // being the live one to `to`), so two concurrent handoffs cannot both apply.
     const offerStill = options.accepting
@@ -2055,6 +2188,10 @@ export class SessionManager {
       await this.announceOwner(id)
       return this.get(id, to)
     }
+    // A durable session's parked calls were asked for the previous owner's turn: ended
+    // only once the owner change above applied, with no lock held, best-effort (the
+    // interrupt Signal when cancel_input goes unanswered).
+    await durable?.handoff(session, `the session was handed off to ${publicLabel(to)}`)
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
@@ -2108,6 +2245,12 @@ export class SessionManager {
     const startedAt = new Date()
     const fresh = options.freshBudget === true && principal.kind === 'browser' && !options.agentActor
     const parent = await this.get(id, principal)
+    if (parent.mode === 'durable') {
+      throw new SessionError(
+        'invalid',
+        `session ${id} is durable: its conversation is held by its workflow and cannot be forked; start a new chat instead`,
+      )
+    }
     const transcript = await this.store.load({ projectKey: '', sessionId: id })
     if (!transcript) {
       throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
@@ -2143,6 +2286,8 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
+      // A fork copies the SDK transcript, which only a classic session has.
+      mode: 'classic',
     }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
     if (options.audit) {
       await this.deps.audit?.record({
@@ -2168,6 +2313,7 @@ export class SessionManager {
         owner: child.owner,
         title,
         budgetUsd: child.budgetUsd,
+        mode: child.mode,
       }),
       // The conversation, re-addressed to the child.
       ...history.map((e) => ({ ...e, sessionId: childId })),
