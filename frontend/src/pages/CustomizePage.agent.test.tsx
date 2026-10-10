@@ -8,6 +8,7 @@ import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { projectViews } from '../mocks/fixtures'
+import { setMockRemembered } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -229,6 +230,30 @@ describe('customizer tools', () => {
     const again = await screen.findByRole('dialog')
     fireEvent.click(await within(again).findByRole('switch', { name: 'Advanced' }))
     await waitFor(() => expect(within(again).getByTestId('project-select')).toBeEnabled())
+  })
+
+  it('refuses to file away from the remembered project until the agent names one (#1660)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ projects: projectViews, last_project_id: 1 }),
+      ),
+    )
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const { user } = await open()
+    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
+    await waitFor(() => expect(picker).toHaveValue('2'))
+    await user.selectOptions(picker, '1')
+
+    const refused = await call('generate', { timeout_ms: 5000 })
+    expect(!refused.ok && refused.error.message).toMatch(
+      /last filed in project 2 \(Gridfinity Bins\).*picker has project 1 \(Reagan Keychain\)/,
+    )
+    // Named, it files there and the picker follows.
+    expect(await call('generate', { timeout_ms: 5000, project_id: 2 })).toMatchObject({
+      ok: true,
+      result: { filed: { project_id: 2 } },
+    })
+    expect(picker).toHaveValue('2')
   })
 
   it('holds Generate while a project is being created (#665)', async () => {

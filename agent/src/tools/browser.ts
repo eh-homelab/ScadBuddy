@@ -390,8 +390,14 @@ export const browserTools: Tool[] = [
       PREFIX +
       'in the customizer, save the settled render as an output (the Generate button). Needed before the print ' +
       'or send dialog can open. A result with superseded: true was saved, but the template UI state moved ' +
-      'while it saved, so it is not the output on screen: generate again once the inputs are settled.',
-    input: z.object({ timeout_ms: waitMs(120_000, 30_000) }),
+      "while it saved, so it is not the output on screen: generate again once the inputs are settled. It files " +
+      "the 3MF in the Project picker's project; when that is not the project this model (with the preset in " +
+      'use) was last filed in, it saves nothing and the error names both: call again with project_id set to ' +
+      'the one meant (null for no project), which also moves the picker there.',
+    input: z.object({
+      timeout_ms: waitMs(120_000, 30_000),
+      project_id: z.number().int().nullable().optional().describe('The project to file in, past the remembered-project check'),
+    }),
     risk: 'write',
   }),
   forwarded({

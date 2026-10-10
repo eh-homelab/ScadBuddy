@@ -15,6 +15,8 @@ import type {
   FontFamily,
   Job,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   CatalogueLibrary,
   InvalidLibraryEntry,
   ManifestObject,
@@ -141,6 +143,8 @@ const state = {
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
+  /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
+  modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
   versions: structuredClone(fixtures.versions) as Record<string, ModelVersion[]>,
@@ -300,6 +304,7 @@ export function resetMockState(): void {
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
+  state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
   state.sourceAt = initialSourceAt()
@@ -395,7 +400,9 @@ export function setMockRemembered(remembered: {
   modelChoices?: Record<string, ModelPrintChoices>
   printerBedTypes?: Record<string, string>
   projectTargets?: Record<string, { printer_id: number; nozzle_diameter?: string }>
+  modelProjects?: Record<string, { project_id: number; preset_name?: string | null }>
 }): void {
+  if (remembered.modelProjects) state.modelProjects = structuredClone(remembered.modelProjects)
   if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
   if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
   if (remembered.projectTargets) state.projectTargets = structuredClone(remembered.projectTargets)
@@ -755,6 +762,18 @@ export function mockRemembered() {
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
     project_print_targets: structuredClone(state.projectTargets),
+    model_projects: structuredClone(state.modelProjects),
+  }
+}
+
+/** #1660 — `GET /print/models/{slug}/projects` from the store's `model_projects`. */
+function mockModelProjects(slug: string): ModelProjects {
+  return {
+    projects: Object.entries(state.modelProjects).flatMap(([key, project]): NonNullable<ModelProjects['projects']> => {
+      if (key === slug) return [{ preset_id: null, ...project }]
+      if (key.startsWith(`${slug}/`)) return [{ preset_id: key.slice(slug.length + 1), ...project }]
+      return []
+    }),
   }
 }
 
@@ -768,6 +787,7 @@ export function forgetMockRemembered(): void {
   state.modelChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
+  state.modelProjects = {}
   state.printOptions.global_options = {}
   state.printOptions.printers = {}
   state.printOptions.models = {}
@@ -3297,6 +3317,20 @@ export const handlers = [
     const body = (await request.json()) as LastProject
     state.lastProjectId = body.project_id ?? null
     return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
+  }),
+
+  // #1660 — the project each model was last filed into, per preset.
+  http.get(`${base}/print/models/:slug/projects`, ({ params }) =>
+    HttpResponse.json(mockModelProjects(String(params['slug']))),
+  ),
+
+  http.put(`${base}/print/models/:slug/project`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const body = (await request.json()) as ModelProjectPut
+    const key = body.preset_id ? `${slug}/${body.preset_id}` : slug
+    if (body.project_id === null || body.project_id === undefined) delete state.modelProjects[key]
+    else state.modelProjects[key] = { project_id: body.project_id, preset_name: body.preset_name ?? null }
+    return HttpResponse.json(mockModelProjects(slug))
   }),
 
   // #317 — Generate with a project files the editable 3MF in its folder, once per

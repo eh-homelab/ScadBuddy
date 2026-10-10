@@ -74,4 +74,40 @@ test.describe('action bar', () => {
       expect((await colours.boundingBox())!.height).toBeLessThan(20)
     })
   }
+
+  test("follows each preset's project and asks before filing it elsewhere (#1660)", async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    const bar = page.locator('footer').filter({ has: page.getByTestId('generate') })
+    const project = bar.getByLabel('Project')
+    const presets = page.getByRole('combobox', { name: 'Preset' })
+    const generate = page.getByTestId('generate')
+
+    // Tiny filed in Gridfinity Bins, the model with no preset in Reagan Keychain.
+    await presets.selectOption('template-tiny')
+    await project.selectOption('2')
+    await expect(generate).toBeEnabled()
+    await generate.click()
+    await expect(bar.getByTestId('project-filed')).toContainText('Saved to Gridfinity Bins')
+    await presets.selectOption('')
+    await project.selectOption('1')
+    await expect(generate).toBeEnabled()
+    await generate.click()
+    await expect(bar.getByTestId('project-filed')).toContainText('Saved to Reagan Keychain')
+
+    // Loading Tiny again moves the picker to its project. Its values are on screen with
+    // no preset selected, so the picker asks before replacing them.
+    await presets.selectOption('template-tiny')
+    await page.getByRole('dialog', { name: 'Apply preset Tiny?' }).getByRole('button', { name: 'Replace my changes' }).click()
+    await expect(project).toHaveValue('2')
+
+    // Moved off it, Generate asks first.
+    await project.selectOption('1')
+    await expect(generate).toBeEnabled()
+    await generate.click()
+    const dialog = page.getByRole('dialog', { name: 'File in another project?' })
+    await expect(dialog).toContainText('Tiny was last filed in Gridfinity Bins. File this in Reagan Keychain?')
+    await dialog.getByRole('button', { name: 'Use Gridfinity Bins' }).click()
+    await expect(bar.getByTestId('project-filed')).toContainText('Saved to Gridfinity Bins')
+    await expect(project).toHaveValue('2')
+  })
 })

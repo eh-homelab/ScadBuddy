@@ -68,7 +68,15 @@ from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure,
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.library.settings_store import ModelPrintChoices, RackAlgorithmSupersededError
+from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
+from scadbuddy.library.settings_store import (
+    ModelPrintChoices,
+    ModelProject,
+    RackAlgorithmSupersededError,
+    StoredSettings,
+    model_project_scope,
+)
+from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_positions
@@ -215,6 +223,77 @@ def put_model_choices(
     """
     settings = store.set_model_choices(slug, body)
     return settings.model_print_choices.get(slug, ModelPrintChoices())
+
+
+#: A saved preset's id or a template preset's, as ``PresetIdPath`` takes them.
+PRESET_ID_PATTERN = rf"^[a-z0-9-]{{1,{len(TEMPLATE_ID_PREFIX) + MAX_SLUG_LENGTH}}}$"
+
+
+class RememberedModelProject(ModelProject):
+    """The project one model was last filed into with one preset, or with none (#1660)."""
+
+    #: ``null`` is the model with no preset loaded.
+    preset_id: str | None = None
+
+
+class ModelProjects(BaseModel):
+    """Every project remembered for one model (#1660), one per preset it was filed with."""
+
+    projects: list[RememberedModelProject] = Field(default_factory=list)
+
+
+class ModelProjectPut(BaseModel):
+    """The project Generate filed this model into with ``preset_id`` (#1660); a ``null``
+    ``project_id`` forgets it."""
+
+    preset_id: str | None = Field(default=None, pattern=PRESET_ID_PATTERN)
+    #: The preset's name now, which Settings shows beside the entry.
+    preset_name: str | None = Field(default=None, max_length=200)
+    project_id: int | None = None
+
+
+def _model_projects(settings: StoredSettings, slug: str) -> ModelProjects:
+    prefix = model_project_scope(slug, "")
+    projects: list[RememberedModelProject] = []
+    for scope, project in settings.model_projects.items():
+        if scope == slug:
+            preset_id = None
+        elif scope.startswith(prefix):
+            preset_id = scope[len(prefix) :]
+        else:
+            continue
+        projects.append(RememberedModelProject(preset_id=preset_id, **project.model_dump()))
+    return ModelProjects(projects=projects)
+
+
+@router.get(
+    "/models/{slug}/projects",
+    response_model=ModelProjects,
+    summary="The projects this model was last filed into",
+)
+def get_model_projects(slug: SlugPath, store: SettingsStoreDep) -> ModelProjects:
+    """One per preset it was generated with, and one for no preset (#1660): the Customize
+    page's Project picker moves to the one for the preset in use, and Generate asks
+    before filing into another. Needs no Bambuddy."""
+    return _model_projects(store.load(), slug)
+
+
+@router.put(
+    "/models/{slug}/project",
+    response_model=ModelProjects,
+    summary="Remember the project this model was filed into",
+)
+def put_model_project(
+    slug: SlugPath, body: ModelProjectPut, store: SettingsStoreDep
+) -> ModelProjects:
+    """What Generate filed this model into with the preset in use (#1660); a ``null``
+    project forgets it. Answers with every project remembered for the model."""
+    project = (
+        None
+        if body.project_id is None
+        else ModelProject(project_id=body.project_id, preset_name=body.preset_name)
+    )
+    return _model_projects(store.set_model_project(slug, body.preset_id, project), slug)
 
 
 @router.put(

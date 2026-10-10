@@ -45,6 +45,8 @@ import type {
   MigrateResult,
   ModelPatch,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -1231,6 +1233,16 @@ export const api = {
     request<LastProject>('/print/projects/last', {
       method: 'PUT',
       body: JSON.stringify({ project_id: projectId } satisfies LastProject),
+    }),
+
+  /** #1660 — the project this model was last filed into, per preset it was generated with. */
+  getModelProjects: (slug: string) => request<ModelProjects>(`/print/models/${seg(slug)}/projects`),
+
+  /** #1660 — remember the project Generate filed this model into; a `null` project forgets it. */
+  putModelProject: (slug: string, body: ModelProjectPut) =>
+    request<ModelProjects>(`/print/models/${seg(slug)}/project`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     }),
 
   /**
