@@ -9,6 +9,10 @@ import { startFakeAnthropic } from './fakeAnthropic.ts'
 import { scriptedReply } from './realAgentScript.ts'
 
 const port = Number(process.argv[2] ?? 0)
+if (!Number.isInteger(port) || port < 0 || port > 65535) {
+  console.error(`usage: node test/support/serveScriptedModel.ts [port]  (port: 0-65535, 0 picks a free one; got ${process.argv[2]})`)
+  process.exit(2)
+}
 const fake = await startFakeAnthropic((request) => scriptedReply(request.body), port)
 console.log(fake.url)
 process.on('SIGINT', () => void fake.close().then(() => process.exit(0)))

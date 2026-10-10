@@ -147,6 +147,39 @@ test.describe('print dialog', () => {
     )
   })
 
+  // #1723 — the plate in 3D: Colors by default, Layers on the switch, over the dialog; on a
+  // phone it covers the screen, and closing it leaves every choice as it was.
+  test('previews the plate in 3D over the dialog at phone width, and keeps the choices', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    const spool = await dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true }).getAttribute('value')
+    expect(spool, 'a spool is chosen for slot 1').not.toBeNull()
+
+    await dialog.getByTestId('plate-preview-open').click()
+    const preview = page.getByRole('dialog', { name: /in 3D$/ })
+    await expect(preview.getByRole('radio', { name: 'Colors' })).toHaveAttribute('aria-checked', 'true')
+    const canvas = preview.getByTestId('plate-scene').locator('canvas')
+    await expect(canvas).toBeVisible()
+    const box = (await preview.boundingBox())!
+    expect(box.x, 'the preview fits the screen').toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(390)
+    expect(box.y + box.height).toBeLessThanOrEqual(844)
+
+    await preview.getByRole('radio', { name: 'Layers' }).click()
+    const slider = preview.getByRole('slider', { name: 'Layer height' })
+    await expect(slider).toBeEnabled()
+    await slider.fill('2')
+    await expect(preview.getByText(/^Up to 2\.00 of /)).toBeVisible()
+
+    await preview.getByRole('button', { name: 'Close' }).click()
+    await expect(preview).toHaveCount(0)
+    await expect(dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })).toHaveAttribute(
+      'value',
+      spool!,
+    )
+    await expect(dialog.getByRole('button', { name: 'Print', exact: true })).toBeInViewport({ ratio: 1 })
+  })
+
   // #944 — at phone width every slot's fieldset and spool rows ran past the screen's
   // right edge, cutting off the grams, the "rests on" badge and the "prints in" colour.
   test('keeps the slots and spool rows inside the screen at phone width', async ({ page }) => {
