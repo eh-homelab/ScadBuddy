@@ -959,11 +959,14 @@ class RenderStoreSettings(BaseModel):
 def load_render_store_settings(
     pool: ConnectionPool[Connection[DictRow]], defaults: Settings
 ) -> RenderStoreSettings:
-    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9)."""
+    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
+    the `render_settings` view, all of the settings the render worker's own role may
+    read (#601); the full key is in it only while no render key is stored."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(RENDER_FIELDS),)
+            "SELECT name, value FROM render_settings WHERE name = ANY(%s)",
+            (list(RENDER_FIELDS),),
         ).fetchall()
     values: dict[str, Any] = {
         name: getattr(defaults, name) for name in ENV_SEEDED if name in RENDER_FIELDS
