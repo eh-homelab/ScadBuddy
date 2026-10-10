@@ -1,5 +1,6 @@
 import { loadChatTransportFactory, type ChatTransportFactory } from '../../agent/chat/transport'
 import { useAsync } from '../../lib/useAsync'
+import { McpAuthBanner } from '../McpAuthBanner'
 import { AssistantChat, type OpenRequest } from './AssistantChat'
 
 interface Props {
@@ -27,13 +28,19 @@ export function AssistantPanel({ onClose, focusKey, factory, embedded, openReque
     )
   }
   return (
-    <AssistantChat
-      factory={loaded.data}
-      onClose={onClose}
-      focusKey={focusKey}
-      embedded={embedded}
-      openRequest={openRequest}
-      onOpenHandled={onOpenHandled}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      {/* #1921 — while /mcp takes calls without a token, the panel says so too. */}
+      <McpAuthBanner link className="m-2 shrink-0" />
+      <div className="min-h-0 flex-1">
+        <AssistantChat
+          factory={loaded.data}
+          onClose={onClose}
+          focusKey={focusKey}
+          embedded={embedded}
+          openRequest={openRequest}
+          onOpenHandled={onOpenHandled}
+        />
+      </div>
+    </div>
   )
 }

@@ -40,6 +40,7 @@ const KIND_LABEL: Record<AuditKind, string> = {
   memory: 'Memory',
   http: 'HTTP requests',
   question: 'Questions',
+  turn: 'Turns',
 }
 
 const OUTCOME_LABEL: Record<AuditOutcome, string> = {
@@ -75,6 +76,8 @@ function describe(entry: AuditEntry): string {
       return `HTTP ${entry.action}`
     case 'question':
       return `Question ${entry.action}`
+    case 'turn':
+      return `Turn ${entry.action}`
     default:
       return `${KIND_LABEL[entry.kind]}: ${entry.action}`
   }
@@ -127,7 +130,24 @@ function httpText(entry: AuditEntry): string | null {
   return parts.length ? parts.join(' · ') : null
 }
 
+const usd = (value: number) => `$${value.toFixed(4)}`
+
+/**
+ * A turn row's cost (#1922). A turn Claude Code never priced (no result came back)
+ * is flagged, with ScadBuddy's own estimate when it made one, never shown as a
+ * priced $0.
+ */
+function turnCost(entry: AuditEntry): string | null {
+  if (entry.kind !== 'turn' || entry.cost_usd === null) return null
+  const estimated = entry.cost_estimated_usd ?? 0
+  if (entry.cost_priced === false) {
+    return estimated > 0 ? `not priced by Claude Code · ~${usd(estimated)} estimated` : 'not priced by Claude Code'
+  }
+  return estimated > 0 ? `${usd(entry.cost_usd)} (incl. ~${usd(estimated)} estimated)` : usd(entry.cost_usd)
+}
+
 function AuditRow({ entry }: { entry: AuditEntry }) {
+  const cost = turnCost(entry)
   const text =
     entry.kind === 'memory'
       ? memoryText(entry)
@@ -150,6 +170,7 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         {entry.duration_ms !== null && <> · <span className="sb-num">{entry.duration_ms} ms</span></>}
         {entry.approval_id && <> · approval <span className="sb-num">{entry.approval_id.slice(0, 8)}</span></>}
         {entry.approved_by && <> · approved by {entry.approved_by.label}</>}
+        {cost && <> · <span className="sb-num">{cost}</span></>}
       </div>
       {text && (
         <p className="mt-0.5 truncate font-mono text-[12px] text-muted" title={text}>
@@ -233,8 +254,8 @@ function AuditLogView() {
       </h2>
       <div className="space-y-3 p-4">
         <p className="text-[12px] text-muted">
-          Every tool call the assistant or an MCP client made, every approval decision, and every
-          change to AI credentials, plugins, settings and MCP tokens. Inputs are shown scrubbed;
+          Every tool call the assistant or an MCP client made, what each assistant turn cost, every
+          approval decision, and every change to AI credentials, plugins, settings and MCP tokens. Inputs are shown scrubbed;
           secrets are never recorded.
         </p>
         <div className="flex flex-wrap items-end gap-3">

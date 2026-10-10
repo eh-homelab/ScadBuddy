@@ -20,6 +20,8 @@ import type {
   FontFamily,
   HeadlessBrowserSetting,
   HttpRequestSetting,
+  ModelSetting,
+  PrinterCameraSetting,
   ImageSettings,
   AttachmentView,
   AiSessionView,
@@ -1516,6 +1518,27 @@ export const api = {
     request<ImageSettings>('/ai/settings/images', {
       method: 'PUT',
       body: JSON.stringify({ long_edge: longEdge }),
+    }),
+
+  /**
+   * #1911 — the switch for the assistant's `get_printer_camera` tool, served by the agent
+   * service. On by default. Fails (404 or 503) when there is no agent or no AI database.
+   */
+  getPrinterCameraSetting: () => request<PrinterCameraSetting>('/ai/settings/printer-camera'),
+
+  putPrinterCameraSetting: (enabled: boolean) =>
+    request<PrinterCameraSetting>('/ai/settings/printer-camera', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** #1917 — the Claude model the assistant uses (`null`: Claude Code's default), served by the agent service. */
+  getModelSetting: () => request<ModelSetting>('/ai/settings/model'),
+
+  putModelSetting: (model: string | null) =>
+    request<ModelSetting>('/ai/settings/model', {
+      method: 'PUT',
+      body: JSON.stringify({ model }),
     }),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */

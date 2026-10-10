@@ -34,8 +34,9 @@ import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
+import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
-import { resolveTabWaits, SessionManager } from './sessions/manager.js'
+import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
@@ -58,6 +59,7 @@ import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
+import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -193,6 +195,8 @@ const toolServices: ToolServices = {
   pollIntervalMs: 1000,
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
+  // The tools Settings can turn off (#1911): read from ai_settings at each call.
+  switchedOff: toolSwitches(settings),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
@@ -444,8 +448,9 @@ const app = createApp({
   tokens: database ? tokens : undefined,
   aiSettings: settings,
   testConnection: async (credential) => {
-    const model = await settings?.get<string>('model')
-    return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
+    // The model Settings chose (routes/model.ts, #1917), as every turn uses it.
+    const model = storedModel(await settings?.get<unknown>(SETTING_MODEL))
+    return testConnection(credential, { paths, ...(model ? { model } : {}) })
   },
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),

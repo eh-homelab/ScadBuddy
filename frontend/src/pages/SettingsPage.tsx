@@ -16,6 +16,10 @@ import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
+import { ModelSetting } from '../components/ModelSetting'
+import { PrinterCameraSetting } from '../components/PrinterCameraSetting'
+import { McpAuthBanner } from '../components/McpAuthBanner'
+import { mcpAuthChanged } from '../lib/mcpAuthChanges'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -644,6 +648,9 @@ export function SettingsPage() {
           the server and never sent back to the browser.
         </p>
 
+        {/* #1921 — while /mcp takes calls without a token; re-read when the mode is saved below. */}
+        {ai.available && <McpAuthBanner className="mt-4" />}
+
         {changedElsewhere && (
           <div
             role="status"
@@ -1196,6 +1203,10 @@ export function SettingsPage() {
             </div>
             <HeadlessBrowserSetting />
             <HttpRequestSetting />
+            {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
+            <PrinterCameraSetting />
+            {/* Saves on its own (#1917), beside the chat limits; hidden without the agent's database. */}
+            <ModelSetting />
             {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
             <SessionLimitsSetting />
             {/* Saves on its own; hidden without the agent's database, like the limits above. */}
@@ -1205,8 +1216,13 @@ export function SettingsPage() {
                 (useAiAvailability). */}
             {ai.available && (
               <>
-                <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
-                <McpTokensSection authMode={mcpAuthMode} />
+                <McpAuthSection
+                  onSaved={(setting) => {
+                    setMcpAuthMode(setting.mode)
+                    mcpAuthChanged()
+                  }}
+                />
+                <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
               </>
             )}
             {ai.available && (

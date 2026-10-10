@@ -62,7 +62,7 @@ import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
-import { TurnAuditor } from '../audit/turn.js'
+import { TurnAuditor, turnCostEntry } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
@@ -1871,6 +1871,15 @@ export class SessionManager {
       WHERE id = ${id} AND turn_id = ${turnId}
       RETURNING id`
     if (!released) return { kind: 'lost_claim' }
+    // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
+    await this.deps.audit?.record(
+      turnCostEntry(
+        { sessionId: id, turnId, actor: session.owner },
+        outcome,
+        { costUsd: costUsd - session.ownCostUsd, priced: result !== undefined, estimatedUsd: cutUsd },
+        secrets,
+      ),
+    )
     // Read again, not from `session`: the user may have raised the budget while the turn
     // ran, and a fork or the parent sharing it may have spent from it (#823). The meter
     // shows what the whole lineage has spent, which is what the budget is checked against.

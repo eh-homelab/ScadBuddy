@@ -61,4 +61,25 @@ describe('SettingsPage and the AI availability gate', () => {
       'MCP authentication is turned off',
     )
   })
+
+  it('banners the top of the page while MCP authentication is off, until it is back on (#1921)', async () => {
+    availability.available = true
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    expect(screen.queryByTestId('mcp-auth-banner')).toBeNull()
+    const auth = screen.getByRole('region', { name: 'MCP authentication' })
+    await user.click(await within(auth).findByRole('radio', { name: /Allow calls without a token/ }))
+    await user.click(within(auth).getByRole('button', { name: 'Save' }))
+    await user.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Turn authentication off' }),
+    )
+    const banner = await screen.findByTestId('mcp-auth-banner')
+    expect(banner).toHaveTextContent('MCP authentication is off')
+    // Above every section, not inside one.
+    expect(banner.compareDocumentPosition(auth) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    await user.click(within(auth).getByRole('radio', { name: /Require an access token/ }))
+    await user.click(within(auth).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(screen.queryByTestId('mcp-auth-banner')).toBeNull())
+  })
 })
