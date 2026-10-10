@@ -111,6 +111,19 @@ export function RememberedChoicesPanel({
         forget: () => api.forgetRememberedProject(projectId),
       })
     }
+    for (const [scope, entry] of Object.entries(remembered.model_projects ?? {})) {
+      // #1660: `<model id>` with no preset, `<model id>/<preset id>` with one.
+      const slash = scope.indexOf('/')
+      const modelId = slash < 0 ? scope : scope.slice(0, slash)
+      const presetId = slash < 0 ? null : scope.slice(slash + 1)
+      rows.push({
+        key: `model-project:${scope}`,
+        kind: 'Project',
+        subject: presetId === null ? modelId : `${modelId} · ${entry.preset_name ?? presetId}`,
+        value: projectName(String(entry.project_id)),
+        forget: () => api.putModelProject(modelId, { preset_id: presetId, project_id: null }),
+      })
+    }
     if (!isEmptyOptions(remembered.print_options)) {
       rows.push({
         key: 'options:global',

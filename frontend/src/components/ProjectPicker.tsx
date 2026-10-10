@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { ProjectRequest, ProjectView } from '../api/types'
-import { type ProjectList, useProjectList } from '../lib/projects'
+import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
@@ -37,30 +37,6 @@ function optionLabel(project: ProjectView, path: string): string {
   if (project.archive_count > 0) parts.push(`${project.archive_count} archived`)
   if (project.queue_count > 0) parts.push(`${project.queue_count} queued`)
   return `${path} · ${parts.join(' · ')}`
-}
-
-/**
- * #930 — each project named by its path, `Parent › Child`, since a native `<option>`
- * cannot indent; keyed by id, built once per list. A parent missing from the list (or a
- * cycle) ends the path there.
- */
-function breadcrumbs(projects: ProjectView[]): Map<number, string> {
-  const byId = new Map(projects.map((project) => [project.id, project]))
-  const paths = new Map<number, string>()
-  for (const project of projects) {
-    const names = [project.name]
-    const seen = new Set([project.id])
-    let parentId = project.parent_id ?? null
-    while (parentId !== null && !seen.has(parentId)) {
-      seen.add(parentId)
-      const parent = byId.get(parentId)
-      if (!parent) break
-      names.unshift(parent.name)
-      parentId = parent.parent_id ?? null
-    }
-    paths.set(project.id, names.join(' › '))
-  }
-  return paths
 }
 
 interface Props {

@@ -42,6 +42,7 @@ from scadbuddy.core.settings import (
 from scadbuddy.library.settings_store import (
     DisplayUnit,
     ModelPrintChoices,
+    ModelProject,
     SettingSource,
     SettingsPatch,
     SettingsSnapshot,
@@ -244,6 +245,9 @@ class RememberedChoices(BaseModel):
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Stringified Bambuddy project id -> the printer and nozzle it last printed on (#599).
     project_print_targets: dict[str, ProjectTarget] = Field(default_factory=dict)
+    #: A model id, or ``<model id>/<preset id>``, -> the project Generate last filed it
+    #: into (#1660).
+    model_projects: dict[str, ModelProject] = Field(default_factory=dict)
 
 
 class BambuddyStatus(BaseModel):
@@ -415,6 +419,7 @@ def _remembered(
         printer_print_options=settings.printer_print_options,
         model_print_options=settings.model_print_options,
         printer_rack_algorithms=settings.printer_rack_algorithms,
+        model_projects=settings.model_projects,
     )
 
 
@@ -430,6 +435,7 @@ async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> Rememb
     ``PUT /print/library/{file_id}/choices``), ``PUT /print/printers/{id}/bed-type``
     with a ``null`` plate,
     ``PUT /print/printers/{id}/rack-algorithm`` with a ``null`` algorithm,
+    ``PUT /print/models/{slug}/project`` with a ``null`` project,
     and ``PUT /settings/print-options`` with no options, so the browser never posts a
     whole map back; a project's printer and nozzle go through
     ``DELETE /settings/remembered/projects/{project_id}``."""

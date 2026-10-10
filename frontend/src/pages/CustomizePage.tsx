@@ -282,6 +282,15 @@ export function CustomizePage() {
   useEffect(() => {
     if (presetElsewhere) setPresetElsewhere(null)
   }, [presetElsewhere])
+  /** #1660 — the preset the picker has selected, which the Project picker follows. */
+  const [presetInUse, setPresetInUse] = useState<{ id: string; name: string } | null>(null)
+  const onPresetSelected = useCallback(
+    (preset: { id: string; name: string } | null) =>
+      setPresetInUse((current) =>
+        current?.id === preset?.id && current?.name === preset?.name ? current : preset && { id: preset.id, name: preset.name },
+      ),
+    [],
+  )
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -907,6 +916,7 @@ export function CustomizePage() {
       viewSize={viewSize}
       cameraView={cameraView}
       model={modelState.data}
+      preset={presetInUse}
       onModelChanged={modelState.setData}
       extra={extra}
       fit={fit}
@@ -938,6 +948,7 @@ export function CustomizePage() {
       pinned={version !== undefined}
       resetKey={resets}
       selected={presetElsewhere}
+      onSelected={onPresetSelected}
     />
   )
   const templateUi = customUi && (
@@ -1216,6 +1227,7 @@ export function CustomizePage() {
                     pinned={version !== undefined}
                     resetKey={resets}
                     selected={presetElsewhere}
+                    onSelected={onPresetSelected}
                   />
                 </>
               }

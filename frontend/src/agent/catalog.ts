@@ -157,11 +157,17 @@ export const TOOLS = {
   }),
   generate: tool({
     description:
-      'Save the settled render as an output (the Generate button). Needed before the print or send dialog can open.',
+      'Save the settled render as an output (the Generate button). Needed before the print or send dialog can open. ' +
+      "It files the 3MF in the Project picker's project. When that is not the project this model (with the preset " +
+      'in use) was last filed in, it saves nothing and names both: call again with project_id set to the one meant ' +
+      '(null for no project), which also moves the picker there.',
     risk: 'write',
     scope: 'customize',
     input: z
-      .object({ timeout_ms: z.number().int().min(0).max(120_000).default(30_000) })
+      .object({
+        timeout_ms: z.number().int().min(0).max(120_000).default(30_000),
+        project_id: z.number().int().nullable().optional(),
+      })
       .strict(),
   }),
   select_plate: tool({

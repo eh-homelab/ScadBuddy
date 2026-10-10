@@ -167,6 +167,15 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
   })),
+  ...(['GET /api/v1/print/models/{slug}/projects', 'PUT /api/v1/print/models/{slug}/project'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        "The project each model (and preset) was last filed in (#1660), which the Customize page's Project " +
+        'picker follows and Generate checks. An agent meets it through browser_generate, which refuses to file ' +
+        'elsewhere until it names the project; get_remembered_choices lists them as `model_projects`.',
+    }),
+  ),
   {
     operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
     reason:

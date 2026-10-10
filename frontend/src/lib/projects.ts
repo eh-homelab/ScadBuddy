@@ -116,3 +116,27 @@ export function useProjectList(
     [choices, loading, error, reload, retry, rereadFor, add],
   )
 }
+
+/**
+ * #930 — each project named by its path, `Parent › Child`, since a native `<option>`
+ * cannot indent; keyed by id, built once per list. A parent missing from the list (or a
+ * cycle) ends the path there.
+ */
+export function breadcrumbs(projects: ProjectView[]): Map<number, string> {
+  const byId = new Map(projects.map((project) => [project.id, project]))
+  const paths = new Map<number, string>()
+  for (const project of projects) {
+    const names = [project.name]
+    const seen = new Set([project.id])
+    let parentId = project.parent_id ?? null
+    while (parentId !== null && !seen.has(parentId)) {
+      seen.add(parentId)
+      const parent = byId.get(parentId)
+      if (!parent) break
+      names.unshift(parent.name)
+      parentId = parent.parent_id ?? null
+    }
+    paths.set(project.id, names.join(' › '))
+  }
+  return paths
+}

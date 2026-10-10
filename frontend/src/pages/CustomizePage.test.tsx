@@ -22,6 +22,7 @@ import {
   setMockPlates,
   setMockPresets,
   setMockRenderColors,
+  setMockRemembered,
   setMockSettings,
 } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
@@ -1776,6 +1777,95 @@ describe('CustomizePage, project file (#317)', () => {
 
     await waitFor(() => expect(ran).toHaveLength(1))
     expect(await ran[0]).not.toHaveProperty('project_id')
+  })
+
+  // #1660 — the project each model and preset was last filed in.
+
+  it('remembers the project Generate filed the model in', async () => {
+    withLastProject(1)
+    const remembered = watchBodies('PUT', '/print/models/name-keychain/project')
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await generate(user)
+
+    await waitFor(() => expect(remembered).toHaveLength(1))
+    expect(await remembered[0]).toEqual({ preset_id: null, preset_name: null, project_id: 1 })
+  })
+
+  it("opens on the model's remembered project over the last one", async () => {
+    withLastProject(1)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+  })
+
+  it("moves to a preset's remembered project when it is loaded, and back without one", async () => {
+    withLastProject(1)
+    setMockRemembered({ modelProjects: { 'name-keychain/template-tiny': { project_id: 2, preset_name: 'Tiny' } } })
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    const presets = screen.getByRole('combobox', { name: 'Preset' })
+    await user.selectOptions(presets, 'template-tiny')
+    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await user.selectOptions(presets, '')
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+  })
+
+  it('asks before filing somewhere other than the remembered project', async () => {
+    withLastProject(1)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const filed = watchBodies('POST', '/project-file')
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await user.selectOptions(pagePicker(), '1')
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+
+    // Cancel saves nothing.
+    await user.click(screen.getByTestId('generate'))
+    const dialog = await screen.findByRole('dialog', { name: 'File in another project?' })
+    expect(within(dialog).getByTestId('generate-project-confirm')).toHaveTextContent(
+      'Name Keychain was last filed in Gridfinity Bins. File this in Reagan Keychain?',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(filed).toHaveLength(0)
+
+    // "Use" files in the remembered project and moves the picker there.
+    await user.click(screen.getByTestId('generate'))
+    await user.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Use Gridfinity Bins' }),
+    )
+    await screen.findByTestId('project-filed')
+    expect(await filed[0]).toEqual({ project_id: 2 })
+    expect(pagePicker()).toHaveValue('2')
+  })
+
+  it('files in the chosen project when asked, which becomes the remembered one', async () => {
+    withLastProject(1)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const filed = watchBodies('POST', '/project-file')
+    const remembered = watchBodies('PUT', '/print/models/name-keychain/project')
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await user.selectOptions(pagePicker(), '1')
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await user.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'File in Reagan Keychain' }),
+    )
+    await screen.findByTestId('project-filed')
+    expect(await filed[0]).toEqual({ project_id: 1 })
+    await waitFor(() => expect(remembered).toHaveLength(1))
+    expect(await remembered[0]).toMatchObject({ project_id: 1 })
+    expect(pagePicker()).toHaveValue('1')
+
+    // Now they match: no question.
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(filed).toHaveLength(2))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })
 
