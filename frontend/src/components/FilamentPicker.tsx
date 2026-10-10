@@ -40,7 +40,7 @@ import {
  */
 
 /**
- * Only a slot with nothing chosen reads as a fault. "Load this spool into AMS 0 slot 2"
+ * Only a slot with nothing chosen reads as a fault. "Load this spool into AMS-A slot 2"
  * is an instruction, and colouring it like a fault trains the user to ignore the colour.
  */
 const WARNING_TONE: Record<FilamentWarning['kind'], string> = {

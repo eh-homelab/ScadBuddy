@@ -18,6 +18,9 @@ name: Deploy (reusable)
 #      The agent sidecar's line in the API manifest (#738) is pinned to
 #      `ghcr.io/eh-homelab/scadbuddy-agent:<version>@sha256:<its digest>`, the
 #      same build's agent image, so the two containers never drift apart.
+#      Once clusters runs it, the durable sessions sidecar's line (#1056) is
+#      pinned the same way, to
+#      `ghcr.io/eh-homelab/scadbuddy-agent-durable:<version>@sha256:<its digest>`.
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
 #      And, once clusters#1596 Phase 5 adds it, the `ref=` of the remote
@@ -89,6 +92,9 @@ env:
   # The agent sidecar (#261), built by the same Build Image run under the same
   # tags, and pinned in $MANIFEST beside the API (#738).
   AGENT_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent
+  # The durable sessions sidecar (#1056), same run, same tags, pinned in
+  # $MANIFEST once clusters runs it.
+  AGENT_DURABLE_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent-durable
   # The overlay that pulls in deploy/grafana as a remote kustomize resource,
   # and that resource without its `?ref=` (spec 2026-10-01 §7, #988).
   KUSTOMIZATION: clusters/prod/scadbuddy/kustomization.yaml
@@ -98,8 +104,8 @@ jobs:
   pin:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
-    # The agent wait below can take up to 10 of these.
-    timeout-minutes: 25
+    # The agent and agent-durable waits below can take up to 10 of these each.
+    timeout-minutes: 35
     # The one place the two callers can race: this job closes the previous
     # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
     # Job-level, so only these few seconds serialise — deploy-release's image
@@ -172,6 +178,32 @@ jobs:
           echo "$ref -> $digest"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The durable sessions sidecar (#1056), resolved like the agent. Not
+      # required here: a build from before 5e has no such image, and a manifest
+      # without its line needs none. The pin step fails when the manifest
+      # names the image and this found nothing.
+      - name: Resolve the agent-durable image
+        id: agent-durable
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ref="${AGENT_DURABLE_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 60); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::could not resolve $ref (got '$digest'); it is pinned only if clusters does not name it"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Mint an App token for clusters
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -227,6 +259,7 @@ jobs:
         env:
           DIGEST: ${{ inputs.digest }}
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
+          AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -306,6 +339,33 @@ jobs:
             expect_one "$target" "$agent_line" "agent image"
             sed -i -E "s|${agent_line}|\1image: ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}|" "$target"
             expect_one "$target" "^\s*image: ${AGENT_IMAGE//./\\.}:${VERSION//./\\.}@${AGENT_DIGEST}\$" "pinned agent image"
+          }
+
+          # The durable sessions sidecar's line (#1056). Optional until clusters
+          # runs it: a manifest with no line deploys without it. A manifest that
+          # names it gets this build's image or fails, never a stale pin beside
+          # a new agent (the two share the tool manifest). Sets $durable to
+          # `pinned` when it rewrote the line.
+          durable=none
+          pin_agent_durable() { # manifest
+            local target=$1 n
+            local durable_line="^(\s*)image: ${AGENT_DURABLE_IMAGE//./\\.}[:@][^[:space:]]*\$"
+            n=$(grep -cE "$durable_line" "$target" || true)
+            if [ "$n" -eq 0 ]; then
+              # An image line for it that the pattern misses (no tag or
+              # digest, a trailing comment) is a near miss, not "not run yet".
+              if grep -qE "^\s*(- )?image:.*${AGENT_DURABLE_IMAGE//./\\.}" "$target"; then
+                echo "::error file=$target::has an image line for ${AGENT_DURABLE_IMAGE} that is not exactly 'image: ${AGENT_DURABLE_IMAGE}:<tag>@<digest>'"; exit 1
+              fi
+              echo "::notice::${target} does not run agent-durable yet; not pinning it"
+              return 0
+            fi
+            expect_one "$target" "$durable_line" "agent-durable image"
+            [[ "${AGENT_DURABLE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              || { echo "::error file=$target::runs ${AGENT_DURABLE_IMAGE}, but no image was published for ${VERSION}"; exit 1; }
+            sed -i -E "s|${durable_line}|\1image: ${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}|" "$target"
+            expect_one "$target" "^\s*image: ${AGENT_DURABLE_IMAGE//./\\.}:${VERSION//./\\.}@${AGENT_DURABLE_DIGEST}\$" "pinned agent-durable image"
+            durable=pinned
           }
 
           # True when transformers[] holds a NamespaceTransformer with
@@ -407,6 +467,8 @@ jobs:
           manifests=("$MANIFEST")
           pin "$MANIFEST" scadbuddy
           pin_agent "$MANIFEST"
+          pin_agent_durable "$MANIFEST"
+          echo "durable=$durable" >> "$GITHUB_OUTPUT"
           pin_dashboard "$KUSTOMIZATION"
           echo "dashboard=$dashboard" >> "$GITHUB_OUTPUT"
           if [ "$dashboard" = pinned ]; then
@@ -447,6 +509,8 @@ jobs:
           GH_REPO: ${{ env.CLUSTERS_REPO }}
           DIGEST: ${{ inputs.digest }}
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
+          AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
+          DURABLE: ${{ steps.edit.outputs.durable }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -476,6 +540,11 @@ jobs:
             kept)   dashboard_note="left at its current ref: ${REVISION} has no deploy/grafana" ;;
             *)      dashboard_note="not pinned in clusters yet (clusters#1596 Phase 5)" ;;
           esac
+          if [ "$DURABLE" = pinned ]; then
+            durable_note="\`${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}\`"
+          else
+            durable_note="not run in clusters yet (#1056)"
+          fi
           git checkout -B "$DEPLOY_BRANCH"
           git add -- "${manifest_files[@]}"
           git commit -q -F - <<EOF
@@ -483,7 +552,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
-          (dashboard: ${dashboard_note})
+          (agent-durable: ${durable_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -503,6 +572,7 @@ jobs:
 
           - **Image:** \`${IMAGE}:${VERSION}@${DIGEST}\`
           - **Agent:** \`${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}\`
+          - **Agent-durable:** ${durable_note}
           - **Dashboard:** ${dashboard_note}
           - **Files:** ${listed}
           - **Built from:** ${SOURCE_URL} (\`${REVISION}\`)
