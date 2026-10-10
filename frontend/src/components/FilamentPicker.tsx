@@ -157,6 +157,16 @@ export function FilamentPicker({
   copies,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
+  // Slots whose list is open although a spool is chosen. A slot with a spool shows only
+  // that spool until "Change" opens it; a slot with nothing chosen is always open.
+  const [opened, setOpened] = useState<ReadonlySet<number>>(() => new Set())
+  const setOpen = (slotId: number, open: boolean) =>
+    setOpened((current) => {
+      const next = new Set(current)
+      if (open) next.add(slotId)
+      else next.delete(slotId)
+      return next
+    })
 
   const spools = options.spools ?? []
   const slots = options.slots ?? []
@@ -171,6 +181,7 @@ export function FilamentPicker({
       ...plan.filter((choice) => choice.slot_id !== slotId),
       { slot_id: slotId, spool_id: spoolId },
     ])
+    setOpen(slotId, false)
   }
 
   const set = <K extends keyof SpoolFilters>(key: K, value: SpoolFilters[K]) =>
@@ -180,6 +191,10 @@ export function FilamentPicker({
   // opening selection — that one stops being true the moment a slot is changed.
   const warnings = checkPlan(options, plan, copies)
   const resting = options.track_switch ?? false
+  const isOpen = (slotId: number) => chosenFor(slotId) === null || opened.has(slotId)
+  // The filters narrow the open lists; with every slot showing only its spool they
+  // would filter nothing.
+  const anyOpen = slots.some((slot) => isOpen(slot.slot_id))
 
   return (
     <section className="mt-4">
@@ -187,7 +202,10 @@ export function FilamentPicker({
         <h3 className="text-[13px] text-ink">Filaments</h3>
         <button
           type="button"
-          onClick={() => onChange(suggested.map((choice) => ({ ...choice })))}
+          onClick={() => {
+            onChange(suggested.map((choice) => ({ ...choice })))
+            setOpened(new Set())
+          }}
           className="text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
           data-testid="reset-filaments"
         >
@@ -195,91 +213,95 @@ export function FilamentPicker({
         </button>
       </div>
 
-      {/* One filter row for every slot: the inventory is the same list each time, and a
-          per-slot copy would mean setting "PLA only" twice for a two-colour plate. */}
-      <div className="mt-2 flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1 text-[12px] text-muted">
-          Material
-          <select
-            value={filters.material}
-            onChange={(event) => set('material', event.target.value)}
-            className="sb-field cursor-pointer py-1 text-[12px]"
-            data-testid="filter-material"
-          >
-            <option value="">Any</option>
-            {choices.materials.map((material) => (
-              <option key={material} value={material}>
-                {material}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-[12px] text-muted">
-          Subtype
-          <select
-            value={filters.subtype}
-            onChange={(event) => set('subtype', event.target.value)}
-            className="sb-field cursor-pointer py-1 text-[12px]"
-            data-testid="filter-subtype"
-          >
-            <option value="">Any</option>
-            {choices.subtypes.map((subtype) => (
-              <option key={subtype} value={subtype}>
-                {subtype}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-[12px] text-muted">
-          Brand
-          <select
-            value={filters.brand}
-            onChange={(event) => set('brand', event.target.value)}
-            className="sb-field cursor-pointer py-1 text-[12px]"
-            data-testid="filter-brand"
-          >
-            <option value="">Any</option>
-            {choices.brands.map((brand) => (
-              <option key={brand} value={brand}>
-                {brand}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-1 flex-col gap-1 text-[12px] text-muted">
-          Search
-          <input
-            type="search"
-            value={filters.search}
-            placeholder="Colour or brand"
-            onChange={(event) => set('search', event.target.value)}
-            className="sb-field py-1 text-[12px]"
-            data-testid="filter-search"
-          />
-        </label>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-4">
-        <label className="flex cursor-pointer items-center gap-2 text-[12px] text-muted">
-          <input
-            type="checkbox"
-            checked={filters.loadedOnly}
-            onChange={(event) => set('loadedOnly', event.target.checked)}
-            className="accent-[var(--sb-accent)]"
-            data-testid="filter-loaded-only"
-          />
-          Loaded in a printer
-        </label>
-        <label className="flex cursor-pointer items-center gap-2 text-[12px] text-muted">
-          <input
-            type="checkbox"
-            checked={filters.enoughOnly}
-            onChange={(event) => set('enoughOnly', event.target.checked)}
-            className="accent-[var(--sb-accent)]"
-            data-testid="filter-enough"
-          />
-          Enough for this print
-        </label>
-      </div>
+      {anyOpen && (
+        <>
+        {/* One filter row for every slot: the inventory is the same list each time, and a
+            per-slot copy would mean setting "PLA only" twice for a two-colour plate. */}
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1 text-[12px] text-muted">
+            Material
+            <select
+              value={filters.material}
+              onChange={(event) => set('material', event.target.value)}
+              className="sb-field cursor-pointer py-1 text-[12px]"
+              data-testid="filter-material"
+            >
+              <option value="">Any</option>
+              {choices.materials.map((material) => (
+                <option key={material} value={material}>
+                  {material}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[12px] text-muted">
+            Subtype
+            <select
+              value={filters.subtype}
+              onChange={(event) => set('subtype', event.target.value)}
+              className="sb-field cursor-pointer py-1 text-[12px]"
+              data-testid="filter-subtype"
+            >
+              <option value="">Any</option>
+              {choices.subtypes.map((subtype) => (
+                <option key={subtype} value={subtype}>
+                  {subtype}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[12px] text-muted">
+            Brand
+            <select
+              value={filters.brand}
+              onChange={(event) => set('brand', event.target.value)}
+              className="sb-field cursor-pointer py-1 text-[12px]"
+              data-testid="filter-brand"
+            >
+              <option value="">Any</option>
+              {choices.brands.map((brand) => (
+                <option key={brand} value={brand}>
+                  {brand}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-1 flex-col gap-1 text-[12px] text-muted">
+            Search
+            <input
+              type="search"
+              value={filters.search}
+              placeholder="Colour or brand"
+              onChange={(event) => set('search', event.target.value)}
+              className="sb-field py-1 text-[12px]"
+              data-testid="filter-search"
+            />
+          </label>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-4">
+          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-muted">
+            <input
+              type="checkbox"
+              checked={filters.loadedOnly}
+              onChange={(event) => set('loadedOnly', event.target.checked)}
+              className="accent-[var(--sb-accent)]"
+              data-testid="filter-loaded-only"
+            />
+            Loaded in a printer
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-muted">
+            <input
+              type="checkbox"
+              checked={filters.enoughOnly}
+              onChange={(event) => set('enoughOnly', event.target.checked)}
+              className="accent-[var(--sb-accent)]"
+              data-testid="filter-enough"
+            />
+            Enough for this print
+          </label>
+        </div>
+        </>
+      )}
 
       <div className="mt-3 space-y-3">
         {slots.map((slot) => {
@@ -291,17 +313,29 @@ export function FilamentPicker({
            * A radio group whose checked member is not rendered shows nothing selected,
            * which reads as "this slot is empty" rather than "the filters hide it".
            */
-          const rows = matched.some((spool) => spool.spool_id === chosen)
-            ? matched
-            : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
           const chosenSpool = spools.find((spool) => spool.spool_id === chosen)
+          const listOpen = isOpen(slot.slot_id)
+          const rows = !listOpen
+            ? [chosenSpool].filter((spool) => spool !== undefined)
+            : matched.some((spool) => spool.spool_id === chosen)
+              ? matched
+              : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
           return (
             // min-w-0: a fieldset defaults to min-inline-size: min-content, so without it
             // the slot grows to its widest row and runs off a phone's screen (#944).
             <fieldset key={slot.slot_id} className="min-w-0" data-testid={`filament-slot-${slot.slot_id}`}>
               <legend className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink">
-                <Swatch colour={slot.colour} />
                 Slot {slot.slot_id}
+                {/* The file's own colour for this slot, labelled so it is not read as a
+                    second choice beside the "prints in" swatch. */}
+                <span
+                  className="flex items-center gap-1 text-[12px] text-faint"
+                  title="The colour this slot has in the file"
+                  data-testid={`slot-original-${slot.slot_id}`}
+                >
+                  <Swatch colour={slot.colour} size="sm" />
+                  original
+                </span>
                 {slot.material ? <span className="text-muted">{slot.material}</span> : null}
                 <span className="text-[12px] text-faint">{needLabel(slot, copies)}</span>
                 {/* The colour this part will actually come out in: the file is recoloured
@@ -325,7 +359,7 @@ export function FilamentPicker({
                 )}
               </legend>
               <ul className="mt-1.5 max-h-56 overflow-y-auto rounded-[6px] border border-line">
-                {rows.length === 0 && (
+                {listOpen && rows.length === 0 && (
                   <li className="px-2.5 py-3 text-[12px] text-muted">
                     No spool matches those filters.
                   </li>
@@ -388,6 +422,17 @@ export function FilamentPicker({
                   )
                 })}
               </ul>
+              {chosenSpool && (
+                <button
+                  type="button"
+                  onClick={() => setOpen(slot.slot_id, !listOpen)}
+                  aria-expanded={listOpen}
+                  className="mt-1 text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
+                  data-testid={`change-slot-${slot.slot_id}`}
+                >
+                  {listOpen ? 'Done' : 'Change'}
+                </button>
+              )}
 
               <WarningList
                 warnings={warningsFor(warnings, slot.slot_id)}
