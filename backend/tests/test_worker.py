@@ -7,6 +7,7 @@ import contextlib
 import logging
 import os
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -912,6 +913,9 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
         local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
     )
     (local.dir_for("k") / "m").write_bytes(b"12345")
+    (tmp_path / "scratch").mkdir()
+    (tmp_path / "scratch" / "left-over").write_bytes(b"x" * 100_000)
+    os.link(tmp_path / "scratch" / "left-over", tmp_path / "scratch" / "linked")
     store = StoreBundle(
         "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
     )
@@ -935,6 +939,72 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
     }
     assert samples["scadbuddy_worker_cache_bytes"] == 5
     assert samples["scadbuddy_store_render_key_fallback"] == 1
+    # The whole data directory, as allocated on disk: the piece cache and the scratch
+    # file beside it, which the cache gauge alone would miss (#1785).
+    # As du counts it: directories too, and the linked file once.
+    du = subprocess.run(
+        ["du", "-s", "-B1", str(tmp_path)], capture_output=True, text=True, check=True
+    )
+    allocated = int(du.stdout.split()[0])
+    assert samples["scadbuddy_render_data_bytes"] == allocated >= 100_000
+
+
+async def test_the_data_directory_is_measured_when_the_database_is_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The eviction gauge needs no database, so an outage does not freeze it (#1785)."""
+
+    async def down(_: StoreBundle) -> None:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(worker_module, "store_health", down)
+    (tmp_path / "scratch").write_bytes(b"x" * 100_000)
+    metrics = Metrics()
+    store = cast(StoreBundle, SimpleNamespace())
+    with pytest.raises(OSError):
+        await worker_module._refresh_store_metrics(
+            metrics, store, worker_module._DataUsage(tmp_path)
+        )
+    measured = metrics.registry.get_sample_value("scadbuddy_render_data_bytes")
+    assert measured is not None and measured >= 100_000
+
+
+async def test_the_data_directory_is_walked_again_only_once_its_value_is_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2020: a scrape every 15-30 s does not walk all of /data each time."""
+    walks: list[Path] = []
+    real = worker_module._allocated_bytes
+
+    def counted(root: Path) -> int:
+        walks.append(root)
+        return real(root)
+
+    monkeypatch.setattr(worker_module, "_allocated_bytes", counted)
+    now = [1000.0]
+    data = worker_module._DataUsage(tmp_path, clock=lambda: now[0])
+    first = await data.read()
+    (tmp_path / "scratch").write_bytes(b"x" * 100_000)
+
+    now[0] += worker_module.DATA_USAGE_MAX_AGE - 1
+    assert await data.read() == first
+    assert len(walks) == 1
+
+    now[0] += 1
+    assert await data.read() >= first + 100_000
+    assert len(walks) == 2
+
+
+def test_a_symlinked_directory_counts_its_own_blocks_not_its_targets(tmp_path: Path) -> None:
+    """As du counts it, without -L (#2025)."""
+    root = tmp_path / "data"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "big").write_bytes(b"x" * 100_000)
+    (root / "link").symlink_to(elsewhere, target_is_directory=True)
+    du = subprocess.run(["du", "-s", "-B1", str(root)], capture_output=True, text=True, check=True)
+    assert worker_module._allocated_bytes(root) == int(du.stdout.split()[0])
 
 
 def test_a_refused_store_closes_the_projection_the_worker_opened(

@@ -28,8 +28,8 @@ import type { RespondBody } from '../agent/respond'
 import {
   PROTOCOL_VERSION,
   type ClientMessage,
-  type ImagePreview,
   type Owner,
+  type SentImage,
   type ServerEvent,
   type SessionMode,
   type SessionStatus,
@@ -42,9 +42,9 @@ type Body<E> = E extends ServerEvent ? Omit<E, 'v'> : never
 type EventBody = Body<ServerEvent>
 
 
-/** The previews of the uploads a message names (#1941); one the mock never took is left out. */
-function uploadedPreviews(refs: { id: string }[]): ImagePreview[] {
-  return refs.map((ref) => takeAttachment(ref.id)).filter((p): p is ImagePreview => p !== undefined)
+/** The previews of the uploads a message names (#1941), with their stored names; one the mock never took is left out. */
+function uploadedPreviews(refs: { id: string }[]): SentImage[] {
+  return refs.map((ref) => takeAttachment(ref.id)).filter((p): p is SentImage => p !== undefined)
 }
 
 export const BROWSER_USER: Owner = { kind: 'browser', id: 'browser', label: 'You' }

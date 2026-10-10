@@ -67,6 +67,31 @@ describe('McpTokensSection', () => {
     expect(document.body.textContent).not.toContain(token)
   })
 
+  it('fills the connect snippet with a token just minted, until Done (#1910)', async () => {
+    const { user } = renderPage(<McpTokensSection publicUrl="https://scadbuddy.example" />)
+    await listed()
+    const snippet = () => screen.getByTestId('mcp-snippet-claude-code').textContent ?? ''
+    expect(snippet()).toContain("'https://scadbuddy.example/mcp' --header 'Authorization: Bearer <your token>'")
+
+    await user.type(screen.getByLabelText('Token name'), 'Claude Code')
+    await user.click(screen.getByRole('button', { name: 'Create token' }))
+    const token = (await screen.findByTestId('minted-token-value')).textContent!
+    expect(snippet()).toContain(`Authorization: Bearer ${token}`)
+
+    await user.click(screen.getByRole('button', { name: 'Done' }))
+    expect(snippet()).toContain('<your token>')
+    expect(document.body.textContent).not.toContain(token)
+  })
+
+  it('leaves the header out of the snippet while MCP authentication is off (#1910)', async () => {
+    setMcpAuthMode('disabled')
+    renderPage(<McpTokensSection publicUrl="https://scadbuddy.example" />)
+    await listed()
+    expect(screen.getByTestId('mcp-snippet-claude-code').textContent).toBe(
+      "claude mcp add --transport http scadbuddy 'https://scadbuddy.example/mcp'",
+    )
+  })
+
   it('offers the approval grant only for an Outward token, worded as system-wide (#804)', async () => {
     const { user } = renderPage(<McpTokensSection />)
     await listed()

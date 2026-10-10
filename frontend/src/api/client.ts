@@ -20,6 +20,8 @@ import type {
   FontFamily,
   HeadlessBrowserSetting,
   HttpRequestSetting,
+  ModelSetting,
+  PrinterCameraSetting,
   ImageSettings,
   AttachmentView,
   AiSessionView,
@@ -57,6 +59,7 @@ import type {
   PlateFit,
   PrinterBedType,
   PrinterRackAlgorithm,
+  PrinterRackUsage,
   RackAlgorithm,
   PrintAgain,
   PrintDetail,
@@ -1119,6 +1122,9 @@ export const api = {
       signal,
     }),
 
+  /** #1298 — the recorded use of each hotend on this printer's rack, by position. */
+  getPrinterRackUsage: (printerId: number) => request<PrinterRackUsage>(`/print/printers/${printerId}/rack-usage`),
+
   /**
    * #87 — one read per output, because the join is the server's job. The spool
    * inventory, where each spool is assigned, the printer's live AMS state and the
@@ -1522,6 +1528,27 @@ export const api = {
     request<SessionModeSetting>('/ai/settings/session-mode', {
       method: 'PUT',
       body: JSON.stringify({ mode }),
+    }),
+
+  /**
+   * #1911 — the switch for the assistant's `get_printer_camera` tool, served by the agent
+   * service. On by default. Fails (404 or 503) when there is no agent or no AI database.
+   */
+  getPrinterCameraSetting: () => request<PrinterCameraSetting>('/ai/settings/printer-camera'),
+
+  putPrinterCameraSetting: (enabled: boolean) =>
+    request<PrinterCameraSetting>('/ai/settings/printer-camera', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** #1917 — the Claude model the assistant uses (`null`: Claude Code's default), served by the agent service. */
+  getModelSetting: () => request<ModelSetting>('/ai/settings/model'),
+
+  putModelSetting: (model: string | null) =>
+    request<ModelSetting>('/ai/settings/model', {
+      method: 'PUT',
+      body: JSON.stringify({ model }),
     }),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */

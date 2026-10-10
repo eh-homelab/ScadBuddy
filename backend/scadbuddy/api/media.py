@@ -28,7 +28,7 @@ from typing import IO, TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
@@ -308,18 +308,6 @@ def no_model(slug: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
-#: Until #401 makes the database required, a deployment may run without one.
-NO_DATABASE = (
-    "template media needs a database: set SCADBUDDY_DATABASE_URL. Without one, only "
-    "the thumbnail is shown"
-)
-
-
-#: Every media write's answer when there is no database.
-NO_DATABASE_RESPONSE: dict[int | str, dict[str, Any]] = {
-    503: {"description": "No database: SCADBUDDY_DATABASE_URL is unset"}
-}
-
 #: A write to an item a built-in ships.
 READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
     403: {"description": "The item is one a built-in template ships, and is read-only"}
@@ -332,13 +320,6 @@ def read_only(slug: str, item_id: str) -> ApiError:
         f"{item_id!r} is shipped with the built-in template {slug!r} and is read-only; "
         "only the media added to it can change",
     )
-
-
-def require_media_store(catalogue: Catalogue) -> None:
-    """503 before anything is read or written, so an upload is refused on its
-    headers rather than after a gigabyte of body."""
-    if catalogue.media_store is None:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NO_DATABASE)
 
 
 def no_item(slug: str, item_id: str) -> ApiError:
@@ -469,9 +450,10 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
     cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
     `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
     header, before decoding). ``draft`` lets a JPEG decode at a fraction of its size,
-    so a large photo is still cheap enough to shrink. Any error decoding it -- a
-    malformed EXIF block raises ``ValueError`` or ``SyntaxError`` -- is a None too,
-    since serving the file as it is is always safe.
+    so a large photo is still cheap enough to shrink. Any error decoding it is a None
+    too, since serving the file as it is is always safe: Pillow's metadata parser has
+    no single error type, and a malformed EXIF block raises ``ValueError``,
+    ``SyntaxError``, ``TypeError`` or ``struct.error`` among others (#1690).
 
     The box is square, so an EXIF orientation of 5 to 8, which swaps width and height,
     fits it either way round: the image is shrunk before it is turned upright, and the
@@ -488,13 +470,7 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
                 out = io.BytesIO()
                 upright.save(out, "WEBP", quality=80)
                 return out.getvalue()
-    except (
-        UnidentifiedImageError,
-        OSError,
-        Image.DecompressionBombError,
-        ValueError,
-        SyntaxError,
-    ):
+    except Exception:
         return None
 
 
@@ -689,7 +665,6 @@ async def get_media_thumbnail(
     "/models/{slug}/media",
     response_model=ModelRecord,
     responses={
-        **NO_DATABASE_RESPONSE,
         409: {"description": f"The template already holds {MAX_MEDIA_ITEMS} items"},
         413: {
             "description": "Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB"
@@ -726,7 +701,6 @@ async def upload_media(
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_model_exists(catalogue, slug)
-    require_media_store(catalogue)
     received = await _receive(request, catalogue.paths.cache)
     claims = ClaimStore(catalogue.paths.claims)
     held: list[Held] = []
@@ -779,7 +753,7 @@ async def upload_media(
 @router.patch(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
+    responses={**READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Caption a media item",
 )
 async def patch_media(
@@ -806,7 +780,7 @@ async def _edit(
     request: dict[str, Any],
     idempotency_key: str | None,
 ) -> ModelRecord | JSONResponse:
-    """A media edit as its operation (#1054); the check makes the 404 and the 503, so a
+    """A media edit as its operation (#1054); the check makes the 404, so a
     re-send gets its recorded answer whatever has changed since (review 3e final M1)."""
     result = await run_operation(
         ops,
@@ -822,7 +796,7 @@ async def _edit(
 @router.put(
     "/models/{slug}/media/order",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
+    responses={**OPERATION_RESPONSES},
     summary="Reorder the media",
     description=(
         "Puts the items in the order given, which must name every item exactly once "
@@ -850,7 +824,7 @@ async def reorder_media(
 @router.put(
     "/models/{slug}/media/cover",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
+    responses={**OPERATION_RESPONSES},
     summary="Choose the cover",
     description=(
         "Makes one item the cover. A template of mine's cover is its first item, so "
@@ -880,7 +854,7 @@ async def put_media_cover(
 @router.delete(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
+    responses={**READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Remove a media item",
     description=(
         "Removes one item and its files, as one revision. An entry whose file is "

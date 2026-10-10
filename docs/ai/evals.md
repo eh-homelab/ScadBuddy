@@ -166,18 +166,37 @@ confirmation of an outward action (spec §8.2) they cover:
   buttons are gone, and no send result ever appears.
 - **Stop while waiting.** The approval resolves as denied and nothing is sent.
 
+## Real-agent UI e2e (opt-in)
+
+[`frontend/e2e/real-agent.spec.ts`](../../frontend/e2e/real-agent.spec.ts) drives the
+assistant panel against the real agent, the real backend and the image's OpenSCAD, with
+the model replaced by a scripted endpoint:
+[`agent/test/support/serveScriptedModel.ts`](../../agent/test/support/serveScriptedModel.ts)
+serves the script in
+[`realAgentScript.ts`](../../agent/test/support/realAgentScript.ts), and
+[`agent/test/realAgentScript.test.ts`](../../agent/test/realAgentScript.test.ts) tests
+the script. A marker in the prompt picks the scenario, and the turn ends with "Done."
+only when every call it made came back as the scenario expects:
+
+| Scenario (#259) | Calls | Checked after the turn |
+|---|---|---|
+| Change name-keychain's text and colour | `render_model` of `builtin:name-keychain` with `name = "Ada"` and a red `text_color` | The render finished; no approval was asked. |
+| A new cable label from a template, through to a render | `create_from_template` from `builtin:cable-label`, then `render_model` | The model exists under its new name, linked to `cable-label` as its upstream. |
+| Add BOSL2 and use a rounded cube | `create_from_template` from `blank`, `pin_library` BOSL2, `apply_patch` (an `include` and a rounded `cuboid`), `render_model` | BOSL2 is pinned, the saved source includes it and uses `cuboid(`, and the render finished. BOSL2 comes from the image's seed, so no network is needed. |
+| An outward call denied at the confirmation | `set_print_options` | The card says "Denied by You.", and the denial reaches the model as the call's result. |
+
+It is **not in CI**. CI's `image` job runs the backend container alone, without the
+agent, so the file skips there (`E2E_AGENT` unset). The spec's header gives a local
+run.
+
 ## Planned: more scenarios
 
-These are the scenarios issue #259 lists that are not covered yet:
+Still missing from issue #259's list: an external MCP client starts a session, and the
+browser takes it over (#300, #1056).
 
-1. "Create a new cable label model" from a template, through to a successful render.
-2. "Add BOSL2 and use a rounded cube".
-3. An external MCP client starts a session, and the browser takes it over (#300).
-
-Driving the panel against the agent service itself, rather than the mock, needs the
-WebSocket transport to the panel (#266). For the headless browser, spec §13 adds a
-container e2e: clicking *Print* without an approval is refused by the backend; an
-off-allowlist navigation is blocked; two sessions don't share storage.
+For the headless browser, spec §13 adds a container e2e: clicking *Print* without an
+approval is refused by the backend; an off-allowlist navigation is blocked; two
+sessions don't share storage.
 
 ## Planned: citation quality and rendered checks
 

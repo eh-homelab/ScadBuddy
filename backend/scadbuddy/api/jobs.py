@@ -246,6 +246,9 @@ class JobStatus(BaseModel):
     diagnostics_dropped: int = Field(default_factory=int)
     #: A pipeline job's outputs, in order; empty for a job that wrote none.
     outputs: list[JobOutputSummary] = Field(default_factory=list)
+    #: The Temporal workflow running the job, for a link to it in the Temporal UI
+    #: (#1293); None on a row written before renders ran as workflows.
+    workflow_id: str | None = None
 
 
 class ModelDiagnostics(BaseModel):
@@ -290,6 +293,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
             JobOutputSummary(index=i, name=o.name, bom=o.bom, files=o.files)
             for i, o in enumerate(job.outputs)
         ],
+        workflow_id=job.workflow_id,
     )
 
 

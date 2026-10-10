@@ -259,8 +259,11 @@ function settleBackfill(output: Output): Output {
   if (!job) {
     output.backfill = { ...pending, error: `the re-render ${pending.job_id} is gone` }
   } else if (job.status === 'done' && !state.backfillsSeen.has(job.id)) {
-    // The API attaches on its next reconcile pass, not as the job ends: one read waits.
+    // The API attaches on its next reconcile pass, not as the job ends: one read waits,
+    // and the attach is announced (#1970).
     state.backfillsSeen.add(job.id)
+    const { id, slug } = output
+    setTimeout(() => emitRealtime('output.updated', ['outputs', `model:${slug}`], { output_id: id, slug }), 0)
   } else if (job.status === 'done') {
     output.manifest = fixtures.backfilledManifest(output.slug, output.colors ?? [])
     output.backfill = null
@@ -2501,6 +2504,7 @@ export const handlers = [
       params: renderParams,
       inputs,
       log_tail: [],
+      workflow_id: `render-${jobId}`,
     })
     runJob(jobId)
     // #904 — the caller's own normalised inputs, as `RenderAccepted.inputs` carries them.

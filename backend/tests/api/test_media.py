@@ -308,15 +308,34 @@ def test_a_video_whose_poster_file_is_gone_has_no_thumbnail(
     assert response.json()["detail"] == f"{model!r} has no poster for {item['id']!r}"
 
 
-@pytest.mark.parametrize("error", [ValueError, SyntaxError])
-def test_an_image_whose_exif_cannot_be_read_is_its_own_thumbnail(
-    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
-) -> None:
-    def malformed(*_: object, **__: object) -> None:
-        raise error("malformed EXIF")
+def _jpeg_with_corrupt_exif(tag: int) -> bytes:
+    """A JPEG whose EXIF block holds an orientation and a string under ``tag``, a
+    tag Pillow expects a number for: it reads the block, then raises writing it back
+    in `exif_transpose`."""
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation, so exif_transpose has work to do.
+    exif[0x010F] = "Cam"  # Make, an ASCII tag, renumbered below.
+    block = exif.tobytes()
+    make = (0x010F).to_bytes(2, "big")
+    assert block.count(make) == 1
+    out = io.BytesIO()
+    Image.new("RGB", (400, 300), (200, 40, 40)).save(
+        out, "JPEG", exif=block.replace(make, tag.to_bytes(2, "big"))
+    )
+    return out.getvalue()
 
-    monkeypatch.setattr("scadbuddy.api.media.ImageOps.exif_transpose", malformed)
-    original = _real_image((400, 300), "JPEG")
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        pytest.param(0x0122, id="short-tag-holding-text"),  # GrayResponseUnit: struct.error
+        pytest.param(0x011A, id="rational-tag-holding-text"),  # XResolution: TypeError
+    ],
+)
+def test_an_image_whose_exif_cannot_be_read_is_its_own_thumbnail(
+    client: TestClient, model: str, tag: int
+) -> None:
+    original = _jpeg_with_corrupt_exif(tag)
     item = _upload(client, model, original).json()["media"][0]
 
     response = client.get(_thumbnail_url(model, item["id"]))
@@ -490,6 +509,13 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
 ) -> None:
     item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
     lock = threading.Lock()
+    # Each decode waits for a second to join it, so two provably overlap; with fewer
+    # than two allowed at once the wait times out and the request fails. That needs
+    # every request to decode, which holds because `slow` returns None (no thumbnail is
+    # cached), and an even count of requests, or the last decode waits alone.
+    requests = 8
+    assert requests % 2 == 0
+    pair = threading.Barrier(2, timeout=10)
     running = 0
     most = 0
 
@@ -498,18 +524,22 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
         with lock:
             running += 1
             most = max(most, running)
+        pair.wait()
         time.sleep(0.05)
         with lock:
             running -= 1
         return None
 
     monkeypatch.setattr("scadbuddy.api.media._shrink", slow)
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=requests) as pool:
         codes = list(
-            pool.map(lambda _: client.get(_thumbnail_url(model, item["id"])).status_code, range(8))
+            pool.map(
+                lambda _: client.get(_thumbnail_url(model, item["id"])).status_code,
+                range(requests),
+            )
         )
 
-    assert codes == [200] * 8
+    assert codes == [200] * requests
     assert 1 < most <= MAX_CONCURRENT_THUMBNAILS
 
 

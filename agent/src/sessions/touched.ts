@@ -422,6 +422,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'sessions_deny',
   'browser_pair',
   'confirm_action',
+  // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
+  // checkout is a cache on the volume, swept at boot when nothing pins it.
+  'check_library_candidate',
+  'check_library_candidate_from_pinned_url',
   // The user's tab: these change only what the open page shows or holds unsaved (a
   // parameter, the editor, a Settings field, a dialog a human then confirms). What is
   // saved is saved by a tool that records it. browser_click and browser_fill are not

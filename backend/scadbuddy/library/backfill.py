@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg
 
-from scadbuddy.core.events import Event, EventBus, JobEvent
+from scadbuddy.core.events import Event, EventBus, JobEvent, OutputEvent, emit
 from scadbuddy.library.outputs import (
     BackfillState,
     OutputNotFoundError,
@@ -53,20 +53,30 @@ def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | Non
 SETTLED = ("job.done", "job.failed", "job.superseded")
 
 
-def attach_backfills(outputs: OutputStore, refs: BlobRefs, read_job: Callable[[str], Job]) -> int:
+def attach_backfills(
+    outputs: OutputStore,
+    refs: BlobRefs,
+    read_job: Callable[[str], Job],
+    events: EventBus | None = None,
+) -> int:
     """Attach every finished re-render to its output. Returns how many it attached; one
     that failed is marked with why, and is not tried again. Each output is on its own:
     one that cannot be attached costs only itself, and a transient failure (the
-    database, the disk) is left for the next pass."""
-    return _attach_all(outputs, refs, read_job, outputs.pending_backfills())
+    database, the disk) is left for the next pass. Either outcome is announced as
+    ``output.updated`` on ``events`` (#1970)."""
+    return _attach_all(outputs, refs, read_job, outputs.pending_backfills(), events)
 
 
 def attach_job_backfills(
-    outputs: OutputStore, refs: BlobRefs, read_job: Callable[[str], Job], job_id: str
+    outputs: OutputStore,
+    refs: BlobRefs,
+    read_job: Callable[[str], Job],
+    job_id: str,
+    events: EventBus | None = None,
 ) -> int:
     """`attach_backfills` for the outputs waiting on ``job_id`` only."""
     pending = [(oid, state) for oid, state in outputs.pending_backfills() if state.job_id == job_id]
-    return _attach_all(outputs, refs, read_job, pending)
+    return _attach_all(outputs, refs, read_job, pending, events)
 
 
 def follow_backfills(
@@ -145,6 +155,7 @@ def _attach_all(
     refs: BlobRefs,
     read_job: Callable[[str], Job],
     pending: list[tuple[str, BackfillState]],
+    events: EventBus | None,
 ) -> int:
     attached = 0
     for output_id, state in pending:
@@ -157,15 +168,51 @@ def _attach_all(
                     continue  # attached, failed or re-queued since it was listed
                 if _attach(outputs, refs, read_job, output_id, state.job_id):
                     attached += 1
+                if _changed(outputs, output_id, state):
+                    _announce(events, outputs, output_id)
         except ValueError as error:  # a corrupt record.json or manifest: not worth retrying
             logger.exception("could not attach a re-render", extra={"id": output_id})
             try:
                 outputs.fail_backfill(output_id, state.job_id, f"the output's record: {error}")
             except Exception:
                 logger.exception("could not mark a backfill failed", extra={"id": output_id})
+            else:
+                _announce(events, outputs, output_id)
         except Exception:
             logger.exception("could not attach a re-render; retrying", extra={"id": output_id})
     return attached
+
+
+def _changed(outputs: OutputStore, output_id: str, state: BackfillState) -> bool:
+    """Whether the attach settled the backfill, read under its own ``try`` (#2038): a
+    re-read that fails (a half-written ``backfill.json`` from a concurrent re-queue)
+    must not reach the attach's ``fail_backfill``. It counts as changed, since an
+    announcement only makes a reader read the output again."""
+    try:
+        return outputs.backfill(output_id) != state
+    except Exception:
+        logger.exception("could not re-read a backfill after its attach", extra={"id": output_id})
+        return True
+
+
+def _announce(events: EventBus | None, outputs: OutputStore, output_id: str) -> None:
+    """``output.updated``: the output's backfill was attached, cleared or marked failed,
+    so a reader waiting on it reads it again rather than polling (#1970).
+
+    Never raises: it runs after the attach is done, so a failure here must not mark
+    that attach failed or stop the pass. The slug comes from the output's directory,
+    as `attach_backfill` names it, not from ``meta.json`` or the database, which can
+    fail where the attach did not."""
+    if events is None:
+        return
+    try:
+        slug = outputs.directory(output_id).parent.name
+    except OutputNotFoundError:
+        return  # deleted meanwhile: its own output.deleted said so
+    except Exception:
+        logger.exception("could not announce a backfill", extra={"id": output_id})
+        return
+    emit(events, OutputEvent(kind="output.updated", output_id=output_id, slug=slug))
 
 
 def _attach(

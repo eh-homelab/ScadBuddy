@@ -7,39 +7,19 @@ holds only its shown form.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
 from scadbuddy.api import assets as assets_api
-from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.assets import AssetStoreUnavailableError
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
-
-
-def _store_answered[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-    """The upload store without its database as the 503 ``install_asset_handlers``
-    answers it with, rather than the operation's unexpected 500."""
-
-    @wraps(fn)
-    async def answered(*args: P.args, **kwargs: P.kwargs) -> R:
-        try:
-            return await fn(*args, **kwargs)
-        except AssetStoreUnavailableError as error:
-            raise ApiError(
-                status.HTTP_503_SERVICE_UNAVAILABLE, str(error), type_=DATABASE_REQUIRED_PROBLEM
-            ) from None
-
-    return answered
 
 
 def asset_kinds(state: AppState) -> list[OperationKind]:
@@ -76,8 +56,8 @@ def asset_kinds(state: AppState) -> list[OperationKind]:
     def kind(name: str, check: Any, run: Any) -> OperationKind:
         return OperationKind(
             name,
-            answered_as_routes(_store_answered(check)),
-            answered_as_routes(_store_answered(run)),
+            answered_as_routes(check),
+            answered_as_routes(run),
             queue="library",
             where="the template's uploaded files",
         )

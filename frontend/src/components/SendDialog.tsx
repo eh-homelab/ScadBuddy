@@ -5,6 +5,7 @@ import type { Output, SendResult } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { traceAction } from '../lib/traceAction'
 import { useAsync } from '../lib/useAsync'
+import { plateLabel } from '../lib/plate'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -29,6 +30,12 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   // and the setting can change between them.
   const settings = useAsync(async () => (open ? await api.getSettings() : null), [open])
   const publicUrl = settings.data?.public_url ?? null
+  // #986 — what is being sent, by what each plate holds; nothing when none is named or
+  // the list cannot be read.
+  const plates =
+    useAsync(async () => (open && output ? await api.getOutputPlates(output.id).catch(() => []) : []), [open, output?.id])
+      .data ?? []
+  const named = plates.some((plate) => plate.name)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<SendResult | null>(null)
@@ -115,6 +122,12 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
           <p className="text-[13px] text-ink">
             Adds the 3MF to the Bambuddy library, laid out for the printer set in Settings, or on the default plate without one.
           </p>
+          {named && (
+            <p className="mt-1.5 text-[13px]" data-testid="send-plates">
+              <span className="text-muted">{plates.length === 1 ? 'Plate:' : 'Plates:'}</span>{' '}
+              {plates.map((plate) => plateLabel(plates, plate.index)).join(' · ')}
+            </p>
+          )}
           <p className="mt-1.5 text-[12px] text-muted">
             To slice and queue it, use Print instead.
           </p>

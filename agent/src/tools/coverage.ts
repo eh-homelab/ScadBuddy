@@ -150,15 +150,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'DELETE /api/v1/analyzers/decisions/{decision_id}',
     reason: ANALYZERS_LATER,
   },
-  // #169: the library upgrade flow's building blocks land API-first; its design is pending.
-  ...(['GET /api/v1/libraries/{name}/users', 'POST /api/v1/models/{slug}/libraries/{name}/check'] as const).map(
-    (operation) => ({
-      operation,
-      reason:
-        'Building blocks of the library upgrade flow (#169), whose product design is not decided; its tools ' +
-        "come with it. The check clones from the model's pinned URL, so its tier follows repin_library's.",
-    }),
-  ),
   ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(
     (operation) => ({
       operation,
@@ -182,6 +173,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Remembers how the print dialog ranks a printer's nozzle rack (#836). It lands UI-first, " +
       'like the rest of the rack picker; an agent prints through print_output, which takes the ' +
       'remembered algorithm, and a tool for changing it is a follow-up.',
+  },
+  {
+    operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
+    reason:
+      "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
+      "print time and open picks in the print check's rack options, for the hotends that job could use.",
   },
 ]
 

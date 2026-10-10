@@ -108,7 +108,7 @@ model is created or deleted. What each backend event updates is `affectedBy()` i
 | `source.changed` | `models/{slug}/source`, `…/schema` |
 | `version.committed` | `models/{slug}`, `…/versions` |
 | `upstream.available` | `models/{slug}`, `…/upstream` |
-| `output.created`, `output.deleted` | `models/{slug}/outputs`, `…/thumbnail`, `outputs/{output_id}`, `…/plates` |
+| `output.created`, `output.updated`, `output.deleted` | `models/{slug}/outputs`, `…/thumbnail`, `outputs/{output_id}`, `…/plates` |
 | `print.progress`, `print.settled` | `print/outputs/{output_id}/progress` |
 | `library.changed` | `libraries`, `models/{slug}` |
 | `library.removed` | `libraries` |

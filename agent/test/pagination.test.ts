@@ -164,11 +164,14 @@ describe('the paged list tools', () => {
     'list_presets',
     'list_libraries',
     'list_installed_libraries',
+    'list_library_users',
     'list_fonts',
     'list_source_files',
     'list_versions',
     'list_print_projects',
     'list_pending_actions',
+    'list_print_queue',
+    'list_print_archives',
   ]
 
   it.each(PAGED)('%s takes limit and cursor and says how to page', (name) => {

@@ -11,7 +11,9 @@ import type { ImageRef } from './protocol.js'
 // read that). sdkEvents.ts takes the block; the manager stores the bytes here
 // before it logs the `tool.result` that names them; the session route serves
 // them. The event carries only `{name, mediaType}`, so the event log every
-// watcher replays stays small.
+// watcher replays stays small. The images a user sends with a turn are stored
+// here too, before the `user.turn` event that names them beside their
+// previews, so the panel's full-size view can load them from any tab.
 //
 // A blob is found by (session, name) and nothing else: no path is ever built
 // from a request. The name is the bytes' sha256 and the type's extension, so
@@ -52,9 +54,12 @@ export function imageOfBlock(block: unknown): SessionImage | undefined {
   if (!(IMAGE_MEDIA_TYPES as readonly string[]).includes(mediaType)) return undefined
   if (data.length === 0 || data.length > IMAGE_DATA_MAX || data.length % 4 !== 0 || !BASE64.test(data)) return undefined
   if (sniff(data) !== mediaType) return undefined
-  const bytes = Buffer.from(data, 'base64')
-  const media = mediaType as ImageMediaType
-  return { name: `${createHash('sha256').update(bytes).digest('hex')}.${EXTENSION[media]}`, mediaType: media, bytes }
+  return sessionImage(mediaType as ImageMediaType, Buffer.from(data, 'base64'))
+}
+
+/** `bytes` as a session image, named by their sha256 and the type's extension. */
+export function sessionImage(mediaType: ImageMediaType, bytes: Buffer): SessionImage {
+  return { name: `${createHash('sha256').update(bytes).digest('hex')}.${EXTENSION[mediaType]}`, mediaType, bytes }
 }
 
 export type StoredBlob = { mediaType: ImageMediaType; bytes: Buffer }

@@ -160,6 +160,9 @@ export type RackOption = Schemas['RackOption']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
+/** #1298 — what each hotend on a printer's rack has printed; never a serial. */
+export type PrinterRackUsage = Schemas['PrinterRackUsage']
+export type RackHotendUsage = Schemas['RackHotendUsage']
 /** #907, #1862 — Bambu's print sequence, a per-print process override. */
 export type PrintSequence = NonNullable<Schemas['PrintRunRequest']['print_sequence']>
 export type OutputPlate = Schemas['OutputPlate']
@@ -268,6 +271,24 @@ export interface HeadlessBrowserSetting {
  */
 export interface HttpRequestSetting {
   enabled: boolean
+}
+
+/**
+ * #1911 — the agent service's switch for the assistant's `get_printer_camera` tool
+ * (`GET/PUT /api/v1/ai/settings/printer-camera`, agent `src/routes/printerCamera.ts`).
+ * On by default; while off, every call to the tool is refused.
+ */
+export interface PrinterCameraSetting {
+  enabled: boolean
+}
+
+/**
+ * #1917 — the Claude model every assistant turn and the connection test use
+ * (`GET/PUT /api/v1/ai/settings/model`, agent `src/routes/model.ts`): an alias such as
+ * `opus` or a full model id; `null` is Claude Code's own default.
+ */
+export interface ModelSetting {
+  model: string | null
 }
 
 /**

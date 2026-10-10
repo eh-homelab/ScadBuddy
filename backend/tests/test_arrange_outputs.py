@@ -11,7 +11,7 @@ import pytest
 import trimesh
 from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.bambuddy.library_objects import LibraryObjects, piece_key, publish_library_pieces
+from scadbuddy.bambuddy.library_objects import piece_key, publish_library_pieces
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, write_bambu_3mf
@@ -268,7 +268,7 @@ async def test_a_library_files_object_is_placed_beside_a_rendered_part(tmp_path:
         count=1,
         library_file_id=88,
     )
-    await publish_library_pieces(deps.blobs, LibraryObjects(88, "plain.3mf", [entry], read))
+    await publish_library_pieces(deps.blobs, [entry], read)
     library = part_of(entry)
     layout = pack_layout(
         PackRequest(

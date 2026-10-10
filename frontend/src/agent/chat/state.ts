@@ -1,10 +1,10 @@
 import type {
   Attention,
-  ImagePreview,
   Origin,
   Owner,
   Question,
   Risk,
+  SentImage,
   ServerEvent,
   SessionStatus,
   SessionMode,
@@ -17,7 +17,7 @@ import type {
 /** One entry in a session's transcript and action feed, in arrival order. */
 export type FeedItem =
   /** `images`: previews of the images sent with the turn (#1866). */
-  | { kind: 'user'; id: string; text: string; author: Owner; images?: ImagePreview[] }
+  | { kind: 'user'; id: string; text: string; author: Owner; images?: SentImage[] }
   | { kind: 'assistant'; id: string; text: string; done: boolean }
   | {
       kind: 'tool'

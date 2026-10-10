@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -425,6 +426,34 @@ def test_a_library_file_with_part_omitted_keeps_its_own_count(
         json={"objects": [{"library_file_id": 88, "part": "nope"}], "slug": "demo"},
     )
     assert unknown.status_code == 422 and "has no object nope" in unknown.json()["detail"]
+
+
+@respx.mock
+def test_a_library_file_listed_once_is_not_read_again_to_arrange(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#1973: the dialog's listing reads the file and stores its pieces; listing it
+    again and the arrange after it download nothing."""
+    configure(client)
+    asyncio.run(saved_output(tmp_path))
+    content = two_colour_3mf(tmp_path)
+    download = library_file(88, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    listed = client.get("/api/v1/print/library/88/objects")
+    assert listed.status_code == 200, listed.text
+    assert client.get("/api/v1/print/library/88/objects").json() == listed.json()
+    [obj] = listed.json()["objects"]
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"library_file_id": 88, "part": obj["part"]}], "slug": "demo"},
+    )
+    assert response.status_code == 202, response.text
+    assert download.call_count == 1
+    [inputs] = arranger.inputs
+    assert [i.part.piece_key for i in inputs.items] == [obj["part"]]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    assert (state.store.blobs.dir_for(obj["part"]) / LAYOUT_NAME).is_file()
 
 
 @respx.mock

@@ -11,6 +11,7 @@ import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untr
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
+import type { SwitchedOff } from './switches.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -68,6 +69,8 @@ export type ToolServices = {
   renderWaitMs: number
   /** How long a command follows a 202 (tools/command.ts); `COMMAND_FOLLOW_MS` when unset. */
   commandFollowMs?: number
+  /** How long a call may run past its own waits before it is answered as timed out; `TOOL_DEADLINE_MS` when unset. */
+  toolDeadlineMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
@@ -88,6 +91,8 @@ export type ToolServices = {
   waitForTab?: WaitForTab | undefined
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
+  /** Tools Settings turned off (switches.ts, #1911): a call is refused before its handler runs. Every tool is on without it. */
+  switchedOff?: SwitchedOff | undefined
 }
 
 export type ToolContext = ToolServices & {
@@ -168,6 +173,13 @@ export type ToolSpec<S extends z.ZodRawShape> = {
    * author or imported from the web". Defaults to DEFAULT_SOURCE.
    */
   source?: string
+  /**
+   * The longest this call waits by design (a render, the user, a tab, another
+   * session's turn), on top of which `TOOL_DEADLINE_MS` is allowed before the
+   * call is answered as timed out (#1918). `Infinity` for a wait with no bound
+   * of its own (ask_user). None for a tool that only asks and answers.
+   */
+  waitsMs?: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => number
   handler: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<CallToolResult>
 }
 
@@ -191,7 +203,18 @@ export type Tool = {
   parse(args: unknown): Record<string, unknown>
   /** Parses `args` and runs the handler, with no tier check or gate: call `runTool` instead. */
   execute(args: unknown, ctx: ToolContext): Promise<CallToolResult>
+  /** How long the call may run before `runTool` answers it as timed out (ToolSpec.waitsMs). */
+  deadlineMs(args: unknown, ctx: ToolContext): number
 }
+
+/**
+ * How long a call may run past its own waits (ToolSpec.waitsMs) before it is
+ * answered as timed out (#1918). Most backend calls carry only the call's
+ * abort signal, so a backend that never answers would otherwise hold the turn
+ * until the user presses Stop. Generous: a command route alone may wait
+ * `ACCEPTING_MS` (4 min) for the backend to accept it (tools/command.ts).
+ */
+export const TOOL_DEADLINE_MS = 5 * 60_000
 
 export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
   const readOnly = spec.readOnly ?? spec.risk === 'read'
@@ -227,6 +250,11 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     },
     execute(args, ctx) {
       return spec.handler(spec.input.parse(args), ctx)
+    },
+    deadlineMs(args, ctx) {
+      const parsed = spec.waitsMs ? spec.input.safeParse(args) : undefined
+      const waits = parsed?.success ? spec.waitsMs!(parsed.data, ctx) : 0
+      return waits + (ctx.toolDeadlineMs ?? TOOL_DEADLINE_MS)
     },
   }
 }
@@ -411,6 +439,8 @@ async function runJudgedByResult(
       `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
     )
   }
+  const off = await ctx.switchedOff?.(tool.name)
+  if (off) return refused(off)
   try {
     if (tool.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
@@ -432,10 +462,25 @@ async function runJudgedByResult(
       }
     }
     // Every backend call names the agent, so each commit it makes is the agent's (#252).
-    const raw = await tool.execute(args, {
-      ...ctx,
-      backend: authored(ctx.backend, authorHeaders(ctx.principal, ctx.session)),
-    })
+    const deadline = tool.deadlineMs(args, ctx)
+    const raw = await withDeadline(deadline, ctx.signal, (signal) =>
+      tool.execute(args, {
+        ...ctx,
+        signal,
+        backend: authored(ctx.backend, authorHeaders(ctx.principal, ctx.session)),
+      }),
+    )
+    if (raw === TIMED_OUT) {
+      const after = `${tool.name} did not answer within ${Math.round(deadline / 1000)} s`
+      // A read can simply be asked again. Anything else may have been done by
+      // the backend all the same (a handler need not heed the abort), and a
+      // retry is a new call with a new idempotency key: a second print.
+      return failed(
+        tool.risk === 'read'
+          ? `${after} and was stopped: what it calls is not answering. Try it again later, or carry on without it.`
+          : `${after}. It may still have taken effect: check whether it did before calling ${tool.name} again.`,
+      )
+    }
     const by = executed()
     const result = markUntrusted(raw, by.name, by.source)
     return result.isError
@@ -451,6 +496,37 @@ async function runJudgedByResult(
     if (err instanceof Error && err.name === 'AbortError') return failed('the call was cancelled')
     // An unexpected error's message can quote anything (a response body, a path).
     return failedWith(by, `${by.name} failed`, err instanceof Error ? err.message : String(err), UNEXPECTED_ERROR_SOURCE)
+  }
+}
+
+const TIMED_OUT = Symbol('timed out')
+
+/**
+ * `run`'s result, or `TIMED_OUT` once `ms` passes, when the signal it was given
+ * is aborted. The deadline answers whether or not the handler heeds that
+ * signal; one that does not is left to finish unobserved.
+ */
+async function withDeadline<T>(
+  ms: number,
+  outer: AbortSignal,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T | typeof TIMED_OUT> {
+  if (!Number.isFinite(ms)) return run(outer)
+  const timer = new AbortController()
+  let handle: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<typeof TIMED_OUT>((resolve) => {
+    handle = setTimeout(() => {
+      // Settled before the abort, so the handler's own AbortError cannot win the race.
+      resolve(TIMED_OUT)
+      timer.abort()
+    }, ms)
+  })
+  const running = run(AbortSignal.any([outer, timer.signal]))
+  running.catch(() => {})
+  try {
+    return await Promise.race([running, expired])
+  } finally {
+    clearTimeout(handle)
   }
 }
 

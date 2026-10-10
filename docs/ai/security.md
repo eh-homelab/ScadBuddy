@@ -22,7 +22,9 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
   other tool paths are the harness's in-process `scadbuddy` server (every session's
   queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)) and
   the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
-  Nothing starts a session over HTTP yet (#266, #300).
+  Sessions start from the panel's chat socket, `POST /api/v1/ai/sessions`
+  ([`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)) and the
+  `sessions_*` tools (#300).
 
 ## MCP bearer tokens
 
@@ -46,7 +48,7 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
 - **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
-  where `useAiAvailability()` says AI is available, so not in a production build yet)
+  where `useAiAvailability()` says AI is available, that is, once a Claude credential is saved)
   ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
   over `/api/v1/ai/mcp-tokens`
   ([`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts);
@@ -950,8 +952,17 @@ session: their bytes go to `ai_session_blobs` through `SessionBlobs.put`, named
 `<sha256>.<ext>`, and the staging rows are deleted. The session's own lifetime governs
 them from then on (deleting the session cascades). A durable session (#1056) reads
 images from that table by name in an activity, so no image enters a Temporal payload.
-The `user.turn` event keeps only the previews, and an MCP transcript (`sessions_get`)
-only their count. Nothing logs or traces the bytes.
+Every image a turn starts with, whatever brought it (an attachment, a backend
+reference over `sessions_send`, an old tab's inline image), is also stored in
+`ai_session_blobs` before the `user.turn` event is logged (`sessions/manager.ts`
+`sentImages`; an attachment's later move then finds its row there). The event keeps
+the previews, each with its image's name, and an MCP transcript (`sessions_get`) only
+their count. The panel's full-size view loads an image by that name from
+`GET /api/v1/ai/sessions/:id/blobs/:name` (`routes/sessions.ts`): the same UI-read
+check as the session's other reads, `Content-Type` from the stored type, `nosniff`,
+`Content-Disposition: inline`, a sandboxing CSP, `Cross-Origin-Resource-Policy:
+same-origin` and `Cache-Control: private, immutable` (the name is the bytes' hash).
+Nothing logs or traces the bytes.
 
 **The socket.** The chat socket takes frames up to 256 KiB (`CHAT_FRAME_MAX`), the
 same as the tab socket (`BRIDGE_FRAME_MAX`), and at most 32 unhandled frames per
@@ -978,6 +989,7 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
 | `settings` | `SessionManager.raiseBudget()` (`sessions/manager.ts`); refusals by `auditWrites()` | a raise of one session's budget (#790), action `session_budget_usd`, with the session id and the old and new budget; refused and failed attempts from the route's status |
 | `http` | `httpRequestServer()` (`harness/httpRequest.ts`) | every request the `http_request` tool makes, each redirect hop its own row (#827): method, scheme, host, status and size; never a path, a header or a body; refused requests included |
+| `turn` | `turnCostEntry()` (`audit/turn.ts`), written by `SessionManager.finish()` (`sessions/manager.ts`) | every session turn as it ends (#1922): the action is the result's subtype, `interrupted` or `failed`, and the row carries what the turn cost: `cost_usd` (its share of the session's spend), `cost_priced` (false when no result came back, so Claude Code never priced it) and `cost_estimated_usd` (the part ScadBuddy priced itself: the request a stopped turn was cut off in, `sessions/unpricedSpend.ts`). Only `turn` rows have the cost columns ([`20261009T0924Z_audit_turn_cost.sql`](../../agent/src/db/migrations/20261009T0924Z_audit_turn_cost.sql)) |
 | `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,
@@ -1148,11 +1160,11 @@ From the merged code and PR bodies:
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Plugins are vetted, but no production turn runs yet.** `main.ts` gives the
+7. **Plugins are vetted before every turn.** `main.ts` gives the
    `SessionManager` ScadBuddy's registry tools, the enabled remote plugins, plugin
    packages and the headless browser's vendored plugin (when enabled, see
-   [headless-browser.md](headless-browser.md)) for each turn, but nothing starts a session
-   over HTTP yet (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
+   [headless-browser.md](headless-browser.md)) for each turn, however the session was
+   started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).

@@ -97,6 +97,8 @@ def libraries_app(app: FastAPI, upstream: tuple[str, dict[str, str]]) -> FastAPI
                 ref="v1",
                 licence="BSD-2-Clause",
                 homepage="https://example.invalid/bosl2",
+                description="Shapes and rounding",
+                tags=["rounding"],
             ),
         ),
         protocols=("file",),
@@ -138,8 +140,22 @@ def test_the_catalogue_lists_what_can_be_pinned(lib_client: TestClient) -> None:
             "ref": "v1",
             "licence": "BSD-2-Clause",
             "homepage": "https://example.invalid/bosl2",
+            "description": "Shapes and rounding",
+            "tags": ["rounding"],
         }
     ]
+
+
+def test_the_catalogue_can_be_searched(lib_client: TestClient) -> None:
+    def names(query: str) -> list[str]:
+        response = lib_client.get("/api/v1/libraries", params={"q": query})
+        assert response.status_code == 200, response.text
+        return [entry["name"] for entry in response.json()]
+
+    assert names("ROUND") == ["BOSL2"]
+    assert names("bosl2 shapes") == ["BOSL2"]
+    assert names("gridfinity") == []
+    assert lib_client.get("/api/v1/libraries", params={"q": "x" * 201}).status_code == 422
 
 
 def test_pinning_a_library_records_it_in_that_model_alone(

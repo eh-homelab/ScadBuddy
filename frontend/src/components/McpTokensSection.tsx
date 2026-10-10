@@ -5,6 +5,7 @@ import type { McpAuthMode, McpToken, McpTokenTier, MintedMcpToken } from '../api
 import { copyText, selectContents } from '../lib/clipboard'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
+import { McpConnectSnippet } from './McpConnectSnippet'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -115,9 +116,11 @@ interface Props {
    * the one this list was loaded with.
    */
   authMode?: McpAuthMode | undefined
+  /** SCADBUDDY_PUBLIC_URL as Settings has it, for the connect snippet (#1910); this page's origin when unset. */
+  publicUrl?: string | null | undefined
 }
 
-export function McpTokensSection({ authMode: savedMode }: Props = {}) {
+export function McpTokensSection({ authMode: savedMode, publicUrl }: Props = {}) {
   const listState = useAsync(() => api.listMcpTokens(), [])
   const [name, setName] = useState('')
   const [tier, setTier] = useState<McpTokenTier>('read')
@@ -267,6 +270,8 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
             </div>
           </div>
         )}
+
+        <McpConnectSnippet publicUrl={publicUrl} authMode={authMode} token={minted?.token} />
 
         <form className="grid gap-3 sm:grid-cols-[1fr_auto_auto_auto] sm:items-end" onSubmit={(event) => void create(event)}>
           <div>

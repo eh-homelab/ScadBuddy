@@ -182,11 +182,6 @@ class MediaOrderError(ValueError):
     """A reorder that is not a permutation of the template's media ids."""
 
 
-class MediaUnavailableError(RuntimeError):
-    """A media write with no database to hold the list (#274): until #401 makes
-    ``SCADBUDDY_DATABASE_URL`` required, a deployment may run without one."""
-
-
 class TooManyMediaError(ValueError):
     """The template already holds :data:`MAX_MEDIA_ITEMS` items."""
 
@@ -602,9 +597,9 @@ class Catalogue:
         outputs: OutputStore | None = None,
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
-        media_store: MediaStore | None = None,
         presets: PresetStore | None = None,
         *,
+        media_store: MediaStore,
         serve_previews: bool = True,
         wrapper_prefix: str,
     ) -> None:
@@ -613,8 +608,7 @@ class Catalogue:
         #: Held while `write_file` counts a model's `.scad` files and adds one, so two
         #: new files cannot both pass the cap, git history or not (PR #752 review).
         self._source_files_lock = threading.Lock()
-        #: Where a template of mine's media list is; None with no database, when
-        #: only a legacy ``thumbnail.png`` is listed and media writes are refused.
+        #: Where a template's media list is (#274), and a built-in's added media.
         self.media_store = media_store
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
@@ -1062,12 +1056,9 @@ class Catalogue:
         history = self._has_history
         # And ONE media query (#274), for every template on the page: a built-in's
         # rows are what was added to it (#722). One more for the built-ins' covers.
-        rows: dict[str, list[MediaItem]] = {}
-        covers: dict[str, str] = {}
-        if self.media_store is not None:
-            rows = self.media_store.items_for(slugs)
-            builtins = [slug for slug in slugs if is_builtin(slug)]
-            covers = self.media_store.covers_for(builtins) if builtins else {}
+        rows = self.media_store.items_for(slugs)
+        builtins = [slug for slug in slugs if is_builtin(slug)]
+        covers = self.media_store.covers_for(builtins) if builtins else {}
 
         def media_of(slug: str) -> list[MediaItem]:
             return rows.get(slug, [])
@@ -1215,8 +1206,7 @@ class Catalogue:
         finally:
             _remove_tree(staging)
         # After the files, as every media write: a row never names a file not there.
-        if self.media_store is not None:
-            self.media_store.replace(slug, media)
+        self.media_store.replace(slug, media)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         # Sweep any staging an earlier duplicate crashed out of, once it is old
         # enough not to be another replica's copy in flight: a single replica that crashed and
@@ -1473,13 +1463,10 @@ class Catalogue:
         media_of: Callable[[str], list[MediaItem]] | None = None,
     ) -> list[MediaItem]:
         """The list as stored: a built-in's bundled model.json ``media``, shipped
-        read-only; a template of mine's `template_media` rows, or none without a
-        database. ``meta`` is the model's and ``media_of`` a listing's rows, when
-        the caller already has them."""
+        read-only; a template of mine's `template_media` rows. ``meta`` is the model's
+        and ``media_of`` a listing's rows, when the caller already has them."""
         if is_builtin(slug):
             return (meta or self._meta(slug, self.read_raw_meta(slug))).media
-        if self.media_store is None:
-            return []
         if media_of is not None:
             return media_of(slug)
         return self.media_store.items(slug)
@@ -1543,11 +1530,8 @@ class Catalogue:
         if not is_builtin(slug):
             return self._views(slug, self._stored_media(slug, meta, media_of)), None
         shipped = self._shipped(slug, meta)
-        rows: list[MediaItem] = []
-        cover: str | None = None
-        if self.media_store is not None:
-            rows = media_of(slug) if media_of is not None else self.media_store.items(slug)
-            cover = cover_of(slug) if cover_of is not None else self.media_store.cover(slug)
+        rows = media_of(slug) if media_of is not None else self.media_store.items(slug)
+        cover = cover_of(slug) if cover_of is not None else self.media_store.cover(slug)
         taken = {view.id for view in shipped}
         added = self._item_views(
             slug,
@@ -1591,19 +1575,13 @@ class Catalogue:
     def _clear_media_rows(self, slug: str) -> None:
         """Rows a deleted model at ``slug`` left behind (its delete removes them
         best-effort), so a new model there does not list its predecessor's media."""
-        if self.media_store is not None:
-            self.media_store.delete(slug)
-
-    def _require_media_store(self) -> MediaStore:
-        if self.media_store is None:
-            raise MediaUnavailableError("template media needs SCADBUDDY_DATABASE_URL")
-        return self.media_store
+        self.media_store.delete(slug)
 
     def _edit_media(self, slug: str) -> _MediaEdit:
         """The stored items, to change and pass to :meth:`_save_media`. A legacy
         ``thumbnail.png`` comes back as an ordinary item with an id of its own,
         which the save moves into ``media/`` -- the first write converts it."""
-        stored = self._require_media_store().items(slug)
+        stored = self.media_store.items(slug)
         if stored:
             return _MediaEdit(list(stored), stored, None)
         if not self.thumbnail_path(slug).is_file():
@@ -1624,7 +1602,7 @@ class Catalogue:
         ``media/``) and a converted legacy thumbnail are in place before the rows
         name them, and are taken back out if the rows cannot be written. Under the
         history's write lock, as every change is."""
-        store = self._require_media_store()
+        store = self.media_store
         before = list(edit.before)
         converted = edit.legacy is not None and any(i.id == edit.legacy.id for i in edit.items)
         if edit.legacy is not None:
@@ -1805,7 +1783,6 @@ class Catalogue:
         """Run ``change`` to a built-in's added media under the write lock, with no
         commit: nothing it touches is in the models repository, so the built-in's
         revision never moves."""
-        self._require_media_store()
         with self._overlay_write_lock():
             change()
         self.notify_change(slug)
@@ -1823,7 +1800,7 @@ class Catalogue:
         :class:`MediaReadOnlyError` first when that names a shipped item."""
         if item_id is not None and any(view.id == item_id for view in self._shipped(slug)):
             raise MediaReadOnlyError(item_id)
-        return list(self._require_media_store().items(slug))
+        return list(self.media_store.items(slug))
 
     def _overlay_add(
         self, slug: str, item: MediaItem, upload: StagedMedia, poster: StagedMedia | None
@@ -1855,13 +1832,13 @@ class Catalogue:
         if len(kept) == len(added):
             raise MediaNotFoundError(item_id)
         self._save_overlay(slug, added, kept)
-        store = self._require_media_store()
+        store = self.media_store
         # A cover naming no item is ignored on read; this keeps none behind.
         if store.cover(slug) == item_id:
             store.set_cover(slug, None)
 
     def _overlay_cover(self, slug: str, item_id: str | None) -> None:
-        store = self._require_media_store()
+        store = self.media_store
         if item_id is None:
             store.set_cover(slug, None)
             return
@@ -1887,7 +1864,7 @@ class Catalogue:
         the rows cannot be written."""
         directory = self.paths.builtin_media_dir(slug)
         try:
-            self._require_media_store().replace(slug, after)
+            self.media_store.replace(slug, after)
         except BaseException:
             for moved_name in moved:
                 (directory / moved_name).unlink(missing_ok=True)
@@ -2370,11 +2347,10 @@ class Catalogue:
         self._drop_preview(slug)
         # Its media rows (#274). Best-effort as the rest: a create or duplicate at
         # this slug clears any left behind (`_clear_media_rows`).
-        if self.media_store is not None:
-            try:
-                self.media_store.delete(slug)
-            except Exception:
-                logger.exception("could not remove media rows", extra={"slug": slug})
+        try:
+            self.media_store.delete(slug)
+        except Exception:
+            logger.exception("could not remove media rows", extra={"slug": slug})
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -2681,8 +2657,7 @@ class Catalogue:
                 # Under the lock the overlay's other writes take, so another
                 # replica's write to this built-in cannot interleave with the drop.
                 with self._overlay_write_lock():
-                    if self.media_store is not None:
-                        self.media_store.delete(model_id)
+                    self.media_store.delete(model_id)
                     _remove_tree(stale)
             except Exception:
                 logger.exception(

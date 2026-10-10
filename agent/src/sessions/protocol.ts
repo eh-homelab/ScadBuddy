@@ -128,14 +128,18 @@ export type ServerEvent = V &
         modeFallback?: string
       }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
-    /** `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones. */
+    /**
+     * `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones.
+     * `name`: the full image, stored with the session (blobs.ts) and served by the session route, as a
+     * tool result's are; absent on turns logged before it, and when the image could not be stored.
+     */
     | {
         type: 'user.turn'
         sessionId: string
         turnId: string
         text: string
         author: Owner
-        images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }[]
+        images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string; name?: string }[]
       }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }

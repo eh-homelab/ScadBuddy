@@ -13,7 +13,7 @@ from typing import Any
 
 import psycopg
 from temporalio import activity
-from temporalio.client import Client, WorkflowHandle
+from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
@@ -183,3 +183,21 @@ async def send(
         result_type=SendAnswer,
     )
     return answer
+
+
+async def send_next(
+    handle: WorkflowHandle[Any, Any], text: str, timeout: float = 30.0
+) -> SendAnswer:
+    """`send` for the turn after one `settled` saw end. `finish_turn` writes the idle
+    `settled` reads, and the workflow leaves the turn only once that activity's result
+    is back, so a send in between is refused `busy`: what a send during a turn gets.
+    Only that refusal is waited out."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        try:
+            return await send(handle, text)
+        except WorkflowUpdateFailedError as err:
+            busy = isinstance(err.cause, ApplicationError) and err.cause.type == "busy"
+            if not busy or asyncio.get_running_loop().time() > deadline:
+                raise
+        await asyncio.sleep(0.1)

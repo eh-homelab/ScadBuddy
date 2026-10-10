@@ -1743,7 +1743,7 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })).toEqual({ back: true, why: 'reconnected' })
     expect(await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })).toEqual({
       back: false,
-      message: 'The tab reconnected, but not to this agent replica, so it cannot be reached from here. Carry on without the tab for the rest of this turn.',
+      message: 'The tab reconnected, but it cannot be reached from this agent replica now. Carry on without the tab for the rest of this turn.',
     })
     expect(asked).toHaveLength(1)
     // A tab back here (or a check that failed) leaves later calls free to wait.
@@ -1762,6 +1762,9 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     await call(gate)
     expect(asked[0]!.questions[0]!.question).not.toContain('browser_snapshot')
     expect(asked[0]!.questions[0]!.question).toMatch(/^I need your ScadBuddy tab, but it is not connected\./)
+    // #1356, #1382: says what is guaranteed, and that a reply of the user's own ends the turn's tab waits.
+    expect(asked[0]!.questions[0]!.question).toContain('A change that was waiting is not made on its own')
+    expect(asked[0]!.questions[0]!.question).toContain('a reply of your own words ends my waits for the tab this turn')
   })
 
   // #1308: a tab wait that joined the model's own card gets its replies.

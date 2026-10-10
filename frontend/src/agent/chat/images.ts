@@ -134,13 +134,11 @@ export async function prepareImage(
       }
       full = { mediaType: blob.type as MediaType, blob }
     }
-    const prepared: UserImage = {
+    return {
       mediaType: full.mediaType,
       data: await base64(full.blob),
       preview: await preview(image, file.name),
     }
-    rememberFullSize(prepared)
-    return prepared
   } finally {
     image.close()
   }
@@ -160,44 +158,4 @@ async function preview(image: Awaited<ReturnType<ImageCodec['open']>>, name: str
 /** A preview or image as an `<img>` source. */
 export function dataUrl(image: { mediaType: string; data: string }): string {
   return `data:${image.mediaType};base64,${image.data}`
-}
-
-/**
- * #1891 — the base64 of full-size images kept for the transcript's lightbox. The agent
- * keeps previews only (#1866), so the image itself exists only in the tab that sent it,
- * and only until the tab is reloaded; past this many characters the oldest go first.
- */
-export const FULL_SIZES_MAX = 24 * 1024 * 1024
-
-/** Each image this tab prepared, as an `<img>` source, under its preview's base64. */
-const fullSizes = new Map<string, string>()
-let fullSizesLength = 0
-
-/** Keeps `image` for its preview's lightbox. Never sent anywhere. */
-export function rememberFullSize(image: UserImage) {
-  const key = image.preview.data
-  const url = dataUrl(image)
-  const old = fullSizes.get(key)
-  if (old !== undefined) {
-    fullSizes.delete(key)
-    fullSizesLength -= old.length
-  }
-  fullSizes.set(key, url)
-  fullSizesLength += url.length
-  for (const [oldest, kept] of fullSizes) {
-    if (fullSizesLength <= FULL_SIZES_MAX || oldest === key) break
-    fullSizes.delete(oldest)
-    fullSizesLength -= kept.length
-  }
-}
-
-/** The full-size image this tab sent with `preview`, as an `<img>` source, if it still has it. */
-export function fullSizeOf(preview: ImagePreview): string | undefined {
-  return fullSizes.get(preview.data)
-}
-
-/** For tests: forgets every full-size image. */
-export function forgetFullSizes() {
-  fullSizes.clear()
-  fullSizesLength = 0
 }

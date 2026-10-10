@@ -8,6 +8,14 @@ A piece's key is the file's sha256 and the object's place in it: the same bytes 
 the same pieces, whichever arrange reads them, and a changed file is new ones. A sliced
 file, one past the download cap, and one whose objects cannot be read faithfully
 (:mod:`scadbuddy.render.objects3mf`) are :class:`NotArrangeableError`, saying why.
+
+A file is read once per hash (#1973): reading took 13.5 s for a 13 MB file idle and
+~52 s under the dialog's parallel requests. Its pieces are stored as it is read, and its
+object list, or why it cannot be arranged, is kept under ``cache/library-objects/`` by
+the file's SHA-256 as Bambuddy states it (as :mod:`~scadbuddy.bambuddy.library_view`
+keeps a preview), so the dialog's next listing and the arrange after it download and
+parse nothing. A kept list whose pieces were swept since is read again; a file Bambuddy
+states no hash for is read each time.
 """
 
 from __future__ import annotations
@@ -15,8 +23,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
+
+from pydantic import BaseModel, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.library_view import _HASH, _store
+from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printable
 from scadbuddy.render.glb import bounding_box
 from scadbuddy.render.job_models import ManifestObject
@@ -33,8 +46,13 @@ from scadbuddy.store.cache import StaleBlobError
 from scadbuddy.store.content_models import BlobScope
 
 #: A library piece's key prefix; the number moves when the reader changes what a file's
-#: objects are, so an older reading is never taken for the new one.
+#: objects are, so an older reading is never taken for the new one. It prefixes a kept
+#: object list's name too, for the same reason.
 LIBRARY_PIECE_PREFIX = "lib1"
+#: Where the object lists are kept, under the data volume's cache.
+CACHE_DIRNAME = "library-objects"
+#: How many files' object lists are kept, newest first: each is a few hundred bytes.
+MAX_CACHED = 512
 #: Library pieces belong to no template.
 LIBRARY_SCOPE = BlobScope(slug=None, title=SHARED_TITLE)
 
@@ -51,23 +69,57 @@ class NotArrangeableError(Exception):
 
 @dataclass(frozen=True)
 class LibraryObjects:
-    """A library file's objects: as manifest entries (``part`` their piece key,
-    ``library_file_id`` the file, ``slug`` empty until the arrange files the result) and
-    as read, to write into the store."""
+    """A library file's objects as manifest entries (``part`` their piece key, stored
+    already; ``library_file_id`` the file; ``slug`` empty until the arrange files the
+    result)."""
 
     file_id: int
     filename: str
     objects: list[ManifestObject]
-    read: list[ReadObject]
+
+
+class _Kept(BaseModel):
+    """What one file hash reads as: its objects, or why it cannot be arranged."""
+
+    objects: list[ManifestObject] = []
+    refused: str | None = None
 
 
 def piece_key(digest: str, index: int) -> str:
     return f"{LIBRARY_PIECE_PREFIX}-{digest[:48]}-{index}"
 
 
-async def read_library_objects(client: BambuddyClient, file_id: int) -> LibraryObjects:
-    """Download ``file_id`` and read its objects. A file deleted in Bambuddy is the
-    client's 404; one that cannot be arranged is :class:`NotArrangeableError`."""
+def _kept_at(cache: Path, file: LibraryFile) -> Path | None:
+    digest = (file.file_hash or "").lower()
+    if not _HASH.fullmatch(digest):
+        return None
+    return cache / CACHE_DIRNAME / f"{LIBRARY_PIECE_PREFIX}-{digest}.json"
+
+
+def _load(path: Path) -> _Kept | None:
+    try:
+        return _Kept.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError):
+        return None
+
+
+async def _keep(path: Path | None, kept: _Kept) -> None:
+    if path is not None:
+        data = (kept.model_dump_json() + "\n").encode("utf-8")
+        await asyncio.to_thread(_store, path, data, MAX_CACHED)
+
+
+async def _stored(blobs: BlobStore, key: str) -> bool:
+    directory = await asyncio.to_thread(blobs.dir_for, key)
+    return await blobs.fetch(key) and await asyncio.to_thread((directory / LAYOUT_NAME).is_file)
+
+
+async def read_library_objects(
+    client: BambuddyClient, file_id: int, *, blobs: BlobStore, cache: Path
+) -> LibraryObjects:
+    """``file_id``'s objects, their pieces in ``blobs``: kept in ``cache`` by the file's
+    hash, else downloaded and read. A file deleted in Bambuddy is the client's 404; one
+    that cannot be arranged is :class:`NotArrangeableError`."""
     file = await client.library_file(file_id)
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
@@ -80,18 +132,27 @@ async def read_library_objects(client: BambuddyClient, file_id: int) -> LibraryO
             file.filename,
             f"Arrange reads only 3MF and STL files, and it is a {kind or 'file of unknown type'}",
         )
+    path = _kept_at(cache, file)
+    kept = None if path is None else await asyncio.to_thread(_load, path)
+    if kept is not None and kept.refused is not None:
+        raise NotArrangeableError(file_id, file.filename, kept.refused)
+    if kept is not None and all([await _stored(blobs, obj.part) for obj in kept.objects]):
+        # Another library file with the same bytes kept them: these are this file's.
+        objects = [obj.model_copy(update={"library_file_id": file_id}) for obj in kept.objects]
+        return LibraryObjects(file_id, file.filename, objects)
     source = LibrarySource(
         file_id=file_id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
     payload = await source.fetch_3mf(client)
     if payload is None:
-        raise NotArrangeableError(
-            file_id, file.filename, "it is too large to read, or holds no mesh ScadBuddy can read"
-        )
+        reason = "it is too large to read, or holds no mesh ScadBuddy can read"
+        await _keep(path, _Kept(refused=reason))
+        raise NotArrangeableError(file_id, file.filename, reason)
     digest = hashlib.sha256(payload).hexdigest()
     try:
         read = await asyncio.to_thread(read_objects, payload)
     except UnreadableObjectsError as error:
+        await _keep(path, _Kept(refused=str(error)))
         raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):
@@ -110,18 +171,22 @@ async def read_library_objects(client: BambuddyClient, file_id: int) -> LibraryO
                 notes=list(obj.notes),
             )
         )
-    return LibraryObjects(file_id, file.filename, objects, read)
+    await publish_library_pieces(blobs, objects, read)
+    await _keep(path, _Kept(objects=objects))
+    return LibraryObjects(file_id, file.filename, objects)
 
 
-async def publish_library_pieces(blobs: BlobStore, found: LibraryObjects) -> None:
+async def publish_library_pieces(
+    blobs: BlobStore, objects: list[ManifestObject], read: list[ReadObject]
+) -> None:
     """Write each object as its piece and store it, unless the store holds it already
-    (the same bytes read before). Two arranges of one file at once write the same
+    (the same bytes read before). Two reads of one file at once write the same
     bytes, so the one that loses the race keeps the winner's."""
-    for entry, obj in zip(found.objects, found.read, strict=True):
+    for entry, obj in zip(objects, read, strict=True):
         key = entry.part
-        directory = await asyncio.to_thread(blobs.dir_for, key)
-        if await blobs.fetch(key) and await asyncio.to_thread((directory / LAYOUT_NAME).is_file):
+        if await _stored(blobs, key):
             continue
+        directory = await asyncio.to_thread(blobs.dir_for, key)
         expected = await blobs.checkout_fresh(key)
         await asyncio.to_thread(write_piece, directory, obj)
         try:

@@ -554,6 +554,7 @@ export function ActionBar({
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}
+        printSettings={model?.print_settings}
         project={{
           value: projectId,
           onChange: chooseProject,

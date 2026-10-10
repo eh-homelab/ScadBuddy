@@ -694,6 +694,8 @@ export const libraries: CatalogueLibrary[] = [
     ref: 'v2.0.761',
     licence: 'BSD-2-Clause',
     homepage: 'https://github.com/BelfrySCAD/BOSL2',
+    description: 'The Belfry OpenSCAD Library: shapes, attachments, rounding, threading, gears, hinges, paths and transforms.',
+    tags: ['general', 'shapes', 'attachments', 'rounding', 'threads', 'gears', 'screws'],
   },
   {
     name: 'dotSCAD',
@@ -701,6 +703,8 @@ export const libraries: CatalogueLibrary[] = [
     ref: 'v3.3',
     licence: 'LGPL-3.0',
     homepage: 'https://github.com/JustinSDK/dotSCAD',
+    description: 'Paths, curves, sweeps, polyhedra, turtle graphics, mazes and other generative shapes.',
+    tags: ['paths', 'curves', 'sweep', 'generative', 'turtle', 'maze'],
   },
 ]
 
@@ -986,6 +990,13 @@ export const settings: Settings = {
       source: 'default',
       reason:
         'Paired with the Temporal address: the API and the render workers must name the same queue, and only the deployment sets both.',
+    },
+    {
+      name: 'temporal_namespace',
+      env_var: 'SCADBUDDY_TEMPORAL_NAMESPACE',
+      value: 'default',
+      source: 'default',
+      reason: 'Paired with the Temporal address; set with it by the deployment.',
     },
   ],
   about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
@@ -1539,7 +1550,7 @@ export const prints: PrintDetail[] = [
         info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
         poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
       },
-      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail' }],
+      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],
     },
   }),

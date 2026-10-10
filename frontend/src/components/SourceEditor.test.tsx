@@ -66,8 +66,8 @@ const instance = {
     }
     return model
   },
-  options: {} as { tabFocusMode?: boolean },
-  updateOptions: (options: { tabFocusMode?: boolean }) => Object.assign(instance.options, options),
+  options: {} as { tabFocusMode?: boolean; ariaLabel?: string },
+  updateOptions: (options: { tabFocusMode?: boolean; ariaLabel?: string }) => Object.assign(instance.options, options),
   keyListeners: [] as ((event: { keyCode: number }) => void)[],
   onKeyDown: (listener: (event: { keyCode: number }) => void) => {
     instance.keyListeners.push(listener)
@@ -198,6 +198,13 @@ describe('SourceEditor', () => {
         </>,
       )
     }
+
+    it('says how to leave in its accessible name, not only in visible text (#1672)', () => {
+      renderBetween()
+      expect(instance.options.ariaLabel).toBe('OpenSCAD source. Esc, then Tab, to leave the editor')
+      // Shown for sighted users, and not read a second time.
+      expect(screen.getByText('Esc, then Tab, to leave the editor')).toHaveAttribute('aria-hidden', 'true')
+    })
 
     it('is not a keyboard trap: Escape, then Tab, leaves the editor', async () => {
       const user = userEvent.setup()

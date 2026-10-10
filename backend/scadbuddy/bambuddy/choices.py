@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.extruders import default_nozzles
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.hardware import (
     InstalledNozzle,
@@ -18,6 +19,7 @@ from scadbuddy.bambuddy.hardware import (
 )
 from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
+    NozzleChoice,
     PresetRef,
     Printer,
     PrinterStatus,
@@ -68,6 +70,9 @@ class ChoicesView(BaseModel):
     printers: list[Printer] = Field(default_factory=list)
     nozzle_sizes: list[str] = Field(default_factory=lambda: list(SIZES))
     installed: list[InstalledNozzle] = Field(default_factory=list)
+    #: What the dialog opens on when the model remembers no nozzles (#1895): High Flow
+    #: on each side that has a High Flow nozzle of the size, else Standard.
+    default_nozzles: list[NozzleChoice] = Field(default_factory=lambda: default_nozzles(None))
     tiers: dict[str, list[TierOption]] = Field(default_factory=dict)
     processes: dict[str, list[str]] = Field(default_factory=dict)
     bed_types: list[str] = Field(default_factory=lambda: list(BED_TYPES))
@@ -164,6 +169,7 @@ async def choices_for(
         printer_id=printer_id,
         printers=printers,
         installed=installed_nozzles(status),
+        default_nozzles=default_nozzles(status),
         tiers={
             size: [TierOption(tier=tier, process_name=name) for tier, name in names.items()]  # type: ignore[arg-type]
             for size, names in TIERS.items()

@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.extruders import default_nozzles
+from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import StoredSettings
 from tests.api.test_print import printers_route
@@ -54,6 +56,9 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
 
     assert body["nozzle_sizes"] == ["0.2", "0.4", "0.6", "0.8"]
     assert {(n["size"], n["flow"]) for n in body["installed"]} >= {("0.2", "standard")}
+    # #1895: read from this printer's own nozzles.
+    status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
+    assert body["default_nozzles"] == [n.model_dump() for n in default_nozzles(status)]
     assert body["tiers"]["0.2"][0] == {
         "tier": "fine",
         "process_name": "0.08mm High Quality @BBL H2C 0.2 nozzle",
@@ -118,6 +123,11 @@ def test_an_offline_printer_still_opens_the_dialog(client: TestClient, model: st
     assert response.status_code == 200
     assert response.json()["installed"] == []
     assert response.json()["bed_type"] == "Textured PEI Plate"
+    # Nothing known of its nozzles: Standard, as before #1895.
+    assert response.json()["default_nozzles"] == [
+        {"size": "0.4", "flow": "standard"},
+        {"size": "0.4", "flow": "standard"},
+    ]
 
 
 @respx.mock

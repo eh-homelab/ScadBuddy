@@ -17,7 +17,8 @@
     "erasableSyntaxOnly": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test", "evals", "vitest.config.ts", "vitest.evals.config.ts"]
 }

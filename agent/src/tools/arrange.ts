@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { ok } from './call.js'
-import { command } from './command.js'
+import { ACCEPTING_MS, command } from './command.js'
 import { outputId, slug } from './common.js'
 import { waitForJob } from './customizer.js'
 import { slotChoice } from './print.js'
@@ -80,6 +80,8 @@ export const arrangeTools: Tool[] = [
     routes: ['POST /api/v1/outputs/arrange'],
     summarize: ({ objects, goal }) =>
       `Arrange ${objects.length} object${objects.length === 1 ? '' : 's'} (${goal.replaceAll('_', ' ')}) and save the result`,
+    // Its own wait for the render, after the backend has accepted it.
+    waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async ({ objects, goal, printer_id, filament_plan, colours, name, slug }, ctx) => {
       const sent = await ctx.backend.POST('/api/v1/outputs/arrange', {
         body: {

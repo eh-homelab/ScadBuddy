@@ -97,6 +97,7 @@ from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
     laid_out_plates,
+    parse_model,
 )
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import UNCOLOURED_WARNING
@@ -326,24 +327,11 @@ def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
                 if part_id.isdigit() and extruder.isdigit():
                     extruders[int(part_id)] = int(extruder)
         for index in indices:
-            root = ET.fromstring(archive.read(f"3D/Objects/object_{index}.model"))
-            obj = root.find(f".//{{{CORE_NS}}}object")
-            vertices_node = root.find(f".//{{{CORE_NS}}}vertices")
-            triangles_node = root.find(f".//{{{CORE_NS}}}triangles")
-            vertices = np.array(
-                [
-                    [float(v.get("x", 0)), float(v.get("y", 0)), float(v.get("z", 0))]
-                    for v in (vertices_node if vertices_node is not None else [])
-                ],
-                dtype=np.float64,
-            ).reshape(-1, 3)
-            faces = np.array(
-                [
-                    [int(t.get("v1", 0)), int(t.get("v2", 0)), int(t.get("v3", 0))]
-                    for t in (triangles_node if triangles_node is not None else [])
-                ],
-                dtype=np.int64,
-            ).reshape(-1, 3)
+            model = parse_model(archive, f"3D/Objects/object_{index}.model")
+            obj = model.root.find(f".//{{{CORE_NS}}}object")
+            meshes = list(model.meshes.values())
+            vertices = meshes[0].vertices if meshes else np.empty((0, 3))
+            faces = meshes[0].faces if meshes else np.empty((0, 3), dtype=np.int64)
             name = (obj.get("name") if obj is not None else None) or f"Color {index}"
             number = extruders.get(index, index)
             colour = normalise_colour(colours[number - 1] if 1 <= number <= len(colours) else None)

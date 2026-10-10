@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { PairingError } from '../bridge/pairings.js'
-import type { BrowserStatus, BrowserTarget, HubErrorCode } from '../bridge/hub.js'
+import { type BrowserStatus, type BrowserTarget, CALL_TIMEOUT_MS, type HubErrorCode } from '../bridge/hub.js'
+import { TAB_WAIT_S } from '../sessions/manager.js'
 import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolContext, ToolError } from './registry.js'
 
 // The browser_* tools (#254, spec §5.2 and §8.5): the user's own open
@@ -41,6 +42,7 @@ export type TabTool =
   | 'navigate'
   | 'snapshot'
   | 'click'
+  | 'highlight'
   | 'fill'
   | 'search'
   | 'open_model'
@@ -101,6 +103,12 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
     ...(spec.summarize ? { summarize: spec.summarize } : {}),
     routes: [],
     source: SOURCE,
+    // The call, a wait for the tab to come back, and the call once more (#815 §2).
+    waitsMs: (args) => {
+      const input = args as Record<string, unknown>
+      const call = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : CALL_TIMEOUT_MS
+      return 2 * call + TAB_WAIT_S * 1000
+    },
     handler: async (args, ctx) => {
       const input = args as Record<string, unknown>
       const wait = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : undefined
@@ -109,7 +117,7 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       let outcome = await call()
       // #815 §2: in a session the user owns, a call that finds no tab waits for
       // it as an attention request. When the tab is back, a read runs once more
-      // (once only: a tab that came back on another replica is still not here).
+      // (once only: a tab that came back and dropped again is not waited for twice).
       // A write or outward call is never re-run: the page may have reloaded or
       // changed while the tab was away, and an outward call's approval was given
       // for the page as it was. The model re-checks the page and calls again.
@@ -174,10 +182,9 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
-  // Neutral (#1410): the tab may have come back on another replica, or dropped again at once.
-  reconnected:
-    'The session\'s tab reconnected, but none is attached here now: it may have come back on another agent ' +
-    'replica, or dropped again.',
+  // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #1916), so it dropped again,
+  // or the replica holding it did not answer.
+  reconnected: 'The session\'s tab reconnected, but it cannot be reached now: it may have dropped again.',
   user_back: 'The user said they were back, but no tab is attached here yet.',
 }
 
@@ -288,6 +295,19 @@ export const browserTools: Tool[] = [
       index: z.number().int().min(0).optional().describe('Which match, when several share the name'),
     }),
     risk: 'write',
+  }),
+  forwarded({
+    tool: 'highlight',
+    description:
+      PREFIX +
+      'point at the visible element with this ARIA role and accessible name: it scrolls into view and is ' +
+      'outlined for a moment, so the user can see what you are explaining. Changes nothing.',
+    input: z.object({
+      role: z.string().min(1).describe('ARIA role, e.g. "button", "link", "tab", "checkbox"'),
+      name: z.string().describe('Accessible name, matched exactly (case-insensitive)'),
+      index: z.number().int().min(0).optional().describe('Which match, when several share the name'),
+    }),
+    risk: 'read',
   }),
   forwarded({
     tool: 'fill',

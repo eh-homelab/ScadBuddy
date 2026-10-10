@@ -56,7 +56,7 @@ async def test_a_hotend_moved_to_another_printer_keeps_its_age_and_history(
     printer_id, first_seen = _seen_rows(pg_conninfo)[A]
     assert (printer_id, first_seen) == (2, first[1])
     assert (await store.usage([A]))[A] == Usage(
-        prints=1, print_seconds=600, grams=12.5, first_seen_at=first[1]
+        prints=1, print_seconds=600, grams=12.5, first_seen_at=first[1], last_used_at=AT
     )
 
 

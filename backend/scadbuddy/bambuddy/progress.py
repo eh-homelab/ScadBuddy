@@ -28,7 +28,7 @@ from scadbuddy.bambuddy.models import QueueItem, SliceJob
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.stages import Stage, stage_of
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
@@ -177,7 +177,7 @@ _last_hash_scan: dict[str, float] = {}
 
 #: What recording a link can fail with. Linking is a side effect of the progress read:
 #: none of these may fail the read, nor another plate's read beside it (#522 review).
-_LINK_ERRORS = (ApiError, psycopg.Error, DatabaseRequiredError)
+_LINK_ERRORS = (ApiError, psycopg.Error)
 
 
 def _claim_hash_scan(output_id: str, now: float) -> bool:

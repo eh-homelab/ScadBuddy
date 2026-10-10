@@ -48,7 +48,19 @@ describe('plugin names', () => {
       expect(() => validatePluginName(name)).toThrow(PluginError)
     },
   )
-  it.each(['scadbuddy', 'playwright', 'workspace', 'computer-use', 'claude-in-chrome', 'hearthbot', 'ide'])(
+  it.each([
+    'scadbuddy',
+    'playwright',
+    'workspace',
+    'computer-use',
+    'claude-in-chrome',
+    'claude-device',
+    'hearthbot',
+    'remote-devices',
+    'webagent',
+    'claude-code-remote',
+    'ide',
+  ])(
     'refuses the reserved server name %s',
     (name) => {
       expect(() => validatePluginName(name)).toThrow(/reserved/)

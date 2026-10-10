@@ -17,6 +17,10 @@ import { HttpRequestSetting } from '../components/HttpRequestSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
 import { SessionModeSetting } from '../components/SessionModeSetting'
+import { ModelSetting } from '../components/ModelSetting'
+import { PrinterCameraSetting } from '../components/PrinterCameraSetting'
+import { McpAuthBanner } from '../components/McpAuthBanner'
+import { mcpAuthChanged } from '../lib/mcpAuthChanges'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -44,6 +48,7 @@ import {
   type FieldSpec,
   type SectionId,
 } from './settings/fields'
+import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
@@ -644,6 +649,9 @@ export function SettingsPage() {
           the server and never sent back to the browser.
         </p>
 
+        {/* #1921 — while /mcp takes calls without a token; re-read when the mode is saved below. */}
+        {ai.available && <McpAuthBanner className="mt-4" />}
+
         {changedElsewhere && (
           <div
             role="status"
@@ -816,6 +824,7 @@ export function SettingsPage() {
                     </p>
                   )}
                 </div>
+                {test?.upstream && <UpstreamAnswerDetails answer={test.upstream} />}
                 {test && (test.scopes?.length ?? 0) > 0 && (
                   <ul aria-label="Scopes" className="space-y-1 text-[12px]">
                     {test.scopes?.map((check) => (
@@ -1165,9 +1174,10 @@ export function SettingsPage() {
           <Section
             id="remembered"
             title={sectionTitle('remembered')}
-            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults."
+            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults. A printer with a nozzle rack also lists what each hotend has printed, which Least used ranks by."
           >
             <RememberedChoicesPanel targets={targetsState.data} projects={projectsState.data} />
+            <HotendUsagePanel targets={targetsState.data} />
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">
@@ -1194,6 +1204,10 @@ export function SettingsPage() {
             </div>
             <HeadlessBrowserSetting />
             <HttpRequestSetting />
+            {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
+            <PrinterCameraSetting />
+            {/* Saves on its own (#1917), beside the chat limits; hidden without the agent's database. */}
+            <ModelSetting />
             {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
             <SessionLimitsSetting />
             {/* Saves on its own; hidden without the agent's database, like the limits above. */}
@@ -1205,8 +1219,13 @@ export function SettingsPage() {
                 (useAiAvailability). */}
             {ai.available && (
               <>
-                <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
-                <McpTokensSection authMode={mcpAuthMode} />
+                <McpAuthSection
+                  onSaved={(setting) => {
+                    setMcpAuthMode(setting.mode)
+                    mcpAuthChanged()
+                  }}
+                />
+                <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
               </>
             )}
             {ai.available && (
@@ -1306,5 +1325,40 @@ export function SettingsPage() {
         <p className="text-[13px] text-muted">Save each section first to keep its changes.</p>
       </Dialog>
     </div>
+  )
+}
+
+/** #1542 — what Bambuddy itself answered a failed connection test, as it said it. */
+function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest['upstream']> }) {
+  return (
+    <details className="rounded-[6px] border border-line px-3 py-2 text-[12px]">
+      <summary className="cursor-pointer text-muted">What Bambuddy answered</summary>
+      <dl className="mt-2 space-y-1">
+        {answer.status != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Status</dt>
+            <dd>{answer.status}</dd>
+          </div>
+        )}
+        {answer.retry_after != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Retry-After</dt>
+            <dd>{answer.retry_after}</dd>
+          </div>
+        )}
+        {answer.detail != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Its message</dt>
+            <dd className="break-all">{answer.detail}</dd>
+          </div>
+        )}
+        {answer.error != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Error</dt>
+            <dd className="break-all">{answer.error}</dd>
+          </div>
+        )}
+      </dl>
+    </details>
   )
 }

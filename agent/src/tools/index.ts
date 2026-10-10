@@ -4,6 +4,7 @@ import { authoringTools } from './authoring.js'
 import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
+import { farmTools } from './farm.js'
 import { fileTools } from './files.js'
 import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
@@ -42,6 +43,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...printTools,
   ...printHistoryTools,
   ...printMediaTools,
+  ...farmTools,
   ...browserTools,
   ...approvalTools,
   ...sessionTools,

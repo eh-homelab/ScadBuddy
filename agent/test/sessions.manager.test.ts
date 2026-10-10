@@ -54,12 +54,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
   () => {
     let db: Database
     let schema: string
+    let url: string
     let drop: () => Promise<void>
     let stop: AbortController
     const others: Database[] = []
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, url, drop } = await throwawayDatabase())
       expect(await db.ready()).toBe(true)
       stop = new AbortController()
     })
@@ -71,7 +72,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     /** A second "replica": its own pool on the same schema. */
     function replica(): Database {
-      const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+      const other = connectDatabase(url, { searchPath: schema })
       others.push(other)
       return other
     }

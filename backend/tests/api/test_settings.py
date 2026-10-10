@@ -308,6 +308,7 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
 
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is True
+    assert body["upstream"] is None
     assert "3DP-31B-598" in body["detail"]
     assert body["printers"] == [
         {"id": 1, "name": "3DP-31B-598", "model": "H2C", "is_active": True, "nozzle_count": None}
@@ -344,6 +345,73 @@ def test_an_unreachable_bambuddy_is_reported_not_raised(client: TestClient) -> N
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is False
     assert "ConnectError" in body["detail"]
+    # What went wrong, in ScadBuddy's words (#1542).
+    assert body["upstream"] == {
+        "status": None,
+        "retry_after": None,
+        "detail": None,
+        "error": "ConnectError: could not connect",
+    }
+
+
+@respx.mock
+def test_a_test_never_passes_on_what_a_non_http_peer_sent(client: TestClient) -> None:
+    """#2021 review: pointed at another TCP service, h11 quotes that service's first
+    line in its error. The URL is a setting, so that text must not come back."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(
+        side_effect=httpx.RemoteProtocolError("illegal status line: bytearray(b'-ERR secret')")
+    )
+
+    body = client.post("/api/v1/settings/test").json()
+    assert "secret" not in json.dumps(body)
+    assert body["upstream"]["error"] == "RemoteProtocolError: the server did not answer in HTTP"
+
+
+@respx.mock
+def test_a_rate_limit_until_a_date_reads_as_one(client: TestClient) -> None:
+    """#2037: a Retry-After HTTP-date is said as "until", never as "<date> s"."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    when = "Thu, 09 Oct 2026 07:28:00 GMT"
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(429, headers={"Retry-After": when}))
+
+    body = client.post("/api/v1/settings/test").json()
+    assert f"wait until {when}" in body["detail"]
+    assert f"{when} s" not in body["detail"]
+    assert body["upstream"]["retry_after"] == when
+
+
+@respx.mock
+def test_a_rate_limited_test_shows_what_bambuddy_said(client: TestClient) -> None:
+    """#1542: a 429's own words and its Retry-After, not only ScadBuddy's sentence."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(
+        return_value=httpx.Response(
+            429, headers={"Retry-After": "30"}, json={"detail": "Too many requests"}
+        )
+    )
+
+    body = client.post("/api/v1/settings/test").json()
+    assert body["ok"] is False
+    assert "limiting requests" in body["detail"]
+    assert "wait 30 s" in body["detail"]
+    assert body["upstream"] == {
+        "status": 429,
+        "retry_after": "30",
+        "detail": "Too many requests",
+        "error": None,
+    }
+
+
+@respx.mock
+def test_a_failed_test_never_passes_the_body_through(client: TestClient) -> None:
+    """The URL is a setting: a body passed through would read any reachable address."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(500, text="internal secret page"))
+
+    body = client.post("/api/v1/settings/test").json()
+    assert body["upstream"] == {"status": 500, "retry_after": None, "detail": None, "error": None}
+    assert "internal secret page" not in json.dumps(body)
 
 
 def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> None:

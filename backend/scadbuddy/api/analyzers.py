@@ -64,7 +64,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
 from scadbuddy.bambuddy.options import library_options_scope
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
@@ -304,12 +304,8 @@ async def _context(
     library_file_id: int | None = None
     if meta is not None:
         # Any copy will do: every one is this output's 3MF, and the filament read only
-        # needs the plate's slots. Without a database the analyzers still run, with the
-        # inventory reported unavailable (#461).
-        try:
-            copies = await uploads.for_output(meta.id)
-        except DatabaseRequiredError:
-            copies = []
+        # needs the plate's slots.
+        copies = await uploads.for_output(meta.id)
         library_file_id = copies[-1].id if copies else None
     return await gather_context(
         outputs=outputs,

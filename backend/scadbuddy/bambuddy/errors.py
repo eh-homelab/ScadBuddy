@@ -8,11 +8,17 @@ signal. Each client call therefore declares the API-key scope it needs, and a
 
 from __future__ import annotations
 
+import email.utils
+import os
+import re
+import socket
+import ssl
 from enum import StrEnum
 from typing import Any
 
 import httpx
 from fastapi import status
+from pydantic import BaseModel
 
 from scadbuddy.core.problems import ApiError
 
@@ -69,12 +75,63 @@ def upstream_body(response: httpx.Response) -> Any:
         return None
 
 
+#: Longer than any HTTP-date (29 characters) or delay a server sends.
+MAX_RETRY_AFTER_CHARS = 40
+
+
+def retry_after(value: str | None) -> str | None:
+    """A ``Retry-After`` header as RFC 9110 §10.2.3 allows it, a delay in seconds or an
+    HTTP-date, else None (#2037). It is the peer's text, carried into a problem's
+    detail and the Settings page, so anything else is dropped rather than passed on."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or len(value) > MAX_RETRY_AFTER_CHARS:
+        return None
+    if value.isdigit():
+        return value
+    try:
+        email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
+class UpstreamAnswer(BaseModel):
+    """What Bambuddy itself answered to a failed call (#1542): the status, the
+    ``Retry-After`` it asked for and its own ``detail``; or, when it never answered,
+    why not. Never the raw body: the URL is a setting, so a body passed through would
+    let whoever sets it read any address this server can reach."""
+
+    status: int | None = None
+    retry_after: str | None = None
+    detail: str | None = None
+    error: str | None = None
+
+
+def _answered(error: ApiError, answer: UpstreamAnswer) -> ApiError:
+    error.upstream = answer
+    return error
+
+
 def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiError:
-    """Turn a failed Bambuddy response into the problem the browser should see.
+    """Turn a failed Bambuddy response into the problem the browser should see, with
+    Bambuddy's own answer kept on it (`UpstreamAnswer`).
 
     ``what`` names the operation in the first person plural of the UI ("upload the
     3MF"), so the detail reads as a sentence.
     """
+    answer = UpstreamAnswer(
+        status=response.status_code,
+        retry_after=retry_after(response.headers.get("Retry-After")),
+        detail=upstream_detail(response),
+    )
+    return _answered(_mapped(response, scope=scope, what=what, answer=answer), answer)
+
+
+def _mapped(
+    response: httpx.Response, *, scope: Scope, what: str, answer: UpstreamAnswer
+) -> ApiError:
     code = response.status_code
     detail = upstream_detail(response)
     suffix = f": {detail}" if detail else ""
@@ -114,6 +171,20 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
             bambuddy_status=code,
             bambuddy_body=upstream_body(response),
         )
+    if code == status.HTTP_429_TOO_MANY_REQUESTS:
+        wait = (
+            ""
+            if answer.retry_after is None
+            else f"; it asks to wait {answer.retry_after} s"
+            if answer.retry_after.isdigit()
+            else f"; it asks to wait until {answer.retry_after}"
+        )
+        return ApiError(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Bambuddy is limiting requests and refused to {what}{wait}{suffix}",
+            type_=UNAVAILABLE_PROBLEM,
+            bambuddy_status=code,
+        )
     return ApiError(
         status.HTTP_502_BAD_GATEWAY,
         f"Bambuddy answered {code} when asked to {what}{suffix}",
@@ -148,8 +219,54 @@ def map_transport(error: httpx.HTTPError, *, what: str) -> ApiError:
         if isinstance(error, httpx.TimeoutException)
         else status.HTTP_502_BAD_GATEWAY
     )
-    return ApiError(
-        code,
-        f"could not reach Bambuddy to {what}: {type(error).__name__}",
-        type_=UNAVAILABLE_PROBLEM,
+    return _answered(
+        ApiError(
+            code,
+            f"could not reach Bambuddy to {what}: {type(error).__name__}",
+            type_=UNAVAILABLE_PROBLEM,
+        ),
+        UpstreamAnswer(error=f"{type(error).__name__}: {_transport_reason(error)}"),
     )
+
+
+#: What each transport failure means, in ScadBuddy's words; the first match wins.
+_TRANSPORT_REASONS: tuple[tuple[type[httpx.HTTPError], str], ...] = (
+    (httpx.ConnectTimeout, "timed out connecting"),
+    (httpx.ReadTimeout, "timed out waiting for the answer"),
+    (httpx.WriteTimeout, "timed out sending the request"),
+    (httpx.PoolTimeout, "timed out waiting for a free connection"),
+    (httpx.RemoteProtocolError, "the server did not answer in HTTP"),
+    (httpx.ConnectError, "could not connect"),
+    (httpx.ReadError, "the connection failed while reading the answer"),
+    (httpx.WriteError, "the connection failed while sending the request"),
+)
+
+#: An OpenSSL reason code, such as CERTIFICATE_VERIFY_FAILED: a constant, never peer text.
+_TLS_REASON = re.compile(r"[A-Z0-9_]{1,64}")
+
+
+def _transport_reason(error: httpx.HTTPError) -> str:
+    """Why the call failed, never in the exception's own words. For a peer that does
+    not speak HTTP, h11 quotes the bytes it received in its message (``illegal status
+    line: bytearray(b'...')``), and the URL is a setting: passing that text on would
+    let whoever sets the URL read the first line of any port this server can reach.
+    What the local socket or TLS layer said is kept, as a constant: the OS's text for
+    the errno, or OpenSSL's reason code."""
+    seen: set[int] = set()
+    cause = error.__cause__ or error.__context__
+    # A chain can loop back on itself, through a handler that re-raises.
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, ssl.SSLError):
+            reason = getattr(cause, "reason", None)
+            reason = reason if isinstance(reason, str) else ""
+            return f"TLS failed ({reason})" if _TLS_REASON.fullmatch(reason) else "TLS failed"
+        if isinstance(cause, socket.gaierror):
+            return "the host name could not be resolved"
+        if isinstance(cause, OSError) and cause.errno:
+            return os.strerror(cause.errno)
+        cause = cause.__cause__ or cause.__context__
+    for kind, reason in _TRANSPORT_REASONS:
+        if isinstance(error, kind):
+            return reason
+    return "the call failed"

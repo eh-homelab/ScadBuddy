@@ -62,7 +62,7 @@ import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
-import { TurnAuditor } from '../audit/turn.js'
+import { TurnAuditor, turnCostEntry } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
@@ -78,13 +78,13 @@ import {
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, type StoredBlob } from './blobs.js'
+import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
 import { SessionEdits } from './edits.js'
 import { forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
-import { previewsOf, userPrompt, type UserImage } from './images.js'
+import { type ImagePreview, previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { DurableGate } from '../gate/durable.js'
@@ -263,8 +263,9 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         // opened it may stop waiting first (#1341). The row keeps the opener's id.
         message:
           'I need your ScadBuddy tab, but it is not connected. Open ScadBuddy (or reload it) and open ' +
-          'this chat in the assistant panel. When it is back I re-check the page before going on; without it I carry ' +
-          'on with what needs no tab.',
+          "this chat in the assistant panel. A change that was waiting is not made on its own when the tab is back. " +
+          "Answer I'm back to have me try again; a reply of your own words ends my waits for the tab this turn, and " +
+          'without the tab I carry on with what needs no tab.',
         options: [IM_BACK, CARRY_ON],
         timeout_s: TAB_WAIT_S,
       })
@@ -294,12 +295,13 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         },
       })
       if ('reconnected' in verdict && verdict.reconnected) {
-        // reconnected() runs on whichever replica saw the tab. Back on another one, it
-        // cannot be reached from here and nothing here will end a later wait but its
-        // timer (#1308), so the rest of the turn does not wait. A failed check does not latch.
+        // reconnected() runs on whichever replica saw the tab. isBack reaches a tab on
+        // another replica too (bridge/relay.ts, #1916); when it still finds none, nothing
+        // here will end a later wait but its timer (#1308), so the rest of the turn does
+        // not wait. A failed check does not latch.
         if (!(await isBack(turn).catch(() => true))) {
           gaveUp =
-            'The tab reconnected, but not to this agent replica, so it cannot be reached from here. Carry on ' +
+            'The tab reconnected, but it cannot be reached from this agent replica now. Carry on ' +
             'without the tab for the rest of this turn.'
         }
         return { back: true, why: 'reconnected' }
@@ -1237,6 +1239,23 @@ export class SessionManager {
     if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
   }
 
+  /**
+   * The `user.turn` event's images: each preview with the name of the full
+   * image, stored before the event is logged (blobs.ts), as a tool result's
+   * are, so the panel's full-size view can load it. If they cannot be stored,
+   * the previews go without names.
+   */
+  private async sentImages(id: string, images: readonly UserImage[]): Promise<(ImagePreview & { name?: string })[]> {
+    const named = images.map((image) => ({ image, blob: sessionImage(image.mediaType, Buffer.from(image.data, 'base64')) }))
+    try {
+      await this.blobs.put(id, named.map((n) => n.blob))
+    } catch (err) {
+      this.deps.stderr?.(`session ${id}: could not store a turn's images: ${err instanceof Error ? err.message : String(err)}\n`)
+      return previewsOf(images)
+    }
+    return named.map(({ image: { preview }, blob }) => ({ mediaType: preview.mediaType, data: preview.data, name: blob.name }))
+  }
+
   private async startTurn(
     session: ClaimedSession,
     turnId: string,
@@ -1261,7 +1280,7 @@ export class SessionManager {
         turnId,
         text: prompt,
         author,
-        ...(options.images?.length ? { images: previewsOf(options.images) } : {}),
+        ...(options.images?.length ? { images: await this.sentImages(id, options.images) } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
@@ -1952,6 +1971,15 @@ export class SessionManager {
       WHERE id = ${id} AND turn_id = ${turnId}
       RETURNING id`
     if (!released) return { kind: 'lost_claim' }
+    // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
+    await this.deps.audit?.record(
+      turnCostEntry(
+        { sessionId: id, turnId, actor: session.owner },
+        outcome,
+        { costUsd: costUsd - session.ownCostUsd, priced: result !== undefined, estimatedUsd: cutUsd },
+        secrets,
+      ),
+    )
     // Read again, not from `session`: the user may have raised the budget while the turn
     // ran, and a fork or the parent sharing it may have spent from it (#823). The meter
     // shows what the whole lineage has spent, which is what the budget is checked against.

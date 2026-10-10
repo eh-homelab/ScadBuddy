@@ -40,6 +40,9 @@ function entry(id: number, minutesAgo: number, fields: Partial<AuditEntry> & Pic
     started_at: at,
     finished_at: at,
     duration_ms: null,
+    cost_usd: null,
+    cost_priced: null,
+    cost_estimated_usd: null,
     ...fields,
   }
 }

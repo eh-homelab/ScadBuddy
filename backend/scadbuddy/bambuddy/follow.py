@@ -36,7 +36,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from prometheus_client import Gauge
 from pydantic import BaseModel
@@ -49,6 +49,10 @@ from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
+
+if TYPE_CHECKING:
+    # Annotations only: runs imports print_run, which reaches rack.usage, which imports this.
+    from scadbuddy.bambuddy.runs import NewestFailed
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,7 @@ class Follower:
         on_settled: Sequence[SettledHook] = (),
         settle_timeout: float = SETTLE_TIMEOUT,
         read_library: LibraryReader | None = None,
+        newest_failed: NewestFailed | None = None,
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -135,6 +140,14 @@ class Follower:
         #: concurrently (a poke's old attempt reads until its next heartbeat).
         self.on_settled: list[SettledHook] = list(on_settled)
         self.settle_timeout = settle_timeout
+        #: The progress the subject's newest run shows when it failed before queueing
+        #: (``runs.newest_failure``), else None. While it is not None that is what is
+        #: published, as the progress routes publish it: a follow of an older print
+        #: publishing that print's progress meanwhile made the two alternate (#1837).
+        #: The follow still reads the older print until it settles, for its hooks. Its
+        #: settle then emits no ``print.settled`` on that subject: the subject shows the
+        #: newer failure, not the older print, and that is intended (#2015).
+        self.newest_failed = newest_failed
 
     async def follow(
         self,
@@ -153,6 +166,7 @@ class Follower:
             return "gone"
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
+        last_read: PrintProgress | None = None
         while True:
             if read_now:
                 read_now = False
@@ -190,7 +204,12 @@ class Follower:
                 interval = self.error_interval
                 continue
             last_failure = None
-            changed = self.observer.observe_subject(key, slug, progress)
+            failed = await self._newest_failed(key)
+            published = self.observer.observe_subject(key, slug, failed or progress)
+            # Whether the print moved: while a newer run's failure is what is published,
+            # that is not what the observer compared.
+            changed = published if failed is None else progress != last_read
+            last_read = progress
             if progress is not None and progress.settled:
                 # After observe, so print.settled is already published (#836). Not on
                 # progress None: a print never queued has no picks.
@@ -200,6 +219,17 @@ class Follower:
             if changed:
                 active = self.now()
             interval = self.min_interval if changed else min(self.max_interval, interval * 2)
+
+    async def _newest_failed(self, key: str) -> PrintProgress | None:
+        if self.newest_failed is None:
+            return None
+        try:
+            return await self.newest_failed(key)
+        except Exception:
+            # Not the database (newest_failure answers None for that): a bug, or a
+            # broken setting. Publish the print's own progress, as before #1837.
+            logger.exception("the newest run's failure could not be read", extra={"subject": key})
+            return None
 
     async def _read(
         self, subject: PrintSubject

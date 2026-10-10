@@ -27,7 +27,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     let store: CredentialStore
 
     beforeEach(async () => {
-      ;({ db, drop } = await throwawayDatabase())
+      ;({ db, drop } = await throwawayDatabase({ empty: true }))
       store = new CredentialStore(db.sql)
     })
     afterEach(async () => {

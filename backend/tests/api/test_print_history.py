@@ -445,8 +445,9 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
         "timestamp": frames["timestamps"][0],
         "data_url": "data:image/jpeg;base64," + frames["thumbnails"][0],
     }
+    # #2055: named by what the output's plate holds, as the print dialog names it.
     assert media["plate_thumbnails"] == [
-        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail"}
+        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail", "name": "demo"}
     ]
     assert media["attachments"] == []
 
@@ -715,6 +716,14 @@ def link_library(client: TestClient, file_id: int, archive_id: int) -> None:
 def library_file_route(
     file_id: int, *, deleted: bool = False, filename: str = "bracket.3mf"
 ) -> respx.Route:
+    # The detail names the printed plate from the file's plates (#2055); none by default.
+    respx.get(f"{API}/library/files/{file_id}/plates").mock(
+        return_value=(
+            httpx.Response(404, json={"detail": "File not found"})
+            if deleted
+            else httpx.Response(200, json={"file_id": file_id, "plates": []})
+        )
+    )
     return respx.get(f"{API}/library/files/{file_id}").mock(
         return_value=(
             httpx.Response(404, json={"detail": "File not found"})
@@ -761,6 +770,54 @@ def test_a_library_prints_files_name_the_file_and_its_preview(client: TestClient
 
 
 @respx.mock
+def test_a_library_prints_plate_is_named_by_what_it_holds(client: TestClient) -> None:
+    """#2055: the plate the archive printed, named from the library file's plates."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+    respx.get(f"{API}/library/files/89/plates").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "file_id": 89,
+                "filename": "bracket.3mf",
+                "plates": [
+                    {"index": 1, "name": "Base", "has_thumbnail": True},
+                    {"index": 2, "name": "Lid", "has_thumbnail": True},
+                ],
+            },
+        )
+    )
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 2, "url": "/api/v1/prints/90/plates/2/thumbnail", "name": "Lid"}
+    ]
+
+
+@respx.mock
+def test_a_library_prints_plates_that_cannot_be_read_leave_the_number(
+    client: TestClient,
+) -> None:
+    """#2055: the name is advisory; the detail still answers, unnamed."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+    respx.get(f"{API}/library/files/89/plates").mock(return_value=httpx.Response(500))
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 2, "url": "/api/v1/prints/90/plates/2/thumbnail", "name": None}
+    ]
+
+
+@respx.mock
 def test_a_library_print_whose_file_is_gone_lists_bambuddys_files_alone(
     client: TestClient,
 ) -> None:
@@ -784,6 +841,7 @@ def test_a_library_print_whose_file_cannot_be_read_still_has_its_detail(
     link_library(client, 89, 90)
     mock_archive(90, timelapse_path=None)
     respx.get(f"{API}/library/files/89").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/library/files/89/plates").mock(return_value=httpx.Response(500))
 
     detail = client.get("/api/v1/prints/90")
 

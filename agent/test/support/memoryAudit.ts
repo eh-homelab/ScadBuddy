@@ -47,6 +47,9 @@ export class MemoryAudit implements AuditRepo {
         started_at: e.startedAt?.toISOString() ?? null,
         finished_at: e.finishedAt?.toISOString() ?? null,
         duration_ms: null,
+        cost_usd: e.costUsd ?? null,
+        cost_priced: e.costPriced ?? null,
+        cost_estimated_usd: e.costEstimatedUsd ?? null,
       }))
       .reverse()
       .filter((r) => (filter.kind ? r.kind === filter.kind : true))

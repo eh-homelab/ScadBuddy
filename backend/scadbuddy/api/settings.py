@@ -20,7 +20,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
 from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
 from scadbuddy.bambuddy.options import (
     BAMBUDDY_DEFAULTS,
@@ -225,6 +225,9 @@ class ConnectionTest(BaseModel):
     detail: str
     printers: list[Printer] = Field(default_factory=list)
     scopes: list[ScopeCheck] = Field(default_factory=list)
+    #: On a failure, what Bambuddy itself answered (or why it never did), as it said it,
+    #: beside ``detail``'s sentence (#1542).
+    upstream: UpstreamAnswer | None = None
 
 
 class RememberedChoices(BaseModel):
@@ -500,7 +503,10 @@ async def test_settings(store: SettingsStoreDep) -> ConnectionTest:
         try:
             printers = await client.printers()
         except ApiError as error:
-            return ConnectionTest(ok=False, detail=error.detail, scopes=_all_failed(error))
+            upstream = error.upstream if isinstance(error.upstream, UpstreamAnswer) else None
+            return ConnectionTest(
+                ok=False, detail=error.detail, scopes=_all_failed(error), upstream=upstream
+            )
     scopes = [
         ScopeCheck(scope=scope, status="ok", required=required, detail=what)
         if scope == Scope.READ_STATUS

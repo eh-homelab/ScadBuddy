@@ -57,11 +57,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
   () => {
     let db: Database
     let schema: string
+    let url: string
     let drop: () => Promise<void>
     const closers: (() => Promise<void>)[] = []
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, url, drop } = await throwawayDatabase())
       expect(await db.ready()).toBe(true)
     })
     afterEach(async () => {
@@ -70,7 +71,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     async function listener(): Promise<PgEventListener> {
-      const l = new PgEventListener(TEST_DATABASE_URL!, { searchPath: schema, retryMinMs: 20, log: () => {} })
+      const l = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
       l.start()
       closers.push(() => l.close())
       await l.ready()
@@ -420,7 +421,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const pubA = new SessionEventPublisher(db.sql, { throttleMs: 10 })
       const { runner } = scriptedRunner(() => ({ reply: 'from replica A' }))
       const replicaA = manager({ sql: db.sql, paths, run: runner, pollMs: slow, onAppend: pubA.onAppend })
-      const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+      const other = connectDatabase(url, { searchPath: schema })
       const pubB = new SessionEventPublisher(other.sql, { throttleMs: 10 })
       const replicaB: SessionManager = manager({ sql: other.sql, paths, pollMs: slow, onAppend: pubB.onAppend })
       const bus = await listener()

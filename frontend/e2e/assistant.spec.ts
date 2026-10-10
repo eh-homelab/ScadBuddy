@@ -284,6 +284,44 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(composer).toHaveValue('Which spool is the grey one?')
     await expect(dialog).toBeVisible()
   })
+
+  // #1897 — a click on the toggle closed the dialog instead: the dialog's overlay covered
+  // it. The toggle is above the overlay now.
+  test('opens from its button while the Print dialog is open', async ({ page }) => {
+    await page.setViewportSize({ width: 1100, height: 800 })
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('generate')).toBeEnabled()
+    await page.getByTestId('generate').click()
+    await expect(page.getByTestId('print')).toBeEnabled()
+    await page.getByTestId('print').click()
+    const dialog = page.getByRole('dialog', { name: 'Print' })
+    await expect(dialog).toBeVisible()
+
+    // A real click: Playwright refuses one on a button the overlay covers, and a click
+    // on the overlay closes the dialog.
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeFocused()
+    await expect(dialog).toBeVisible()
+
+    // Then as when it was open first: side by side, and the chat takes typing.
+    const dialogBox = await dialog.boundingBox()
+    const panelBox = await panel.boundingBox()
+    if (!dialogBox || !panelBox) throw new Error('not laid out')
+    expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(panelBox.x)
+    await composer.fill('Which spool is the grey one?')
+    await expect(composer).toHaveValue('Which spool is the grey one?')
+    await expect(dialog).toBeVisible()
+
+    // Clicked again beside the dialog, it brings the focus back to the chat rather than
+    // closing it (AppShell's `open && besideDialog`): the click itself took the focus.
+    await dialog.getByRole('button').first().focus()
+    await page.getByRole('button', { name: 'Assistant', exact: true }).click()
+    await expect(composer).toBeFocused()
+    await expect(panel).toBeVisible()
+    await expect(dialog).toBeVisible()
+  })
 })
 
 // #795 — a fork's row, with Rename and Done beside it, fits the panel at phone width.
