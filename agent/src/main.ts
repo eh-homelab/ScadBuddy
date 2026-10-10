@@ -24,6 +24,7 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
+import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -50,6 +51,8 @@ import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
 import { PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
+import { DurableTurns } from './sessions/durable.js'
+import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -170,6 +173,8 @@ const oidcRepo = settings
   : undefined
 const oidcProvider = new OidcProvider()
 const plugins = database ? new PluginStore(database.sql) : undefined
+// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_settings.
+const builtInTools = new BuiltInTools(settings)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start()
@@ -201,6 +206,8 @@ const toolServices: ToolServices = {
   publicBaseUrl: config.publicUrl,
   // The tools Settings can turn off (#1911): read from ai_settings at each call.
   switchedOff: toolSwitches(settings),
+  // Settings → Plugins' raised tiers and disabled tools (#1953), read at each call.
+  toolOverrides: builtInTools.registryOverrides(),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
@@ -265,6 +272,8 @@ const sessions =
         ...(settings ? { settings } : {}),
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
+        // Settings → Plugins' overrides of the built-in tools (#1953), per turn.
+        builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
         // subagents, with the Skill and Agent tools they need.
         ownPlugin: OWN_PLUGIN_DIR,
@@ -418,6 +427,23 @@ const temporalClient = temporal
   : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// A durable session's turns (plan 5c PR 3): only with the codec, so a session's
+// payloads are never sent to Temporal unsealed; without it a durable start is refused.
+if (sessions && temporalClient && payloadKeys && database) {
+  sessions.durableTurns = new DurableTurns({ client: temporalClient, sql: database.sql, events: sessions.events })
+}
+// Every 30 s, beside the lease reaper: durable sessions left `running` whose workflow
+// has ended or never started (#2001); a durable turn takes no lease.
+const stopDurableSweep =
+  sessions && temporalClient && database
+    ? new DurableRunningSweep({ sql: database.sql, events: sessions.events, describe: durableDescriber(temporalClient) }).start(
+        SESSION_REAP_MS,
+        {
+          ready: database.ready,
+          onError: (err) => console.error('durable running sweep failed:', (err as Error).message),
+        },
+      )
+    : undefined
 // Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
 const stopOrphanSweep =
   sessions && temporalClient
@@ -513,6 +539,7 @@ async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
   stopOrphanSweep?.()
+  stopDurableSweep?.()
   stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()

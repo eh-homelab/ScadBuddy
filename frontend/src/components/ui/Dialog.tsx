@@ -154,7 +154,10 @@ export function Dialog({ open, title, description, onClose, children, footer, si
       {/* Bounded, with the body scrolling, so the title and the buttons stay reachable
           however tall the content grows. The print picker's filament step (#87) is the
           first content to exceed a short viewport, and without this the Run button sits
-          off screen with nothing to scroll it into view. */}
+          off screen with nothing to scroll it into view. Bounded by the *visible* height
+          (`dvh`), not `vh`: on a phone `100vh` is the height with the browser's toolbars
+          hidden, so a dialog at that cap ran under them, title and Print button included,
+          and the overlay does not scroll (#1723). */}
       <div
         ref={panelRef}
         role="dialog"
@@ -166,7 +169,7 @@ export function Dialog({ open, title, description, onClose, children, footer, si
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
         onKeyDown={trapTab}
-        className={`flex max-h-[calc(100vh-2rem)] w-full ${size === 'wide' ? 'max-w-[1600px]' : 'max-w-lg'} flex-col rounded-lg border border-line bg-surface shadow-2xl outline-none`}
+        className={`flex max-h-[calc(100dvh-2rem)] w-full ${size === 'wide' ? 'max-w-[1600px]' : 'max-w-lg'} flex-col rounded-lg border border-line bg-surface shadow-2xl outline-none`}
       >
         <header className="shrink-0 border-b border-line px-5 py-3.5">
           <h2 className="text-[15px] font-semibold">{title}</h2>

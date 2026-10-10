@@ -409,6 +409,10 @@ the page you are on, so "make the text bigger" on a model's page means that mode
 
 - Type and press **Enter** (Shift+Enter for a new line). **Image** attaches up to four
   PNG, JPEG, GIF or WebP pictures; pasting or dropping them works too.
+- Type **/** at the start of a message to list the skills the assistant loads
+  (ScadBuddy's own `/scadbuddy:authoring`, `customize` and `print`, and those of enabled
+  plugin packages). Keep typing to filter; **Up**/**Down** move, **Enter** or **Tab**
+  puts the skill in the message, **Esc** closes the list. Nothing is sent until you send it.
 - The microphone is **Voice input** (press to talk and again to stop, or hold it), and
   **Read replies aloud** speaks the answers. Inside Bambuddy's frame, voice needs
   ScadBuddy open in a tab of its own.
@@ -559,7 +563,12 @@ browser are built in, each with **Enable**/**Disable**.
   listed; the only way past is to approve loading the package as it is, which runs its
   code with the assistant service's own access. A newer commit is **Fetch re-pin**,
   approved the same way.
-- **Plugin endpoints** (remote MCP servers). Give a **Name**, the **MCP endpoint URL**
+- **Plugins**. ScadBuddy's own tools come first, marked **Built in**: `scadbuddy` (the
+  assistant's ScadBuddy tools) and `playwright` (the headless browser's). **Review tools**
+  lists each one with its tier and **Disable**. A tier can only be raised above the one
+  ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
+  built-in is never removed. A durable session does not yet ask about a tool raised to
+  outward: it refuses the call instead. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
   and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never

@@ -52,7 +52,7 @@ from scadbuddy_durable.gate.store import ResolveInput
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
-from scadbuddy_durable.session.models import FinishTurn, GateSettings
+from scadbuddy_durable.session.models import TURN_QUERY, FinishTurn, GateSettings
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -368,6 +368,24 @@ async def test_a_busy_session_refuses_a_second_message(
     await settled(connect, sid)
 
 
+async def test_the_turn_query_names_the_turn_the_workflow_holds(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2078: the agent's sweep gives back a kept claim when the workflow holds no turn."""
+    sid, handle = await harness.session(agent_db)
+    assert await handle.query(TURN_QUERY) is None
+    answer = await send(handle, "print it")
+    await _parked(handle)
+    assert await handle.query(TURN_QUERY) == answer.turn_id
+    await handle.execute_update(CANCEL_INPUT_UPDATE, {"reason": "done"})
+    assert await settled(connect, sid) == "idle"
+    await until(lambda: _turn_is(handle, None))
+
+
+async def _turn_is(handle: WorkflowHandle[Any, Any], turn_id: str | None) -> bool:
+    return bool(await handle.query(TURN_QUERY) == turn_id)
+
+
 async def test_interrupt_ends_the_turn_even_while_the_worker_is_down(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
@@ -401,7 +419,7 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     queries = {q.name for q in definition.query_definitions}
     assert {"send_message", "respond", "cancel_input"} <= updates
     assert "interrupt" in signals
-    assert {"pending_input", "segment_context"} <= queries
+    assert {"pending_input", "segment_context", "turn"} <= queries
     ours = {
         "send_message",
         "respond",
@@ -409,6 +427,7 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
         "interrupt",
         "pending_input",
         "segment_context",
+        "turn",
     }
     others = (updates | signals | queries) - ours
     # Workflow Streams' and the plugin's own.

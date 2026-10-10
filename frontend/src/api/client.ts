@@ -24,8 +24,10 @@ import type {
   PrinterCameraSetting,
   ImageSettings,
   AttachmentView,
+  AiSessionEdit,
   AiSessionView,
   SessionLimits,
+  SessionModeSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
@@ -1081,6 +1083,9 @@ export const api = {
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
+  /** #1723 — the output's preview mesh, every part in its colour. */
+  outputPreviewGlbUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/preview.glb`,
+
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
@@ -1281,6 +1286,10 @@ export const api = {
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
+
+  /** #1723 — one plate of the library file as a preview mesh (#1753). */
+  libraryPreviewGlbUrl: (fileId: number, plate: number) =>
+    `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
@@ -1520,6 +1529,15 @@ export const api = {
       body: JSON.stringify({ long_edge: longEdge }),
     }),
 
+  /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
+  getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),
+
+  putSessionMode: (mode: SessionModeSetting['mode']) =>
+    request<SessionModeSetting>('/ai/settings/session-mode', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
+
   /**
    * #1911 — the switch for the assistant's `get_printer_camera` tool, served by the agent
    * service. On by default. Fails (404 or 503) when there is no agent or no AI database.
@@ -1561,12 +1579,16 @@ export const api = {
       ...(options.upTo === undefined ? {} : { body: JSON.stringify({ up_to: options.upTo }) }),
     }),
 
-  /** #795 — renames a session, or marks it done; only the session's owner can. */
-  updateAiSession: (id: string, edit: { title: string } | { done: true }) =>
+  /** #795, #1885 — renames a session, marks it done, or archives or unarchives it; only the session's owner can. */
+  updateAiSession: (id: string, edit: AiSessionEdit) =>
     request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(edit),
     }),
+
+  /** #1885 — the archived sessions, newest first: the switcher's Archived view. */
+  listArchivedAiSessions: (limit: number) =>
+    request<{ sessions: AiSessionView[] }>(`/ai/sessions?archived=true&limit=${limit}`),
 
   /** #790 — adds to one session's budget; only the user can (it spends money). */
   raiseAiSessionBudget: (id: string, addUsd: number) =>

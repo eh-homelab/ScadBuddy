@@ -18,6 +18,10 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number]
 
 export type Risk = 'read' | 'write' | 'outward'
 
+/** How a session runs (spec 2026-10-01 §6.1): in this service's harness, or as a DurableSession workflow. */
+export const SESSION_MODES = ['classic', 'durable'] as const
+export type SessionMode = (typeof SESSION_MODES)[number]
+
 /**
  * A principal (spec §8.1) as the protocol carries it; `label` is what the
  * "controlled by …" badge reads. Two owners are the same principal when kind
@@ -68,6 +72,8 @@ export type SessionSummary = {
   updatedAt: string
   costUsd: number
   budgetUsd: number
+  /** Classic or durable (plan 5d), for the switcher's badge. */
+  mode: SessionMode
 }
 
 type V = { v: typeof PROTOCOL_VERSION }
@@ -105,8 +111,22 @@ export type InputOutcome = 'approved' | 'denied' | 'expired' | 'answered' | 'can
 export type ServerEvent = V &
   (
     | { type: 'sessions.snapshot'; sessions: SessionSummary[] }
-    /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
-    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
+    /**
+     * `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it.
+     * `mode` (plan 5d): how it runs, absent before 5d (classic); `modeFallback`: why a session
+     * whose mode came from the default runs classic instead of durable,
+     * as the bare reason (each surface words it).
+     */
+    | {
+        type: 'session.started'
+        sessionId: string
+        origin: Origin
+        owner: Owner
+        title?: string
+        budgetUsd?: number
+        mode?: SessionMode
+        modeFallback?: string
+      }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
     /**
      * `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones.

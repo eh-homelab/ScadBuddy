@@ -151,4 +151,27 @@ describe.skipIf(skip !== undefined)(`ChatConnection${skip ? ` (skipped: ${skip})
     ])
     connection.close()
   })
+
+  it("passes a new chat's mode, and refuses one on an existing session (plan 5d)", async () => {
+    const out: { type: string; sessionId?: string; mode?: string; code?: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e as never))
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' }, mode: 'classic' })))
+    await settle()
+    const started = out.find((e) => e.type === 'session.started') as { sessionId: string; mode?: string; modeFallback?: string }
+    expect(started).toMatchObject({ mode: 'classic' })
+    expect(started).not.toHaveProperty('modeFallback')
+    // Asked for, durable is refused here (no Temporal), not run as classic.
+    await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' }, mode: 'durable' })))
+    const errors = () => out.filter((e) => e.type === 'error')
+    expect(errors()).toEqual([expect.objectContaining({ code: 'unavailable' })])
+    await connection.receive(
+      JSON.stringify(
+        clientMessage({ type: 'user.message', sessionId: started.sessionId, text: 'more', context: { route: '/' }, mode: 'classic' }),
+      ),
+    )
+    expect(errors().at(-1)).toMatchObject({ code: 'invalid', sessionId: started.sessionId })
+    connection.close()
+  })
 })

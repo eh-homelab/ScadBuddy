@@ -1,0 +1,171 @@
+import { type Client, WorkflowNotFoundError } from '@temporalio/client'
+import type { Sql } from 'postgres'
+import { sessionWorkflowId } from '../gate/durable.js'
+import type { EventLog } from './eventLog.js'
+import { event, type ServerEvent } from './protocol.js'
+
+// The sweep of durable sessions left `running` (#2001, plan 5c Ruling 16). A durable
+// turn takes no lease, so SessionManager.reapExpired never sees one; its end is
+// finish_turn's, run by `session-<id>`. A claim is left with no turn behind it when the
+// workflow ends (terminated, failed, reset) before finish_turn runs, or when a kept
+// claim's update-with-start never reached Temporal, so the workflow was never started.
+// Every later send is then refused `busy`. Each pass, a durable row `running` with no
+// write for `graceMs` is described; when its workflow is closed, not found, or open
+// but holding no turn (its `turn` Query: the kept claim's Update never reached it,
+// #2078), the turn's end is written as finish_turn writes a failed turn (a
+// `turn_failed` error, then the status), but to `idle`: the next send either starts or
+// reaches the workflow, or is refused `closed`. A workflow not found for a row whose
+// `durable_offset` moved ran a turn and was removed by retention; the error says so,
+// and the send refuses it `closed` (plan 5c Ruling 18). The UPDATE is guarded on the
+// claim read (still `running`, same event_seq), so a turn that claimed the row
+// meanwhile is never ended here.
+
+/**
+ * A session's workflow (its latest run): running a turn (`open`), running but holding
+ * none (`between_turns`), ended, or unknown to Temporal.
+ */
+export type SessionRunState = 'open' | 'between_turns' | 'closed' | 'not_found'
+export type DescribeSession = (workflowId: string) => Promise<SessionRunState>
+/** DurableSession's Query: the turn the workflow holds, or null (agent-durable session/models.py). */
+export const TURN_QUERY = 'turn'
+
+/**
+ * Past DurableTurns' 10 s send timeout many times over, so an update-with-start still
+ * in flight is never taken for one that never arrived (plan 5c Ruling 17).
+ */
+export const RUNNING_GRACE_MS = 120_000
+/** How long one describe may take before the row is left for the next pass. */
+const DESCRIBE_DEADLINE_MS = 3_000
+/** Rows described per pass, one at a time: a slow Temporal keeps a pass near the 30 s interval. */
+const BATCH = 10
+
+const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
+  closed: "the turn ended without a result: the session's workflow has ended",
+  between_turns: "the turn never started: the message never reached the session's workflow; send it again",
+  not_found: "the turn never started: the session's workflow could not be found; send the message again",
+  removed: "the turn never started: the session's workflow is gone (it ended and was removed); continue in a new chat",
+}
+
+export type DurableRunningSweepDeps = {
+  sql: Sql
+  events: EventLog
+  describe: DescribeSession
+  /** A row written to within this long is not described (default RUNNING_GRACE_MS). */
+  graceMs?: number
+  /** Rows described per pass (default BATCH). */
+  batch?: number
+  /** How long the sweep waits on one describe, whatever `describe` does (default DESCRIBE_DEADLINE_MS + 1 s). */
+  describeTimeoutMs?: number
+}
+
+export class DurableRunningSweep {
+  readonly #deps: DurableRunningSweepDeps
+  readonly #graceMs: number
+  readonly #batch: number
+  readonly #describeTimeoutMs: number
+  /**
+   * The last id a pass described: the next pass reads the page after it, and starts over
+   * past the end. Rows that stay unresolved (a long live turn, a describe that keeps
+   * failing) thus never fill every page and starve the rows behind them. In memory, so
+   * a restart starts from the beginning; no column is needed.
+   */
+  #after = ''
+
+  constructor(deps: DurableRunningSweepDeps) {
+    this.#deps = deps
+    this.#graceMs = deps.graceMs ?? RUNNING_GRACE_MS
+    this.#batch = deps.batch ?? BATCH
+    this.#describeTimeoutMs = deps.describeTimeoutMs ?? DESCRIBE_DEADLINE_MS + 1_000
+  }
+
+  /** One pass; returns the sessions reset. */
+  async sweep(): Promise<string[]> {
+    const { sql, events } = this.#deps
+    const page = (after: string) => sql<{ id: string; event_seq: string; durable_offset: string }[]>`
+      SELECT id, event_seq, durable_offset FROM ai_sessions
+      WHERE mode = 'durable' AND status = 'running' AND id::text > ${after}
+        AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
+      ORDER BY id::text LIMIT ${this.#batch}`
+    let rows = await page(this.#after)
+    // Past the end: start over in this pass rather than spend it on nothing.
+    if (rows.length === 0 && this.#after) rows = await page('')
+    this.#after = rows.length < this.#batch ? '' : (rows.at(-1)?.id ?? '')
+    const reset: string[] = []
+    let undescribed = 0
+    for (const row of rows) {
+      let state: SessionRunState
+      try {
+        state = await this.#describe(sessionWorkflowId(row.id))
+      } catch {
+        undescribed += 1
+        continue
+      }
+      if (state === 'open') continue
+      const lost = state === 'not_found' && Number(row.durable_offset) > 0 ? 'removed' : state
+      const tail: ServerEvent[] = [
+        event({ type: 'error', sessionId: row.id, code: 'turn_failed', message: LOST[lost] }),
+        event({ type: 'session.status', sessionId: row.id, status: 'idle' }),
+      ]
+      const done = await sql.begin(async (tx) => {
+        const [claimed] = await tx`
+          UPDATE ai_sessions SET status = 'idle', updated_at = now()
+          WHERE id = ${row.id} AND mode = 'durable' AND status = 'running' AND event_seq = ${row.event_seq}
+          RETURNING id`
+        return claimed ? await events.append(row.id, tail, tx) : undefined
+      })
+      if (!done) continue
+      events.committed(row.id, tail, done)
+      reset.push(row.id)
+    }
+    // Once per pass and payload-free, so a describe that always fails (codec, permission) shows.
+    if (undescribed) console.warn(`durable running sweep: ${undescribed} of ${rows.length} sessions' workflows could not be described`)
+    return reset
+  }
+
+  /** `describe`, abandoned past its timeout so one hung call cannot stall the pass. */
+  #describe(workflowId: string): Promise<SessionRunState> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('describe timed out')), this.#describeTimeoutMs)
+    })
+    return Promise.race([this.#deps.describe(workflowId), timeout]).finally(() => clearTimeout(timer))
+  }
+
+  /** Runs `sweep` every `intervalMs`, as PendingInputSweep does; returns the stop. */
+  start(intervalMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
+    const ready = options.ready ?? (() => Promise.resolve(true))
+    let running = false
+    const timer = setInterval(() => {
+      if (running) return
+      running = true
+      ready()
+        .then((ok) => (ok ? this.sweep() : []))
+        .catch((err: unknown) => options.onError?.(err))
+        .finally(() => {
+          running = false
+        })
+    }, intervalMs)
+    timer.unref()
+    return () => clearInterval(timer)
+  }
+}
+
+/**
+ * DescribeSession over a Temporal client: the latest run's status and, while it runs,
+ * the turn it holds, within a deadline. A workflow that cannot answer the Query (no
+ * worker) throws, so the row is left for a later pass.
+ */
+export function durableDescriber(client: Client): DescribeSession {
+  return async (workflowId) => {
+    try {
+      return await client.withDeadline(Date.now() + DESCRIBE_DEADLINE_MS, async () => {
+        const handle = client.workflow.getHandle(workflowId)
+        if ((await handle.describe()).status.name !== 'RUNNING') return 'closed'
+        return (await handle.query<string | null>(TURN_QUERY)) ? 'open' : 'between_turns'
+      })
+    } catch (err) {
+      if (err instanceof WorkflowNotFoundError) return 'not_found'
+      throw err
+    }
+  }
+}

@@ -63,6 +63,7 @@ with workflow.unsafe.imports_passed_through():
         SEGMENT_CONTEXT_QUERY,
         SEND_MESSAGE_UPDATE,
         TOOLS_QUEUE,
+        TURN_QUERY,
         WORKFLOW,
         FinishTurn,
         FollowArgs,
@@ -521,3 +522,11 @@ class DurableSession:
             images=list(self._turn.images) if self._turn else [],
             system_append=self._start.system_append,
         )
+
+    @workflow.query(name=TURN_QUERY)
+    def turn(self) -> str | None:
+        """The turn this workflow holds: running (or handed over by continue-as-new) or
+        finishing, else a message taken but not yet started. None between turns (#2078)."""
+        if self._turn is not None:
+            return self._turn.turn_id
+        return self._message.turn_id if self._message is not None else None

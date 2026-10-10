@@ -626,6 +626,17 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  `session_mode`, the mode a new session gets when whoever starts it names none
+  (`durable` unless it says `classic`), which Settings → Assistant session mode writes
+  through `PUT /api/v1/ai/settings/session-mode`
+  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts)). A
+  durable session needs Temporal, the KEK and an `agent-durable` worker polling the
+  `agent` queue; without them a session whose mode came from this default runs classic
+  and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
+  and `sessions_start`), while one that asked for `durable` is refused 503
+  (plan `2026-10-09-durable-phase-5d-mode.md`). The worker check counts only a
+  poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
+  gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `approval_expiry_seconds` has no route yet.
@@ -771,8 +782,18 @@ in `main.ts`).
 
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
-and "Plugin endpoints", the remote MCP plugins of `/api/v1/ai/plugins`
-([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)).
+and "Plugins", the list of `/api/v1/ai/plugins`
+([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)): ScadBuddy's
+own tool sets first (#1953, `built_in: true`; `scadbuddy` is every registry tool, `playwright`
+the headless browser's, both from
+[`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
+remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
+below the tier its code declares (a lower one answers 400); the overrides are the
+`ai_settings` keys `builtin_tools.scadbuddy` and `builtin_tools.playwright`, applied at the
+harness seam, on `/mcp` and in the durable `agent-tools` activities. The durable session
+workflow parks a call by the manifest's tier, so a tool raised to outward is not parked
+there: its activity finds no recorded approval and refuses it (NotApproved). Adding, removing,
+testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
 full commit SHA and content hash, and you must tick a confirmation before it sends
 exactly those values. Every control that writes is user-only (`USER_ONLY`), so the
