@@ -119,7 +119,7 @@ describe('FilamentPicker', () => {
     expect(misty).toHaveTextContent('1000 g')
     // Where it is, as a label. Which tray the print actually draws from is Bambuddy's
     // to decide at dispatch, so no tray number is computed here.
-    expect(misty).toHaveTextContent('AMS 0 · slot 2')
+    expect(misty).toHaveTextContent('AMS-A · slot 2')
 
     // Loaded, but in the other machine — the difference between "ready" and "fetch it".
     const away = within(rows).getByTestId('spool-30').closest('label') as HTMLElement
@@ -257,7 +257,7 @@ describe('FilamentPicker', () => {
   it('reads an instruction as muted and an unfilled slot as a fault', () => {
     open({ ...fixtures.filamentOptions, suggested: [{ slot_id: 1, spool_id: 27 }] })
 
-    // "Load this spool into AMS 0 slot 2" is an instruction, not a fault; colouring it
+    // "Load this spool into AMS-A slot 2" is an instruction, not a fault; colouring it
     // like one trains the user to ignore the colour.
     expect(screen.getByTestId('filament-warnings-1').firstChild).toHaveClass('text-muted')
     expect(screen.getByTestId('filament-warnings-2').firstChild).toHaveClass('text-warn')
