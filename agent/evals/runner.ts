@@ -3,6 +3,7 @@ import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Credential } from '../src/credentials.js'
 import type { HarnessPaths } from '../src/harness/options.js'
+import { OWN_PLUGIN_DIR, ownPluginTierOf } from '../src/harness/ownPlugin.js'
 import type { ApprovalGate, ApprovalRequest, RiskTier, ToolDecision } from '../src/harness/permissions.js'
 import { runHarness } from '../src/harness/run.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
@@ -10,6 +11,7 @@ import { PendingActionStore } from '../src/tools/pending.js'
 import { createHarnessServer, SERVER_NAME } from '../src/tools/projections.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
+import { type CollectOptions, collectRenders, type RenderedJob, type ScenarioBackend } from './render.js'
 
 // Runs one eval scenario through the REAL harness (src/harness/run.ts
 // `runHarness`: the Agent SDK and its bundled Claude Code binary) with the
@@ -48,7 +50,10 @@ export type Outcome = {
   /** Every request the approval gate saw. */
   approvals: Pick<ApprovalRequest, 'toolName' | 'input' | 'toolUseId' | 'tier'>[]
   decisions: { toolName: string; decision: ToolDecision['decision']; tier: RiskTier }[]
-  backend: EvalBackend
+  /** The recorded backend (evals/backend.ts), or the image behind a recorder (evals/realBackend.ts). */
+  backend: ScenarioBackend
+  /** Every render the run started, followed to its end and its saved output's 3MF (evals/render.ts). */
+  renders: RenderedJob[]
   result?: SDKResultMessage
   /** The last assistant text of the run. */
   finalText: string
@@ -69,8 +74,14 @@ export type Scenario = {
   id: string
   title: string
   /** Seeds the backend and returns the prompt and the scripted model turns for the deterministic run. */
-  prepare(backend: EvalBackend): { prompt: string; script: ScriptedTurn[] }
+  prepare(backend: ScenarioBackend): { prompt: string; script: ScriptedTurn[] }
   checks: Check[]
+  /**
+   * Seeds nothing, so a live run may point it at a real backend
+   * (SCADBUDDY_EVAL_BACKEND_URL, evals/live.eval.ts); the others need the
+   * recorded backend's seeded models and outputs.
+   */
+  realBackend?: boolean
 }
 
 /** What the scripted model says on one call: text, or one tool call (registry name, without the prefix). */
@@ -85,6 +96,10 @@ export type RunOptions = {
   maxBudgetUsd?: number
   /** Whole-run deadline, so a stuck live run cannot hang the job. */
   timeoutMs?: number
+  /** How long render_model waits for a render before handing back the running job (5 s: the recorded backend's are instant). */
+  renderWaitMs?: number
+  /** How the scorer follows the run's renders afterwards (evals/render.ts). */
+  collect?: CollectOptions
   stderr?: (line: string) => void
 }
 
@@ -121,7 +136,8 @@ export function foldMessages(messages: SDKMessage[]): Pick<Outcome, 'toolCalls' 
             name: b.name,
             tool: b.name.startsWith(EVAL_TOOL_PREFIX) ? b.name.slice(EVAL_TOOL_PREFIX.length) : b.name,
             input,
-            tier: tierOf(b.name) ?? 'outward',
+            // As the run tiers them (harness/run.ts `harnessTierOf`): the own plugin's Skill and Agent first.
+            tier: ownPluginTierOf(b.name) ?? tierOf(b.name) ?? 'outward',
           }
           byId.set(b.id, call)
           toolCalls.push(call)
@@ -145,7 +161,7 @@ export function foldMessages(messages: SDKMessage[]): Pick<Outcome, 'toolCalls' 
 export async function runScenario(
   scenario: Scenario,
   options: RunOptions,
-  backend = new EvalBackend(),
+  backend: ScenarioBackend = new EvalBackend(),
 ): Promise<Outcome & { script: ScriptedTurn[] }> {
   const { prompt, script } = scenario.prepare(backend)
   const approvals: Outcome['approvals'] = []
@@ -158,7 +174,7 @@ export async function runScenario(
     backend: createBackendClient(EVAL_BACKEND_URL, backend.fetch),
     pending: new PendingActionStore(),
     pollIntervalMs: 5,
-    renderWaitMs: 5_000,
+    renderWaitMs: options.renderWaitMs ?? 5_000,
   } satisfies ToolServices
   const principal = { id: `eval:${scenario.id}`, kind: 'browser' as const, tiers: tiersUpTo('outward') }
   const stop = new AbortController()
@@ -176,6 +192,9 @@ export async function runScenario(
       maxBudgetUsd: options.maxBudgetUsd ?? 0.5,
       signal: stop.signal,
       mcpServers: { [SERVER_NAME]: createHarnessServer(ALL_TOOLS, services, principal) },
+      // As a session loads it by default (src/sessions/manager.ts, #896): its
+      // skills are where the model learns how ScadBuddy wants sources cited.
+      ownPlugin: OWN_PLUGIN_DIR,
       tierOf,
       approvalGate: gate,
       onDecision: (toolName, decision) => decisions.push({ toolName, decision: decision.decision, tier: decision.tier }),
@@ -192,12 +211,14 @@ export async function runScenario(
   } finally {
     clearTimeout(timer)
   }
+  const renders = await collectRenders(backend, options.collect)
   return {
     scenario: scenario.id,
     ...foldMessages(messages),
     approvals,
     decisions,
     backend,
+    renders,
     ...(error !== undefined ? { error } : {}),
     durationMs: Date.now() - started,
     script,

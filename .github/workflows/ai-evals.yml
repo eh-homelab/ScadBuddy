@@ -41,18 +41,106 @@ jobs:
     name: Live AI evals
     runs-on: ubuntu-latest
     # The scenarios run one at a time, each up to vitest's 6 minutes
-    # (vitest.evals.config.ts, live.eval.ts): 4 scenarios are 24 minutes before
-    # checkout and install. Keep headroom so a slow model fails a scenario, not
-    # the job.
-    timeout-minutes: 45
+    # (vitest.evals.config.ts, live.eval.ts): 5 scenarios are 30 minutes, after
+    # checkout, install and the image build below. Keep headroom so a slow model
+    # fails a scenario, not the job.
+    timeout-minutes: 75
     defaults:
       run:
         working-directory: agent
+    # The backend the render scenario runs against needs Postgres (#401), as in
+    # ci.yml's `image` job.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_evals
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      # Without the key every scenario skips, so the image is not worth building.
+      - name: Is the key configured?
+        id: key
+        env:
+          HAS_KEY: ${{ secrets.SCADBUDDY_EVAL_ANTHROPIC_API_KEY != '' }}
+        run: echo "present=$HAS_KEY" >> "$GITHUB_OUTPUT"
+
+      # The real backend for the scenarios that render (issue #1924,
+      # docs/ai/evals.md "Real-render checks"): the image, started as ci.yml's
+      # `image` job starts it. The `test` target ships the pinned Temporal CLI
+      # (Dockerfile, TEMPORAL_CLI_VERSION), so no second pin is kept here; both
+      # builds only read the `type=gha` cache that ci.yml and build-image.yml
+      # write (GitHub-hosted runner only, see ci.yml).
+      - uses: docker/setup-buildx-action@v4
+        if: ${{ steps.key.outputs.present == 'true' }}
+
+      - name: Build the test image (for its Temporal CLI)
+        if: ${{ steps.key.outputs.present == 'true' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:evals-test
+          cache-from: type=gha
+
+      - name: Build the runtime image
+        if: ${{ steps.key.outputs.present == 'true' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: scadbuddy:evals
+          cache-from: type=gha
+
+      - name: Start the backend and wait for its healthcheck
+        if: ${{ steps.key.outputs.present == 'true' }}
+        run: |
+          set -euo pipefail
+          docker run -d --name temporal-evals --network host --entrypoint temporal \
+            scadbuddy:evals-test server start-dev --headless --ip 0.0.0.0 --port 7233 \
+            --namespace default --log-level warn
+          for _ in $(seq 1 30); do
+            if docker exec temporal-evals temporal operator cluster health \
+                --address 127.0.0.1:7233 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec temporal-evals temporal operator cluster health --address 127.0.0.1:7233
+
+          docker run -d --name scadbuddy-evals -p 18080:8080 \
+            --add-host=host.docker.internal:host-gateway \
+            -e SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/scadbuddy_evals \
+            -e SCADBUDDY_TEMPORAL_ADDRESS=host.docker.internal:7233 \
+            -e SCADBUDDY_TEMPORAL_NAMESPACE=default \
+            -e SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true \
+            scadbuddy:evals
+
+          status=""
+          for _ in $(seq 1 60); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' scadbuddy-evals 2>/dev/null || true)"
+            case "$status" in
+              healthy) echo "backend healthy"; exit 0 ;;
+              unhealthy) break ;;
+            esac
+            sleep 2
+          done
+          echo "::error::the backend never became healthy (last status: ${status:-<none>})"
+          docker logs scadbuddy-evals
+          exit 1
 
       # Pinned with the Dockerfile's agent stages and ci.yml's `agent` job.
       - uses: actions/setup-node@v7
@@ -72,7 +160,12 @@ jobs:
           SCADBUDDY_EVAL_ANTHROPIC_API_KEY: ${{ secrets.SCADBUDDY_EVAL_ANTHROPIC_API_KEY }}
           SCADBUDDY_EVAL_MODEL: ${{ inputs.model }}
           SCADBUDDY_EVAL_REPORT: ${{ runner.temp }}/eval-report.json
+          SCADBUDDY_EVAL_BACKEND_URL: ${{ steps.key.outputs.present == 'true' && 'http://127.0.0.1:18080' || '' }}
         run: pnpm evals
+
+      - name: Backend logs
+        if: ${{ failure() && steps.key.outputs.present == 'true' }}
+        run: docker logs scadbuddy-evals 2>&1 | tail -n 200
 
       - name: Summarise
         if: always()
