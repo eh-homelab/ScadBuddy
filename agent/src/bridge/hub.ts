@@ -260,9 +260,10 @@ export class TabHub implements BrowserTabs {
 
   /** The browser user sent a message to `sessionId` from tab `tabId` (routes/chat.ts). */
   pairSession(sessionId: string, tabId: string): void {
-    const before = this.#sessionTabs.get(sessionId)
-    // Written when it changes, not on every message: other replicas read it (#2086).
-    if (before !== tabId && this.#sessionTabStore) {
+    // Written on every message, not only when this replica's map changes: the
+    // row is the session's tab for every replica (#2086), and another may have
+    // moved it to a tab this one never saw since this one last paired it.
+    if (this.#sessionTabStore) {
       const store = this.#sessionTabStore
       // One write at a time, in pairing order: two in flight could commit out of
       // order and leave the earlier tab stored.

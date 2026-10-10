@@ -438,7 +438,11 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       })
       return queue
     }
-    const beat = setInterval(() => void send({ t: 'beat', req, to }), this.#beatMs)
+    const beat = setInterval(() => {
+      void send({ t: 'beat', req, to })
+      // A long relayed GET stream is use too: keep the directory row from the sweep.
+      void this.touch(body.hash)
+    }, this.#beatMs)
     let headSent = false
     try {
       await send({ t: 'ack', req, to })

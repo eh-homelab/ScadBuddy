@@ -231,6 +231,26 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     expect(t2Calls).toHaveLength(1)
   })
 
+  it('follows the session back to a tab it used before, through the replica it used before', async () => {
+    await tab(a.hub, () => ({ ok: true, result: 'T1 on a' }))
+    const session = await chatSession()
+    const stored = async () =>
+      (await db.sql<{ tab_id: string }[]>`SELECT tab_id FROM ai_session_tabs WHERE session_id = ${session}`)[0]?.tab_id
+    // T1 (on A), then T2 (on B), then T1 again.
+    a.hub.pairSession(session, TAB)
+    await until(async () => (await stored()) === TAB)
+    b.hub.pairSession(session, 'tab-bbbbbbbbbbbbbbbbbbbbbb')
+    await until(async () => (await stored()) === 'tab-bbbbbbbbbbbbbbbbbbbbbb')
+    a.hub.pairSession(session, TAB)
+    await until(async () => (await stored()) === TAB)
+    for (const r of [a, b]) {
+      expect(await r.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
+        ok: true,
+        result: 'T1 on a',
+      })
+    }
+  })
+
   it('keeps a tab connected here local: nothing goes through the database', async () => {
     const t = await tab(a.hub, () => ({ ok: true, result: 1 }))
     a.hub.pairSession('s1', TAB)
