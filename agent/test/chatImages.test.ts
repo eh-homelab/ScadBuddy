@@ -1,6 +1,7 @@
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
-import { parseClientFrame } from '../src/sessions/clientProtocol.js'
+import { z } from 'zod'
+import { parseClientFrame, STALE_TAB_IMAGES } from '../src/sessions/clientProtocol.js'
 import {
   IMAGE_DATA_MAX,
   IMAGES_DATA_TOTAL_MAX,
@@ -9,6 +10,7 @@ import {
   previewsOf,
   userPrompt,
   type UserImage,
+  UserImagesSchema,
 } from '../src/sessions/images.js'
 import { event } from '../src/sessions/protocol.js'
 import { condense } from '../src/tools/sessions.js'
@@ -36,13 +38,7 @@ function pngOfLength(count: number): string {
 
 const ID = '0b6f7a1e-3c2d-4e5f-8a9b-0c1d2e3f4a5b'
 
-describe('user.message images (#1866; inline ones from a tab loaded before #1941)', () => {
-  it('takes PNG, JPEG, GIF and WebP images, each with a preview', () => {
-    const images = [image('image/png', PNG), image('image/jpeg', JPEG), image('image/gif', GIF), image('image/webp', WEBP)]
-    const parsed = parseClientFrame(frame(images))
-    expect(parsed).toMatchObject({ ok: true, value: { images } })
-  })
-
+describe('user.message images: uploads by id (#1941)', () => {
   it('takes a message with no images, as before', () => {
     expect(parseClientFrame(frame(undefined)).ok).toBe(true)
   })
@@ -64,42 +60,64 @@ describe('user.message images (#1866; inline ones from a tab loaded before #1941
     expect(parseClientFrame(frame([{ ...ref(), extra: 1 }])).ok).toBe(false)
     expect(parseClientFrame(frame([ref(), image('image/png', PNG)])).ok).toBe(false)
     expect(parseClientFrame(frame([{ kind: 'asset', slug: 'keychain', asset_id: 'a'.repeat(64) }])).ok).toBe(false)
+    expect(parseClientFrame(frame([])).ok).toBe(false)
+  })
+
+  it('refuses inline images from a tab loaded before #1941, asking for a reload (#1959)', () => {
+    expect(STALE_TAB_IMAGES).toContain('reload the page')
+    expect(parseClientFrame(frame([image('image/png', PNG)]))).toEqual({ ok: false, error: STALE_TAB_IMAGES, stale: {} })
+    // One that would never have passed gets the same answer, which never quotes its bytes.
+    expect(parseClientFrame(frame([image('image/png', JPEG)]))).toEqual({ ok: false, error: STALE_TAB_IMAGES, stale: {} })
+    // A message to a session names it, so the panel shows the refusal in that session's feed.
+    const sessionId = '11111111-2222-4333-8444-555555555555'
+    const inSession = JSON.stringify({ ...(JSON.parse(frame([image('image/png', PNG)])) as object), sessionId })
+    expect(parseClientFrame(inSession)).toEqual({ ok: false, error: STALE_TAB_IMAGES, stale: { sessionId } })
+  })
+})
+
+// UserImagesSchema checks each upload (routes/attachments.ts) and a message's
+// images together (routes/chat.ts, tools/imageRefs.ts).
+describe('UserImagesSchema (#1866)', () => {
+  const ok = (images: unknown) => UserImagesSchema.safeParse(images).success
+
+  it('takes PNG, JPEG, GIF and WebP images, each with a preview', () => {
+    expect(ok([image('image/png', PNG), image('image/jpeg', JPEG), image('image/gif', GIF), image('image/webp', WEBP)])).toBe(true)
   })
 
   it('refuses another type, bytes that are not the type they claim, and data that is not base64', () => {
-    expect(parseClientFrame(frame([image('image/svg+xml', b64('<svg/>'))])).ok).toBe(false)
-    expect(parseClientFrame(frame([image('image/bmp', b64('BM\x00\x00'))])).ok).toBe(false)
-    expect(parseClientFrame(frame([image('image/png', JPEG)])).ok).toBe(false)
-    expect(parseClientFrame(frame([image('image/jpeg', b64('<html>not an image</html>'))])).ok).toBe(false)
-    expect(parseClientFrame(frame([image('image/png', `${PNG.slice(0, 12)}!!!!`)])).ok).toBe(false)
-    expect(parseClientFrame(frame([image('image/png', '')])).ok).toBe(false)
+    expect(ok([image('image/svg+xml', b64('<svg/>'))])).toBe(false)
+    expect(ok([image('image/bmp', b64('BM\x00\x00'))])).toBe(false)
+    expect(ok([image('image/png', JPEG)])).toBe(false)
+    expect(ok([image('image/jpeg', b64('<html>not an image</html>'))])).toBe(false)
+    expect(ok([image('image/png', `${PNG.slice(0, 12)}!!!!`)])).toBe(false)
+    expect(ok([image('image/png', '')])).toBe(false)
   })
 
   it('refuses a preview that is missing, too large, a GIF, or not what it claims', () => {
-    expect(parseClientFrame(frame([{ mediaType: 'image/png', data: PNG }])).ok).toBe(false)
+    expect(ok([{ mediaType: 'image/png', data: PNG }])).toBe(false)
     const big = { ...image('image/png', PNG), preview: { mediaType: 'image/png', data: pngOfLength(PREVIEW_DATA_MAX + 4) } }
-    expect(parseClientFrame(frame([big])).ok).toBe(false)
+    expect(ok([big])).toBe(false)
     const gif = { ...image('image/png', PNG), preview: { mediaType: 'image/gif', data: GIF } }
-    expect(parseClientFrame(frame([gif])).ok).toBe(false)
+    expect(ok([gif])).toBe(false)
     const lying = { ...image('image/png', PNG), preview: { mediaType: 'image/png', data: JPEG } }
-    expect(parseClientFrame(frame([lying])).ok).toBe(false)
+    expect(ok([lying])).toBe(false)
   })
 
   it('caps the count, each image, and all of them together', () => {
-    expect(parseClientFrame(frame([])).ok).toBe(false)
-    expect(parseClientFrame(frame(Array.from({ length: IMAGES_MAX }, () => image('image/png', PNG)))).ok).toBe(true)
-    expect(parseClientFrame(frame(Array.from({ length: IMAGES_MAX + 1 }, () => image('image/png', PNG)))).ok).toBe(false)
-    expect(parseClientFrame(frame([image('image/png', pngOfLength(IMAGE_DATA_MAX))])).ok).toBe(true)
-    expect(parseClientFrame(frame([image('image/png', pngOfLength(IMAGE_DATA_MAX + 4))])).ok).toBe(false)
+    expect(ok([])).toBe(false)
+    expect(ok(Array.from({ length: IMAGES_MAX }, () => image('image/png', PNG)))).toBe(true)
+    expect(ok(Array.from({ length: IMAGES_MAX + 1 }, () => image('image/png', PNG)))).toBe(false)
+    expect(ok([image('image/png', pngOfLength(IMAGE_DATA_MAX))])).toBe(true)
+    expect(ok([image('image/png', pngOfLength(IMAGE_DATA_MAX + 4))])).toBe(false)
     const each = Math.floor(IMAGES_DATA_TOTAL_MAX / 2 / 4) * 4 + 4
     expect(each).toBeLessThanOrEqual(IMAGE_DATA_MAX)
-    expect(parseClientFrame(frame([image('image/png', pngOfLength(each)), image('image/png', pngOfLength(each))])).ok).toBe(false)
+    expect(ok([image('image/png', pngOfLength(each)), image('image/png', pngOfLength(each))])).toBe(false)
   })
 
   it('never echoes the image bytes in its refusal', () => {
-    const parsed = parseClientFrame(frame([image('image/png', JPEG)]))
-    expect(parsed.ok).toBe(false)
-    if (!parsed.ok) expect(parsed.error).not.toContain(JPEG)
+    const parsed = UserImagesSchema.safeParse([image('image/png', JPEG)])
+    expect(parsed.success).toBe(false)
+    if (!parsed.success) expect(z.prettifyError(parsed.error)).not.toContain(JPEG)
   })
 })
 
