@@ -369,6 +369,8 @@ export type SessionErrorCode =
   | 'rate_limited'
   /** A durable session's workflow cannot be reached, or this service has no Temporal or key for one. */
   | 'unavailable'
+  /** The session is archived (#1885): read-only until it is unarchived. */
+  | 'archived'
 
 type SessionErrorStatus = 400 | 403 | 404 | 409 | 429 | 503
 
@@ -382,6 +384,7 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   no_transcript: 409,
   rate_limited: 429,
   unavailable: 503,
+  archived: 409,
 }
 
 /**
@@ -421,6 +424,11 @@ export class SessionError extends Error {
   }
 }
 
+/** What a send or a handoff to an archived session is refused with (#1885). */
+export function archivedError(id: string): SessionError {
+  return new SessionError('archived', `session ${id} is archived, so it is read-only; unarchive it to continue it, or fork it`)
+}
+
 /** A pending handoff (`handoff`): who may accept it, and until when. */
 export type HandoffOffer = { to: Owner; until: string }
 
@@ -450,6 +458,8 @@ export type SessionRecord = {
   turnActive: boolean
   createdAt: string
   updatedAt: string
+  /** When its owner archived it (#1885, edits.ts); null while it is not archived. */
+  archivedAt: string | null
 }
 
 /**
@@ -529,6 +539,11 @@ export type ListFilter = {
   limit?: number
   /** Only sessions whose tool calls touched it (#931, touched.ts `ResourceRef`). */
   resource?: ResourceRef
+  /**
+   * Archived sessions (#1885): left out (`exclude`, the default, as the panel's list
+   * leaves them out), the only ones listed (`only`, the archive view), or both (`include`).
+   */
+  archived?: 'exclude' | 'only' | 'include'
 }
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
@@ -688,6 +703,7 @@ type Row = {
   turn_active: boolean
   created_at: Date
   updated_at: Date
+  archived_at: Date | null
 }
 
 /** A pending handoff offer, read as none once it has expired (the columns stay until the next change clears them). */
@@ -707,7 +723,7 @@ const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, cr
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
   status, title, tags, scope, parent_id, mode, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
   ${POOL_COST} AS pool_cost_usd, turns,
-  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at`
+  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at, archived_at`
 
 function record(row: Row): SessionRecord {
   return {
@@ -733,6 +749,7 @@ function record(row: Row): SessionRecord {
     turnActive: row.turn_active,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    archivedAt: row.archived_at?.toISOString() ?? null,
   }
 }
 
@@ -792,6 +809,8 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
     params.push(filter.origin)
     where.push(`origin = $${params.length}`)
   }
+  const archived = filter.archived ?? 'exclude'
+  if (archived !== 'include') where.push(archived === 'only' ? 'archived_at IS NOT NULL' : 'archived_at IS NULL')
   if (filter.resource) {
     // Served by ai_session_resources_model / _resource (20261001T1824Z_session_resources.sql).
     let match: string
@@ -887,7 +906,12 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
-    this.edits = new SessionEdits({ sql: deps.sql, events: this.events, get: (id, principal) => this.get(id, principal) })
+    this.edits = new SessionEdits({
+      sql: deps.sql,
+      events: this.events,
+      get: (id, principal) => this.get(id, principal),
+      ...(deps.audit ? { audit: deps.audit } : {}),
+    })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
@@ -1133,6 +1157,8 @@ export class SessionManager {
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
     if (this.draining) throw new SessionError('busy', RESTARTING)
     const before = await this.get(id, principal)
+    // Never unarchived by a send (#1885): unarchiving is the owner's explicit PATCH.
+    if (before.archivedAt !== null) throw archivedError(id)
     const turnId = randomUUID()
     if (before.mode === 'durable') {
       const turn = await this.durableOrRefuse().send(before, {
@@ -1150,8 +1176,8 @@ export class SessionManager {
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
-         AND (turn_id IS NULL OR lease_until <= now())
+       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
+         AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
@@ -1181,13 +1207,13 @@ export class SessionManager {
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
+       WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
-      return { resumed: false, reason: 'it is running another turn, is done, or has spent its budget' }
+      return { resumed: false, reason: 'it is running another turn, is done or archived, or has spent its budget' }
     }
     try {
       if (!(await this.approvals.bindResume(approval.id, turnId))) {
@@ -1311,6 +1337,7 @@ export class SessionManager {
       )
     }
     if (now.status === 'done') return new SessionError('closed', `session ${id} is done`)
+    if (now.archivedAt !== null) return archivedError(id)
     if (now.costUsd >= now.budgetUsd) {
       return new SessionError(
         'budget_exhausted',
@@ -2059,6 +2086,7 @@ export class SessionManager {
    */
   async handoff(id: string, actor: Owner, to: Owner): Promise<SessionRecord> {
     const session = await this.get(id, actor)
+    if (session.archivedAt !== null) throw archivedError(id)
     const isOwner = sameOwner(actor, session.owner)
     if (sameOwner(actor, to)) {
       if (actor.kind === 'browser') return this.transfer(session, to)
@@ -2089,6 +2117,7 @@ export class SessionManager {
    */
   async acceptHandoff(id: string, actor: Owner): Promise<SessionRecord> {
     const session = await this.get(id, actor)
+    if (session.archivedAt !== null) throw archivedError(id)
     if (!session.offer || !sameOwner(actor, session.offer.to)) {
       throw new SessionError('invalid', `session ${id} is not offered to you`)
     }
