@@ -779,7 +779,9 @@ the headless browser's, both from
 remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
 below the tier its code declares (a lower one answers 400); the overrides are the
 `ai_settings` keys `builtin_tools.scadbuddy` and `builtin_tools.playwright`, applied at the
-harness seam, on `/mcp` and in the durable `agent-tools` activities. Adding, removing,
+harness seam, on `/mcp` and in the durable `agent-tools` activities. The durable session
+workflow parks a call by the manifest's tier, so a tool raised to outward is not parked
+there: its activity finds no recorded approval and refuses it (NotApproved). Adding, removing,
 testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
 full commit SHA and content hash, and you must tick a confirmation before it sends

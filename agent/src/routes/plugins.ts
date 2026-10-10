@@ -224,15 +224,16 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
       if (body.enabled !== undefined && !set.switchable) {
         return isBuiltIn(c, set.name, 'switched off as a whole: disable its tools one by one instead')
       }
+      if (body.enabled !== undefined && !deps.switches) return c.json({ detail: NO_DATABASE }, 503)
       const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
       try {
+        // The overrides first: a refused one (400) writes nothing, the switch included.
         if (body.tool_tiers !== undefined || body.disabled_tools !== undefined) {
           await deps.builtIns.update(set, { tool_tiers: body.tool_tiers, disabled_tools: body.disabled_tools }, context)
         }
         if (body.enabled !== undefined) {
-          if (!deps.switches) return c.json({ detail: NO_DATABASE }, 503)
           // The existing switch (builtins.ts): the same as Settings → Plugin packages.
-          await deps.switches.setEnabled(set.name, body.enabled, context)
+          await deps.switches!.setEnabled(set.name, body.enabled, context)
         }
         return c.json(await deps.builtIns.view(set))
       } catch (err) {

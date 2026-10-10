@@ -563,7 +563,8 @@ browser are built in, each with **Enable**/**Disable**.
   assistant's ScadBuddy tools) and `playwright` (the headless browser's). **Review tools**
   lists each one with its tier and **Disable**. A tier can only be raised above the one
   ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
-  built-in is never removed. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
+  built-in is never removed. A durable session does not yet ask about a tool raised to
+  outward: it refuses the call instead. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
   and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never

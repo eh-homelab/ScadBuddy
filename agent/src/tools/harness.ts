@@ -3,6 +3,7 @@ import type { Context } from '@opentelemetry/api'
 import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
 import type { TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
+import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
 import type { TurnPrincipal } from '../sessions/manager.js'
 import type { TitleResolver } from '../sessions/sdkEvents.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -52,7 +53,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
       const builtIn = extras?.builtIn
       const allowed = tools.filter((t) =>
         builtIn
-          ? !builtIn.isDisabled(SERVER_NAME, t.name) && hasTier(principal, builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk))
+          ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk))
           : hasTier(principal, t.risk),
       )
       // The browser_* tools reach the tab this session is paired with (#254, bridge/hub.ts).

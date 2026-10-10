@@ -140,7 +140,7 @@ function BuiltInCard({ set, onChange }: { set: BuiltInToolSet; onChange: (set: B
   }
 
   return (
-    <li className="rounded-[6px] border border-line p-3" aria-label={`Built-in plugin ${set.name}`}>
+    <li className="rounded-[6px] border border-line p-3" aria-label={`Built-in tools ${set.name}`}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[13px] font-medium">{set.name}</span>
         <span className="rounded-full border border-line px-2 py-px text-[11px] text-muted">Built in</span>
@@ -166,7 +166,10 @@ function BuiltInCard({ set, onChange }: { set: BuiltInToolSet; onChange: (set: B
           </Button>
         )}
       </div>
-      {open && <BuiltInToolTable set={set} onSaved={onChange} />}
+      {/* Keyed by what is stored, so a newer copy of the set resets the table. */}
+      {open && (
+        <BuiltInToolTable key={JSON.stringify([set.tool_tiers, set.disabled_tools])} set={set} onSaved={onChange} />
+      )}
       {error && (
         <p role="alert" className="mt-2 text-[12px] text-warn">
           {error}
@@ -521,7 +524,7 @@ export function RemotePluginsPanel() {
           </p>
         )}
         {builtIns.length > 0 && (
-          <ul className="space-y-3" aria-label="Built-in plugins">
+          <ul className="space-y-3" aria-label="Built-in tools">
             {builtIns.map((set) => (
               <BuiltInCard key={set.name} set={set} onChange={replace} />
             ))}
