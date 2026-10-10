@@ -4,6 +4,8 @@ import { useLatest } from '../lib/useLatest'
 import { useSubscription, type RealtimeSignal } from '../lib/realtime'
 import type {
   CatalogueLibrary,
+  DependencyReport,
+  IncludeTarget,
   InvalidLibraryEntry,
   LibraryPinRequest,
   ModelLibrary,
@@ -53,9 +55,13 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   // or by a pin, would otherwise land late and put back what it replaced.
   const generation = useRef(0)
 
+  // #1285 — bumped whenever the pins are read or changed: the includes are checked again.
+  const [pinsRead, setPinsRead] = useState(0)
+
   function showModel(model: ModelSummary) {
     setPins(model.libraries ?? [])
     setInvalid(model.invalid_libraries ?? [])
+    setPinsRead((n) => n + 1)
   }
 
   useEffect(() => {
@@ -232,6 +238,8 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
                 </ul>
               </section>
             )}
+
+            <Includes slug={slug} checkAgain={pinsRead} apply={apply} />
 
             <AddByUrl slug={slug} apply={apply} />
           </div>
@@ -493,5 +501,204 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
         </div>
       </form>
     </section>
+  )
+}
+
+/**
+ * #1285 — the dependency check (`POST /models/{slug}/dependencies`): the saved source's
+ * includes that resolve nowhere, with the library that would provide each, and the
+ * `font = "…"` families that are not installed. Checked again whenever the pins change.
+ */
+function Includes({ slug, checkAgain, apply }: { slug: string; checkAgain: number; apply: Apply }) {
+  const [report, setReport] = useState<DependencyReport | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  // Bumped by a font install: the families it adds resolve now.
+  const [installed, setInstalled] = useState(0)
+
+  useEffect(() => {
+    let live = true
+    setError(null)
+    api
+      .checkDependencies(slug)
+      .then((answer) => {
+        if (live) setReport(answer)
+      })
+      .catch((caught: unknown) => {
+        if (live) setError(message(caught))
+      })
+    return () => {
+      live = false
+    }
+  }, [slug, checkAgain, installed])
+
+  const unresolved = report?.includes?.filter((include) => include.status === 'unresolved') ?? []
+  const missingFonts = [...new Set((report?.fonts ?? []).flatMap((use) => use.missing))]
+  const missingCheckouts = report?.missing_checkouts ?? []
+
+  return (
+    <section aria-label="Includes">
+      <h3 className="text-[13px] font-medium">Includes</h3>
+      {error ? (
+        <p role="alert" className="mt-1 text-[12px] text-warn">
+          Could not check the includes: {error}
+        </p>
+      ) : report === null ? (
+        <p className="mt-1 flex items-center gap-2 text-[12px] text-muted">
+          <Spinner /> Checking includes
+        </p>
+      ) : (
+        <>
+          {unresolved.length === 0 && missingFonts.length === 0 && (
+            <p className="mt-1 text-[12px] text-muted">
+              {(report.includes ?? []).length === 0
+                ? 'The source has no include or use'
+                : 'Every include and use resolves'}
+              {report.fonts_checked && (report.fonts ?? []).length > 0
+                ? ', and every font it names is installed.'
+                : '.'}
+            </p>
+          )}
+          {unresolved.length + missingFonts.length > 0 && (
+            <ul
+              aria-label="Unresolved"
+              className="mt-2 divide-y divide-line rounded-[6px] border border-line"
+            >
+              {unresolved.map((include) => (
+                <UnresolvedRow
+                  key={`${include.file}:${include.line}:${include.target}`}
+                  slug={slug}
+                  include={include}
+                  apply={apply}
+                />
+              ))}
+              {missingFonts.map((family) => (
+                <MissingFontRow
+                  key={family}
+                  family={family}
+                  onInstalled={() => setInstalled((n) => n + 1)}
+                />
+              ))}
+            </ul>
+          )}
+          {missingCheckouts.length > 0 && (
+            <p className="mt-2 text-[12px] text-muted">
+              Not on the volume yet: {missingCheckouts.join(', ')}. The next render clones{' '}
+              {missingCheckouts.length === 1 ? 'it' : 'them'} again; until then nothing inside{' '}
+              {missingCheckouts.length === 1 ? 'it' : 'them'} can be checked.
+            </p>
+          )}
+          {!report.fonts_checked && (report.fonts ?? []).length > 0 && (
+            <p className="mt-2 text-[12px] text-muted">
+              The fonts were not checked: the server could not ask fontconfig.
+            </p>
+          )}
+          {report.truncated && (
+            <p className="mt-2 text-[12px] text-muted">
+              The check stopped short: this model has more to follow than it reads, so not
+              everything is listed.
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+function UnresolvedRow({
+  slug,
+  include,
+  apply,
+}: {
+  slug: string
+  include: IncludeTarget
+  apply: Apply
+}) {
+  const { busy, error, run } = useAction(apply)
+  const { suggestion } = include
+
+  return (
+    <li aria-label={`<${include.target}>`} className="px-3 py-2.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <span className="sb-num text-[13px]">
+            {include.kind} &lt;{include.target}&gt;
+          </span>
+          <p className="mt-0.5 text-[12px] text-muted">
+            <span className="sb-num">
+              {include.file}:{include.line}
+            </span>
+            {include.reason ? ` — ${include.reason}` : ''}
+          </p>
+          {suggestion && (
+            <p className="mt-0.5 text-[12px] text-muted">
+              {suggestion.source === 'catalogue'
+                ? `${suggestion.name} from the catalogue provides it`
+                : `${suggestion.name}, as ${suggestion.pinned_by ?? 'another model'} pins it, would provide it`}
+              {suggestion.has_file === false && ' (its checkout here has no such file)'}.
+            </p>
+          )}
+        </div>
+        {suggestion && (
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() =>
+                void run('pin', () =>
+                  api.pinModelLibrary(slug, suggestion.name, {
+                    url: suggestion.url,
+                    ref: suggestion.ref,
+                  }),
+                )
+              }
+              disabled={busy !== null}
+              aria-busy={busy !== null}
+            >
+              {busy && <Spinner />}
+              Pin {suggestion.name}
+            </Button>
+          </div>
+        )}
+      </div>
+      <RowError error={error} />
+    </li>
+  )
+}
+
+function MissingFontRow({ family, onInstalled }: { family: string; onInstalled: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function install() {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.installFont(family)
+      onInstalled()
+    } catch (caught) {
+      setError(message(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li aria-label={`Font ${family}`} className="px-3 py-2.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <span className="text-[13px] font-medium">{family}</span>
+          <span className="ml-2 text-[11px] text-warn">Not installed</span>
+          <p className="mt-0.5 text-[12px] text-muted">
+            A render draws this font in the default font instead.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button size="sm" onClick={() => void install()} disabled={busy} aria-busy={busy}>
+            {busy && <Spinner />}
+            Install {family}
+          </Button>
+        </div>
+      </div>
+      <RowError error={error} />
+    </li>
   )
 }

@@ -33,6 +33,7 @@ import type {
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  DependencyReport,
   LibraryFileObjects,
   LibraryListing,
   LibraryPinRequest,
@@ -1424,6 +1425,14 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+
+  /**
+   * #1285 — what each `include`/`use` of the saved source resolves to, a library that
+   * would provide each unresolved one, and the `font = "…"` families not installed.
+   * Read-only; nothing is cloned.
+   */
+  checkDependencies: (slug: string) =>
+    request<DependencyReport>(`/models/${seg(slug)}/dependencies`, { method: 'POST' }),
 
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
