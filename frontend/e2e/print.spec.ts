@@ -113,6 +113,36 @@ test.describe('print dialog', () => {
     await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
   })
 
+  // #1723 — at phone width, Advanced on and then off again must leave every control
+  // reachable: nothing past the screen's edge, and Print on screen, with the choices kept.
+  test('stays usable at phone width with Advanced on, and after it is switched off', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    const fits = async (state: string) => {
+      const scrollWidth = Number(await page.evaluate('document.documentElement.scrollWidth'))
+      expect(scrollWidth, `${state}: nothing scrolls sideways`).toBeLessThanOrEqual(390)
+      const panel = (await dialog.boundingBox())!
+      expect(panel.y, `${state}: the title is on screen`).toBeGreaterThanOrEqual(0)
+      expect(panel.y + panel.height, `${state}: the dialog ends on screen`).toBeLessThanOrEqual(844)
+      await expect(dialog.getByRole('button', { name: 'Print', exact: true })).toBeInViewport({ ratio: 1 })
+    }
+    await fits('Advanced off')
+    const chosen = dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })
+    const spool = await chosen.getAttribute('value')
+
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
+    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toBeVisible()
+    await fits('Advanced on')
+
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
+    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toHaveCount(0)
+    await fits('Advanced off again')
+    await expect(dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })).toHaveAttribute(
+      'value',
+      spool ?? '',
+    )
+  })
+
   // #944 — at phone width every slot's fieldset and spool rows ran past the screen's
   // right edge, cutting off the grams, the "rests on" badge and the "prints in" colour.
   test('keeps the slots and spool rows inside the screen at phone width', async ({ page }) => {
