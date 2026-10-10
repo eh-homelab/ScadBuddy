@@ -321,6 +321,10 @@ COPY agent-durable/src ./src
 RUN uv sync --frozen --no-dev
 
 # ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
+# A directory with no .claude-plugin/plugin.json: the bundled Claude Code takes a
+# --plugin-dir with `skills/` at its top as one plugin named after the directory
+# (checked 2026-10-10 on 2.1.292 with --debug-to-stderr: "Loaded 3 skills from
+# plugin scadbuddy"). SCADBUDDY_DURABLE_SKILLS_DIR below points at it.
 COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
 # The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
 # becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
@@ -331,7 +335,7 @@ COPY --from=agent-build /src/agent/dist/tools.json /app/agent-durable/tools.json
 # is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin),
 # or when the tool manifest does not parse or is empty (rather than at the worker's start).
 RUN .venv/bin/python -m scadbuddy_durable.check_cli_version \
-    && .venv/bin/python -c "import sys; from scadbuddy_durable.session.tools import load_manifest; sys.exit(0 if load_manifest(sys.argv[1]) else 1)" /app/agent-durable/tools.json
+    && .venv/bin/python -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
 
 ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev

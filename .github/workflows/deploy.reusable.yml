@@ -104,8 +104,8 @@ jobs:
   pin:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
-    # The agent and agent-durable waits below can take up to 10 of these each.
-    timeout-minutes: 35
+    # The agent wait below can take up to 10 of these, the agent-durable one 20.
+    timeout-minutes: 45
     # The one place the two callers can race: this job closes the previous
     # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
     # Job-level, so only these few seconds serialise — deploy-release's image
@@ -178,32 +178,6 @@ jobs:
           echo "$ref -> $digest"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # The durable sessions sidecar (#1056), resolved like the agent. Not
-      # required here: a build from before 5e has no such image, and a manifest
-      # without its line needs none. The pin step fails when the manifest
-      # names the image and this found nothing.
-      - name: Resolve the agent-durable image
-        id: agent-durable
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          ref="${AGENT_DURABLE_IMAGE}:${VERSION}"
-          digest=""
-          for _ in $(seq 60); do
-            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
-            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
-            sleep 10
-          done
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "$ref -> $digest"
-          else
-            echo "::warning::could not resolve $ref (got '$digest'); it is pinned only if clusters does not name it"
-            digest=""
-          fi
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
       - name: Mint an App token for clusters
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -223,6 +197,39 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 1
           path: clusters
+
+      # The durable sessions sidecar (#1056), resolved like the agent, but only
+      # when the manifest runs it: a manifest without its line needs no image,
+      # so a build from before 5e, or a still-private package, costs no wait.
+      # Its job builds the agent-build chain plus the stage and can finish well
+      # after the API's, so it waits up to 20 minutes. The pin step fails when
+      # the manifest names the image and this found nothing.
+      - name: Resolve the agent-durable image
+        id: agent-durable
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -qE "^\s*(- )?image:.*${AGENT_DURABLE_IMAGE//./\\.}" "clusters/${MANIFEST}"; then
+            echo "clusters/${MANIFEST} does not run agent-durable; not resolving it"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ref="${AGENT_DURABLE_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 120); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::could not resolve $ref (got '$digest')"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       # The dashboard's ref= may only move to a revision that has the
       # kustomization it points at: one without it (a rollback to a build from
