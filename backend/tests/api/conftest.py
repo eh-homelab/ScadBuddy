@@ -6,8 +6,9 @@ import time
 import uuid
 import zipfile
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import psycopg
 import pytest
@@ -17,7 +18,8 @@ from fastapi.testclient import TestClient
 from temporalio.client import Client
 
 from scadbuddy.activity.component import ACTIVITY
-from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.activity.index import ActivityIndex, Attribution
+from scadbuddy.activity.models import ActivityRow, ActivityStatus
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
@@ -209,6 +211,100 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 def activity_index(client: TestClient) -> ActivityIndex:
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     return state.components.get(ACTIVITY).index
+
+
+class SeedActivity(Protocol):
+    def __call__(
+        self,
+        *,
+        id: str,
+        principal: str = "browser",
+        kind: str = "render",
+        status: ActivityStatus = "succeeded",
+        **fields: Any,
+    ) -> None: ...
+
+
+@pytest.fixture
+def seed_activity(activity_index: ActivityIndex) -> SeedActivity:
+    """Write one activity row as a source and its route would: the row, then who
+    started it. ``session`` and ``via_tool`` go to the attribution, the rest to the row."""
+
+    def seed(
+        *,
+        id: str,
+        principal: str = "browser",
+        kind: str = "render",
+        status: ActivityStatus = "succeeded",
+        **fields: Any,
+    ) -> None:
+        session = fields.pop("session", None)
+        via_tool = fields.pop("via_tool", None)
+        row = ActivityRow(
+            id=id,
+            kind=kind,
+            status=status,
+            title=fields.pop("title", f"Seeded {id}"),
+            source="test",
+            source_id=fields.pop("source_id", id),
+            **fields,
+        )
+        with activity_index.pool.connection() as conn, conn.transaction():
+            activity_index.upsert_in(
+                conn, row, attribution=Attribution(principal, session, via_tool)
+            )
+
+    return seed
+
+
+#: The agent's tables the backend reads, cut down to the columns it reads:
+#: `ai_sessions`' owner, and `ai_operations` and `ai_activity_kinds` as the agent's
+#: migrations create them.
+AGENT_TABLES = """
+CREATE TABLE ai_sessions (id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL);
+CREATE TABLE ai_operations (
+  id              text PRIMARY KEY,
+  kind            text NOT NULL,
+  subject         text NOT NULL,
+  operation_key   text NOT NULL,
+  status          text NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+  request         jsonb NOT NULL,
+  result          jsonb,
+  error           jsonb,
+  workflow_id     text NOT NULL,
+  workflow_run_id text NOT NULL,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  finished_at     timestamptz,
+  principal       text,
+  session         text,
+  via_tool        text,
+  CHECK ((status = 'running') = (finished_at IS NULL))
+);
+CREATE TABLE ai_activity_kinds (
+  key text PRIMARY KEY, label text NOT NULL, facets jsonb NOT NULL, retired_at timestamptz
+);
+"""
+
+
+@dataclass
+class AgentTables:
+    conninfo: str
+
+    def insert_session(self, *, owner_kind: str, owner_id: str) -> str:
+        session_id = str(uuid.uuid4())
+        with psycopg.connect(self.conninfo, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO ai_sessions (id, owner_kind, owner_id) VALUES (%s, %s, %s)",
+                (session_id, owner_kind, owner_id),
+            )
+        return session_id
+
+
+@pytest.fixture
+def agent_tables(pg_conninfo: str) -> AgentTables:
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(AGENT_TABLES.encode())
+    return AgentTables(pg_conninfo)
 
 
 def job_file(client: TestClient, job_id: str, name: str) -> Path:

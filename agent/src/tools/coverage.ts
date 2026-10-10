@@ -12,6 +12,10 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/activity/facets',
+    reason: "The UI's filter bar; activity_list's own filters say the same.",
+  },
+  {
     operation: 'GET /api/v1/print/library/{file_id}/objects',
     reason:
       "The Arrange dialog's list of a library file's objects, with a count each (#1863). The arrange " +

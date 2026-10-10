@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import builtins
 import json
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from psycopg import Connection, errors, sql
@@ -68,6 +72,89 @@ _AGENT_STATUS: dict[str, ActivityStatus] = {
     "succeeded": "succeeded",
     "failed": "failed",
 }
+
+
+DEFAULT_LIMIT = 50
+MAX_LIMIT = 200
+#: The window ``facets`` counts over when its caller names none.
+FACETS_WINDOW = timedelta(days=7)
+
+
+@dataclass(frozen=True)
+class ActivityFilter:
+    """What ``list`` keeps; every field set must match, a tuple matches any member."""
+
+    kinds: tuple[str, ...] = ()
+    statuses: tuple[str, ...] = ()
+    principal: str | None = None
+    session: str | None = None
+    via_tool: str | None = None
+    subject: str | None = None
+    parent: str | None = None
+    #: A substring of the title, case-insensitive.
+    q: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    #: Facet name to value, each matched as ``facets @> {name: value}``.
+    facets: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Count:
+    value: str
+    count: int
+
+
+@dataclass(frozen=True)
+class Counts:
+    principals: list[Count]
+    tools: list[Count]
+    subjects: list[Count]
+
+
+def encode_cursor(row: ActivityRow) -> str:
+    assert row.created_at is not None  # a read row has its timestamps
+    raw = f"{row.created_at.isoformat()}|{row.id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """The position ``encode_cursor`` wrote; ValueError for anything else."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    except (binascii.Error, UnicodeError) as error:
+        raise ValueError("not a cursor") from error
+    created, sep, activity_id = raw.partition("|")
+    if not sep or not activity_id:
+        raise ValueError("not a cursor")
+    at = datetime.fromisoformat(created)
+    if at.tzinfo is None:
+        raise ValueError("not a cursor")
+    return at, activity_id
+
+
+def _escape_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _visible(pinned: str | None) -> list[sql.Composable]:
+    """Placeholders are never read; a pinned request reads its principal's rows only,
+    and one pinned to an unknown session reads none."""
+    where: list[sql.Composable] = [sql.SQL("source <> ''")]
+    if pinned == UNKNOWN_SESSION:
+        where.append(sql.SQL("false"))
+    elif pinned is not None:
+        where.append(sql.SQL("principal = {}").format(sql.Literal(pinned)))
+    return where
+
+
+def _where(conditions: list[sql.Composable]) -> sql.Composable:
+    return sql.SQL(" AND ").join(conditions)
+
+
+_SELECT = sql.SQL("SELECT {} FROM activity").format(
+    sql.SQL(", ").join(map(sql.Identifier, _COLUMNS))
+)
 
 
 @dataclass(frozen=True)
@@ -219,12 +306,109 @@ class ActivityIndex:
     def _get(self, activity_id: str) -> ActivityRow | None:
         with self.pool.connection() as conn:
             found = conn.execute(
-                sql.SQL("SELECT {} FROM activity WHERE id = %s AND source <> ''").format(
-                    sql.SQL(", ").join(map(sql.Identifier, _COLUMNS))
-                ),
-                (activity_id,),
+                sql.SQL("{} WHERE id = %s AND source <> ''").format(_SELECT), (activity_id,)
             ).fetchone()
         return None if found is None else ActivityRow.model_validate(found)
+
+    async def list(
+        self,
+        filters: ActivityFilter,
+        *,
+        pinned: str | None,
+        cursor: tuple[datetime, str] | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> tuple[list[ActivityRow], str | None]:
+        """Newest first, and the cursor of the next page (None on the last). ``pinned``
+        is ``visibility.pinned_principal``'s answer: a ``principal`` filter that differs
+        from it matches nothing."""
+        return await asyncio.to_thread(self._list, filters, pinned, cursor, limit)
+
+    def _list(
+        self,
+        filters: ActivityFilter,
+        pinned: str | None,
+        cursor: tuple[datetime, str] | None,
+        limit: int,
+    ) -> tuple[builtins.list[ActivityRow], str | None]:
+        if not 1 <= limit <= MAX_LIMIT:
+            raise ValueError(f"limit must be 1 to {MAX_LIMIT}")
+        where = _visible(pinned)
+        params: list[Any] = []
+
+        def add(condition: str, *values: Any) -> None:
+            where.append(sql.SQL(condition))  # fixed text from this module only
+            params.extend(values)
+
+        if filters.kinds:
+            add("kind = ANY(%s)", list(filters.kinds))
+        if filters.statuses:
+            add("status = ANY(%s)", list(filters.statuses))
+        for column, value in (
+            ("principal", filters.principal),
+            ("session", filters.session),
+            ("via_tool", filters.via_tool),
+            ("subject", filters.subject),
+            ("parent_id", filters.parent),
+        ):
+            if value is not None:
+                where.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
+                params.append(value)
+        if filters.q is not None:
+            add("title ILIKE '%%' || %s || '%%'", _escape_like(filters.q))
+        if filters.since is not None:
+            add("created_at >= %s", filters.since)
+        if filters.until is not None:
+            add("created_at < %s", filters.until)
+        for name, value in filters.facets.items():
+            add("facets @> %s::jsonb", json.dumps({name: value}))
+        if cursor is not None:
+            add("(created_at, id) < (%s, %s)", *cursor)
+        params.append(limit + 1)
+        with self.pool.connection() as conn:
+            found = conn.execute(
+                sql.SQL("{} WHERE {} ORDER BY created_at DESC, id DESC LIMIT %s").format(
+                    _SELECT, _where(where)
+                ),
+                params,
+            ).fetchall()
+        rows = [ActivityRow.model_validate(r) for r in found[:limit]]
+        return rows, encode_cursor(rows[-1]) if len(found) > limit else None
+
+    async def children(self, activity_id: str, *, pinned: str | None) -> builtins.list[ActivityRow]:
+        return await asyncio.to_thread(self._children, activity_id, pinned)
+
+    def _children(self, activity_id: str, pinned: str | None) -> builtins.list[ActivityRow]:
+        where = [*_visible(pinned), sql.SQL("parent_id = %s")]
+        with self.pool.connection() as conn:
+            found = conn.execute(
+                sql.SQL("{} WHERE {} ORDER BY created_at, id").format(_SELECT, _where(where)),
+                (activity_id,),
+            ).fetchall()
+        return [ActivityRow.model_validate(r) for r in found]
+
+    async def counts(self, *, since: datetime | None, pinned: str | None) -> Counts:
+        """The principals, tools and subjects present since ``since`` (default the last
+        ``FACETS_WINDOW``), most frequent first."""
+        return await asyncio.to_thread(self._counts, since, pinned)
+
+    def _counts(self, since: datetime | None, pinned: str | None) -> Counts:
+        start = since if since is not None else datetime.now(UTC) - FACETS_WINDOW
+        where = _where([*_visible(pinned), sql.SQL("created_at >= %s")])
+        counted: dict[str, list[Count]] = {}
+        with self.pool.connection() as conn:
+            for column, blank in (("principal", None), ("via_tool", None), ("subject", "")):
+                present = sql.SQL("{} IS NOT NULL").format(sql.Identifier(column))
+                if blank is not None:
+                    present = sql.SQL("{} <> ''").format(sql.Identifier(column))
+                found = conn.execute(
+                    sql.SQL(
+                        "SELECT {c} AS value, count(*) AS count FROM activity"
+                        " WHERE {where} AND {present} GROUP BY {c} ORDER BY count DESC, {c}"
+                    ).format(c=sql.Identifier(column), where=where, present=present),
+                    (start,),
+                ).fetchall()
+                counted[column] = [Count(r["value"], r["count"]) for r in found]
+        return Counts(counted["principal"], counted["via_tool"], counted["subject"])
 
 
 async def attribute_request(index: ActivityIndex, activity_id: str, request: Request) -> None:

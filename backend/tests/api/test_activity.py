@@ -1,0 +1,232 @@
+"""Reading activity (spec 2026-10-09 §6, §7): the list, its facets, one row, and the
+headless browser pinned to its session owner."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+
+from fastapi.testclient import TestClient
+
+from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.activity.visibility import UNKNOWN_SESSION
+from tests.api.conftest import AgentTables, SeedActivity
+from tests.support.operations import press
+
+SESSION_HEADER = "X-ScadBuddy-Agent-Session"
+
+
+def ids(page: dict[str, object]) -> list[str]:
+    items = page["items"]
+    assert isinstance(items, list)
+    return [r["id"] for r in items]
+
+
+def test_lists_newest_first_with_filters(client: TestClient, seed_activity: SeedActivity) -> None:
+    seed_activity(id="render:a", principal="browser", status="succeeded", kind="render")
+    seed_activity(id="render:b", principal="token:t1", status="failed", kind="render")
+    assert ids(client.get("/api/v1/activity").json()) == ["render:b", "render:a"]
+    page = client.get("/api/v1/activity", params={"status": "failed"}).json()
+    assert ids(page) == ["render:b"]
+    page = client.get("/api/v1/activity", params={"principal": "browser"}).json()
+    assert ids(page) == ["render:a"]
+
+
+def test_filters_by_session_tool_subject_parent_and_title(
+    client: TestClient, seed_activity: SeedActivity
+) -> None:
+    seed_activity(id="render:a", session="s-1", via_tool="render_model", subject="box")
+    seed_activity(id="render:b", parent_id="render:a", title="Render 100% keychain")
+    seed_activity(id="render:c", title="Render keychain")
+    for params, expected in [
+        ({"session": "s-1"}, ["render:a"]),
+        ({"via_tool": "render_model"}, ["render:a"]),
+        ({"subject": "box"}, ["render:a"]),
+        ({"parent": "render:a"}, ["render:b"]),
+        ({"q": "100%"}, ["render:b"]),
+        ({"q": "KEYCHAIN"}, ["render:c", "render:b"]),
+    ]:
+        assert ids(client.get("/api/v1/activity", params=params).json()) == expected, params
+
+
+def test_since_and_until(client: TestClient, seed_activity: SeedActivity) -> None:
+    seed_activity(id="render:a")
+    created = client.get("/api/v1/activity").json()["items"][0]["created_at"]
+    assert ids(client.get("/api/v1/activity", params={"since": created}).json()) == ["render:a"]
+    assert ids(client.get("/api/v1/activity", params={"until": created}).json()) == []
+    bad = client.get("/api/v1/activity", params={"since": "yesterday"})
+    assert bad.status_code == 422
+
+
+def test_placeholders_are_never_listed(client: TestClient, activity_index: ActivityIndex) -> None:
+    # A route's attribution that arrived before its source's first write.
+    asyncio.run(
+        activity_index.attribute("render:early", principal="browser", session=None, via_tool=None)
+    )
+    assert ids(client.get("/api/v1/activity").json()) == []
+    assert client.get("/api/v1/activity/render:early").status_code == 404
+
+
+def test_facet_filter(client: TestClient, seed_activity: SeedActivity) -> None:
+    seed_activity(id="render:a", kind="render", facets={"slug": "keychain"})
+    seed_activity(id="render:b", kind="render", facets={"slug": "box"})
+    page = client.get("/api/v1/activity", params={"kind": "render", "facet.slug": "box"}).json()
+    assert ids(page) == ["render:b"]
+
+
+def test_unknown_param_is_400(client: TestClient) -> None:
+    for params in (
+        {"stauts": "failed"},
+        {"kind": "render", "facet.nope": "x"},
+        {"facet.slug": "x"},
+        # Declared, but not filterable.
+        {"kind": "render", "facet.model_version": "x"},
+        {"cursor": "not-a-cursor"},
+    ):
+        response = client.get("/api/v1/activity", params=params)
+        assert response.status_code == 400, params
+        assert response.headers["content-type"].startswith("application/problem+json")
+    for params in ({"limit": "0"}, {"limit": "201"}, {"status": "done"}):
+        response = client.get("/api/v1/activity", params=params)
+        assert response.status_code == 422, params
+        assert response.headers["content-type"].startswith("application/problem+json")
+    for path, params in (
+        ("/api/v1/activity/facets", {"kind": "render"}),
+        ("/api/v1/activity/render:a", {"advance": "1"}),
+    ):
+        response = client.get(path, params=params)
+        assert response.status_code == 400, (path, params)
+
+
+def test_facets_from_data(client: TestClient, seed_activity: SeedActivity) -> None:
+    seed_activity(id="render:a", principal="token:t1", via_tool="render_model", subject="box")
+    body = client.get("/api/v1/activity/facets").json()
+    assert {"value": "token:t1", "count": 1} in body["principals"]
+    assert {"value": "render_model", "count": 1} in body["tools"]
+    assert {"value": "box", "count": 1} in body["subjects"]
+    render = next(k for k in body["kinds"] if k["key"] == "render")
+    assert {"name": "slug", "type": "keyword", "label": "Model", "filterable": True} in render[
+        "facets"
+    ]
+    assert body["statuses"] == ["queued", "running", "waiting", "succeeded", "failed", "cancelled"]
+    later = client.get("/api/v1/activity/facets", params={"since": "2999-01-01T00:00:00Z"}).json()
+    assert later["principals"] == []
+
+
+def test_facets_without_agent_tables(client: TestClient) -> None:
+    assert client.get("/api/v1/activity/facets").status_code == 200
+
+
+def test_headless_session_is_pinned_to_its_owner(
+    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
+) -> None:
+    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
+    seed_activity(id="render:a", principal="browser")
+    seed_activity(id="render:b", principal="token:t1")
+    headers = {SESSION_HEADER: sid}
+    assert ids(client.get("/api/v1/activity", headers=headers).json()) == ["render:b"]
+    page = client.get("/api/v1/activity", params={"principal": "browser"}, headers=headers)
+    assert page.json()["items"] == []
+    facets = client.get("/api/v1/activity/facets", headers=headers).json()
+    assert facets["principals"] == [{"value": "token:t1", "count": 1}]
+
+
+def test_headless_session_of_the_browser_user_sees_everything(
+    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
+) -> None:
+    sid = agent_tables.insert_session(owner_kind="browser", owner_id="browser")
+    seed_activity(id="render:a", principal="browser")
+    seed_activity(id="render:b", principal="token:t1")
+    page = client.get("/api/v1/activity", headers={SESSION_HEADER: sid}).json()
+    assert ids(page) == ["render:b", "render:a"]
+
+
+def test_headless_session_cannot_read_other_detail(
+    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
+) -> None:
+    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
+    seed_activity(id="render:a", principal="browser")
+    seed_activity(id="render:b", principal="token:t1")
+    seed_activity(id="render:c", principal="browser", parent_id="render:b")
+    headers = {SESSION_HEADER: sid}
+    hidden = client.get("/api/v1/activity/render:a", headers=headers)
+    missing = client.get("/api/v1/activity/render:zzz", headers=headers)
+    assert hidden.status_code == missing.status_code == 404
+    assert hidden.json()["detail"] == missing.json()["detail"].replace("render:zzz", "render:a")
+    own = client.get("/api/v1/activity/render:b", headers=headers).json()
+    assert own["children"] == []
+    browser = client.get("/api/v1/activity/render:b").json()
+    assert [c["id"] for c in browser["children"]] == ["render:c"]
+
+
+def test_unknown_session_sees_nothing(
+    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
+) -> None:
+    seed_activity(id="render:a", principal="browser")
+    seed_activity(id="render:b", principal=UNKNOWN_SESSION)
+    for marker in (str(uuid.uuid4()), "not-a-uuid"):
+        headers = {SESSION_HEADER: marker}
+        page = client.get("/api/v1/activity", headers=headers).json()
+        assert page["items"] == [], marker
+        assert client.get("/api/v1/activity/render:a", headers=headers).status_code == 404
+        assert client.get("/api/v1/activity/facets", headers=headers).json()["principals"] == []
+
+
+def test_without_agent_tables_a_session_sees_nothing(
+    client: TestClient, seed_activity: SeedActivity
+) -> None:
+    seed_activity(id="render:a", principal="browser")
+    page = client.get("/api/v1/activity", headers={SESSION_HEADER: str(uuid.uuid4())}).json()
+    assert page["items"] == []
+
+
+def test_detail_simple_and_advanced(client: TestClient, seed_activity: SeedActivity) -> None:
+    seed_activity(
+        id="render:a",
+        workflow_id="render-x",
+        traceparent="00-abc-def-01",
+        source_id="a",
+        detail={"request": {"w": 1}, "stage": "split"},
+    )
+    simple = client.get("/api/v1/activity/render:a").json()
+    for hidden in ("workflow_id", "run_id", "traceparent", "source", "source_id", "facets"):
+        assert hidden not in simple["row"], hidden
+    assert simple["detail"] == {"stage": "split"}
+    assert simple["links"] == [{"rel": "job", "label": "Render", "href": "/api/v1/jobs/a"}]
+    advanced = client.get("/api/v1/activity/render:a", params={"advanced": "1"}).json()
+    assert advanced["row"]["workflow_id"] == "render-x"
+    assert advanced["detail"] == {"request": {"w": 1}, "stage": "split"}
+
+
+def test_paging_is_stable(client: TestClient, seed_activity: SeedActivity) -> None:
+    for i in range(5):
+        seed_activity(id=f"render:{i}")
+    seen: list[str] = []
+    cursor = None
+    for _ in range(3):
+        params: dict[str, str | int] = {"limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = client.get("/api/v1/activity", params=params).json()
+        seen += ids(page)
+        cursor = page["next_cursor"]
+    assert seen == [f"render:{i}" for i in reversed(range(5))]
+    assert cursor is None
+
+
+def test_headless_operation_is_its_session_owners(
+    client: TestClient, agent_tables: AgentTables
+) -> None:
+    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
+    headers = {SESSION_HEADER: sid}
+    created = client.post(
+        "/api/v1/models",
+        json={"name": "Widget", "source": "width = 10;\n"},
+        headers={**press(), **headers},
+    )
+    assert created.status_code == 201, created.text
+    page = client.get("/api/v1/activity", headers=headers).json()
+    operations = [r for r in page["items"] if r["id"].startswith("operation:")]
+    assert operations, page
+    assert all(r["principal"] == "token:t1" for r in operations)
+    assert all(r["session"] == sid for r in operations)

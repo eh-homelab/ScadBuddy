@@ -9,8 +9,9 @@ import asyncio
 from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+from starlette.requests import Request
 
-from scadbuddy.api.agent_actor import _session_id
+from scadbuddy.api.agent_actor import AGENT_ACTOR_HEADER, _session_id
 
 UNKNOWN_SESSION = "session:unknown"
 
@@ -34,3 +35,25 @@ async def session_owner(pool: ConnectionPool[Connection[DictRow]], session_id: s
         return "browser" if row["owner_kind"] == "browser" else row["owner_id"]
 
     return await asyncio.to_thread(read)
+
+
+async def pinned_principal(
+    request: Request, pool: ConnectionPool[Connection[DictRow]]
+) -> str | None:
+    """The one principal a request may read, or None when it may read all: a request
+    with the agent-actor marker reads its session owner's activity, unless that owner is
+    the browser user. A marker that names no session is pinned to
+    :data:`UNKNOWN_SESSION`, which reads nothing (``ActivityIndex``): the rows attributed
+    to it were started by other unresolved sessions."""
+    marker = request.headers.get(AGENT_ACTOR_HEADER)
+    if marker is None:
+        return None
+    owner = await session_owner(pool, marker)
+    if owner == "browser":
+        return None
+    return owner or UNKNOWN_SESSION
+
+
+def readable(pinned: str | None, principal: str | None) -> bool:
+    """Whether a request pinned to ``pinned`` may read a row of ``principal``."""
+    return pinned is None or (pinned != UNKNOWN_SESSION and principal == pinned)

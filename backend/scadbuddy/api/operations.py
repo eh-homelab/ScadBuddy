@@ -218,6 +218,14 @@ def _problem(
     return ApiError(status_code, detail, title=title, type_=type_, headers=headers, **extensions)
 
 
+#: Where a 202's operation is followed as activity (spec 2026-10-09 §6).
+ACTIVITY_LOCATION = "Activity-Location"
+
+
+def activity_location(operation_id: str) -> str:
+    return f"/api/v1/activity/operation:{operation_id}"
+
+
 def _answer(
     op: Operation, response: Response, *, repeated: bool
 ) -> dict[str, Any] | OperationAccepted:
@@ -229,6 +237,7 @@ def _answer(
         error = op.error
         raise _problem(error.status, error.detail, error.title, error.type, error.extensions)
     response.status_code = status.HTTP_202_ACCEPTED
+    response.headers[ACTIVITY_LOCATION] = activity_location(op.id)
     return OperationAccepted(**op.model_dump(), repeated=repeated)
 
 
@@ -486,7 +495,11 @@ def operation_answer[M: BaseModel](
 ) -> M | JSONResponse:
     """The route's own body, or 202 with the operation to follow."""
     if isinstance(result, OperationAccepted):
-        return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
+        return JSONResponse(
+            result.model_dump(mode="json"),
+            status_code=status.HTTP_202_ACCEPTED,
+            headers={ACTIVITY_LOCATION: activity_location(result.id)},
+        )
     return model.model_validate(result)
 
 
