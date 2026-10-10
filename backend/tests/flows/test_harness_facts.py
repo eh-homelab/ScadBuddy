@@ -9,7 +9,7 @@ work around the harness (spec 2026-10-01 §9).
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -54,7 +54,6 @@ from tests.flows.harness_probe import (
     ProbeWorkflow,
     probe_close,
 )
-from tests.support.temporal import temporal_available, temporal_server
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -83,14 +82,6 @@ class _Keys:
                 raise SubjectForgottenError(subject)
             self.keys[subject] = uuid.uuid4().bytes * 2
         return self.keys[subject]
-
-
-@pytest.fixture(scope="module")
-def temporal_address() -> Iterator[str]:
-    if not temporal_available():
-        pytest.skip("no Temporal")
-    with temporal_server() as address:
-        yield address
 
 
 @pytest.fixture
