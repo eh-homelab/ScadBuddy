@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Param, ParamValue } from '../../api/types'
+import { UNINSTALLABLE_FONT } from '../../mocks/fixtures'
 import { ParamWidget } from './ParamWidget'
 
 const fonts = [
@@ -507,6 +508,58 @@ describe('font', () => {
 
     await waitFor(() => expect(onChange).toHaveBeenLastCalledWith('Pacifico:style=Regular'))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('flags families the render was refused for and installs one from the field (#1286)', async () => {
+    const user = userEvent.setup()
+    const onFontInstalled = vi.fn()
+    render(
+      <ParamWidget
+        slug="name-keychain"
+        param={param}
+        value="Roboto:style=Bold"
+        fonts={fonts}
+        missingFonts={['Roboto']}
+        onFontInstalled={onFontInstalled}
+        onChange={vi.fn()}
+      />,
+    )
+    const field = screen.getByRole('combobox', { name: 'Typeface' })
+    expect(field).toHaveAttribute('aria-invalid', 'true')
+    expect(field).toHaveAccessibleDescription(
+      'Roboto is not installed, so this would render in the default font.',
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Install Roboto' }))
+
+    await waitFor(() => expect(onFontInstalled).toHaveBeenCalledWith(expect.objectContaining({ family: 'Roboto' })))
+  })
+
+  it('says why a family could not be installed from the field', async () => {
+    const user = userEvent.setup()
+    const onFontInstalled = vi.fn()
+    render(
+      <ParamWidget
+        slug="name-keychain"
+        param={param}
+        value={UNINSTALLABLE_FONT}
+        fonts={fonts}
+        missingFonts={[UNINSTALLABLE_FONT]}
+        onFontInstalled={onFontInstalled}
+        onChange={vi.fn()}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: `Install ${UNINSTALLABLE_FONT}` }))
+
+    expect(await screen.findByText(/could not be downloaded/)).toBeInTheDocument()
+    expect(onFontInstalled).not.toHaveBeenCalled()
+  })
+
+  it('is not flagged when nothing is missing', () => {
+    setup(param, 'Liberation Sans:style=Bold')
+    expect(screen.getByRole('combobox', { name: 'Typeface' })).not.toHaveAttribute('aria-invalid')
+    expect(screen.queryByRole('button', { name: /^Install/ })).not.toBeInTheDocument()
   })
 
   it('seeds the picker preview with the model\u2019s own text', async () => {

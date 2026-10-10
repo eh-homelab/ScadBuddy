@@ -2494,6 +2494,29 @@ export const handlers = [
       }
     }
 
+    // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
+    // chose that names a family not installed is refused, naming both.
+    const installedFamilies = new Set(state.fonts.map((font) => font.family.toLowerCase()))
+    const unfontedParams: string[] = []
+    const unfontedFamilies: string[] = []
+    for (const param of schema.parameters ?? []) {
+      const value = renderParams[param.name]
+      if (param.type !== 'font' || typeof value !== 'string' || value === param.initial) continue
+      const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
+      const missing = families.filter((family) => !installedFamilies.has(family.toLowerCase()))
+      if (missing.length === 0) continue
+      unfontedParams.push(param.name)
+      for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)
+    }
+    if (unfontedParams.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${unfontedParams[0]}' names font family '${unfontedFamilies[0]}', which is not installed`,
+        { parameters: unfontedParams, families: unfontedFamilies },
+      )
+    }
+
     const jobId = nextHexId()
     const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
