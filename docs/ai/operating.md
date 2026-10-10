@@ -613,6 +613,17 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  `session_mode`, the mode a new session gets when whoever starts it names none
+  (`durable` unless it says `classic`), which Settings → Assistant session mode writes
+  through `PUT /api/v1/ai/settings/session-mode`
+  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts)). A
+  durable session needs Temporal, the KEK and an `agent-durable` worker polling the
+  `agent` queue; without them a session whose mode came from this default runs classic
+  and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
+  and `sessions_start`), while one that asked for `durable` is refused 503
+  (plan `2026-10-09-durable-phase-5d-mode.md`). The worker check counts only a
+  poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
+  gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `model` and `approval_expiry_seconds` have no

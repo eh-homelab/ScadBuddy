@@ -42,6 +42,20 @@ export const DURABLE_WORKFLOW = 'DurableSession'
 export const DURABLE_TASK_QUEUE = 'agent'
 export const SEND_MESSAGE_UPDATE = 'send_message'
 
+/** How long a readiness answer is reused (plan 5d Ruling 2): one Temporal call per window, not per start. */
+const READY_TTL_MS = 15_000
+/** How long "Temporal did not answer" is reused: short, so a blip passes, but an outage costs one deadline per window. */
+const UNANSWERED_TTL_MS = 2_000
+/**
+ * A poller seen longer ago than this is a worker that has gone: Temporal lists pollers
+ * for minutes after, but a live worker re-polls at least once a long-poll (about 60 s).
+ */
+const POLLER_FRESH_MS = 70_000
+/** How long the readiness check waits for Temporal before calling it unreachable. */
+const READY_DEADLINE_MS = 3_000
+/** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW */
+const WORKFLOW_TASK_QUEUE = 1
+
 /** What the workflow's validator refuses a second turn with (models.py, workflow.py). */
 const BUSY = 'busy'
 const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
@@ -99,6 +113,11 @@ function blobsOf(images: readonly UserImage[]): SessionImage[] {
   })
 }
 
+/** A protobuf Timestamp (`seconds` may be a Long) as epoch ms; 0 when absent. */
+function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
+  return ts ? Number(String(ts.seconds ?? 0)) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6) : 0
+}
+
 /** The `send_message` Update went unanswered: neither taken nor refused, as far as this service knows. */
 class OutcomeUnknown extends Error {}
 
@@ -110,6 +129,7 @@ export class DurableTurns {
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
   readonly #sendTimeoutMs: number
+  #ready: { until: number; why: string | undefined } | undefined
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -119,6 +139,39 @@ export class DurableTurns {
     this.#blobs = new SessionBlobs(deps.sql)
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
+  }
+
+  /**
+   * Why a new durable session could not run now, or undefined when it could (plan 5d
+   * Ruling 2): some agent-durable worker polls the `agent` queue. Until one does, a
+   * turn would wait on a queue no one reads, so the manager falls back or refuses at
+   * start instead. An answer from Temporal is reused for READY_TTL_MS, no answer for
+   * UNANSWERED_TTL_MS, so one blip does not refuse explicit durable starts for long.
+   * Only a poller seen within POLLER_FRESH_MS counts: Temporal keeps listing one for
+   * minutes after its worker has gone.
+   */
+  async unready(): Promise<string | undefined> {
+    const cached = this.#ready
+    if (cached && Date.now() < cached.until) return cached.why
+    let why: string | undefined
+    let answered = true
+    try {
+      const { pollers } = await this.#client.withDeadline(Date.now() + READY_DEADLINE_MS, () =>
+        this.#client.workflowService.describeTaskQueue({
+          namespace: this.#client.options.namespace,
+          taskQueue: { name: this.#taskQueue },
+          taskQueueType: WORKFLOW_TASK_QUEUE,
+        }),
+      )
+      const now = Date.now()
+      const live = (pollers ?? []).filter((p) => now - seenAtMs(p.lastAccessTime) < POLLER_FRESH_MS)
+      if (!live.length) why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
+    } catch {
+      why = 'Temporal did not answer'
+      answered = false
+    }
+    this.#ready = { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why }
+    return why
   }
 
   /**

@@ -10,7 +10,7 @@ import {
   SessionError,
   type SessionRecord,
 } from '../sessions/manager.js'
-import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
+import { type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
 import { BROWSER_USER } from './approvals.js'
@@ -94,6 +94,8 @@ export type SessionView = {
   offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
+  /** Classic or durable (plan 5d), set when the session started. */
+  mode: SessionRecord['mode']
   turns: number
   cost_usd: number
   budget_usd: number
@@ -118,6 +120,7 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
     offered_to_you: s.offer !== null && sameOwner(viewer, s.offer.to),
     status: s.status,
     parent_id: s.parentId,
+    mode: s.mode,
     turns: s.turns,
     cost_usd: s.costUsd,
     budget_usd: s.budgetUsd,
@@ -130,6 +133,8 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
 const StartBody = z.strictObject({
   title: z.string().max(200).optional(),
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
+  /** Plan 5d: absent, the `session_mode` setting's, which falls back to classic when durable cannot run. */
+  mode: z.enum(SESSION_MODES).optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
 /** `up_to`: a reply's panel message id (`assistant.text.done`'s `messageId`), #793. */
@@ -272,12 +277,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, StartBody, {})
       if (!body.ok) return body.response
-      const { session, turn } = await sessions.start(BROWSER_USER, {
+      const { session, turn, modeFallback } = await sessions.start(BROWSER_USER, {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
+        ...(body.value.mode ? { mode: body.value.mode } : {}),
       })
-      return c.json({ session: sessionView(session, BROWSER_USER), ...(turn ? { turn_id: turn.turnId } : {}) }, 201)
+      return c.json(
+        {
+          session: sessionView(session, BROWSER_USER),
+          ...(turn ? { turn_id: turn.turnId } : {}),
+          ...(modeFallback ? { mode_fallback: modeFallback } : {}),
+        },
+        201,
+      )
     }),
   )
 

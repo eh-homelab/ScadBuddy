@@ -94,6 +94,23 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect((await m.get(id, browser)).turns).toBe(2)
   })
 
+  it("takes a new session's mode, says when the default fell back, and refuses an unknown one (plan 5d)", async () => {
+    const start = (body: unknown) =>
+      app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
+    // No Temporal here: the default (durable) runs classic and says so.
+    const fell = await start({ title: 'a' })
+    expect(fell.status).toBe(201)
+    expect(await fell.json()).toMatchObject({ session: { mode: 'classic' }, mode_fallback: expect.stringMatching(/durable sessions need Temporal/) })
+    const classic = await start({ title: 'b', mode: 'classic' })
+    expect(classic.status).toBe(201)
+    const body = (await classic.json()) as Record<string, unknown>
+    expect(body).toMatchObject({ session: { mode: 'classic' } })
+    expect(body).not.toHaveProperty('mode_fallback')
+    // Asked for, durable is never run as classic instead.
+    expect((await start({ title: 'c', mode: 'durable' })).status).toBe(503)
+    expect((await start({ title: 'd', mode: 'fast' })).status).toBe(400)
+  })
+
   it('streams the event log as SSE from ?after= / Last-Event-ID', async () => {
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
     await turn!.done

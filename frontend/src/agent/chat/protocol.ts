@@ -55,6 +55,10 @@ export type Risk = z.infer<typeof RiskSchema>
 export const OriginSchema = z.enum(['chat', 'mcp', 'analyzer', 'hook'])
 export type Origin = z.infer<typeof OriginSchema>
 
+/** Plan 5d — how a session runs: in the agent's harness, or as a durable Temporal workflow. */
+export const SessionModeSchema = z.enum(['classic', 'durable'])
+export type SessionMode = z.infer<typeof SessionModeSchema>
+
 /** §6 statuses. */
 export const SessionStatusSchema = z.enum([
   'running',
@@ -190,6 +194,8 @@ export const SessionSummarySchema = z.object({
   updatedAt: z.string().optional(),
   costUsd: z.number().nonnegative().optional(),
   budgetUsd: z.number().positive().optional(),
+  /** Plan 5d — how it runs; absent from an older agent (classic). */
+  mode: SessionModeSchema.optional(),
 })
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
 
@@ -272,6 +278,10 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     title: z.string().optional(),
     /** What the session may spend in all (#790); absent on sessions started before it. */
     budgetUsd: z.number().positive().optional(),
+    /** Plan 5d — how it runs; absent on sessions started before it (classic). */
+    mode: SessionModeSchema.optional(),
+    /** Plan 5d — why a session whose mode came from the default runs classic, not durable (the bare reason). */
+    modeFallback: z.string().optional(),
   }),
   z.object({ v, type: z.literal('session.owner'), sessionId, owner: OwnerSchema }),
   z.object({
@@ -451,6 +461,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     context: PageContextSchema,
     /** #1941 — uploaded images for the model, by id (#1866 sent them inline). */
     images: z.array(AttachmentRefSchema).min(1).optional(),
+    /** Plan 5d — a new chat's mode, from the composer's picker; absent, the agent's default applies. */
+    mode: SessionModeSchema.optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent

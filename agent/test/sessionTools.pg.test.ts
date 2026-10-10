@@ -257,6 +257,18 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(1)
     })
 
+    it("takes a new session's mode, and says when the default ran classic (plan 5d)", async () => {
+      const { agent } = await setup()
+      const a = await agent('write')
+      const fell = ok<{ session: { mode: string }; mode_fallback?: string }>(await a.call('sessions_start', { title: 'a' }))
+      expect(fell.session.mode).toBe('classic')
+      expect(fell.mode_fallback).toMatch(/durable sessions need Temporal/)
+      const classic = ok<Record<string, unknown>>(await a.call('sessions_start', { title: 'b', mode: 'classic' }))
+      expect(classic).toMatchObject({ session: { mode: 'classic' } })
+      expect(classic).not.toHaveProperty('mode_fallback')
+      expect(errorText(await a.call('sessions_start', { title: 'c', mode: 'durable' }))).toMatch(/Temporal/)
+    })
+
     it("shows a caller only the sessions it may see; another agent's are 'no session'", async () => {
       const { agent } = await setup()
       const a = await agent('write')
