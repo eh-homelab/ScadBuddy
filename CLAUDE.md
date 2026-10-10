@@ -195,7 +195,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   workflow's first (local) activity inserts the row, identical requests join it as
   claims, and a supersede sends the old execution `release`, #1053), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations). The legacy in-process queue, its file and Postgres stores
+  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, everything the
+  render worker's own role `scadbuddy_render` may touch, granted by the API at start;
+  a change to what the worker reads or writes changes it, and
+  `tests/test_render_worker_role.py` renders as that role; the worker never migrates
+  and reads settings only through the `render_settings` view). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
