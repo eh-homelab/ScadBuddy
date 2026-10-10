@@ -5,6 +5,8 @@ Temporal call the routes and the reconcilers share, and what `start_command` and
 
 from __future__ import annotations
 
+import asyncio
+import gc
 from typing import Any, cast
 
 import pytest
@@ -142,6 +144,33 @@ async def test_start_command_reads_an_execution_not_found_as_closing(
 
     with pytest.raises(expected):
         await call(Failing())
+
+
+async def test_a_failed_start_leaves_no_unretrieved_future_behind() -> None:
+    """#2065: temporalio sets a failed start's error on the operation's handle future
+    as well as raising it (``client/_client.py`` ``on_start_error``). The raised one is
+    handled, so the future's copy must be read too, or asyncio logs it as "Future
+    exception was never retrieved" with nobody's traceback."""
+    logged: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: logged.append(context))
+
+    class TimingOut:
+        async def execute_update_with_start_workflow(
+            self, *args: Any, start_workflow_operation: Any, **kwargs: Any
+        ) -> Any:
+            error = RPCError("Timeout expired", RPCStatusCode.UNAVAILABLE, b"")
+            start_workflow_operation._workflow_handle.set_exception(error)
+            raise error
+
+    try:
+        with pytest.raises(TemporalUnavailableError):
+            await call(TimingOut())
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+    assert [c["message"] for c in logged] == []
 
 
 @pytest.mark.parametrize(

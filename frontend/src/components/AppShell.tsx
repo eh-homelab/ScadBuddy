@@ -9,7 +9,15 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
-import { attentionCount, attentionDetail, attentionLabel, summaryLabel, useAttention, useAttentionTitle } from '../agent/attention'
+import {
+  attentionCount,
+  attentionDetail,
+  attentionLabel,
+  summaryLabel,
+  useAttention,
+  useAttentionTitle,
+  WORKING_LABEL,
+} from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -103,7 +111,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const waitingDetail = attentionDetail(attention.counts)
   // A done summary waits for nothing, so it is shown beside the count, not in it.
   const summaries = summaryLabel(attention.counts)
-  const toggleLabel = [waitingLabel, summaries].filter(Boolean).join(', ')
+  // #1125 — a turn under way in any of the user's sessions, shown whether or not the
+  // panel is open. What waits on the user is the badge above, so this is the third
+  // state: idle shows neither.
+  const working = attention.running === true ? WORKING_LABEL : ''
+  const toggleLabel = [working, waitingLabel, summaries].filter(Boolean).join(', ')
   useAttentionTitle(attention.waiting, !embedded)
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
@@ -238,6 +250,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 </span>
               )}
               {shown && (
+                // #1125 — its own region, so starting or finishing a turn does not
+                // announce the waiting count again.
+                <span data-testid="assistant-working-live" aria-live="polite" className="sr-only">
+                  {working && 'The assistant is working'}
+                </span>
+              )}
+              {shown && (
                 <button
                   ref={toggleButton}
                   type="button"
@@ -246,7 +265,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   aria-controls={mounted ? PANEL_ID : undefined}
                   aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
                   aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
-                  title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
+                  title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[working, waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
                   // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
                   // opens beside a dialog that is already open, as the shortcut does. Only
                   // where the panel can sit beside one (#2013): on a phone the dialog covers
@@ -255,6 +274,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                     open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
                   }`}
                 >
+                  {working && (
+                    <span
+                      data-testid="assistant-working"
+                      aria-hidden="true"
+                      className="size-2 rounded-full bg-accent motion-safe:animate-pulse"
+                    />
+                  )}
                   Assistant
                   {attention.waiting !== null && attention.waiting > 0 && (
                     <span
