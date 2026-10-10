@@ -22,7 +22,9 @@ import { event, type Owner, type SessionStatus } from './protocol.js'
 //   workflow owns the turn), put the turn's images in ai_session_blobs (the claim
 //   check the segment runner reads by name, Ruling 5), write `user.turn` and
 //   `session.status running`, then update-with-start `send_message` (update id: the
-//   turn id), starting the workflow on the first message. Only a definite refusal (the
+//   turn id), starting the workflow on the first message. Once a turn has run
+//   (`durable_offset` moved) it is a plain Update: a workflow removed by retention is
+//   refused `closed`, never restarted empty (Ruling 18). Only a definite refusal (the
 //   validator's `busy`, a failed Update, an ended workflow) gives the claim back. An
 //   Update not accepted in time keeps it: Temporal may already hold the message, which a
 //   worker delivers later, so the turn is handed back and `done` follows the log.
@@ -185,13 +187,13 @@ export class DurableTurns {
     const blobs = blobsOf(turn.images)
     // The status before the claim, which a give-back restores (a refused send keeps `failed`).
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
-    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus }[]>(
-      `WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = $1 FOR UPDATE)
+    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string }[]>(
+      `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', updated_at = now() FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND ${POOL_COST} < ${POOL_BUDGET}
-       RETURNING prior.prior_status`,
+       RETURNING prior.prior_status, prior.durable_offset`,
       [id, turn.author.kind, turn.author.id],
     )
     if (!claimed) return undefined
@@ -212,7 +214,7 @@ export class DurableTurns {
         event({ type: 'session.status', sessionId: id, status: 'running' }),
       ])
       seq = seqs.at(-1) ?? 0
-      await this.#sendMessage(session, turn, blobs)
+      await this.#sendMessage(session, turn, blobs, Number(claimed.durable_offset) > 0)
     } catch (err) {
       if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
       // The refusal is what the caller hears, whatever the give-back meets.
@@ -237,7 +239,13 @@ export class DurableTurns {
     }
   }
 
-  async #sendMessage(session: SessionRecord, turn: DurableTurn, blobs: readonly SessionImage[]): Promise<void> {
+  /**
+   * `ranTurn`: the session's workflow has run a turn (its output moved
+   * `durable_offset`), so the message goes to that workflow and never starts one: a
+   * workflow not found was removed by retention after it ended, and starting
+   * `session-<id>` again would run the session's history-holding chat empty (#2078).
+   */
+  async #sendMessage(session: SessionRecord, turn: DurableTurn, blobs: readonly SessionImage[], ranTurn: boolean): Promise<void> {
     const start: SessionStart = {
       session_id: session.id,
       creator: wire(session.creator),
@@ -260,18 +268,24 @@ export class DurableTurns {
       // never started afresh under the same session.
       workflowIdReusePolicy: 'REJECT_DUPLICATE',
     })
+    // The turn id as the update id: a re-send of the same turn is the same Update.
+    const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
     try {
       await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
-        this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
-          SEND_MESSAGE_UPDATE,
-          // The turn id as the update id: a re-send of the same turn is the same Update.
-          { args: [message], updateId: turn.turnId, startWorkflowOperation: operation },
-        ),
+        ranTurn
+          ? this.#client.workflow.getHandle(sessionWorkflowId(session.id)).executeUpdate<SendAnswer, [DurableMessage]>(SEND_MESSAGE_UPDATE, update)
+          : this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
+              SEND_MESSAGE_UPDATE,
+              { ...update, startWorkflowOperation: operation },
+            ),
       )
     } catch (err) {
       const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)
+      }
+      if (err instanceof WorkflowNotFoundError) {
+        throw new SessionError('closed', `session ${session.id}'s workflow is gone (it ended and was removed); continue in a new chat`)
       }
       if (err instanceof WorkflowExecutionAlreadyStartedError) {
         throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
