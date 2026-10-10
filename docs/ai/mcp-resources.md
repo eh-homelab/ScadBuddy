@@ -235,8 +235,16 @@ sequenceDiagram
   its head answers 503, and a body already streaming ends with an error, so the client
   reconnects and meets the 404.
 - **Who may use it.** The replica the request reached runs every gate (HTTPS, Origin,
-  auth) and relays the principal; the owner still refuses another caller's principal
-  with 403, as it does for its own requests.
+  auth) and relays the principal as authenticated; the owner ties it to the session
+  (an anonymous caller's `anonymous:<session id>` is made there) and still refuses
+  another caller's principal with 403, as it does for its own requests. No credential
+  is relayed: `Authorization`, `Cookie` and `Mcp-Session-Id` are stripped, and the
+  owner puts the session id back from the session it finds, so no relay row holds a
+  token or a session id.
+- **A late ack.** When the ack timeout passes, the request row is withdrawn only if it
+  is still there. An owner that took it is running it (its ack was lost or is slow),
+  so the replica keeps waiting on its beats rather than answer 404 and forget a live
+  session.
 - **Not covered.** A NOTIFY sent while a replica's listening connection is down is lost
   (the same limit as the bridge relay): the request then times out as an owner that went
   away.

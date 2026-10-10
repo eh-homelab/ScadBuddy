@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { z } from 'zod'
-import type { Principal } from '../auth/principal.js'
+import { type Principal, TIERS } from '../auth/principal.js'
 
 // /mcp sessions across agent replicas (#2086). A session is its transport, its
 // McpServer, its resource subscriptions and its replay log: live objects in
@@ -96,11 +96,17 @@ export interface McpSessionRelay {
   close(): void
 }
 
+// The caller as authenticated, before it is tied to a session: an anonymous
+// caller's per-session id (`anonymous:<session id>`) is made by the owner, so
+// the id never travels. Credentials (Authorization, Cookie, Mcp-Session-Id) are
+// stripped from the relayed request for the same reason (mcp/http.ts).
 const PrincipalSchema = z.object({
   id: z.string(),
-  kind: z.string(),
-  tiers: z.array(z.string()),
+  kind: z.enum(['browser', 'bearer', 'oidc', 'anonymous', 'flow']),
+  tiers: z.array(z.enum(TIERS)),
   clientIp: z.string().optional(),
+  subject: z.string().optional(),
+  clientId: z.string().optional(),
 })
 const RequestBodySchema = z.object({
   from: z.string(),
@@ -223,6 +229,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const encoder = new TextEncoder()
     return new Promise<Response | undefined>((resolve, reject) => {
       let settled = false
+      let acked = false
       let stream: ReadableStreamDefaultController<Uint8Array> | undefined
       let lastHeard = Date.now()
       let ackTimer: NodeJS.Timeout | undefined
@@ -263,6 +270,21 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           )
         } else stream?.error(new Error('the agent replica holding this MCP session stopped answering'))
       }
+      const unclaimed = async () => {
+        try {
+          // Withdrawn only if still there: an owner that took it is running it,
+          // and its ack was lost or is late. Then keep waiting, on its beats.
+          const withdrawn = await this.#sql`DELETE FROM ai_mcp_relay_messages WHERE id = ${row} RETURNING id`
+          if (withdrawn.length === 0) return this.#waiting.get(req)?.acked()
+          // Nobody took it: nobody holds the session.
+          done()
+          await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner}`
+        } catch (err) {
+          this.#failed(err)
+          done()
+        }
+        settle(undefined)
+      }
       signal.addEventListener('abort', onAbort, { once: true })
       this.#waiting.set(req, {
         chain: Promise.resolve(),
@@ -271,6 +293,9 @@ export class PgMcpSessionRelay implements McpSessionRelay {
         },
         acked: () => {
           clearTimeout(ackTimer)
+          if (acked) return
+          acked = true
+          lastHeard = Date.now()
           liveness = setInterval(() => {
             if (Date.now() - lastHeard > this.#beatMs * SILENT_AFTER_BEATS) void ownerGone()
           }, this.#beatMs)
@@ -295,24 +320,13 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           settle(undefined)
         },
       })
-      const value: RequestBody = { from: this.replica, hash, principal: { ...principal, tiers: [...principal.tiers] }, request }
+      const value: RequestBody = { from: this.replica, hash, principal: PrincipalSchema.parse(principal), request }
       this.#send({ t: 'req', req, to: owner, row }, { row, value }).then(
+        // From the commit, so a slow pool does not eat the owner's time to ack;
+        // and not at all once the ack was heard, which can come first.
         () => {
-          if (this.#waiting.has(req)) {
-            ackTimer = setTimeout(() => {
-              // Nobody has the session: remove its row and the unclaimed request.
-              done()
-              void Promise.all([
-                this.#sql`DELETE FROM ai_mcp_relay_messages WHERE id = ${row}`,
-                this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner}`,
-              ]).then(
-                () => settle(undefined),
-                (err: unknown) => {
-                  this.#failed(err)
-                  settle(undefined)
-                },
-              )
-            }, this.#ackTimeoutMs)
+          if (this.#waiting.has(req) && !acked) {
+            ackTimer = setTimeout(() => void unclaimed(), this.#ackTimeoutMs)
           }
         },
         (err: unknown) => {

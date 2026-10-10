@@ -41,10 +41,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
   let b: Replica
   const clients: Client[] = []
 
-  function replica(mcp: { maxSessionsPerCaller?: number } = {}): Replica {
+  /** A replica; `hears` drops the relay notifications it returns false for. */
+  function replica(mcp: { maxSessionsPerCaller?: number } = {}, hears: (payload: string) => boolean = () => true): Replica {
     const listener = new PgEventListener(url, { searchPath: 'public', log: () => {} })
     const relay = new PgMcpSessionRelay(db.sql, {
-      listen: (c, f) => listener.listenAlso(c, f),
+      listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload) ? f(payload) : undefined)),
       ackTimeoutMs: ACK_TIMEOUT_MS,
       beatMs: BEAT_MS,
       log: () => {},
@@ -198,6 +199,49 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
     const res = await post(b, token, id, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
     expect(res.status).toBe(404)
     expect(await db.sql`SELECT 1 FROM ai_mcp_sessions WHERE id_hash = ${sessionHash(id)}`).toHaveLength(0)
+  })
+
+  /** Replaces replica `which` with one built by `make`. */
+  async function swap(which: 'a' | 'b', make: () => Replica): Promise<void> {
+    const old = which === 'a' ? a : b
+    await old.app.close()
+    await old.listener.close()
+    const fresh = make()
+    await fresh.listener.ready()
+    if (which === 'a') a = fresh
+    else b = fresh
+  }
+
+  it('never writes the bearer token or the session id to the relay', async () => {
+    // A never hears the request, so its row waits out the ack timeout where it can be read.
+    await swap('a', () => replica({}, (payload) => JSON.parse(payload).t !== 'req'))
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    const client = await connect(token, () => a)
+    const id = sessionOf(client)
+    const pending = post(b, token, id, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+    let rows: { body: unknown }[] = []
+    await until(async () => {
+      rows = await db.sql<{ body: unknown }[]>`SELECT body FROM ai_mcp_relay_messages`
+      return rows.length > 0
+    }, 'the relayed request row')
+    const written = JSON.stringify(rows)
+    expect(written).toContain(sessionHash(id))
+    expect(written).not.toContain(token)
+    expect(written).not.toContain(id)
+    expect(written.toLowerCase()).not.toContain('authorization')
+    expect((await pending).status).toBe(404)
+  })
+
+  it('keeps waiting, and keeps the session, when the owner took a request whose ack was lost', async () => {
+    // B never hears an ack: its timeout finds the row taken, so the owner has it.
+    await swap('b', () => replica({}, (payload) => JSON.parse(payload).t !== 'ack'))
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    const client = await connect(token, () => a)
+    const id = sessionOf(client)
+    const res = await post(b, token, id, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('list_models')
+    expect(await db.sql`SELECT 1 FROM ai_mcp_sessions WHERE id_hash = ${sessionHash(id)}`).toHaveLength(1)
   })
 
   it('ends a relayed answer with an error when the owner dies mid-call', async () => {

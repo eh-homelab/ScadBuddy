@@ -105,8 +105,23 @@ type Session = {
   hash: string
 }
 
-/** Headers a relayed request does not carry: they describe the hop, not the request. */
-const HOP_HEADERS: ReadonlySet<string> = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'keep-alive'])
+/**
+ * Headers a relayed request does not carry: those of the hop, and the
+ * credentials, which would otherwise sit in a Postgres row (sessionRelay.ts).
+ * Auth has run on the replica the request reached, which relays the principal;
+ * the owner puts the session id back from the session it finds.
+ */
+const NOT_RELAYED: ReadonlySet<string> = new Set([
+  'host',
+  'connection',
+  'content-length',
+  'transfer-encoding',
+  'keep-alive',
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'mcp-session-id',
+])
 
 /** What `mountMcp` hands back: the open-session count and a shutdown hook. */
 export type McpHandle = { sessions: () => number; close: () => Promise<void> }
@@ -320,15 +335,21 @@ export function mountMcp(
     run: async (hash, principal, request) => {
       const id = byHash.get(hash)
       const session = id === undefined ? undefined : sessions.get(id)
-      if (!session) {
+      if (id === undefined || !session) {
         await relay.remove(hash)
         return jsonRpcError(404, -32001, 'Session not found')
       }
-      return serveHere(session, principal, request)
+      const headers = new Headers(request.headers)
+      headers.set('mcp-session-id', id)
+      return serveHere(session, sessionPrincipal(principal, id), new Request(request, { headers }))
     },
   })
 
-  /** `request`, for a session another replica holds, sent there; 404 when no replica has it. */
+  /**
+   * `request`, for a session another replica holds, sent there as `principal`
+   * (the caller as authenticated, not yet tied to the session); 404 when no
+   * replica has it.
+   */
   async function relayed(sessionId: string, principal: Principal, request: Request): Promise<Response> {
     if (!relay) return jsonRpcError(404, -32001, 'Session not found')
     let body: string | null = null
@@ -340,7 +361,7 @@ export function mountMcp(
     const forwarded: RelayedRequest = {
       method: request.method,
       url: request.url,
-      headers: [...request.headers.entries()].filter(([name]) => !HOP_HEADERS.has(name.toLowerCase())),
+      headers: [...request.headers.entries()].filter(([name]) => !NOT_RELAYED.has(name.toLowerCase())),
       body,
     }
     let response: Response | undefined
@@ -421,9 +442,10 @@ export function mountMcp(
 
     const sessionId = request.headers.get('mcp-session-id')
     if (sessionId !== null) {
-      const principal = sessionPrincipal(auth.principal, sessionId)
       const session = sessions.get(sessionId)
-      return session ? serveHere(session, principal, request) : relayed(sessionId, principal, request)
+      return session
+        ? serveHere(session, sessionPrincipal(auth.principal, sessionId), request)
+        : relayed(sessionId, auth.principal, request)
     }
 
     if (request.method !== 'POST') return jsonRpcError(400, -32000, 'Mcp-Session-Id header is required')
