@@ -309,3 +309,35 @@ describe('NewModelPage', () => {
     expect(await screen.findByText(/check timed out/)).toBeInTheDocument()
   })
 })
+
+describe('NewModelPage, blank template (#1291)', () => {
+  it("fills an empty editor with the agent's blank starter, and then offers it no more", async () => {
+    const { user } = renderNew()
+    await user.click(await screen.findByRole('button', { name: 'Start from blank template' }))
+    expect(screen.getByLabelText('OpenSCAD source')).toHaveValue(
+      '// A blank starter\n/* [Hidden] */\n$fn = 64;\n\ncube(10);\n',
+    )
+    expect(screen.queryByRole('button', { name: 'Start from blank template' })).not.toBeInTheDocument()
+  })
+
+  it('never offers to replace a pasted source', async () => {
+    const { user } = renderNew()
+    await screen.findByRole('button', { name: 'Start from blank template' })
+    await paste(user, 'cube(1);\n')
+    expect(screen.queryByRole('button', { name: 'Start from blank template' })).not.toBeInTheDocument()
+  })
+
+  it('offers no button when the agent service does not answer', async () => {
+    let asked = false
+    server.use(
+      http.get('/api/v1/ai/templates/blank', () => {
+        asked = true
+        return new HttpResponse(null, { status: 502 })
+      }),
+    )
+    renderNew()
+    await waitFor(() => expect(asked).toBe(true))
+    expect(screen.queryByRole('button', { name: 'Start from blank template' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('OpenSCAD source')).toHaveValue('')
+  })
+})

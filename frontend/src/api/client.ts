@@ -27,6 +27,7 @@ import type {
   AiSessionEdit,
   AiSessionView,
   SessionLimits,
+  BlankTemplate,
   SessionModeSetting,
   SessionResource,
   ResourceRef,
@@ -1558,6 +1559,9 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ model }),
     }),
+
+  /** #1291 — New model's "Start from blank template", served by the agent service. */
+  getBlankTemplate: () => request<BlankTemplate>('/ai/templates/blank'),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
   getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),
