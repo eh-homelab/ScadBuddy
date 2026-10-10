@@ -207,6 +207,31 @@ describe('useRenderJob', () => {
     expect(result.current.error).toBeUndefined()
   })
 
+  it('says a snapshot still uploading is why it waits, and waits it out as long as it lasts (#1422)', async () => {
+    const pending = () =>
+      new ApiError({
+        title: 'Service Unavailable',
+        status: 503,
+        detail: "demo@abc: the revision's snapshot is still uploading",
+        retry_after: 2,
+        code: 'snapshot_pending',
+      })
+    // More refusals than a transient outage is allowed: an upload is waited out, as a full queue is.
+    for (let i = 0; i < TRANSIENT_RETRIES + 2; i++) submit.mockRejectedValueOnce(pending())
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+
+    expect(result.current.busy).toEqual({ seconds: 2, reason: 'snapshot-pending' })
+    for (let i = 0; i < TRANSIENT_RETRIES + 2; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+    }
+    expect(submit).toHaveBeenCalledTimes(TRANSIENT_RETRIES + 3)
+    expect(result.current.error).toBeUndefined()
+    expect(result.current.busy).toBeUndefined()
+  })
+
   it('says why it waits: an unreachable render service, or a request still accepting', async () => {
     submit.mockRejectedValueOnce(
       new ApiError({
@@ -337,6 +362,29 @@ describe('useRenderJob', () => {
     expect(result.current.rendering).toBe(false)
     // By identity: the caller compares it to the exact values object it rendered.
     expect(result.current.settledFor).toBe(second)
+  })
+
+  it('keeps jobFor the values the job on show ran with when a submit fails before any job (#1685)', async () => {
+    const first = { n: 1 }
+    const second = { n: 2 }
+    vi.mocked(api.getJob).mockImplementation(async (id) => job(id, 'done'))
+    const { result, rerender } = mount({ slug: 'demo', params: first })
+    await settle()
+    await realtime.signal(`job:${JOB_A}`)
+    expect(result.current.job?.id).toBe(JOB_A)
+    expect(result.current.jobFor).toBe(first)
+
+    // The next submit is refused for good: no job, so the previous one stays on show.
+    submit.mockRejectedValueOnce(
+      new ApiError({ title: 'Internal Server Error', status: 500, detail: 'the render could not be started' }),
+    )
+    rerender({ slug: 'demo', params: second })
+    await settle()
+    expect(result.current.error).toBeDefined()
+    expect(result.current.settledFor).toBe(second)
+    expect(result.current.job?.id).toBe(JOB_A)
+    // What JOB_A's colours belong to: not the values that never rendered.
+    expect(result.current.jobFor).toBe(first)
   })
 
   it('never supersedes a render of another model or revision', async () => {

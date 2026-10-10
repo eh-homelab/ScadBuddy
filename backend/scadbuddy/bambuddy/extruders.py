@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from typing import Literal
 
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentWarning
-from scadbuddy.bambuddy.models import FlowType, NozzleChoice, PrinterStatus
+from scadbuddy.bambuddy.models import FlowType, NozzleChoice, NozzleSize, PrinterStatus
 
 RIGHT = 0
 LEFT = 1
@@ -265,6 +265,22 @@ def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
             if slot.id > LEFT and slot.nozzle_diameter == size
         ]
     return found
+
+
+def default_nozzles(status: PrinterStatus | None, size: NozzleSize = "0.4") -> list[NozzleChoice]:
+    """What the print dialog and ``print_output`` open on when the model remembers no
+    nozzles (#1895): ``size`` on both sides, High Flow on each side that can print with
+    a High Flow nozzle of that size (its mounted one or, on the rack side, a spare in
+    the rack, as :func:`_nozzles_on` counts them), else Standard. A printer whose status
+    cannot be read gets Standard, as before."""
+
+    def flow(extruder: int) -> FlowType:
+        if status is not None and any(_nozzles_on(status, extruder, size)):
+            return "high_flow"
+        return "standard"
+
+    # The dialog's order: the left extruder first (`_flows`).
+    return [NozzleChoice(size=size, flow=flow(LEFT)), NozzleChoice(size=size, flow=flow(RIGHT))]
 
 
 def _offered_side(status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]) -> int | None:

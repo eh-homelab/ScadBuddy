@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { Button } from './ui/Button'
@@ -14,18 +14,44 @@ interface Props {
 const inputClass =
   'h-8 w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong'
 
+/**
+ * The seconds a 503 asks to wait (#1295): the server's import budget is spent, and it
+ * says when a fetch slot frees, in the body and as `Retry-After` (the client copies the
+ * header in). Anything else is not a wait.
+ */
+function retryAfterSeconds(cause: unknown): number | undefined {
+  if (!(cause instanceof ApiError) || cause.status !== 503) return undefined
+  const seconds = cause.problem['retry_after']
+  return typeof seconds === 'number' && seconds > 0 ? seconds : undefined
+}
+
 /** #153 — the URL is fetched by the server, so a failure's reason comes back as a problem. */
 export function ImportDialog({ open, onClose, onImported }: Props) {
   const [url, setUrl] = useState('')
   const [name, setName] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
+  /**
+   * #1295 — seconds left before a refused import may be tried again. Never retried on
+   * its own: an import is the user's action, so the button only waits.
+   */
+  const [wait, setWait] = useState(0)
+  /** The last import was refused for a spent budget, so the button offers it again. */
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (wait <= 0) return
+    const tick = setTimeout(() => setWait((left) => left - 1), 1000)
+    return () => clearTimeout(tick)
+  }, [wait])
 
   async function submit(event?: FormEvent) {
     event?.preventDefault()
-    if (!url.trim()) return
+    // Enter submits the form too: the wait holds it as it holds the button.
+    if (!url.trim() || wait > 0) return
     setImporting(true)
     setError(null)
+    setBusy(false)
     try {
       const model = await api.importModel({
         url: url.trim(),
@@ -36,6 +62,9 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
       reset()
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Import failed. Try again.')
+      const seconds = retryAfterSeconds(cause)
+      setBusy(seconds !== undefined)
+      setWait(Math.ceil(seconds ?? 0))
     } finally {
       setImporting(false)
     }
@@ -45,6 +74,8 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
     setUrl('')
     setName('')
     setError(null)
+    setWait(0)
+    setBusy(false)
     onClose()
   }
 
@@ -62,10 +93,10 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
           <Button
             variant="primary"
             onClick={() => void submit()}
-            disabled={!url.trim() || importing}
+            disabled={!url.trim() || importing || wait > 0}
           >
             {importing && <Spinner />}
-            {importing ? 'Importing' : 'Import'}
+            {importing ? 'Importing' : busy ? 'Try again' : 'Import'}
           </Button>
         </>
       }
@@ -94,6 +125,11 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
       {error && (
         <p role="alert" className="mt-3 text-[13px] text-warn">
           {error}
+        </p>
+      )}
+      {busy && (
+        <p role="status" className="mt-1 text-[13px] text-muted">
+          {wait > 0 ? `Try again in ${wait} s.` : 'You can try again now.'}
         </p>
       )}
     </Dialog>

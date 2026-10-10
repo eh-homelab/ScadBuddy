@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import tracemalloc
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -13,6 +14,7 @@ import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.render import bambu3mf
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
     CORE_NS,
@@ -25,11 +27,13 @@ from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL_SMALL,
     PLATE_TOP,
     PRODUCTION_NS,
+    ArchiveTooLargeError,
     PlateParts,
     cover_names,
     laid_out_plates,
     layout_of,
     nozzles_statable,
+    parse_model,
     plate_columns,
     plate_origin,
     plate_settings,
@@ -1117,3 +1121,174 @@ def test_a_write_that_fails_part_way_leaves_the_previous_3mf_whole(
         _write_plates(out, covers=False)
     assert out.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["model.3mf"]
+
+
+def _model_zip(body: str, name: str = "3D/3dmodel.model") -> zipfile.ZipFile:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, f'<model xmlns="{CORE_NS}"><resources>{body}</resources></model>')
+    return zipfile.ZipFile(io.BytesIO(out.getvalue()))
+
+
+def test_a_model_file_s_meshes_are_read_into_arrays_and_left_out_of_the_tree() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices>'
+        '<vertex x="1" y="2" z="3"/><vertex x="4" y="5" z="6"><x/></vertex><vertex x="7"/>'
+        "</vertices><triangles>"
+        '<triangle v1="0" v2="1" v3="2"/>'
+        '<triangle v1="2" v2="1" v3="0" pid="5" p1="1"/>'
+        '<triangle v1="0" v2="2" v3="1" pid="7"/>'
+        "</triangles></mesh></object>"
+        '<object id="2"><components><component objectid="1"/></components></object>'
+    )
+
+    model = parse_model(archive, "3D/3dmodel.model")
+
+    (mesh_element, mesh), *rest = model.meshes.items()
+    assert not rest
+    assert model.root.find(f".//{{{CORE_NS}}}mesh") is mesh_element
+    left = mesh_element.find(f"{{{CORE_NS}}}vertices")
+    assert left is not None and not len(left)
+    assert model.root.find(f".//{{{CORE_NS}}}component") is not None
+    assert mesh.vertices.tolist() == [[1, 2, 3], [4, 5, 6], [7, 0, 0]]
+    assert mesh.faces.tolist() == [[0, 1, 2], [2, 1, 0], [0, 2, 1]]
+    assert [mesh.pids[i] if i >= 0 else None for i in mesh.pid] == [None, "5", "7"]
+    assert mesh.p1.tolist() == [-1, 1, -1]
+    assert not mesh.painted
+
+
+@pytest.mark.parametrize("attribute", ['paint_color="8"', 'mmu_segmentation="4"'])
+def test_a_painted_triangle_marks_its_mesh(attribute: str) -> None:
+    namespace = 'xmlns:s="http://schemas.slic3r.org/3mf/2017/06" '
+    attribute = attribute if attribute.startswith("paint") else f"{namespace}s:{attribute}"
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f'<triangles><triangle v1="0" v2="0" v3="0" {attribute}/></triangles></mesh></object>'
+    )
+
+    (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
+
+    assert mesh.painted
+
+
+def test_a_model_file_past_its_cap_is_refused_whatever_its_header_says() -> None:
+    archive = _model_zip("<object/>" * 1000)
+
+    with pytest.raises(ArchiveTooLargeError, match="inflates past 100 bytes"):
+        parse_model(archive, "3D/3dmodel.model", cap=100)
+
+
+def test_a_model_file_costs_about_its_own_size_to_read() -> None:
+    """An element per vertex costs some 500 bytes against the 27 of XML it is read from,
+    so an untrusted model entry near the archive's cap would take gigabytes (#1949)."""
+    vertices = 300_000
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices>'
+        + '<vertex x="1" y="2" z="3"/>' * vertices
+        + "</vertices><triangles/></mesh></object>"
+    )
+    size = archive.getinfo("3D/3dmodel.model").file_size
+
+    tracemalloc.start()
+    try:
+        model = parse_model(archive, "3D/3dmodel.model")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    (mesh,) = model.meshes.values()
+    assert mesh.vertices.shape == (vertices, 3)
+    # ET.fromstring measured 13x here; arrays and expat's buffers stay well under 4x.
+    assert peak < 4 * size, f"{peak} bytes to read {size}"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            '<triangle v1="0" v2="0" v3="99999999999999999999"/>', id="index-past-64-bits"
+        ),
+        pytest.param(
+            '<triangle v1="0" v2="0" v3="0" p1="99999999999999999999"/>', id="p1-past-64-bits"
+        ),
+        pytest.param('<triangle v1="x" v2="0" v3="0"/>', id="not-a-number"),
+    ],
+)
+def test_a_triangle_that_is_not_an_index_is_a_value_error(body: str) -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{body}</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+@pytest.mark.parametrize(
+    ("body", "block"),
+    [
+        pytest.param(
+            '<vertices><vertex x="0" y="0" z="0"/></vertices>'
+            '<vertices><vertex x="1" y="0" z="0"/></vertices><triangles/>',
+            "vertices",
+            id="vertices",
+        ),
+        pytest.param(
+            '<vertices><vertex x="0" y="0" z="0"/></vertices>'
+            '<triangles><triangle v1="0" v2="0" v3="0"/></triangles>'
+            '<triangles><triangle v1="0" v2="0" v3="0"/></triangles>',
+            "triangles",
+            id="triangles",
+        ),
+    ],
+)
+def test_a_mesh_with_a_repeated_block_is_refused(body: str, block: str) -> None:
+    """#2024: a second block would be appended to the first, so its indices would not
+    mean what the writer meant. The old parse read only the first."""
+    archive = _model_zip(f'<object id="1"><mesh>{body}</mesh></object>')
+
+    with pytest.raises(ValueError, match=f"more than one <{block}>"):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+def test_each_mesh_has_its_own_blocks() -> None:
+    mesh = (
+        '<mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        '<triangles><triangle v1="0" v2="0" v3="0"/></triangles></mesh>'
+    )
+    archive = _model_zip(f'<object id="1">{mesh}</object><object id="2">{mesh}</object>')
+
+    assert len(parse_model(archive, "3D/3dmodel.model").meshes) == 2
+
+
+def test_a_mesh_naming_too_many_property_groups_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2024: each distinct ``pid`` costs a dict entry, so their number is capped."""
+    monkeypatch.setattr(bambu3mf, "MAX_MESH_PIDS", 3)
+    triangles = "".join(f'<triangle v1="0" v2="0" v3="0" pid="{n}"/>' for n in range(4))
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="more than 3 property groups"):
+        parse_model(archive, "3D/3dmodel.model")
+    # As many as the cap still read, and the same pid again costs nothing.
+    triangles = "".join(f'<triangle v1="0" v2="0" v3="0" pid="{n % 3}"/>' for n in range(9))
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object>"
+    )
+    [arrays] = parse_model(archive, "3D/3dmodel.model").meshes.values()
+    assert arrays.pids == ("0", "1", "2")
+
+
+def test_a_mesh_inside_a_mesh_is_refused() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/>'
+        "<mesh/></vertices><triangles/></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="inside another"):
+        parse_model(archive, "3D/3dmodel.model")

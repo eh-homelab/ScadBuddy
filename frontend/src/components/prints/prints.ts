@@ -73,8 +73,9 @@ export function printSlides(print: PrintDetail): Slide[] {
       key: `plate:${plate.index}`,
       kind: 'image',
       src: plate.url,
-      alt: `${label}, plate ${plate.index}`,
-      caption: `Plate ${plate.index}`,
+      alt: `${label}, ${plate.name ?? `plate ${plate.index}`}`,
+      // #2055 — by what the plate holds, as the print dialog names it.
+      caption: plate.name ?? `Plate ${plate.index}`,
     })
   }
   return slides.length > 0 ? slides : coverSlides(print)

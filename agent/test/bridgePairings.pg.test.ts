@@ -49,15 +49,15 @@ describe('pairedTab abort', () => {
 describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
   let schema: string
+  let url: string
   let drop: () => Promise<void>
   let store: PostgresPairingStore
   let agent: Principal
 
-  // One schema for the file, emptied before each test: migrating is serialised
-  // across the whole database (db/migrations.ts MIGRATION_LOCK), so a schema per
-  // test would hold up every other file's migrations.
+  // One database for the file, emptied before each test: the tests below share a
+  // pool and an admin connection, and copying a database per test buys nothing here.
   beforeAll(async () => {
-    ;({ db, schema, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     store = new PostgresPairingStore(db.sql)
   })
@@ -95,7 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
 
   // #1410: a lookup actually blocked on the server (#1352), not one aborted before postgres.js sent it.
   it('stops waiting for a pairedTab lookup blocked on the server, and the pool still serves afterwards', async () => {
-    const admin = postgres(TEST_DATABASE_URL!, { max: 2, onnotice: () => {} })
+    const admin = postgres(url, { max: 2, onnotice: () => {} })
     let unlock!: () => void
     const unlocked = new Promise<void>((resolve) => (unlock = resolve))
     const locked = admin.begin(async (tx) => {
@@ -106,14 +106,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
       await expect
         .poll(async () => (await admin`
           SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace
-           WHERE n.nspname = ${schema} AND c.relname = 'ai_browser_pairings' AND l.mode = 'AccessExclusiveLock' AND l.granted`).length)
+           WHERE n.nspname = ${schema} AND c.relname = 'ai_browser_pairings' AND l.mode = 'AccessExclusiveLock' AND l.granted
+             -- Every copy of the template has the same relation OIDs: only this database's lock counts.
+             AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())`).length)
         .toBe(1)
       const stop = new AbortController()
       const lookup = store.pairedTab(agent, stop.signal)
       const waiting = async () =>
         (await admin`
           SELECT 1 FROM pg_stat_activity
-           WHERE wait_event_type = 'Lock' AND query LIKE '%FROM ai_browser_pairings%' AND query LIKE '%tab_id%'`).length
+           WHERE datname = current_database() AND wait_event_type = 'Lock'
+             AND query LIKE '%FROM ai_browser_pairings%' AND query LIKE '%tab_id%'`).length
       await expect.poll(waiting).toBe(1)
       stop.abort(new Error('the wait ended'))
       // Rejects while the lock is still held: the wait ended, the read did not.
@@ -123,7 +126,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
       await locked
       // Never cancelled on the server: the read finishes once the lock goes, and the pool serves the next one.
       await expect.poll(async () => (await admin`
-        SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%FROM ai_browser_pairings%'`).length).toBe(0)
+        SELECT 1 FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM ai_browser_pairings%'`).length).toBe(0)
       expect(await store.pairedTab(agent)).toBeUndefined()
     } finally {
       unlock()

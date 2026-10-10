@@ -245,7 +245,18 @@ export const ToolImageSchema = z.object({
 })
 export type ToolImage = z.infer<typeof ToolImageSchema>
 
-/** Where the agent serves one of a session's tool images (agent `GET /api/v1/ai/sessions/:id/blobs/:name`). */
+/**
+ * An image the user sent, as a `user.turn` shows it: its preview, and the name the agent
+ * stored the full image under (agent `src/sessions/manager.ts` `sentImages`), absent on
+ * turns logged before it and when the image could not be stored.
+ */
+export const SentImageSchema = ImagePreviewSchema.extend({ name: ToolImageSchema.shape.name.optional() })
+export type SentImage = z.infer<typeof SentImageSchema>
+
+/**
+ * Where the agent serves one of a session's stored images, a tool result's or one the
+ * user sent (agent `GET /api/v1/ai/sessions/:id/blobs/:name`).
+ */
 export function blobUrl(sessionId: string, name: string): string {
   return `/api/v1/ai/sessions/${encodeURIComponent(sessionId)}/blobs/${encodeURIComponent(name)}`
 }
@@ -281,8 +292,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     turnId: z.string().min(1),
     text: z.string(),
     author: OwnerSchema,
-    /** #1866 — previews of the images sent with the turn. */
-    images: z.array(ImagePreviewSchema).optional(),
+    /** #1866 — previews of the images sent with the turn, each naming its stored full image. */
+    images: z.array(SentImageSchema).optional(),
   }),
   z.object({
     v,

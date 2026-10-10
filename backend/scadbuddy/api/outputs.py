@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.api.deps import (
+    AppState,
     AssetsDep,
     CatalogueDep,
     ConfigDep,
@@ -67,7 +68,6 @@ from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.library_objects import (
     LibraryObjects,
     NotArrangeableError,
-    publish_library_pieces,
     read_library_objects,
 )
 from scadbuddy.bambuddy.project_file import (
@@ -207,10 +207,8 @@ def detail(
 
 
 async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
-    """The outputs whose newest run failed before queueing; none without a database, or
-    with one that does not answer, as ``/progress`` reads them."""
-    if not runs.available:
-        return set()
+    """The outputs whose newest run failed before queueing; none with a database that
+    does not answer, as ``/progress`` reads them."""
     try:
         return await runs.failed_before_queueing([meta.id for meta in metas])
     except DATABASE_ERRORS:
@@ -384,15 +382,18 @@ async def resolve_library_files(
 
 
 async def read_plain_files(
-    client: BambuddyClient, file_ids: list[int]
+    client: BambuddyClient, file_ids: list[int], state: AppState
 ) -> dict[int, LibraryObjects]:
-    """Each plain library file's objects, read from its 3MF (#1863). Every file that
-    cannot be arranged is refused at once, each with why."""
+    """Each plain library file's objects, read from its 3MF (#1863) once per file hash
+    (#1973), their pieces stored. Every file that cannot be arranged is refused at
+    once, each with why."""
     read: dict[int, LibraryObjects] = {}
     refused: list[NotArrangeableError] = []
     for file_id in file_ids:
         try:
-            read[file_id] = await read_library_objects(client, file_id)
+            read[file_id] = await read_library_objects(
+                client, file_id, blobs=state.store.blobs, cache=state.paths.cache
+            )
         except NotArrangeableError as error:
             refused.append(error)
     if refused:
@@ -574,14 +575,12 @@ async def arrange_outputs(
         async with client_for(stored) as client:
             if printer_id is not None:
                 plate_model = (await client.printer(printer_id)).model
-            library = await read_plain_files(client, plain)
+            library = await read_plain_files(client, plain, state)
     slug, inputs = await asyncio.to_thread(
         arrange_inputs, outputs, body, plate_model=plate_model, library=library
     )
     if not inputs.sources:
         await asyncio.to_thread(require_model_exists, catalogue, slug)
-    for found in library.values():
-        await publish_library_pieces(state.store.blobs, found)
     with submit_problems():
         job = await render.arrange(slug, inputs)
     return _job_status(job, None)

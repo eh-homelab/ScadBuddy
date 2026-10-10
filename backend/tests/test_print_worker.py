@@ -86,6 +86,23 @@ def test_the_drain_skips_exactly_the_workflows_not_pinned(
     assert registered and sorted(unpinned) == sorted(PRINT_UNPINNED)
 
 
+def test_the_print_worker_shares_the_apps_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2014: the client's tracing interceptor makes workflow spans in every worker's
+    sandbox, so the print worker passes OpenTelemetry through as the render worker
+    does. The follow worker runs no workflows."""
+    runners: list[Any] = []
+
+    def record(*_: Any, **kwargs: Any) -> None:
+        runners.append(kwargs.get("workflow_runner"))
+
+    monkeypatch.setattr(client_module, "Worker", record)
+    client_module.bambuddy_worker(None, "q", [])  # type: ignore[arg-type]
+    [runner] = runners
+    assert "opentelemetry" in runner.restrictions.passthrough_modules
+
+
 def test_the_print_worker_needs_the_apis_internal_url(tmp_path: Path) -> None:
     settings = Settings(
         database_url=UNUSED_DATABASE_URL,

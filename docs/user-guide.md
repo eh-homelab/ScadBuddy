@@ -175,19 +175,24 @@ stored on ScadBuddy's server and is never sent to the browser.
    | **Manage Queue** | queueing prints from the print picker |
    | **Read Status** | listing printers, spools and AMS slots for the print picker and **Test connection** |
    | **Manage Projects** | only if you use the project picker |
+   | **Manage Archives** | uploading and deleting print photos, and pulling a timelapse off the printer |
 
-2. Open **Settings** in ScadBuddy. Enter the Bambuddy URL and the key, then press
-   **Test connection**.
-3. Under **Where files go**, choose the library folder and the printer. **Send to
-   Bambuddy** lays its upload out for that printer's plate, and the print picker opens
-   on it.
-4. Under **Bambuddy sidebar**, enter ScadBuddy's own URL (the address Bambuddy
-   should link to; ScadBuddy can't work it out from behind a proxy). Then press
-   **Add to Bambuddy sidebar**. This creates an External Link called "ScadBuddy"
-   with "open in new tab" turned off, so ScadBuddy opens inside Bambuddy in a
-   sandboxed frame. Pressing it again updates the existing entry instead of adding
-   a second one.
-5. Press **Save changes**.
+2. Open **Settings** in ScadBuddy. Under **Connection**, enter the **Bambuddy URL**
+   and the **API key**, then press **Test connection**.
+3. Also under **Connection**, enter **ScadBuddy's own URL** (the address Bambuddy
+   should link to; ScadBuddy can't work it out from behind a proxy) and press the
+   section's **Save**. Then press **Add to Bambuddy sidebar**. This creates an External
+   Link called "ScadBuddy" with "open in new tab" turned off, so ScadBuddy opens inside
+   Bambuddy in a sandboxed frame. Pressing it again updates the existing entry instead
+   of adding a second one.
+4. Under **Printing defaults**, choose the **Printer**. **Send to Bambuddy** lays its
+   upload out for that printer's plate, and the print picker opens on it.
+5. Under **Projects & files**, choose the **Inbox folder, for sends without a
+   project**, where a 3MF sent without a project goes. **Default project** is where
+   the project picker opens, and the project a send without one is filed under.
+
+Each section has its own **Save** and **Discard changes**: save every section you
+changed before leaving the page.
 
 If the Bambuddy URL is one only ScadBuddy's server can reach (an in-cluster address,
 say), list the addresses browsers use under **Bambuddy web URLs**, comma-separated.
@@ -223,7 +228,10 @@ Changing a parameter starts a real render. The preview *is* the render (debounce
 so it shows exactly what the 3MF will contain, with the bounding box in mm. Then:
 
 - **Generate** saves the current render as an output, with its parameters and a
-  thumbnail.
+  thumbnail. When the bottom bar's **Project** picker has a project selected (it opens
+  on the last one you chose), Generate also uploads the 3MF into that project's folder
+  in Bambuddy. Deleting the output later never deletes that copy: it is the project's
+  record. Choose **No project** to only save the output.
 - **Download 3MF** downloads that output. When the template declares default slicer
   settings (`print_settings` in its `model.json`, such as the name keychain's prime
   tower), the file carries them, and Bambu Studio shows them as changes to the system

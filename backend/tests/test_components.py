@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 import scadbuddy
 from scadbuddy.api import components, deps
 from scadbuddy.api.components import component_dep, getter_for
-from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.components import (
     Component,
     ComponentCycleError,
@@ -218,12 +218,6 @@ def _app(registry: Components) -> FastAPI:
     def word(value: Annotated[str, component_dep(WORD)]) -> str:
         return value
 
-    @app.get("/maybe")
-    def maybe(
-        value: Annotated[str, component_dep(MAYBE, required="maybe needs a database")],
-    ) -> str:
-        return value
-
     return app
 
 
@@ -236,20 +230,6 @@ def test_component_dep_reads_the_registry_and_honours_dependency_overrides() -> 
         assert client.get("/word").json() == "built"
         app.dependency_overrides[getter_for(WORD)] = lambda: "overridden"
         assert client.get("/word").json() == "overridden"
-
-
-def test_a_required_component_that_is_none_answers_503() -> None:
-    registry = Components(CORE, [Component(MAYBE, build=lambda core, components: None)])
-    app = _app(registry)
-    with TestClient(app) as client:
-        response = client.get("/maybe")
-        assert response.status_code == 503
-        problem = response.json()
-        assert problem["type"] == DATABASE_REQUIRED_PROBLEM
-        assert problem["detail"] == "maybe needs a database"
-        # The required dependency reads the key's one getter, so its override counts too.
-        app.dependency_overrides[getter_for(MAYBE)] = lambda: "present"
-        assert client.get("/maybe").json() == "present"
 
 
 @pytest.fixture

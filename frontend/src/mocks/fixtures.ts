@@ -987,6 +987,13 @@ export const settings: Settings = {
       reason:
         'Paired with the Temporal address: the API and the render workers must name the same queue, and only the deployment sets both.',
     },
+    {
+      name: 'temporal_namespace',
+      env_var: 'SCADBUDDY_TEMPORAL_NAMESPACE',
+      value: 'default',
+      source: 'default',
+      reason: 'Paired with the Temporal address; set with it by the deployment.',
+    },
   ],
   about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
 }
@@ -1539,7 +1546,7 @@ export const prints: PrintDetail[] = [
         info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
         poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
       },
-      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail' }],
+      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],
     },
   }),

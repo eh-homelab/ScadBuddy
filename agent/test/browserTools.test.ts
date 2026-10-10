@@ -427,6 +427,16 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     expect((await callTool('browser_click', { role: 'button', name: 'Render' })).text).toMatch(/needs the "write" tier/)
     expect(t.calls()).toEqual([])
   })
+
+  it('lets a read-tier token point at a control: browser_highlight reaches the tab ungated (#1919)', async () => {
+    const { t, pairings, principal, callTool } = await setup('read')
+    const request = await pairings.request(principal)
+    await pairings.accept(request.id, request.code, TAB)
+    const result = await callTool('browser_highlight', { role: 'button', name: 'Render' })
+    expect(result.isError).toBe(false)
+    expect(result.body).toEqual({ tool: 'highlight' })
+    expect(t.calls()).toMatchObject([{ type: 'call', tool: 'highlight', args: { role: 'button', name: 'Render' } }])
+  })
 })
 
 // #815 §2: a call that finds no tab, in a session the user owns, waits for the
@@ -596,8 +606,10 @@ describe('waiting for the tab (#815)', () => {
     const stop = new AbortController()
     const result = runTool(tool('browser_snapshot'), {}, ctx(hub.forSession('s1'), agent, stop.signal))
     await expect.poll(() => seen.length).toBe(2)
-    expect(seen[1]).toBe(stop.signal)
+    // The call's signal, joined with its deadline (registry.ts withDeadline, #1918).
+    expect(seen[1]?.aborted).toBe(false)
     stop.abort()
+    expect(seen[1]?.aborted).toBe(true)
     expect(text(await result)).toMatch(/the call was cancelled/)
   })
 

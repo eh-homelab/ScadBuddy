@@ -72,8 +72,8 @@ def _cached(cache: Path, file: LibraryFile, name: str) -> Path | None:
     return cache / CACHE_DIRNAME / f"v{VIEW_VERSION}-{digest}-{name}"
 
 
-def _store(path: Path, data: bytes) -> None:
-    """Write ``path`` aside and rename it in, then drop all but the newest files."""
+def _store(path: Path, data: bytes, keep: int) -> None:
+    """Write ``path`` aside and rename it in, then drop all but the ``keep`` newest files."""
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
     partial.write_bytes(data)
@@ -83,7 +83,7 @@ def _store(path: Path, data: bytes) -> None:
         key=lambda entry: entry.stat().st_mtime_ns,
         reverse=True,
     )
-    for stale in kept[MAX_CACHED:]:
+    for stale in kept[keep:]:
         stale.unlink(missing_ok=True)
 
 
@@ -112,7 +112,7 @@ async def library_preview(
         return await asyncio.to_thread(path.read_bytes)
     data = await asyncio.to_thread(_glb, await _read(client, file, plate))
     if path is not None:
-        await asyncio.to_thread(_store, path, data)
+        await asyncio.to_thread(_store, path, data, MAX_CACHED)
     return data
 
 
@@ -135,5 +135,5 @@ async def library_geometry(
     analysis = await asyncio.to_thread(_analysis, read, plate)
     if path is not None:
         data = (analysis.model_dump_json(indent=2) + "\n").encode("utf-8")
-        await asyncio.to_thread(_store, path, data)
+        await asyncio.to_thread(_store, path, data, MAX_CACHED)
     return analysis

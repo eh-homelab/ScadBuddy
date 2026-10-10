@@ -61,6 +61,7 @@ describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? 
   let script: (request: RecordedRequest) => Reply
   let db: Database
   let schema: string
+  let url: string
   let drop: () => Promise<void>
   let stop: AbortController
   let backend: Server
@@ -72,7 +73,7 @@ describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? 
     await resetTracing()
     hits.length = 0
     fake = await startFakeAnthropic((r) => script(r))
-    ;({ db, schema, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     stop = new AbortController()
     backend = createServer((req, res) => {
@@ -94,7 +95,7 @@ describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? 
   async function agent(): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
-    const pool = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+    const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
     const services = {
       backend: createBackendClient(backendUrl),

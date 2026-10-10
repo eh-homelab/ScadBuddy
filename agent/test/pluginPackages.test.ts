@@ -205,6 +205,14 @@ describe('vetting a package', () => {
     expect(v.review?.refused?.some((p) => /more$/.test(p))).toBe(false)
   })
 
+  it.each(['remote-devices', 'claude-device', 'webagent', 'claude-code-remote'])(
+    'refuses a package named %s, a server name Claude Code reserves (#2017)',
+    (name) => {
+      const v = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name }) }))
+      expect(v.review?.refused).toEqual([expect.stringMatching(new RegExp(`plugin name "${name}" is reserved`))])
+    },
+  )
+
   it('lists what an admin may allow in the review, and keeps unsafe names and escaping paths fatal', () => {
     const hook = { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }
     const allowable = vetPackage(tree({ ...GREETER, ...hook }))

@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
-import type { CustomizerSchema, LibraryCopy, Output } from '../api/types'
+import type { CustomizerSchema, LibraryCopy, ModelLibrary, Output } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
@@ -13,10 +13,12 @@ import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { fromOutputs } from '../lib/arrange'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
+import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
+import { libraryLabel, pinChange } from '../lib/libraryPins'
 import { isEmbedded } from '../lib/embed'
 
 /** Output ids are 32 hex characters; only the head of one is worth showing. */
@@ -139,6 +141,7 @@ export function HistoryPage() {
                   onSend={() => setSendFor(output)}
                   onDelete={() => requestDelete(output)}
                   bambuddyUrl={bambuddyUrl}
+                  pinned={modelState.data?.libraries}
                 />
               ))}
             </ul>
@@ -317,6 +320,30 @@ function BambuddyId({
   )
 }
 
+/** #1296 — the libraries and commits an output was rendered with. */
+function OutputLibraries({
+  libraries,
+  pinned,
+}: {
+  libraries: ModelLibrary[]
+  pinned: ModelLibrary[] | undefined
+}) {
+  if (libraries.length === 0) return null
+  return (
+    <p className="sb-num mt-1 text-[12px] text-muted" aria-label="Rendered with libraries">
+      {libraries.map((library, index) => {
+        const change = pinChange(library, pinned)
+        return (
+          <span key={library.name} className={index > 0 ? 'ml-3' : undefined}>
+            {libraryLabel(library)}
+            {change && <span className="ml-1 text-warn">({change})</span>}
+          </span>
+        )
+      })}
+    </p>
+  )
+}
+
 function OutputRow({
   output,
   schema,
@@ -327,6 +354,7 @@ function OutputRow({
   onSend,
   onDelete,
   bambuddyUrl,
+  pinned,
 }: {
   output: Output
   schema: CustomizerSchema
@@ -338,9 +366,18 @@ function OutputRow({
   onSend: () => void
   onDelete: () => void
   bambuddyUrl: string | undefined
+  /** The model's current pins; undefined until the model has loaded, so nothing is flagged. */
+  pinned: ModelLibrary[] | undefined
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
   const unit = useDisplayUnit()
+  const queuedPlates = output.plates ?? []
+  // #986 — a printed plate by what it holds. Read only for an output printed plate by
+  // plate; an unreadable list leaves the numbers.
+  const plateNames = useAsync(
+    () => (queuedPlates.length > 1 ? api.getOutputPlates(output.id).catch(() => []) : Promise.resolve([])),
+    [output.id, queuedPlates.length > 1],
+  ).data ?? []
   /** An arranged output has no template inputs to reopen in the customizer. */
   const arrangedFrom = (output.arranged_from ?? []).length
   // #975 — what each row's buttons are named after, so a list of them can tell the rows apart.
@@ -371,7 +408,7 @@ function OutputRow({
                   className="ml-2 text-ok"
                   href={bambuddyUrl && `${bambuddyUrl}/queue/${plate.queue_item_id}`}
                 >
-                  plate {plate.plate_id} queued #{plate.queue_item_id}
+                  {plateLabel(plateNames, plate.plate_id)} queued #{plate.queue_item_id}
                 </BambuddyId>
               ))}
             {output.queue_item_id && (output.plates ?? []).length <= 1 && (
@@ -388,6 +425,7 @@ function OutputRow({
               </BambuddyId>
             )}
           </p>
+          <OutputLibraries libraries={output.libraries ?? []} pinned={pinned} />
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

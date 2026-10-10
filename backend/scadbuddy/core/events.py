@@ -142,7 +142,10 @@ class UpstreamAvailable(BaseEvent):
 
 
 class OutputEvent(BaseEvent):
-    kind: Literal["output.created", "output.deleted"]
+    """An output was saved or deleted, or (``output.updated``) its re-render was
+    attached or marked failed (#1970): re-read ``GET /outputs/{id}``."""
+
+    kind: Literal["output.created", "output.deleted", "output.updated"]
     output_id: str
     slug: str
 

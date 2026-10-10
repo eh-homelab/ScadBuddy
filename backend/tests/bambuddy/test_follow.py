@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import psycopg
 import pytest
 import respx
 from temporalio.exceptions import ApplicationError
@@ -22,13 +23,28 @@ from scadbuddy.bambuddy import follow as follow_module
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.follow import FollowActivities, Follower, FollowInput
 from scadbuddy.bambuddy.output_reader import LocalOutputs
-from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.progress import (
+    QUEUE_PATH,
+    PrintProgress,
+    ProgressObserver,
+    from_failed_run,
+    progress_for,
+)
+from scadbuddy.bambuddy.runs import (
+    NewestFailed,
+    PrintRun,
+    PrintRunError,
+    PrintRunStore,
+    newest_failed_from,
+    newest_failure,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.glb import BoundingBox
 
 OUTPUT = "c" * 32
@@ -610,3 +626,137 @@ def test_a_library_print_bambuddy_no_longer_has_ends_the_follow(paths: DataPaths
 def test_without_a_library_reader_a_library_follow_ends_at_once(paths: DataPaths) -> None:
     follower, _ = follower_for(paths, Script(None))
     assert asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5)) == "gone"
+
+
+FAILED_RUN = from_failed_run("the slice failed", bambuddy_url="http://bambuddy.test/queue")
+
+
+def test_a_newer_runs_failure_is_published_not_the_older_print_it_follows(
+    paths: DataPaths,
+) -> None:
+    """#1837: a newer run of the output failed before queueing while this follow's older
+    print still moves. The route publishes that failure (``route: "run"``); the follow
+    publishes the same, so the two never alternate, yet still reads the older print to
+    its end, for the settled hooks."""
+    write_output(paths)
+    read = Script(progress("queued"), progress("running"), progress("done", settled=True))
+    asked: list[str] = []
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        asked.append(run_subject)
+        return FAILED_RUN
+
+    follower, seen = follower_for(paths, read, newest_failed=newest_failed)
+    # The progress route already published the failure, through the same observer.
+    follower.observer.observe_subject(OUTPUT, "demo", FAILED_RUN)
+    seen.clear()
+    heard: list[str] = []
+
+    async def hook(subject: PrintSubject) -> None:
+        heard.append(subject.id)
+
+    follower.on_settled.append(hook)
+    assert follow(follower) == "settled"
+    assert read.reads == 3
+    assert asked == [OUTPUT] * 3
+    assert kinds(seen) == []  # nothing new to publish: no alternation
+    assert heard == [OUTPUT]  # the older print's settle still ran its hooks
+
+
+def test_without_a_newer_failure_the_follow_publishes_its_print(paths: DataPaths) -> None:
+    write_output(paths)
+    read = Script(progress("running"), progress("done", settled=True))
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        return None
+
+    follower, seen = follower_for(paths, read, newest_failed=newest_failed)
+    assert follow(follower) == "settled"
+    assert kinds(seen) == ["print.progress", "print.progress", "print.settled"]
+
+
+def test_a_newest_failure_read_that_breaks_publishes_the_print_as_before(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    write_output(paths)
+    read = Script(progress("running"), progress("done", settled=True))
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        raise RuntimeError("a bug")
+
+    follower, seen = follower_for(paths, read, newest_failed=newest_failed)
+    with caplog.at_level(logging.ERROR):
+        assert follow(follower) == "settled"
+    assert kinds(seen) == ["print.progress", "print.progress", "print.settled"]
+    assert "the newest run's failure could not be read" in caplog.text
+
+
+class _Runs:
+    """`PrintRunStore` as `newest_failure` reads it."""
+
+    def __init__(self, latest: PrintRun | Exception | None) -> None:
+        self.latest = latest
+
+    async def latest_for_output(self, output_id: str) -> PrintRun | None:
+        if isinstance(self.latest, Exception):
+            raise self.latest
+        return self.latest
+
+
+def _run(status: str, *, may_have_queued: bool = False) -> PrintRun:
+    return PrintRun(
+        id="r" * 32,
+        subject=f"output:{OUTPUT}",
+        status=status,  # type: ignore[arg-type]
+        created_at=NOW,
+        error=PrintRunError(status=502, title="Bad Gateway", detail="the slice failed")
+        if status == "failed"
+        else None,
+        may_have_queued=may_have_queued,
+    )
+
+
+@pytest.mark.parametrize(
+    ("runs", "expected"),
+    [
+        (_Runs(_run("failed")), "the slice failed"),
+        (_Runs(_run("failed", may_have_queued=True)), None),  # its print says more
+        (_Runs(_run("succeeded")), None),
+        (_Runs(None), None),  # never run
+        (_Runs(psycopg.OperationalError("down")), None),  # unreachable database
+    ],
+    ids=["failed", "may-have-queued", "succeeded", "none", "unreachable"],
+)
+def test_newest_failure(runs: _Runs, expected: str | None) -> None:
+    assert asyncio.run(newest_failure(cast(PrintRunStore, runs), OUTPUT)) == expected
+
+
+def _newest_failed_of(newest_failed: NewestFailed) -> PrintProgress | None:
+    async def read() -> PrintProgress | None:
+        return await newest_failed(OUTPUT)
+
+    return asyncio.run(read())
+
+
+def test_newest_failed_from_links_the_queue_as_the_routes_do() -> None:
+    """#2015: the worker's and the API's follow build the failure's link from the stored
+    settings as the progress routes do from ``client.config.web_url(QUEUE_PATH)``: the
+    browser-facing URL, not the internal one."""
+    settings = StoredSettings(
+        bambuddy_url="http://bambuddy:8000",
+        bambuddy_api_key="bb_test",
+        bambuddy_web_urls="https://bambuddy.example",
+    )
+    newest_failed = newest_failed_from(cast(PrintRunStore, _Runs(_run("failed"))), lambda: settings)
+    failed = _newest_failed_of(newest_failed)
+    assert failed is not None
+    assert failed.bambuddy_url == "https://bambuddy.example/queue"
+    assert failed.bambuddy_url == BambuddyConfig.from_settings(settings).web_url(QUEUE_PATH)
+
+
+def test_newest_failed_from_reads_no_settings_without_a_failure() -> None:
+    def load() -> StoredSettings:
+        raise AssertionError("read the settings for nothing")
+
+    newest_failed = newest_failed_from(cast(PrintRunStore, _Runs(_run("succeeded"))), load)
+    assert _newest_failed_of(newest_failed) is None

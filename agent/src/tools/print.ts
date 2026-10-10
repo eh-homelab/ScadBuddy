@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { command, reattach } from './command.js'
+import { ACCEPTING_MS, command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
@@ -97,6 +97,19 @@ function getChoices(ctx: ToolContext, source: Source, printer_id: number | undef
     : ok(
         ctx.backend.GET('/api/v1/print/outputs/{output_id}/choices', { params: { path: { output_id: source.id }, query } }),
         `get print choices for ${source.id}`,
+      )
+}
+
+/** The source's plates: for an output its 3MF's, for a library file what Bambuddy reads from it. */
+export function getPlates(ctx: Pick<ToolContext, 'backend'>, source: Source) {
+  return source.kind === 'library'
+    ? ok(
+        ctx.backend.GET('/api/v1/print/library/{file_id}/plates', { params: { path: { file_id: source.id } } }),
+        `get plates of library file ${source.id}`,
+      )
+    : ok(
+        ctx.backend.GET('/api/v1/outputs/{output_id}/plates', { params: { path: { output_id: source.id } } }),
+        `get plates of ${source.id}`,
       )
 }
 
@@ -203,7 +216,7 @@ const tier = z.enum(['fine', 'standard', 'draft'])
 type NozzleChoice = z.infer<typeof nozzleChoice>
 type SlotChoice = z.infer<typeof slotChoice>
 
-/** The dialog's own default: 0.4 mm standard on both sides (frontend PrintPicker `DEFAULT_NOZZLES`). */
+/** 0.4 mm standard on both sides, when the choices name no defaults (frontend `DEFAULT_NOZZLES`). */
 const DEFAULT_NOZZLES: NozzleChoice[] = [
   { size: '0.4', flow: 'standard' },
   { size: '0.4', flow: 'standard' },
@@ -235,8 +248,10 @@ export const printTools: Tool[] = [
       'Everything the print dialog offers for an output, or a Bambuddy library file (`library_file_id`), in ' +
       'one read: printers (and the one chosen), the installed nozzles, quality tiers and Bambu processes per ' +
       'nozzle size, filament presets per size, plate types with the one last printed on, the filament step ' +
-      "(as get_print_filaments), and the model's (or the file's) remembered choices. What print_output fills " +
-      'omitted choices from.',
+      "(as get_print_filaments), the model's (or the file's) remembered choices, and its plates by index and " +
+      'name (what each holds; `null` when nothing names it; empty when they cannot be read), which ' +
+      'print_output takes as `plate_id`. What ' +
+      'print_output fills omitted choices from.',
     input: withSource({ printer_id: z.number().int().optional() }),
     risk: 'read',
     source:
@@ -244,8 +259,22 @@ export const printTools: Tool[] = [
     // Printers, status and archives (Read Status); slicer presets and the 3MF's
     // filament requirements (Manage Library). backend/scadbuddy/bambuddy/choices.py.
     bambuddyScope: ['Read Status', 'Manage Library'],
-    routes: ['GET /api/v1/print/outputs/{output_id}/choices', 'GET /api/v1/print/library/{file_id}/choices'],
-    handler: async (args, ctx) => json(await getChoices(ctx, sourceOf(args), args.printer_id)),
+    routes: [
+      'GET /api/v1/print/outputs/{output_id}/choices',
+      'GET /api/v1/print/library/{file_id}/choices',
+      'GET /api/v1/outputs/{output_id}/plates',
+      'GET /api/v1/print/library/{file_id}/plates',
+    ],
+    handler: async (args, ctx) => {
+      const source = sourceOf(args)
+      // #986 — a plate by what it holds, so the agent can say "the lid", not "plate 2". The plates
+      // are extra: an unreadable list is empty, as in the dialog, and never fails the choices.
+      const [choices, plates] = await Promise.all([
+        getChoices(ctx, source, args.printer_id),
+        getPlates(ctx, source).catch(() => []),
+      ])
+      return json({ ...choices, plates: plates.map(({ index, name }) => ({ index, name: name || null })) })
+    },
   }),
 
   defineTool({
@@ -479,7 +508,8 @@ export const printTools: Tool[] = [
       'derives from the chosen spools, nozzles, quality and plate, then queue it on one printer, behind one ' +
       'approval. Any choice left out is filled ' +
       "the way the print dialog opens: the chosen printer, the model's (or file's) remembered nozzles, tier or " +
-      "process and spools (else 0.4 mm standard, the Standard tier and the suggested spools), and the printer's " +
+      "process and spools (else 0.4 mm, High Flow on each side with a High Flow nozzle of that size and Standard " +
+      "elsewhere, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
       'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
@@ -536,6 +566,8 @@ export const printTools: Tool[] = [
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
+    // Its own wait for the print run, after the backend has accepted it.
+    waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async (args, ctx) => {
       const { backend } = ctx
       const source = sourceOf(args)
@@ -560,7 +592,11 @@ export const printTools: Tool[] = [
         bedType ??= view.bed_type
         const last = view.model_choices
         const remembered = last?.nozzles ?? []
-        if (chosenNozzles === undefined) chosenNozzles = remembered.length > 0 ? remembered : DEFAULT_NOZZLES
+        // With nothing remembered, the printer's defaults: High Flow on each side that has
+        // a High Flow nozzle of the size (#1895).
+        const defaults = view.default_nozzles ?? []
+        if (chosenNozzles === undefined)
+          chosenNozzles = remembered.length > 0 ? remembered : defaults.length > 0 ? defaults : DEFAULT_NOZZLES
         if (chosenTier === undefined && processName === undefined) {
           // A remembered process belongs to the remembered nozzle size.
           processName = remembered.length > 0 && args.nozzles === undefined ? (last?.process_name ?? null) : null

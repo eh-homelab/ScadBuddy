@@ -1,6 +1,6 @@
 import { api } from '../api/client'
 import type { Job } from '../api/types'
-import { getRealtime } from './realtime'
+import { getRealtime, type RealtimeEvent } from './realtime'
 
 /** The wait's limit passed with the job still going. */
 export class JobStillRunning extends Error {
@@ -27,8 +27,40 @@ export function waitForJob(
   jobId: string,
   opts: { pollMs: number; waitMs?: number; signal?: AbortSignal; onJob?: (job: Job) => void },
 ): Promise<Job> {
+  return followUntil(`job:${jobId}`, {
+    ...opts,
+    read: () => api.getJob(jobId),
+    done: settled,
+    // A step starting changes nothing a read would show.
+    relevant: (event) => event.kind !== 'job.progress',
+    onRead: opts.onJob,
+    stillRunning: () => new JobStillRunning(jobId),
+  })
+}
+
+/**
+ * `read()` once `done` holds of it, reading once per signal on `topic` that
+ * `relevant` admits (and on the subscription's confirmation, so a change made before
+ * it is still seen), and on a `pollMs` timer only while the socket is unavailable.
+ * `onRead` sees every read that is not done. An aborted `signal` rejects with its
+ * reason; `waitMs` passing rejects with `stillRunning()`, after one read if none has
+ * answered yet (waiting at most `pollMs` more for it); a failed read rejects with its error.
+ */
+export function followUntil<T>(
+  topic: string,
+  opts: {
+    read: () => Promise<T>
+    done: (value: T) => boolean
+    relevant?: (event: RealtimeEvent) => boolean
+    onRead?: ((value: T) => void) | undefined
+    stillRunning: () => Error
+    pollMs: number
+    waitMs?: number | undefined
+    signal?: AbortSignal | undefined
+  },
+): Promise<T> {
   const { signal } = opts
-  return new Promise<Job>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     if (signal?.aborted) {
       reject(signal.reason as Error)
       return
@@ -37,9 +69,27 @@ export function waitForJob(
     let ended = false
     let reading = false
     let again = false
+    /** A read has answered: until one has, the limit reads once before it gives up. */
+    let answered = false
+    let expired = false
     let poll: ReturnType<typeof setTimeout> | undefined
+    /** Bounds that one look: fetch has no timeout, so a read can hang (#2045 review). */
+    let grace: ReturnType<typeof setTimeout> | undefined
+    const giveUp = () => end(() => reject(opts.stillRunning()))
     const limit =
-      opts.waitMs === undefined ? undefined : setTimeout(() => end(() => reject(new JobStillRunning(jobId))), opts.waitMs)
+      opts.waitMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            expired = true
+            // A limit that passes before the first read (a caller's budget already
+            // spent) still looks once (#2038), for at most `pollMs` more: the limit
+            // stays a bound however long that read takes.
+            if (answered) giveUp()
+            else {
+              grace = setTimeout(giveUp, opts.pollMs)
+              if (!reading) void read()
+            }
+          }, opts.waitMs)
 
     const onAbort = () => end(() => reject(signal?.reason as Error))
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -52,10 +102,14 @@ export function waitForJob(
       }
       reading = true
       try {
-        const job = await api.getJob(jobId)
+        const value = await opts.read()
         if (ended) return
-        if (settled(job)) end(() => resolve(job))
-        else opts.onJob?.(job)
+        answered = true
+        if (opts.done(value)) end(() => resolve(value))
+        else {
+          opts.onRead?.(value)
+          if (expired) giveUp()
+        }
       } catch (cause) {
         end(() => reject(cause as Error))
       } finally {
@@ -67,9 +121,8 @@ export function waitForJob(
       }
     }
 
-    const unfollow = realtime.subscribe(`job:${jobId}`, (event) => {
-      // A step starting changes nothing a read would show.
-      if (event !== 'resync' && event.kind === 'job.progress') return
+    const unfollow = realtime.subscribe(topic, (event) => {
+      if (event !== 'resync' && opts.relevant && !opts.relevant(event)) return
       void read()
     })
     const fallback = () => {
@@ -86,6 +139,7 @@ export function waitForJob(
       unfollow()
       clearTimeout(poll)
       clearTimeout(limit)
+      clearTimeout(grace)
       signal?.removeEventListener('abort', onAbort)
       settle()
     }

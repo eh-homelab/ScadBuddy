@@ -189,6 +189,62 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })
 
+  describe('the images a user sends with a turn', () => {
+    // A JPEG's signature is enough for images.ts; the preview is the panel's own drawing.
+    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]).toString('base64')
+    const SENT = `${createHash('sha256').update(Buffer.from(JPEG, 'base64')).digest('hex')}.jpg`
+    const preview = { mediaType: 'image/png' as const, data: PNG }
+    const image = { mediaType: 'image/jpeg' as const, data: JPEG, preview }
+
+    /** A browser session whose first turn carried the image; its turn returns none. */
+    async function withSent(): Promise<string> {
+      next = { reply: 'I see it.' }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'look', images: [image] })
+      await turn!.done
+      return session.id
+    }
+
+    it('stores each before the user.turn that names it beside its preview, and serves it', async () => {
+      const id = await withSent()
+      const events = await logged(id)
+      expect(events.find((e) => e.type === 'user.turn')).toMatchObject({ images: [{ ...preview, name: SENT }] })
+      // The log names the image; only the preview is in it.
+      expect(JSON.stringify(events)).not.toContain(JPEG)
+      await expectPanelAccepts(events)
+
+      const res = await get(`/api/v1/ai/sessions/${id}/blobs/${SENT}`)
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toBe('image/jpeg')
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+      expect(res.headers.get('content-disposition')).toBe('inline')
+      expect(res.headers.get('cache-control')).toMatch(/^private, .*immutable/)
+      expect(Buffer.from(await res.arrayBuffer()).equals(Buffer.from(JPEG, 'base64'))).toBe(true)
+    })
+
+    it('serves it to the UI only, under its own session, and not to another principal', async () => {
+      const id = await withSent()
+      const path = `/api/v1/ai/sessions/${id}/blobs/${SENT}`
+      expect((await get(path, { ...UI_READ, 'sec-fetch-site': 'cross-site' })).status).toBe(403)
+      expect((await get(path, { ...UI_READ, origin: 'https://evil.example' })).status).toBe(403)
+      next = { reply: 'nothing to see' }
+      const { session: other } = await m.start(browser, { origin: 'chat' })
+      expect((await get(`/api/v1/ai/sessions/${other.id}/blobs/${SENT}`)).status).toBe(404)
+      // A name this session never stored: the full view falls back to the preview.
+      expect((await get(`/api/v1/ai/sessions/${id}/blobs/${'0'.repeat(64)}.jpg`)).status).toBe(404)
+      // The owner reads it as the session; any other principal finds no session.
+      await expect(m.blob(id, SENT, browser)).resolves.toMatchObject({ mediaType: 'image/jpeg' })
+      await expect(m.blob(id, SENT, agentA)).rejects.toMatchObject({ code: 'not_found' })
+    })
+
+    it('logs the previews without names when the images cannot be stored', async () => {
+      await db.sql`ALTER TABLE ai_session_blobs ADD CONSTRAINT no_more CHECK (false) NOT VALID`
+      const id = await withSent()
+      const turn = (await logged(id)).find((e) => e.type === 'user.turn')
+      expect(turn).toMatchObject({ images: [preview] })
+      expect(turn?.type === 'user.turn' && turn.images?.[0] && 'name' in turn.images[0]).toBe(false)
+    })
+  })
+
   it('shows the call without its images when they cannot be stored', async () => {
     await db.sql`ALTER TABLE ai_session_blobs ADD CONSTRAINT no_more CHECK (false) NOT VALID`
     const id = await withImage()

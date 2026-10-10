@@ -204,8 +204,6 @@ async def test_a_file_deleted_in_bambuddy_is_a_404(bambuddy: BambuddyClient) -> 
 class _Sends:
     """Records `record_sends` as the link store would take it."""
 
-    available = True
-
     def __init__(self, error: Exception | None = None) -> None:
         self.recorded: list[tuple[PrintSubject, list[PrintSend]]] = []
         self.error = error

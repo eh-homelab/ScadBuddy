@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from contextlib import suppress
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 import psycopg
@@ -64,13 +64,14 @@ from scadbuddy.bambuddy.projects import (
     ProjectView,
     describe_projects,
 )
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices, RackAlgorithmSupersededError
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
+from scadbuddy.rack.rank import Usage, rack_positions
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -174,6 +175,30 @@ class PrinterRackAlgorithm(BaseModel):
     algorithm: RackAlgorithm
 
 
+class RackHotendUsage(BaseModel):
+    """What one rack position's hotend has printed (#1298). Named by position and nozzle,
+    never by serial (spec 2026-10-01 §7)."""
+
+    position: int
+    nozzle_diameter: str
+    nozzle_type: str
+    high_flow: bool
+    prints: int
+    print_seconds: int
+    grams: float
+    #: Picks whose print has not settled yet: queued, or printing (#1079).
+    pending: int
+    first_seen_at: datetime | None
+    last_used_at: datetime | None
+
+
+class PrinterRackUsage(BaseModel):
+    """The recorded use of each hotend on one printer's rack now (#1298)."""
+
+    printer_id: int
+    hotends: list[RackHotendUsage]
+
+
 @router.put(
     "/models/{slug}/choices",
     response_model=ModelPrintChoices,
@@ -272,6 +297,57 @@ def put_printer_rack_algorithm(
             type_=DATABASE_UNAVAILABLE_PROBLEM,
         ) from None
     return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
+
+
+@router.get(
+    "/printers/{printer_id}/rack-usage",
+    response_model=PrinterRackUsage,
+    summary="What each hotend on this printer's rack has printed",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "The recorded usage could not be read from the database."
+        },
+    },
+)
+async def get_printer_rack_usage(
+    printer_id: int, store: SettingsStoreDep, rack: RackUsageDep
+) -> PrinterRackUsage:
+    """The counts behind the Least used rack algorithm (#1298), for the hotends the
+    printer reports on its rack now. A printer with no rack lists none."""
+    async with client_for(store.load()) as client:
+        printer = await client.printer_status(printer_id)
+    positions = rack_positions(printer.nozzle_rack)
+    try:
+        usage = await rack.usage(slot.serial_number for slot in positions.values())
+    except DATABASE_ERRORS as error:
+        # By type only: a database error's text can carry a serial (spec §7).
+        logger.warning(
+            "rack usage read gave up on the database",
+            extra={"printer_id": printer_id, "error": type(error).__name__},
+        )
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"could not read the recorded hotend usage ({type(error).__name__})",
+            type_=DATABASE_UNAVAILABLE_PROBLEM,
+        ) from None
+    hotends = []
+    for position, slot in positions.items():
+        use = usage.get(slot.serial_number, Usage()) if slot.serial_number else Usage()
+        hotends.append(
+            RackHotendUsage(
+                position=position,
+                nozzle_diameter=slot.nozzle_diameter,
+                nozzle_type=slot.nozzle_type,
+                high_flow=slot.high_flow,
+                prints=use.prints,
+                print_seconds=use.print_seconds,
+                grams=use.grams,
+                pending=use.pending,
+                first_seen_at=use.first_seen_at,
+                last_used_at=use.last_used_at,
+            )
+        )
+    return PrinterRackUsage(printer_id=printer_id, hotends=hotends)
 
 
 @router.get(
@@ -617,22 +693,8 @@ async def get_choices(
 
 
 async def failed_before_queueing(state: AppState, run_subject: str) -> str | None:
-    """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
-    #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
-    run that may have queued recorded what it queued, so its print's own progress says
-    more. Without a database, or with one that does not answer, there are no runs to
-    read, and the progress is read as it was before."""
-    runs = state.print_runs.store
-    if not runs.available:
-        return None
-    try:
-        latest = await runs.latest_for_output(run_subject)
-    except DATABASE_ERRORS:
-        logger.warning("print runs unreadable; progress read without them")
-        return None
-    if latest is None or latest.status != "failed" or latest.may_have_queued:
-        return None
-    return latest.error.detail if latest.error is not None else None
+    """`newest_failure` over this process's print runs."""
+    return await newest_failure(state.print_runs.store, run_subject)
 
 
 @router.get(
@@ -668,9 +730,7 @@ async def get_progress(
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
-            progress = await progress_for(
-                client, meta, uploads=uploads, links=links if links.available else None
-            )
+            progress = await progress_for(client, meta, uploads=uploads, links=links)
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

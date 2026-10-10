@@ -210,6 +210,7 @@ class RackUsageStore:
                 "SELECT s.serial, seen.first_seen_at, count(p.archive_id) AS prints,"
                 " coalesce(sum(p.print_seconds), 0) AS print_seconds,"
                 " coalesce(sum(p.grams), 0) AS grams,"
+                " max(p.settled_at) AS last_used_at,"
                 # Open picks (#1079): no print row for the pick's item and group yet.
                 " (SELECT count(*) FROM rack_nozzle_picks AS k"
                 "  WHERE k.serial = s.serial AND k.picked_at > now() - %s"
@@ -229,6 +230,7 @@ class RackUsageStore:
                 grams=float(row["grams"]),
                 first_seen_at=row["first_seen_at"],
                 pending=int(row["pending"]),
+                last_used_at=row["last_used_at"],
             )
             for row in rows
         }
@@ -498,8 +500,6 @@ def settle_hook(
     linked by the read that finds it settled (``tests/rack/test_settle.py``)."""
 
     async def hook(subject: PrintSubject) -> None:
-        if not links.available:
-            return
         # A settings read is a database read: off the event loop, so the follow stops
         # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
         # stuck on a slow Postgres gives its thread back to the shared executor rather

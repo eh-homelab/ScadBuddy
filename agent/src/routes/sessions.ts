@@ -41,8 +41,9 @@ import { ready, type RouteModule } from './module.js'
 //                                                 changed or deleted, oldest first (#931,
 //                                                 sessions/touched.ts)
 //   GET  /api/v1/ai/sessions/:id/blobs/:name      an image one of its tool results carried (#782,
-//                                                 sessions/blobs.ts), by the name its tool.result
-//                                                 event gives; 404 for any other name. Never a path:
+//                                                 sessions/blobs.ts), or one the user sent, by the
+//                                                 name its tool.result or user.turn event gives;
+//                                                 404 for any other name. Never a path:
 //                                                 the name is looked up in ai_session_blobs
 //   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
@@ -302,6 +303,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // and no other site may embed it.
         'Content-Security-Policy': "default-src 'none'; sandbox",
         'Cross-Origin-Resource-Policy': 'same-origin',
+        'Content-Disposition': 'inline',
         // The name is the bytes' hash: what it names never changes.
         'Cache-Control': 'private, max-age=31536000, immutable',
       })

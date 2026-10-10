@@ -70,6 +70,20 @@ export const TOOLS = {
       })
       .strict(),
   }),
+  highlight: tool({
+    description:
+      'Point at the visible element with this ARIA role and accessible name: it scrolls into view and ' +
+      'is outlined for a moment, so the user can see what you are talking about. Changes nothing.',
+    risk: 'read',
+    scope: 'global',
+    input: z
+      .object({
+        role: z.string().min(1).describe('ARIA role, e.g. "button", "link", "tab", "checkbox"'),
+        name: z.string().describe('Accessible name, matched exactly (case-insensitive)'),
+        index: z.number().int().min(0).optional().describe('Which match, when several share the name'),
+      })
+      .strict(),
+  }),
   fill: tool({
     description:
       'Fallback for UI no other tool covers: type a value into the visible field with this label ' +

@@ -102,6 +102,37 @@ describe('SettingsPage', () => {
     expect(await findStatus("'Read Status' scope")).toBeInTheDocument()
   })
 
+  it("shows what Bambuddy itself answered a failed test (#1542)", async () => {
+    server.use(
+      http.post('/api/v1/settings/test', () =>
+        HttpResponse.json({
+          ok: false,
+          detail: 'Bambuddy is limiting requests and refused to list the printers; it asks to wait 30 s',
+          printers: [],
+          upstream: { status: 429, retry_after: '30', detail: 'Too many requests for this API key', error: null },
+        }),
+      ),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(bambuddyTest())
+    expect(await findStatus('limiting requests')).toBeInTheDocument()
+    const answered = screen.getByText('What Bambuddy answered').closest('details')!
+    expect(within(answered).getByText('429')).toBeInTheDocument()
+    expect(within(answered).getByText('30')).toBeInTheDocument()
+    expect(within(answered).getByText('Too many requests for this API key')).toBeInTheDocument()
+  })
+
+  it('shows no answer when the test passed', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(bambuddyTest())
+    expect(await findStatus('3DP-31B-598')).toBeInTheDocument()
+    expect(screen.queryByText('What Bambuddy answered')).not.toBeInTheDocument()
+  })
+
   it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
     renderPage(<SettingsPage />)
     await seeded()

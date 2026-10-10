@@ -20,7 +20,7 @@ from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import assets, health, libraries, media, metrics, models, outputs, telemetry
+from scadbuddy.api import health, libraries, media, metrics, models, outputs, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
@@ -68,6 +68,7 @@ from scadbuddy.workflows.client import (
     follow_worker,
     reconcile_lost_operations,
     reconcile_lost_runs,
+    sandboxed_runner,
 )
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
@@ -430,7 +431,7 @@ async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> 
     error; the boot's pass only logs it."""
     try:
         await asyncio.to_thread(
-            attach_backfills, state.outputs, state.refs, state.render.store.read
+            attach_backfills, state.outputs, state.refs, state.render.store.read, state.events
         )
     except Exception:
         logger.exception("could not attach the finished output re-renders")
@@ -735,6 +736,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 queue,
                 activities,
                 workflows=[PreviewBackfill, OperationWorkflow],
+                workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )
             if not await _serve_until([worker], stop, name="library"):
@@ -941,7 +943,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the housekeeping Schedule's `BACKFILL_SWEEP` catches one none heard.
         unfollow_backfills = follow_backfills(
             state.events,
-            partial(attach_job_backfills, state.outputs, state.refs, state.render.store.read),
+            partial(
+                attach_job_backfills,
+                state.outputs,
+                state.refs,
+                state.render.store.read,
+                events=state.events,
+            ),
         )
         # And once now, whatever the Schedule: a re-render that settled while no replica
         # was listening (the sweeps' interval 0, or the Schedule paused).
@@ -999,9 +1007,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.projection.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
-        grants = getattr(app.state, "agent_grants", None)
-        if grants is not None:
-            await grants.aclose()
+        await app.state.agent_grants.aclose()
         await state.store.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
@@ -1030,11 +1036,10 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
-    assets.install_asset_handlers(app)
     models.install_model_handlers(app)
     # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
     # refused on the method, path and marker header alone, before any body is read.
-    grants = postgres_grants(app_settings.database_url) if app_settings.database_url else None
+    grants = postgres_grants(app_settings.database_url)
     # Closed by the lifespan, after everything else has stopped.
     app.state.agent_grants = grants
     # Inside the gate: a commit made for the agent is authored as the agent (#252).

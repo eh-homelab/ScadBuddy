@@ -36,7 +36,7 @@ from scadbuddy.bambuddy.models import QueueItem
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.stages import stage_of
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 
@@ -126,7 +126,7 @@ async def owned_queue_items(
         owned.add(meta.queue_item_id)
     try:
         known = await links.for_subject(PrintSubject.output(meta.id))
-    except (psycopg.Error, DatabaseRequiredError):
+    except psycopg.Error:
         logger.exception("could not read an output's print links", extra={"output_id": meta.id})
     else:
         owned.update(link.queue_item_id for link in known if link.queue_item_id is not None)
@@ -261,7 +261,7 @@ async def scan_library_by_hash(
         return
     try:
         await link_subject_by_hash(client, uploads, links, PrintSubject.library(file_id))
-    except (ApiError, psycopg.Error, DatabaseRequiredError):
+    except (ApiError, psycopg.Error):
         # A failed scan found nothing, so the next read may try again.
         _last_library_scan.pop(file_id, None)
         logger.exception(
@@ -291,7 +291,7 @@ async def link_library_prints(
     """
     try:
         pending = await links.pending_library(LIBRARY_LINK_LIMIT, max_age=LIBRARY_LINK_BACKSTOP)
-    except (psycopg.Error, DatabaseRequiredError):
+    except psycopg.Error:
         logger.exception("could not read the library prints to link")
         return
     gate = asyncio.Semaphore(LIBRARY_LINK_CONCURRENCY)
@@ -327,7 +327,7 @@ async def link_library_prints(
     async def guarded(queue_item_id: int, file_id: int) -> None:
         try:
             await link(queue_item_id, file_id)
-        except (psycopg.Error, DatabaseRequiredError):
+        except psycopg.Error:
             logger.exception(
                 "could not record a library print's link", extra={"queue_item_id": queue_item_id}
             )

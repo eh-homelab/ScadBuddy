@@ -48,6 +48,7 @@ from tests.conftest import (
     UNUSED_TEMPORAL_ADDRESS,
     make_library_upstream,
 )
+from tests.support.media import MemoryMediaStore
 from tests.test_library_processes import _age, _running
 
 pytestmark = pytest.mark.requires_git
@@ -96,7 +97,7 @@ def store(paths: DataPaths, upstream: tuple[str, dict[str, str]]) -> LibraryStor
 
 @pytest.fixture
 def catalogue(paths: DataPaths, history: ModelHistory) -> Catalogue:
-    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
+    return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
 
 def _create(catalogue: Catalogue, slug: str = "widget") -> None:

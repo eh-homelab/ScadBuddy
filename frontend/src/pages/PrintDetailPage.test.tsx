@@ -194,6 +194,13 @@ describe('PrintDetailPage (#311)', () => {
     await screen.findByRole('dialog', {}, { timeout: 3000 })
   })
 
+  it('names the plate image by what the plate holds (#2055)', async () => {
+    render(35)
+    const gallery = await section('Gallery')
+    const slides = within(gallery).getAllByRole('group')
+    expect(within(slides.at(-1)!).getByRole('img')).toHaveAttribute('alt', 'Keychain as sliced')
+  })
+
   it('leads the gallery with the finish photo, then the other photos', async () => {
     const done = prints.find((print) => print.archive_id === 35)!
     server.use(

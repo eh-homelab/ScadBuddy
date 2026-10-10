@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { settled } from './canvas'
 
 // #1743, #1744 — the preview's readouts and its notes and warnings, laid over the scene,
 // must stay inside it, leave most of it to the model, and let a drag orbit the camera.
@@ -68,19 +69,6 @@ async function crowdedRender(page: Page, shortPreview: boolean) {
   await expect(page.getByText('Rendering')).toHaveCount(0)
 }
 
-/** A screenshot of the scene alone, after it has stopped moving. */
-async function settledScene(page: Page): Promise<Buffer> {
-  const canvas = page.getByTestId('preview').locator('canvas')
-  let last = await canvas.screenshot()
-  for (let tries = 0; tries < 20; tries += 1) {
-    await page.waitForTimeout(150)
-    const next = await canvas.screenshot()
-    if (next.equals(last)) return next
-    last = next
-  }
-  return last
-}
-
 const sizes = [
   { name: '1440×900', viewport: { width: 1440, height: 900 }, short: false },
   { name: '1280×720', viewport: { width: 1280, height: 720 }, short: false },
@@ -118,12 +106,12 @@ for (const size of sizes) {
       const y = preview.y + preview.height / 2
       expect(await page.evaluate(`document.elementFromPoint(${x}, ${y})?.tagName`)).toBe('CANVAS')
 
-      const before = await settledScene(page)
+      const before = await settled(page.getByTestId('preview').locator('canvas'))
       await page.mouse.move(x, y)
       await page.mouse.down()
       await page.mouse.move(x + 60, y + 10, { steps: 6 })
       await page.mouse.up()
-      const after = await settledScene(page)
+      const after = await settled(page.getByTestId('preview').locator('canvas'))
       expect(after.equals(before)).toBe(false)
     })
   })

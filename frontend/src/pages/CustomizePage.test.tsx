@@ -16,7 +16,14 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import * as fixtures from '../mocks/fixtures'
-import { setMockJobOutputs, setMockPlates, setMockPresets, setMockRenderColors } from '../mocks/handlers'
+import {
+  mockSettings,
+  setMockJobOutputs,
+  setMockPlates,
+  setMockPresets,
+  setMockRenderColors,
+  setMockSettings,
+} from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
@@ -198,9 +205,38 @@ describe('CustomizePage', () => {
     const hex = screen.getByRole('textbox', { name: 'Text hex' })
     const field = hex.closest('[data-param]')!
     await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
-    await user.clear(hex)
-    await user.type(hex, '#00FF00')
+    // One whole valid colour: clear-then-type left '#000000#00FF00', which is not one,
+    // so the field never took a new value and the test passed whatever the label did
+    // (#2033).
+    await user.tripleClick(hex)
+    await user.paste('#00FF00')
+    expect(hex).toHaveValue('#00FF00')
     expect(field).not.toHaveTextContent('not in this render')
+  })
+
+  // #1685 — a submit refused before it made a job leaves the previous render on show.
+  // Its colours belong to the values it ran with, so the changed colour must not read
+  // "not in this render": the page cannot know yet.
+  it('says nothing about a changed colour whose render was refused before it started', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const field = hex.closest('[data-param]')!
+    await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'the render could not be started' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.tripleClick(hex)
+    await user.paste('#00FF00')
+    expect(await screen.findByRole('alert', {}, { timeout: 4000 })).toHaveTextContent('the render could not be started')
+    expect(field).not.toHaveTextContent('not in this render')
+    expect(field).not.toHaveTextContent(/extruder \d/)
   })
 
   it('renders the defaults without being asked', async () => {
@@ -245,6 +281,33 @@ describe('CustomizePage', () => {
       'retried in 1 s',
     )
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it("says the revision's source is still uploading, not that the queue is full (#1422)", async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: "the revision's snapshot is still uploading",
+              retry_after: 1,
+              code: 'snapshot_pending',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent("Uploading this revision's source; retrying in 1 s.")
+    expect(busy).not.toHaveTextContent('queue is full')
     await firstRender()
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
   })
@@ -350,6 +413,44 @@ describe('CustomizePage', () => {
     const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
     expect(log).toHaveTextContent(CANCELLED_ERROR)
     expect(log).not.toHaveTextContent('Compilation failed')
+  })
+
+  describe('links a render to its workflow in the Temporal UI (#1293)', () => {
+    const link = () => screen.queryByRole('link', { name: 'Open workflow ↗' })
+
+    it('on a failed render, under the deployment\'s namespace', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      const { user } = render()
+      await firstRender()
+
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'boom')
+
+      await screen.findByTestId('render-log', {}, { timeout: 4000 })
+      const href = (await screen.findByRole('link', { name: 'Open workflow ↗' })).getAttribute('href')
+      expect(href).toMatch(/^https:\/\/temporal\.example\/namespaces\/default\/workflows\/render-[0-9a-f]+$/)
+      expect(link()).toHaveAttribute('target', '_blank')
+    })
+
+    it('not once the render is done', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      render()
+      await firstRender()
+      expect(link()).not.toBeInTheDocument()
+    })
+
+    it('not when Settings has no Temporal UI URL', async () => {
+      const { user } = render()
+      await firstRender()
+
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'boom')
+
+      await screen.findByTestId('render-log', {}, { timeout: 4000 })
+      expect(link()).not.toBeInTheDocument()
+    })
   })
 
   it('disables Generate while a render is in flight', async () => {

@@ -24,8 +24,8 @@ covers the same ground more briefly.
 - **Port 8081**, fixed. The comment on `PORT` in [`agent/src/main.ts`](../../agent/src/main.ts)
   calls it "part of the pod contract with the ingress (spec §4.2)". The Dockerfile
   `EXPOSE`s 8081.
-- **Ingress routing (spec §4.2).** `/mcp` and `/api/v1/ai/*` go to the agent,
-  and everything else, including `/api/v1/ws`, goes to the backend. `/api/v1/ai/*` is
+- **Ingress routing (spec §4.2).** `/mcp`, `/api/v1/ai/*` and, for MCP OIDC (§6a),
+  `/.well-known/oauth-protected-resource` go to the agent, and everything else, including `/api/v1/ws`, goes to the backend. `/api/v1/ai/*` is
   under the backend's `/api/v1/*`, so the agent's rules must take precedence
   (longest-prefix match or explicit priority). Details and a check are in §1.1.
 - **Runtime user and filesystem.** The image runs as uid 10001 with
@@ -74,6 +74,7 @@ What the ingress must do:
 |---|---|---|
 | `/api/v1/ai` (prefix) | agent `:8081` | REST, SSE (`/api/v1/ai/sessions/{id}/events`) and the WebSockets `/api/v1/ai/chat` and `/api/v1/ai/bridge` (the tab's socket for the `browser_*` tools, #254, [browser-bridge.md](browser-bridge.md#the-tabs-socket)) |
 | `/mcp` (prefix) | agent `:8081` | MCP Streamable HTTP (SSE) |
+| `/.well-known/oauth-protected-resource` (prefix) | agent `:8081` | The protected-resource metadata MCP clients read when `/mcp` is in `oidc` mode (§6a; `RESOURCE_METADATA_PATH`, [`agent/src/auth/oidc.ts`](../../agent/src/auth/oidc.ts)). Unrouted, it falls through to the backend, whose SPA fallback answers `200` with `index.html` |
 | `/` (prefix) | backend `:8080` | everything else, including the backend's WebSocket `/api/v1/ws` |
 
 - **Precedence.** With a Kubernetes `Ingress`, the longest matching path wins,
@@ -127,6 +128,9 @@ spec:
           - path: /mcp
             pathType: Prefix
             backend: { service: { name: scadbuddy, port: { name: agent } } }     # 8081
+          - path: /.well-known/oauth-protected-resource
+            pathType: Prefix
+            backend: { service: { name: scadbuddy, port: { name: agent } } }     # 8081
           - path: /
             pathType: Prefix
             backend: { service: { name: scadbuddy, port: { name: http } } }      # 8080
@@ -141,6 +145,7 @@ base=https://scadbuddy.example
 curl -sSI "$base/api/v1/ai/status" | grep -i '^x-scadbuddy-service: agent'   # agent
 curl -sS  "$base/api/v1/ai/status"                                           # {"available":…,"state":…,"ai":…}
 curl -sSI -X POST "$base/mcp" | grep -i '^x-scadbuddy-service: agent'        # agent (401/403/503 is fine)
+curl -sSI "$base/.well-known/oauth-protected-resource/mcp" | grep -i '^x-scadbuddy-service: agent'  # agent (404 while OIDC is off is fine)
 curl -sSI "$base/api/v1/settings" | grep -ci '^x-scadbuddy-service'          # 0: the backend
 ```
 
@@ -399,7 +404,7 @@ answers `503` while there is no database, or while migrations have not applied.
 
 Tokens can be managed in every auth mode. In `disabled` mode `/mcp` ignores them, and
 Settings warns about that; they take effect again when the mode returns to `bearer`.
-The mode is not stored yet: `main.ts` passes `DEFAULT_MCP_AUTH` (`bearer`).
+The mode is stored in `ai_settings` and changed in Settings (§10, `GET`/`PUT /api/v1/ai/mcp/auth`, `agent/src/routes/mcpAuthMode.ts`); `bearer` is the default until it is set.
 
 To give a client a token, create one with a name that says where it will live, copy it
 from the panel, and paste it into the client's MCP configuration as
@@ -584,7 +589,8 @@ should return a document whose `authorization_servers` is the issuer. Common fai
 | `401 … "signed with PS256, which is not allowed"` | add the IdP's algorithm in Settings |
 | `403 … error="insufficient_scope"` | the user or client was granted none of the three scopes |
 | `503` with `Retry-After: 30` | the agent cannot reach the IdP's metadata or JWKS |
-| metadata URL answers 404 | OIDC is off, `SCADBUDDY_PUBLIC_URL` is unset, or the ingress does not route `/.well-known/oauth-protected-resource` to the agent |
+| metadata URL answers 404 (with `X-ScadBuddy-Service: agent`) | OIDC is off, or `SCADBUDDY_PUBLIC_URL` is unset |
+| metadata URL answers `200` with `text/html` and no `X-ScadBuddy-Service: agent` | the ingress does not route `/.well-known/oauth-protected-resource` to the agent, so the backend's SPA fallback answers with `index.html`, which an MCP client cannot parse (§1.1) |
 
 A stored configuration that no longer parses (a hand-edited row) reads as "off" and is
 logged as `mcp auth: ai_settings.mcp_oidc is not a valid OIDC configuration`.
@@ -753,7 +759,8 @@ The session manager reads the enabled packages at the start of each turn
 [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)). A package that
 cannot be loaded is reported in the session as a `plugin_unavailable` error, and the
 turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
-`SessionManager`, but nothing starts a session over HTTP yet (the comment on `sessions`
+`SessionManager`, so every turn gets them, whether it was started from the panel's chat
+socket, `POST /api/v1/ai/sessions` or the `sessions_*` tools (the comment on `sessions`
 in `main.ts`).
 
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"

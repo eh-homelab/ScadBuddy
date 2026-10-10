@@ -56,6 +56,7 @@ import type {
   PlateFit,
   PrinterBedType,
   PrinterRackAlgorithm,
+  PrinterRackUsage,
   RackAlgorithm,
   PrintAgain,
   PrintDetail,
@@ -1117,6 +1118,9 @@ export const api = {
       body: JSON.stringify({ algorithm, version }),
       signal,
     }),
+
+  /** #1298 — the recorded use of each hotend on this printer's rack, by position. */
+  getPrinterRackUsage: (printerId: number) => request<PrinterRackUsage>(`/print/printers/${printerId}/rack-usage`),
 
   /**
    * #87 — one read per output, because the join is the server's job. The spool

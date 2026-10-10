@@ -28,6 +28,7 @@ import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
 import { ModalCompanionContext, focusInto, topmostDialog } from '../lib/modal'
+import { useMediaQuery } from '../lib/useMediaQuery'
 
 // Split out: the panel, its protocol schemas (zod) and its renderer download only
 // when someone opens it, and never when AI is off.
@@ -55,6 +56,9 @@ interface Props {
   /** Tests inject the browser bridge's link (null for none); the app makes its own. */
   tabLink?: TabLinkFactory | null
 }
+
+/** Where the assistant panel lies over the page rather than beside it: below `md`. */
+const PANEL_OVERLAYS_QUERY = '(max-width: 767.98px)'
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   const location = useLocation()
@@ -103,6 +107,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   useAttentionTitle(attention.waiting, !embedded)
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
+  // #2013 — below `md` the panel lies over the page (the aside's classes), so a dialog
+  // has no room beside it and covers it.
+  const panelOverlays = useMediaQuery(PANEL_OVERLAYS_QUERY)
 
   const openPanel = useCallback(() => {
     setMounted(true)
@@ -154,10 +161,15 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       else setFocusKey((k) => k + 1)
     } else if (open) {
       closePanel()
+    } else if (dialog && !besideDialog && panelOverlays) {
+      // #2013 — the dialog will still cover the panel: open it under the dialog, but
+      // leave the focus in the dialog rather than in a composer no one can see.
+      setMounted(true)
+      setOpen(true)
     } else {
       openPanel()
     }
-  }, [open, closePanel, openPanel, refreshAttention, panelElement])
+  }, [open, closePanel, openPanel, refreshAttention, panelElement, panelOverlays])
 
   useEffect(() => {
     if (!shown) return
@@ -235,7 +247,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
                   aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
                   title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
-                  className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                  // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
+                  // opens beside a dialog that is already open, as the shortcut does. Only
+                  // where the panel can sit beside one (#2013): on a phone the dialog covers
+                  // the panel anyway, and a raised button would paint over the dialog.
+                  className={`${panelOverlays ? '' : 'relative z-[60] '}inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                     open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
                   }`}
                 >

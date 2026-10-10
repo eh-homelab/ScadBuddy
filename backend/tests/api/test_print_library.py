@@ -70,13 +70,20 @@ def library_file(
     file_type: str = "3mf",
     plates: str = "library-plates-single.json",
     content: bytes | None = None,
+    file_hash: str | None = None,
 ) -> respx.Route:
     """The file, its plates and its bytes (an unsliced 3MF unless ``content`` says
-    otherwise); returns the download's route."""
+    otherwise); returns the download's route. Bambuddy states no hash for it unless
+    ``file_hash`` names one."""
     respx.get(f"{API}/library/files/{file_id}").mock(
         return_value=httpx.Response(
             200,
-            json={"id": file_id, "filename": f"file-{file_id}.{file_type}", "file_type": file_type},
+            json={
+                "id": file_id,
+                "filename": f"file-{file_id}.{file_type}",
+                "file_type": file_type,
+                "file_hash": file_hash,
+            },
         )
     )
     respx.get(f"{API}/library/files/{file_id}/plates").mock(

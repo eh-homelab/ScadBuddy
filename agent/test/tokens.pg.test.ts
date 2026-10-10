@@ -23,11 +23,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
   () => {
     let db: Database
     let schema: string
+    let url: string
     let drop: () => Promise<void>
     let store: PostgresTokenStore
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, url, drop } = await throwawayDatabase())
       await migrate(db.sql)
       store = new PostgresTokenStore(db.sql)
     })
@@ -148,7 +149,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     it('verifies concurrently from two replicas; last use is the latest', async () => {
-      const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+      const other = connectDatabase(url, { searchPath: schema })
       try {
         const replica = new PostgresTokenStore(other.sql)
         const { token, record } = await store.mint({ name: 'c', tier: 'outward' })
@@ -164,7 +165,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     it('sees a revoke made by another replica immediately', async () => {
-      const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+      const other = connectDatabase(url, { searchPath: schema })
       try {
         const { token, record } = await store.mint({ name: 'x', tier: 'read' })
         const replica = new PostgresTokenStore(other.sql)

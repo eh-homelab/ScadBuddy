@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { HOOK_EVENTS } from '@anthropic-ai/claude-agent-sdk'
 import path from 'node:path'
 
 // Vetting a local plugin before the harness loads it (spec §8.6, "Malicious or
@@ -134,6 +135,15 @@ export function hookEvents(config: Json): { file: boolean; events: Json } {
   return { file, events: file ? (config.hooks === undefined ? {} : config.hooks) : config }
 }
 
+/**
+ * Claude Code's hook events, from the SDK pinned with the CLI (2.1.289: 33
+ * events). An inline `{ Event: [...] }` takes any key as an event, so without
+ * this a manifest's `{ "loaders": [...] }` passed as one; an event the pinned
+ * CLI does not know is refused, and a new one is read when the pin moves.
+ * Plugin packages allow fewer (PACKAGE_HOOK_EVENTS, src/plugins/packages/vet.ts).
+ */
+const KNOWN_HOOK_EVENTS: ReadonlySet<string> = new Set(HOOK_EVENTS)
+
 function checkHooksConfig(config: Json, where: string, problems: string[]): void {
   if (config === undefined) return
   if (isRecord(config) && config.modules !== undefined) {
@@ -150,6 +160,7 @@ function checkHooksConfig(config: Json, where: string, problems: string[]): void
     return
   }
   for (const [event, groups] of Object.entries(events)) {
+    if (!KNOWN_HOOK_EVENTS.has(event)) problems.push(`${where}: "${event}" is not a Claude Code hook event`)
     for (const group of Array.isArray(groups) ? groups : [groups]) {
       const handlers = isRecord(group) ? group.hooks : undefined
       for (const handler of Array.isArray(handlers) ? handlers : [handlers]) {

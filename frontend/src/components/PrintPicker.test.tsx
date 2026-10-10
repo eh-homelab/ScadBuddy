@@ -19,6 +19,7 @@ function renderPicker(
     onClose?: () => void
     onRan?: (result: PrintRunResult) => void
     onPrinterModel?: (model: string | null) => void
+    printSettings?: Record<string, string>
   } = {},
 ) {
   return renderPage(
@@ -28,6 +29,7 @@ function renderPicker(
       onClose={props.onClose ?? vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
+      printSettings={props.printSettings}
     />,
   )
 }
@@ -1496,6 +1498,38 @@ describe('PrintPicker · Projects', () => {
     expect(screen.getByTestId('print-progress')).toBeInTheDocument()
   })
 
+  it('files the print under the project the run chose when the project list could not be read (#1830)', async () => {
+    // The server remembers project 2 as the last one printed to.
+    await fetch('/api/v1/print/projects/last', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: 2 }),
+    })
+    const runs = watch('POST', '/run')
+    const { bodies } = watch('POST', '/project')
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ detail: 'Bambuddy unreachable' }, { status: 502 }),
+      ),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.queuedSliceProgress, settled: true }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    const print = screen.getByRole('button', { name: /^Print$/ })
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+
+    // #1045: with the list unknown the run leaves the project to the server…
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    expect(runs.bodies[0]).not.toHaveProperty('project_id')
+    // …and the print is filed under the project the run says it used.
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ project_id: 2, queue_item_ids: [4471] })
+  })
+
   it('does not file a print that was sent without a project', async () => {
     const { bodies } = watch('POST', '/project')
     server.use(
@@ -1627,6 +1661,85 @@ describe('PrintPicker · Projects', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toMatchObject({ project_id: 2 })
+  })
+})
+
+describe('PrintPicker · Default High Flow (#1895)', () => {
+  const STANDARD = [
+    { size: '0.4', flow: 'standard' },
+    { size: '0.4', flow: 'standard' },
+  ] as const
+  const RIGHT_HIGH_FLOW = [
+    { size: '0.4', flow: 'standard' },
+    { size: '0.4', flow: 'high_flow' },
+  ] as const
+
+  /** Each printer's defaults, as the server derives them from its nozzles. */
+  function defaultsByPrinter(byPrinter: Record<number, readonly object[]>, modelChoices: object = {}) {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        const printerId = asked === null ? 1 : Number(asked)
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: printerId,
+          default_nozzles: byPrinter[printerId] ?? STANDARD,
+          model_choices: { printer_id: null, filament_plan: [], ...modelChoices },
+        })
+      }),
+    )
+  }
+
+  it('opens on High Flow where the printer has it, and prints with it', async () => {
+    defaultsByPrinter({ 1: RIGHT_HIGH_FLOW })
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    // Advanced, so the flow is not sent unseen.
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('radio', { name: 'Right High Flow' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Left Standard' })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ choices: { nozzles: RIGHT_HIGH_FLOW } })
+  })
+
+  it('takes the next printer’s defaults while the nozzles are untouched', async () => {
+    defaultsByPrinter({ 1: STANDARD, 2: RIGHT_HIGH_FLOW })
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'false')
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'Right High Flow' })).toBeChecked())
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('keeps what the user chose when the printer changes', async () => {
+    defaultsByPrinter({ 1: STANDARD, 2: RIGHT_HIGH_FLOW })
+    const { urls } = watch('GET', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.click(screen.getByRole('radio', { name: 'Left High Flow' }))
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(urls.at(-1)).toContain('printer_id=2'))
+    await loaded()
+    expect(screen.getByRole('radio', { name: 'Left High Flow' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Right Standard' })).toBeChecked()
+  })
+
+  it('a remembered Standard wins over the printer’s High Flow', async () => {
+    defaultsByPrinter({ 1: RIGHT_HIGH_FLOW }, { printer_id: 1, nozzles: STANDARD, tier: 'standard' })
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'false')
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    expect(screen.getByRole('radio', { name: 'Right Standard' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Left Standard' })).toBeChecked()
   })
 })
 
@@ -2017,6 +2130,25 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await screen.findByTestId('queued-items')
 
     expect(bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+
+  it("names a one-plate output's plate, with nothing to choose (#986)", async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true, name: 'Gear + Axle' }])),
+    )
+    renderPicker()
+    await loaded()
+
+    expect(await screen.findByTestId('single-plate')).toHaveTextContent('Plate: Gear + Axle')
+    expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
+  })
+
+  it('says nothing about an unnamed single plate (#986)', async () => {
+    server.use(http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])))
+    renderPicker()
+    await loaded()
+
+    expect(screen.queryByTestId('single-plate')).not.toBeInTheDocument()
   })
 
   it('labels each plate by its name, with the number only as secondary text (#929)', async () => {
@@ -2896,5 +3028,46 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+  })
+})
+
+describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
+  const SETTINGS = { enable_prime_tower: '1', enable_support: '0', ironing_type: 'top' }
+
+  it('lists them read-only in Advanced, by readable name', async () => {
+    renderPicker({ printSettings: SETTINGS })
+    await loaded()
+    expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
+
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    expect(within(list).getByText('Prime tower').nextElementSibling).toHaveTextContent('On')
+    expect(within(list).getByText('Supports').nextElementSibling).toHaveTextContent('Off')
+    // A key with no readable name shows as itself.
+    expect(within(list).getByText('ironing_type').nextElementSibling).toHaveTextContent('top')
+    expect(within(list).queryByRole('textbox')).toBeNull()
+    expect(within(list).queryByRole('combobox')).toBeNull()
+  })
+
+  it('shows nothing for a template with none', async () => {
+    renderPicker({ printSettings: {} })
+    await loaded()
+    await showAdvanced()
+    expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
+  })
+
+  it('shows nothing for a library file, which has no ScadBuddy template', async () => {
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+        printSettings={SETTINGS}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
   })
 })

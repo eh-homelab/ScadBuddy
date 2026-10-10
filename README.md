@@ -83,7 +83,7 @@ enough.
 Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
 [Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
 **Manage Library**, **Manage Queue** and **Read Status**, plus **Manage Projects**
-for the project picker).
+for the project picker and **Manage Archives** for print photos).
 
 **Renders run on Temporal** (#424, #546). `SCADBUDDY_TEMPORAL_ADDRESS` (the
 Temporal frontend's `host:port`) is required: without it the backend does not start.
@@ -366,9 +366,9 @@ Both call `deploy.reusable.yml`, which:
    another repo and whose PRs would not run clusters' own CI;
 2. rewrites the image line and the three `scadbuddy.eh-homelab.io/*`
    annotations (`version`, `revision`, `source`) in `scadbuddy.yaml`, and in
-   `scadbuddy-render.yaml` and `scadbuddy-print.yaml` when those files exist in
-   clusters (#547, #1060; until clusters adds one, the run notes its absence and
-   pins the rest). Each
+   `scadbuddy-render.yaml` and `scadbuddy-print.yaml` (#547, #1060). All three
+   exist in clusters; the workflow still tolerates a missing worker manifest, noting
+   its absence and pinning the rest, from before clusters added them. Each
    file must have exactly one such image line and one of each annotation, before
    and after the rewrite, or the deploy stops. In the same PR it moves the
    dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
@@ -553,15 +553,16 @@ workers restart.
 - **`local`** (the default): this server's volume, phase 1's topology. There is **one**
   render worker, and it shares the API's `/data` volume, as described under "Render
   worker (#424)" above.
-- **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
-  and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
+- **`bambuddy`**: Bambuddy's library. Files go to `<Inbox folder>/<Template>/Work/`,
+  and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
   The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
   ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
   instance's folder ids (#683). Respelling the same URL (host case, a default port, a
   trailing slash) is the same instance; another host, scheme, port or path is not.
   To switch:
-  1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
+  1. Set Bambuddy's URL (Settings → *Connection*) and the **Inbox folder, for sends
+     without a project** (Settings → *Projects & files*), which is the store's inbox.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
      **Render key**.
   3. Choose **Bambuddy library** under **Blob store**, and restart the API and the
@@ -600,7 +601,10 @@ workers restart.
     `du -sh /data/cache /data/fonts /data/libraries` on a running worker. A trim may
     not bring the cache down to its cap while crash-left staging directories are
     counted (follow-up #8), so watch `scadbuddy_worker_cache_bytes` against
-    `SCADBUDDY_WORKER_CACHE_MAX_BYTES`.
+    `SCADBUDDY_WORKER_CACHE_MAX_BYTES`. `scadbuddy_render_data_bytes` is the whole
+    data directory as allocated on disk, which is what kubelet holds an emptyDir's
+    `sizeLimit` against: alert on that one before eviction (#1785). It is walked at
+    most once a minute (#2020), so it can lag a scrape by that much.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
@@ -630,8 +634,8 @@ workers restart.
 | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
 
 The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
-each. **GET `/api/v1/store/usage`** and the Settings page's **Store** section show the
-count and size against them.
+each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →
+*Projects & files* show the count and size against them.
 
 **Metrics:**
 - `scadbuddy_store_*`: `operations_total{op,outcome}`, `blobs`, `bytes{kind}`,
@@ -688,8 +692,7 @@ published by the `agent` job in `build-image.yml` with the same tags as the
 backend image). It is meant to run as a **second container in the ScadBuddy
 pod**, not inside the backend image: the sidecar layout chosen in §4.1 of the
 AI design spec (`docs/superpowers/specs/2026-09-27-ai-integration-design.md`,
-issue #250; on branch `claude/scad-buddy-ai-integration-pfn00c` until it
-merges). The two containers share the pod network, so the agent reaches
+issue #250). The two containers share the pod network, so the agent reaches
 the backend on `http://127.0.0.1:8080` (§4.3).
 
 - It listens on port `8081` and answers `GET /healthz` (`agent/src/app.ts`).
@@ -932,16 +935,18 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
-- **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*` and `/mcp` to the
-  agent's port `8081`, ahead of the backend's `/`. That keeps the SPA, the
+- **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*`, `/mcp` and, for MCP
+  OIDC, `/.well-known/oauth-protected-resource` to the agent's port `8081`, ahead
+  of the backend's `/`. That keeps the SPA, the
   backend, the agent and the assistant's WebSocket on one origin, which is what
   works inside Bambuddy's iframe. The rules, an example `Ingress` and a
   `curl` check per path (every agent response carries
   `X-ScadBuddy-Service: agent`) are in `docs/ai/operating.md` §1.1.
-  `frontend/vite.config.ts` routes the same way for `pnpm dev` and
-  `pnpm preview`. The clusters manifest is in eh-homelab/clusters, and until it
-  deploys the sidecar the image's publish job is
-  `continue-on-error`, so it cannot hold back a backend deploy, and the new
+  `frontend/vite.config.ts` routes `/api/v1/ai/*` and `/mcp` the same way for
+  `pnpm dev` and `pnpm preview` (not the OIDC metadata path). The clusters
+  manifest that deploys the sidecar is in eh-homelab/clusters. The image's
+  publish job is still `continue-on-error`, so it cannot hold back a backend
+  deploy (the header of `build-image.yml` says when to drop it), and the new
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
 
@@ -974,7 +979,8 @@ deploy PR link into the release notes. There is no human step after
   should match the Deployment's annotations exactly.
 - **What is pinned:** the annotations on the Deployments in
   `applications/scadbuddy/scadbuddy.yaml` and
-  `applications/scadbuddy/scadbuddy-render.yaml`; one deploy pins both to the
+  `applications/scadbuddy/scadbuddy-render.yaml` and
+  `applications/scadbuddy/scadbuddy-print.yaml`; one deploy pins all three to the
   same digest.
 - **Which dashboard is live:** the `?ref=` on the `deploy/grafana` line of
   clusters' `clusters/prod/scadbuddy/kustomization.yaml`, which should equal the

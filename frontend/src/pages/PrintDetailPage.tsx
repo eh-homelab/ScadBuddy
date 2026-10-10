@@ -74,8 +74,9 @@ function gallerySlides(print: PrintDetail): Slide[] {
       key: `plate-${plate.index}`,
       kind: 'image',
       src: plate.url,
-      alt: `Plate ${plate.index} as sliced`,
-      caption: "The slicer's plate image",
+      alt: `${plate.name ?? `Plate ${plate.index}`} as sliced`,
+      // #2055 — the plate by what it holds, when that is known.
+      caption: plate.name ? `${plate.name}, as sliced` : "The slicer's plate image",
     })
   }
   media.attachments.forEach((attachment, index) => {

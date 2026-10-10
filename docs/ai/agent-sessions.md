@@ -238,8 +238,8 @@ itself (the call it ran is recorded). It is recorded in `runToolWithOutcome`
 (`agent/src/tools/registry.ts`) whenever the call carries a session, not in a
 projection, so the tool activities a durable session would run record the same way
 (proposed in PR #972,
-`docs/superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md` §5.3, on
-branch `docs/durable-printing-agents-flows` until it merges). Rows go with their session. Calls
+`docs/superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md` §5.3).
+Rows go with their session. Calls
 over `/mcp` outside a session record nothing. Revision commits already name their
 session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 

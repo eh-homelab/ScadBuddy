@@ -5,7 +5,7 @@ import { binary } from './binary.js'
 import { CAMERA, cameraQuery, outputId, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
 import { backendPage, compositeKey, page, PAGED, pageInput, totalCount } from './pagination.js'
-import { sourceOf, withSource } from './print.js'
+import { getPlates, sourceOf, withSource } from './print.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
 // images, plate fit, and the 3MF. Routes: backend/scadbuddy/api/{outputs,plates}.py.
@@ -171,20 +171,7 @@ export const outputTools: Tool[] = [
     risk: 'read',
     bambuddyScope: ['Manage Library'],
     routes: ['GET /api/v1/outputs/{output_id}/plates', 'GET /api/v1/print/library/{file_id}/plates'],
-    handler: async (args, { backend }) => {
-      const source = sourceOf(args)
-      return json(
-        source.kind === 'library'
-          ? await ok(
-              backend.GET('/api/v1/print/library/{file_id}/plates', { params: { path: { file_id: source.id } } }),
-              `get plates of library file ${source.id}`,
-            )
-          : await ok(
-              backend.GET('/api/v1/outputs/{output_id}/plates', { params: { path: { output_id: source.id } } }),
-              `get plates of ${source.id}`,
-            ),
-      )
-    },
+    handler: async (args, ctx) => json(await getPlates(ctx, sourceOf(args))),
   }),
 
   defineTool({

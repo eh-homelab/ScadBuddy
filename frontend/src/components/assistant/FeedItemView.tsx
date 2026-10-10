@@ -366,7 +366,7 @@ function QuestionCard({
                 : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
                 : item.reconnected
-                  ? 'The tab is back. The assistant re-reads the page before it changes anything.'
+                  ? 'The tab is back. A change that was waiting was not made; the assistant is told to check the page first.'
                   : item.attention
                   ? `No reply: ${item.reason ?? 'the request was cancelled'}.`
                   : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
@@ -427,7 +427,7 @@ export function FeedItemView({
           {item.author.kind !== 'browser' && (
             <p className="mb-0.5 text-[11px] text-faint">{item.author.label}</p>
           )}
-          {item.images && <SentImages images={item.images} />}
+          {item.images && <SentImages images={item.images} sessionId={sessionId} />}
           <p className="whitespace-pre-wrap">{item.text}</p>
           {onForkHere && (
             <ForkHere

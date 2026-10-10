@@ -1,6 +1,5 @@
 """Template media (#274) with no rows yet: the list is the legacy ``thumbnail.png``,
-or a built-in's bundled media. (The no-database mode these tests once covered is
-gone: #467 requires ``SCADBUDDY_DATABASE_URL``.)"""
+or a built-in's bundled media."""
 
 from __future__ import annotations
 
