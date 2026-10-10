@@ -9,8 +9,16 @@ import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { lastArrangeRequest, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { normalizeHex } from '../lib/format'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
+
+// #1723 — jsdom draws no WebGL: the preview's scene shows what it was asked to draw.
+vi.mock('./print/PlateScene', () => ({
+  PlateScene: ({ url, colors }: { url: string; colors: Map<string, string> }) => (
+    <div data-testid="plate-scene" data-url={url} data-colors={JSON.stringify([...colors])} />
+  ),
+}))
 
 const output = fixtures.outputs[0] as Output
 
@@ -60,6 +68,36 @@ async function loaded() {
   await screen.findByRole('switch', { name: 'Advanced' })
   await screen.findByTestId('filament-slot-1')
 }
+
+describe('PrintPicker · 3D preview (#1723)', () => {
+  it('shows the plate in the chosen spools over the dialog, and keeps every choice on close', async () => {
+    renderPicker()
+    await loaded()
+    const slot = screen.getByTestId('filament-slot-1')
+    const other = within(slot)
+      .getAllByRole('radio')
+      .find((radio) => !(radio as HTMLInputElement).checked)!
+    fireEvent.click(other)
+    const chosen = (other as HTMLInputElement).value
+    // The mock's own answer: what the dialog read its slots and spools from.
+    const options = await api.getFilaments(output.id, {})
+    const design = options.slots!.find((need) => need.slot_id === 1)!.colour!
+    const picked = options.spools!.find((row) => String(row.spool_id) === chosen)!.colour!
+
+    fireEvent.click(screen.getByTestId('plate-preview-open'))
+    const preview = await screen.findByRole('dialog', { name: /in 3D$/ })
+    const scene = within(preview).getByTestId('plate-scene')
+    expect(scene).toHaveAttribute('data-url', `/api/v1/outputs/${output.id}/preview.glb`)
+    // Slot 1's design colour now draws in the spool just chosen for it.
+    const colors = new Map(JSON.parse(scene.getAttribute('data-colors')!) as [string, string][])
+    expect(colors.get(normalizeHex(design))).toBe(normalizeHex(picked))
+
+    fireEvent.click(within(preview).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /in 3D$/ })).toBeNull())
+    expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${chosen}`)).toBeChecked()
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+})
 
 /** #768 — nozzles, quality, plate type, options, project and copies are Advanced steps. */
 async function showAdvanced() {

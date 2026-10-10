@@ -35,6 +35,8 @@ export interface SourceApi {
   getFilaments: (query: FilamentQuery) => Promise<FilamentOptions>
   getPlates: () => Promise<OutputPlate[]>
   plateThumbnailUrl: (index: number) => string
+  /** #1723 — the mesh the 3D preview shows: an output's whole, a library file's plate. */
+  previewUrl: (plate: number) => string
   /**
    * `signal` stops waiting on the run (the dialog went away); the run itself goes on.
    * `within` keeps the POST, retries included, in a traced action.
@@ -113,6 +115,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       getFilaments: (query) => api.getFilaments(id, query),
       getPlates: () => api.getOutputPlates(id),
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
+      previewUrl: () => api.outputPreviewGlbUrl(id),
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
       check: (body) => api.checkPrint(id, body),
       remember: (choices) => api.putModelChoices(slug, choices),
@@ -124,6 +127,7 @@ export function sourceApi(source: PrintSource): SourceApi {
     getFilaments: (query) => api.getLibraryFilaments(id, query),
     getPlates: () => api.getLibraryPlates(id),
     plateThumbnailUrl: (index) => api.libraryPlateThumbnailUrl(id, index),
+    previewUrl: (plate) => api.libraryPreviewGlbUrl(id, plate),
     run: (body, signal, within) => api.runLibraryPrint(id, body, signal, within),
     check: (body) => api.checkLibraryPrint(id, body),
     remember: (choices) => api.putLibraryChoices(id, choices),

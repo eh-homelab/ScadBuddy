@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
@@ -27,6 +27,8 @@ import {
 } from '../lib/arrange'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
+import { plateLabel } from '../lib/plate'
+import { resolvedColors } from '../lib/plateColors'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
@@ -49,6 +51,7 @@ import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
 import { NozzleStep } from './print/NozzleStep'
 import { PrintVerdict } from './print/PrintVerdict'
+import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
@@ -217,6 +220,12 @@ export function PrintPicker({
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
   const [copies, setCopies] = useState<number | null>(null)
+  /** #1723 — the plate in 3D, over this dialog; every choice here stays as it is. */
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const previewColors = useMemo(
+    () => resolvedColors(filaments?.slots ?? [], filaments?.spools ?? [], plan),
+    [filaments, plan],
+  )
   /** #145 — the remembered options, so the box can say what an unset Copies queues. */
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
@@ -805,6 +814,26 @@ export function PrintPicker({
                   onChange={picker.setPlate}
                   thumbnailUrl={sourceApi(source).plateThumbnailUrl}
                 />
+              )}
+
+              {source && (
+                <div>
+                  <Button size="sm" variant="ghost" onClick={() => setPreviewOpen(true)} data-testid="plate-preview-open">
+                    Preview in 3D
+                  </Button>
+                  <PlatePreviewDialog
+                    open={previewOpen}
+                    onClose={() => setPreviewOpen(false)}
+                    url={sourceApi(source).previewUrl(plate === 'all' ? 1 : plate)}
+                    label={
+                      // An output's preview is the whole output; a library file's, one plate.
+                      source.kind === 'output' && picker.plates.length > 1
+                        ? 'Every plate'
+                        : plateLabel(picker.plates, plate === 'all' ? 1 : plate)
+                    }
+                    colors={previewColors}
+                  />
+                </div>
               )}
 
               {/* #768 — Simple mode sends these steps' defaults without showing them. */}

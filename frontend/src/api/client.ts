@@ -1081,6 +1081,9 @@ export const api = {
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
+  /** #1723 — the output's preview mesh, every part in its colour. */
+  outputPreviewGlbUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/preview.glb`,
+
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
@@ -1281,6 +1284,10 @@ export const api = {
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
+
+  /** #1723 — one plate of the library file as a preview mesh (#1753). */
+  libraryPreviewGlbUrl: (fileId: number, plate: number) =>
+    `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
