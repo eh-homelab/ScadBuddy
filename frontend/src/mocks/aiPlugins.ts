@@ -220,9 +220,17 @@ function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
   })
 }
 
+/** The remote plugins as the mock has them now; `GET /plugins` lists them after the built-ins (`features/builtInToolSets.ts`). */
+export function remotePluginList(): RemotePlugin[] {
+  return [...state.remote.values()]
+}
+
+/** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
+const BUILT_IN_SETS = new Set(['scadbuddy', 'playwright'])
+
 export const aiPluginHandlers = [
-  // ---- remote MCP endpoints
-  http.get(`${base}/plugins`, () => HttpResponse.json([...state.remote.values()])),
+  // ---- remote MCP endpoints. A name that is no remote plugin falls through to
+  // features/builtInToolSets.ts, which answers for the built-ins and 404s the rest.
 
   http.post(`${base}/plugins`, async ({ request }) => {
     const body = (await request.json()) as RemotePluginCreate
@@ -230,6 +238,9 @@ export const aiPluginHandlers = [
       return detail(400, 'name must be 2–32 characters: lower-case letters, digits and single hyphens')
     }
     if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback')
+    if (BUILT_IN_SETS.has(body.name)) {
+      return detail(409, `"${body.name}" is built in: it cannot be added: it ships with the agent`, { built_in: true })
+    }
     if (state.remote.has(body.name)) return detail(409, `a plugin named "${body.name}" already exists`)
     const plugin: RemotePlugin = {
       name: body.name,
@@ -250,7 +261,7 @@ export const aiPluginHandlers = [
 
   http.patch(`${base}/plugins/:name`, async ({ params, request }) => {
     const plugin = state.remote.get(String(params.name))
-    if (!plugin) return detail(404, `no plugin named "${String(params.name)}"`)
+    if (!plugin) return undefined
     const body = (await request.json()) as RemotePluginPatch
     const next: RemotePlugin = {
       ...plugin,
@@ -264,14 +275,14 @@ export const aiPluginHandlers = [
   }),
 
   http.delete(`${base}/plugins/:name`, ({ params }) => {
-    if (!state.remote.delete(String(params.name))) return detail(404, 'no such plugin')
+    if (!state.remote.delete(String(params.name))) return undefined
     return new HttpResponse(null, { status: 204 })
   }),
 
   http.post(`${base}/plugins/:name/test`, async ({ params }) => {
-    await delay(100)
     const plugin = state.remote.get(String(params.name))
-    if (!plugin) return detail(404, 'no such plugin')
+    if (!plugin) return undefined
+    await delay(100)
     const result: PluginTest = {
       ok: true,
       detail: 'connected; 3 tools',

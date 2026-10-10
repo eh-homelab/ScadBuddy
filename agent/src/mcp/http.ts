@@ -25,7 +25,7 @@ import type { OriginPolicy } from '../http/origins.js'
 import { requestFacts, type RemoteAddress } from '../routes/guard.js'
 import { installResources } from '../resources/server.js'
 import type { ResourceHub } from '../resources/hub.js'
-import { createExternalServer } from '../tools/projections.js'
+import { createExternalServer, refreshOfferedTools } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
 import { recordFailure, tracer } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
@@ -345,6 +345,7 @@ export function mountMcp(
       // principal, even a valid one, may not ride on it.
       if (session.principalId !== principal.id) return jsonRpcError(403, -32001, 'Session belongs to another caller')
       session.lastSeen = performance.now()
+      await refreshOfferedTools(session.server)
       return traced(request, (req, options) => session.transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }))
     }
 
@@ -379,6 +380,7 @@ export function mountMcp(
         void end(sid)
       },
     })
+    await refreshOfferedTools(server)
     await server.connect(transport)
     const response = await traced(request, (req, options) =>
       transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }),
