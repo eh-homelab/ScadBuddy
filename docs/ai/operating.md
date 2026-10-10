@@ -771,8 +771,16 @@ in `main.ts`).
 
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
-and "Plugin endpoints", the remote MCP plugins of `/api/v1/ai/plugins`
-([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)).
+and "Plugins", the list of `/api/v1/ai/plugins`
+([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)): ScadBuddy's
+own tool sets first (#1953, `built_in: true`; `scadbuddy` is every registry tool, `playwright`
+the headless browser's, both from
+[`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
+remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
+below the tier its code declares (a lower one answers 400); the overrides are the
+`ai_settings` keys `builtin_tools.scadbuddy` and `builtin_tools.playwright`, applied at the
+harness seam, on `/mcp` and in the durable `agent-tools` activities. Adding, removing,
+testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
 full commit SHA and content hash, and you must tick a confirmation before it sends
 exactly those values. Every control that writes is user-only (`USER_ONLY`), so the

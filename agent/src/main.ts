@@ -24,6 +24,7 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
+import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -170,6 +171,8 @@ const oidcRepo = settings
   : undefined
 const oidcProvider = new OidcProvider()
 const plugins = database ? new PluginStore(database.sql) : undefined
+// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_settings.
+const builtInTools = new BuiltInTools(settings)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start()
@@ -201,6 +204,8 @@ const toolServices: ToolServices = {
   publicBaseUrl: config.publicUrl,
   // The tools Settings can turn off (#1911): read from ai_settings at each call.
   switchedOff: toolSwitches(settings),
+  // Settings → Plugins' raised tiers and disabled tools (#1953), read at each call.
+  toolOverrides: builtInTools.registryOverrides(),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
@@ -265,6 +270,8 @@ const sessions =
         ...(settings ? { settings } : {}),
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
+        // Settings → Plugins' overrides of the built-in tools (#1953), per turn.
+        builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
         // subagents, with the Skill and Agent tools they need.
         ownPlugin: OWN_PLUGIN_DIR,

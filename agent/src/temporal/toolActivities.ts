@@ -4,7 +4,7 @@ import type { Sql } from 'postgres'
 import type { AuditLog } from '../audit/log.js'
 import { harnessPrincipal } from '../auth/principal.js'
 import type { Owner } from '../sessions/protocol.js'
-import { parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
+import { effectiveTool, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
@@ -157,7 +157,10 @@ async function runAsActivity(
   // `gate: 'workflow'` below skips preparing an approval because the workflow parked
   // the call and a person approved it. That is checked here, not assumed: any client of
   // the namespace can name a workflow after a durable session (security review of 5b).
-  if (tool.gated && !(await deps.approvals?.approved(requestId))) {
+  // Gated as the tool runs now (#1953): a tier Settings raised to outward needs the
+  // approval too, whatever tier the durable worker's manifest declared it at.
+  const effective = await effectiveTool(tool, deps.services)
+  if (effective.gated && !(await deps.approvals?.approved(requestId))) {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({
@@ -168,7 +171,7 @@ async function runAsActivity(
       sessionId: session,
       toolUseId,
       requestId,
-      tier: tool.risk,
+      tier: effective.risk,
       inputHash: deps.audit.hash(tool.name, parsed),
       inputSummary: deps.audit.summarise(tool.name, parsed),
       outcome: 'refused',
@@ -209,7 +212,7 @@ async function runAsActivity(
     sessionId: session,
     toolUseId,
     requestId,
-    tier: run.ran ? (lookup(run.ran.tool)?.risk ?? tool.risk) : tool.risk,
+    tier: run.ran ? (lookup(run.ran.tool)?.risk ?? effective.risk) : effective.risk,
     inputHash: deps.audit.hash(action, parsed),
     inputSummary: deps.audit.summarise(action, parsed),
     outcome: run.outcome,
