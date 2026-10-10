@@ -24,6 +24,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys
@@ -99,10 +100,13 @@ async def _run(flows: Flows) -> AsyncIterator[None]:
     if not inprocess:
         yield
         return
+    # Without SCADBUDDY_API_INTERNAL_URL a flow's render, print and arrange fail,
+    # naming it; the rest of a flow runs.
+    routes = FlowRoutes(api_client(settings.api_internal_url))
     worker = projects_worker(
         flows.client,
         flows.queue,
-        [*FlowActivities(flows.store).all(), *flows.operation_activities()],
+        [*FlowActivities(flows.store).all(), *routes.all(), *flows.operation_activities()],
     )
     task = asyncio.create_task(worker.run())
     try:
@@ -110,6 +114,7 @@ async def _run(flows: Flows) -> AsyncIterator[None]:
     finally:
         await worker.shutdown()
         await asyncio.gather(task, return_exceptions=True)
+        await routes.aclose()
 
 
 COMPONENT = Component(FLOWS, build=_build, run=_run)

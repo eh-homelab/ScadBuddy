@@ -90,6 +90,7 @@ from scadbuddy.workflows.client import (
     render_worker,
 )
 from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.follow import FOLLOW_WORKFLOW
 from scadbuddy.workflows.operation_activities import operation_activities
@@ -857,6 +858,12 @@ async def run_projects_worker(
             "SCADBUDDY_SECRET_KEY_FILE is required for --queue projects: a flow's payloads"
             " are sealed under keys the KEK protects (spec 2026-10-01 §6.5)"
         )
+    if settings.api_internal_url is None:
+        raise ApiUrlMissingError(
+            "SCADBUDDY_API_INTERNAL_URL is required for --queue projects: a flow's render,"
+            " print and arrange call the API's cluster-internal Service, e.g."
+            " http://scadbuddy:8080"
+        )
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
     events = PgNotifyEventBus(
@@ -876,7 +883,10 @@ async def run_projects_worker(
             settings_store,
             {kind.name: kind for kind in flow_kinds(store)},
         )
-        worker = projects_worker(client, queue, [*FlowActivities(store).all(), *decisions])
+        routes = FlowRoutes(api_client(settings.api_internal_url))
+        worker = projects_worker(
+            client, queue, [*FlowActivities(store).all(), *routes.all(), *decisions]
+        )
         server = (
             _health_server(settings, metrics, None, health_port, queue)
             if health_port is not None
@@ -890,6 +900,7 @@ async def run_projects_worker(
             if server is not None and serving is not None:
                 server.should_exit = True
                 await serving
+            await routes.aclose()
     finally:
         await events.aclose()
         await asyncio.to_thread(settings_store.close)

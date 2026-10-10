@@ -255,3 +255,33 @@ def test_an_answer_to_a_call_not_waiting_is_stale(client: TestClient) -> None:
     )
     assert response.status_code == 409
     assert response.json()["type"].endswith("/stale-entry")
+
+
+def test_a_denial_reaches_the_parked_print(client: TestClient, pg_conninfo: str) -> None:
+    definition = register(
+        client,
+        script(
+            "try:",
+            "    await queue_print({'output_id': 'o1'}, {'choices': {}})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+    )
+    run_id = start(client, definition["id"], "p").json()["id"]
+    view = until(client, run_id, lambda v: v["status"] == "waiting" and v["pending"])
+    [entry] = view["pending"]
+    assert (entry["kind"], entry["fn"]) == ("approval", "queue_print")
+    decided = client.post(
+        f"/api/v1/workflow-runs/{run_id}/decide",
+        json={"call_id": entry["call_id"], "approved": False, "reason": "not today"},
+        headers={"Idempotency-Key": "d1"},
+    )
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["outcome"] == "denied"
+    done = until(client, run_id, lambda v: v["status"] == "succeeded")
+    assert "ToolApprovalDenied" in done["run"]["result"]
+    assert "not today" in done["run"]["result"]
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT outcome FROM workflow_run_decisions").fetchall() == [
+            ("denied",)
+        ]

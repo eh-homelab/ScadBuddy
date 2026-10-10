@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
@@ -315,6 +316,20 @@ async def test_the_projects_worker_refuses_to_start_without_a_key(tmp_path: Path
         secret_key_file=None,
     )
     with pytest.raises(worker_module.ProjectsKeyMissingError, match="SCADBUDDY_SECRET_KEY_FILE"):
+        await worker_module.run_projects_worker(settings, health_port=None)
+
+
+async def test_the_projects_worker_refuses_to_start_without_the_api_url(tmp_path: Path) -> None:
+    key = tmp_path / "kek"
+    key.write_text(base64.b64encode(b"\x07" * 32).decode())
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        secret_key_file=key,
+        api_internal_url=None,
+    )
+    with pytest.raises(worker_module.ApiUrlMissingError, match="--queue projects"):
         await worker_module.run_projects_worker(settings, health_port=None)
 
 

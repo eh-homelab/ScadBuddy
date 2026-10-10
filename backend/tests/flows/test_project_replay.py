@@ -8,7 +8,9 @@ adds a history recorded on the changed code beside them.
 
 The histories were recorded on 6b's workflow (`SCADBUDDY_RECORD_HISTORIES=1`): `slept`
 (two `sleep`s, a result), `answered` (a `wait_for_human` answered) and `restarted` (a
-`sleep` its worker was stopped during, finished by a new worker). Never re-record them.
+`sleep` its worker was stopped during, finished by a new worker); `printed` on 6c's
+(`render`, `save_output` and an approved `queue_print`, recorded by
+`test_outward_host_functions.py::test_printed`). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -33,7 +35,7 @@ from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
 from tests.flows.flows_support import Flows, Keys, script
 
 HISTORIES = Path(__file__).parent.parent / "fixtures" / "project_workflow_histories"
-NAMES = ["slept", "answered", "restarted"]
+NAMES = ["slept", "answered", "restarted", "printed"]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
 

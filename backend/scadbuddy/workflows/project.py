@@ -55,7 +55,7 @@ class FlowStart(BaseModel):
     version: int
     name: str
     started_by: dict[str, Any]
-    #: Seconds an outward call waits for a decision; 0 is never (6c's timer).
+    #: Seconds an outward call waits for a decision; 0 is never.
     approval_timeout_s: int = 0
     search_attributes: bool = False
 
@@ -67,6 +67,7 @@ class ProjectWorkflow:
         self._start = data
         self._executed = False
         self._seq = 0
+        self._started: set[str] = set()
         self._runner = AgentWorkflowRunner(
             config,
             stream=WorkflowStream(),
@@ -83,6 +84,18 @@ class ProjectWorkflow:
         """The next host call's step number, from 1."""
         self._seq += 1
         return self._seq
+
+    @property
+    def approval_timeout_s(self) -> int:
+        """Seconds a gated call waits for a decision before it is denied; 0 is never."""
+        return self._start.approval_timeout_s
+
+    def mark_started(self, call_id: str) -> None:
+        """A gated call was approved and its body runs: its timer is over."""
+        self._started.add(call_id)
+
+    def started(self, call_id: str) -> bool:
+        return call_id in self._started
 
     @agent.accepts(mid_turn=MidTurn.REJECT)
     async def execute(self, message: RunFlow) -> TextReply:

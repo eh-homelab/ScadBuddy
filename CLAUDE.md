@@ -225,8 +225,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `project.py` (`ProjectWorkflow`, a model-free temporal-agent-harness agent that runs
   the script in Code Mode), `flow_tools.py` (the host functions, harness tools; no
   `from __future__ import annotations`), `flow_steps.py` (each host call's step on the
-  row), `flow_entries.py` (a parked entry's timer, ended by the harness's own Update),
-  `flow_activities.py`, `flow_models.py`, `projects_worker.py`, on the `projects` queue
+  row), `flow_entries.py` (a parked entry's timer, ended by the harness's own Update:
+  a callback answered `timed out`, an approval denied at the run's approval timeout),
+  `flow_routes.py` (`render`, `save_output`, `queue_print` and `arrange` call the API's
+  own routes at `SCADBUDDY_API_INTERNAL_URL` with a key per call; not `print`, which
+  Monty's builtin shadows), `flow_activities.py`, `flow_models.py`,
+  `projects_worker.py`, on the `projects` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), unversioned: a change must replay
   `tests/fixtures/project_workflow_histories/`. A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
