@@ -292,6 +292,14 @@ export interface ModelSetting {
 }
 
 /**
+ * #1291 — the blank starter template (`GET /api/v1/ai/templates/blank`, agent
+ * `src/routes/templates.ts`), the source the agent's create_from_template writes.
+ */
+export interface BlankTemplate {
+  source: string
+}
+
+/**
  * #790 — what a new assistant session may spend in all (USD) and how many turns one
  * reply may take (`GET/PUT /api/v1/ai/settings/session-limits`, agent
  * `src/routes/sessionLimits.ts`). Applies to sessions started after a change.
