@@ -20,7 +20,7 @@ Bambuddy library file (#976). The two kinds share both tables (#1750).
   An archive two subjects name is the output's.
 
 Both are created by ``*_print_subjects.sql``, from ``output_bambuddy_prints`` and
-``library_bambuddy_prints``.
+``library_bambuddy_prints``, which ``*_drop_legacy_print_links.sql`` (#1772) drops.
 """
 
 from __future__ import annotations

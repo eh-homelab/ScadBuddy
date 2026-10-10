@@ -230,34 +230,20 @@ def test_the_print_subjects_migration_keeps_every_output_and_library_row(
 
 
 @pytest.mark.requires_postgres
-def test_a_previous_release_writing_the_old_link_tables_still_reaches_the_new_ones(
-    pg_conninfo: str,
-) -> None:
-    # #1750: a pod of the previous release, still draining during the rollout, records
-    # into the old tables. Until a later migration drops them, its writes are forwarded.
-    output = "a" * 32
+def test_the_old_link_tables_and_their_forwarding_are_gone(pg_conninfo: str) -> None:
+    # #1772: once no pod of a release before #1771 runs, the old link tables, their
+    # forwarding triggers and functions are dropped.
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn)
-        conn.execute(
-            "INSERT INTO output_bambuddy_prints (output_id, archive_id, matched_by)"
-            " VALUES (%s, 18, 'queue_item')",
-            (output,),
-        )
-        conn.execute(
-            "INSERT INTO library_bambuddy_prints"
-            " (queue_item_id, library_file_id, plate_id, printer_id)"
-            " VALUES (51, 89, 1, 2), (52, 89, 1, 2)"
-        )
-        conn.execute(
-            "UPDATE library_bambuddy_prints SET archive_id = 40, name = 'cube.3mf'"
-            " WHERE queue_item_id = 51"
-        )
-        conn.execute("UPDATE library_bambuddy_prints SET gone = true WHERE queue_item_id = 52")
-        links = conn.execute(
-            "SELECT subject, archive_id, queue_item_id, name FROM print_links ORDER BY archive_id"
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+            " WHERE table_schema = current_schema()"
+            " AND table_name IN ('output_bambuddy_prints', 'library_bambuddy_prints')"
         ).fetchall()
-        sends = conn.execute(
-            "SELECT subject, queue_item_id, gone FROM print_sends ORDER BY queue_item_id"
+        functions = conn.execute(
+            "SELECT proname FROM pg_proc"
+            " WHERE proname IN ('print_links_forward_output', 'print_links_forward_library')"
+            " AND pronamespace = current_schema()::regnamespace"
         ).fetchall()
-    assert links == [(f"output:{output}", 18, None, None), ("library:89", 40, 51, "cube.3mf")]
-    assert sends == [("library:89", 51, False), ("library:89", 52, True)]
+    assert tables == []
+    assert functions == []
