@@ -68,13 +68,13 @@ class SkippedLibraryFile(BaseModel):
 class LibraryDeleteResult(BaseModel):
     """The files Bambuddy deleted, and the ones it skipped (never counted as deleted)."""
 
-    deleted: list[DeletedLibraryFile] = Field(default_factory=list)
-    skipped: list[SkippedLibraryFile] = Field(default_factory=list)
+    deleted: list[DeletedLibraryFile]
+    skipped: list[SkippedLibraryFile]
 
 
 class LibraryRestoreResult(BaseModel):
-    restored: list[int] = Field(default_factory=list)
-    skipped: list[SkippedLibraryFile] = Field(default_factory=list)
+    restored: list[int]
+    skipped: list[SkippedLibraryFile]
 
 
 #: Why Bambuddy's bulk delete skips a file: its key's user did not add it.
@@ -153,7 +153,7 @@ def library_file_kinds(state: Core) -> list[OperationKind]:
 
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         files: list[dict[str, Any]] = checked["files"]
-        result = LibraryDeleteResult()
+        result = LibraryDeleteResult(deleted=[], skipped=[])
         async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
             if len(files) == 1:
                 [only] = files
@@ -199,7 +199,7 @@ def library_file_kinds(state: Core) -> list[OperationKind]:
         return {}
 
     async def restore_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        result = LibraryRestoreResult()
+        result = LibraryRestoreResult(restored=[], skipped=[])
         async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
             for file_id in _unique(LibraryFilesRequest.model_validate(request).file_ids):
                 try:

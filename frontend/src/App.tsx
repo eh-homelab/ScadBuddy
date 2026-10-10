@@ -62,7 +62,7 @@ export function App() {
         <Route path="prints" element={<PrintsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
-        <Route path="library" element={<LibraryPage />} />
+        <Route path="library/*" element={<LibraryPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
