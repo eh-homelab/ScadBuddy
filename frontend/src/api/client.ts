@@ -24,6 +24,7 @@ import type {
   PrinterCameraSetting,
   ImageSettings,
   AttachmentView,
+  AiSessionEdit,
   AiSessionView,
   SessionLimits,
   SessionModeSetting,
@@ -1571,12 +1572,16 @@ export const api = {
       ...(options.upTo === undefined ? {} : { body: JSON.stringify({ up_to: options.upTo }) }),
     }),
 
-  /** #795 — renames a session, or marks it done; only the session's owner can. */
-  updateAiSession: (id: string, edit: { title: string } | { done: true }) =>
+  /** #795, #1885 — renames a session, marks it done, or archives or unarchives it; only the session's owner can. */
+  updateAiSession: (id: string, edit: AiSessionEdit) =>
     request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(edit),
     }),
+
+  /** #1885 — the archived sessions, newest first: the switcher's Archived view. */
+  listArchivedAiSessions: (limit: number) =>
+    request<{ sessions: AiSessionView[] }>(`/ai/sessions?archived=true&limit=${limit}`),
 
   /** #790 — adds to one session's budget; only the user can (it spends money). */
   raiseAiSessionBudget: (id: string, addUsd: number) =>

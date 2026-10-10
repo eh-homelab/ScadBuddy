@@ -336,6 +336,9 @@ export interface AttachmentView {
 }
 
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
+/** #795, #1885 — one edit `PATCH /api/v1/ai/sessions/:id` takes. */
+export type AiSessionEdit = { title: string } | { done: true } | { archived: boolean }
+
 export interface AiSessionView {
   id: string
   title: string
@@ -349,6 +352,9 @@ export interface AiSessionView {
   running: boolean
   /** Plan 5d — absent from an older agent (classic). */
   mode?: 'classic' | 'durable'
+  /** #1885 — archived by its owner: out of the panel's list, and read-only. Absent from an older agent. */
+  archived?: boolean
+  archived_at?: string | null
 }
 
 /**
