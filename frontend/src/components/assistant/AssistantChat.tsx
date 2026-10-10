@@ -37,6 +37,7 @@ import { FeedItemView } from './FeedItemView'
 import { ToolGroup } from './ToolGroup'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { SessionSwitcher } from './SessionSwitcher'
+import { useSkillMenu } from './SkillMenu'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
@@ -289,6 +290,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     void addImages(files)
   }
   const focusComposer = useCallback(() => composer.current?.focus(), [])
+  const skillMenu = useSkillMenu({ draft, writeDraft, focus: focusComposer, enabled: owned })
   const speakReplies = useSpeakReplies()
   const speech = useSpokenReplies(state.activeId, active?.items, speakReplies)
   const dictation = useDictation({
@@ -360,6 +362,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }
 
   const onComposerKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (skillMenu.onKeyDown(event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
       submit(draft)
@@ -721,7 +724,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         onDragLeave={() => setDropping(false)}
         onDrop={onComposerDrop}
         data-agent-user-only=""
-        className={`shrink-0 border-t p-2.5 ${dropping ? 'border-accent bg-accent/5' : 'border-line'}`}
+        className={`relative shrink-0 border-t p-2.5 ${dropping ? 'border-accent bg-accent/5' : 'border-line'}`}
       >
         <label htmlFor="assistant-composer" className="sr-only">
           Message the assistant
@@ -756,12 +759,14 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           onChange={(event) => writeDraft(event.target.value)}
           onKeyDown={onComposerKey}
           onPaste={onComposerPaste}
+          {...skillMenu.inputProps}
           disabled={!owned}
           placeholder={
             owned ? 'Ask about this page… (Enter to send, Shift+Enter for a new line)' : 'Take over to send messages'
           }
           className="w-full resize-none rounded-[6px] border border-line bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-line-strong disabled:opacity-50"
         />
+        {skillMenu.menu}
         {imageErrors.map((error) => (
           <p key={error} role="alert" className="mt-1 text-[12px] text-warn">
             {error}
