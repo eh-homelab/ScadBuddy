@@ -284,10 +284,8 @@ export class DurableTurns {
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)
       }
-      if (err instanceof WorkflowNotFoundError) {
-        throw new SessionError('closed', `session ${session.id}'s workflow is gone (it ended and was removed); continue in a new chat`)
-      }
-      if (err instanceof WorkflowExecutionAlreadyStartedError) {
+      // A plain Update to an ended workflow is NOT_FOUND whether or not retention has removed it yet.
+      if (err instanceof WorkflowNotFoundError || err instanceof WorkflowExecutionAlreadyStartedError) {
         throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
       }
       if (err instanceof WorkflowUpdateFailedError) {
