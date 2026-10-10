@@ -9,12 +9,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from psycopg import Connection, sql
+from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from starlette.requests import Request
 
-from scadbuddy.activity.models import FINISHED, ActivityRow
+from scadbuddy.activity.models import FINISHED, ActivityRow, ActivityStatus
 from scadbuddy.activity.visibility import UNKNOWN_SESSION, session_owner
 from scadbuddy.api.agent_actor import AGENT_ACTOR_HEADER
 from scadbuddy.core.authorship import current_author
@@ -59,6 +59,15 @@ _COLUMNS = (
     "updated_at",
     "finished_at",
 )
+
+
+#: ``ai_operations.status`` (agent ``src/operations/``, its CHECK); anything else raises
+#: inside ``upsert_in``'s guard, so it is logged and counted, never lost in a listener task.
+_AGENT_STATUS: dict[str, ActivityStatus] = {
+    "running": "running",
+    "succeeded": "succeeded",
+    "failed": "failed",
+}
 
 
 @dataclass(frozen=True)
@@ -159,6 +168,50 @@ class ActivityIndex:
                 self.events.publish_in(
                     conn, ActivityEvent(activity_id=activity_id, principal=principal)
                 )
+
+    async def ingest_agent_operation(self, operation_id: str) -> None:
+        """Mirror the agent's ``ai_operations`` row (spec §5). A no-op when the agent's
+        tables, or the attribution columns its migration adds, are not there."""
+        await asyncio.to_thread(self._ingest_agent_operation, operation_id)
+
+    def _ingest_agent_operation(self, operation_id: str) -> None:
+        with self.pool.connection() as conn, conn.transaction():
+            try:
+                with conn.transaction():
+                    op = conn.execute(
+                        "SELECT id, kind, subject, status, request, result, error, principal,"
+                        " session, via_tool, workflow_id, workflow_run_id"
+                        " FROM ai_operations WHERE id = %s",
+                        (operation_id,),
+                    ).fetchone()
+            except (errors.UndefinedTable, errors.UndefinedColumn):
+                return
+            if op is None:
+                return
+            self.upsert_in(
+                conn,
+                lambda: ActivityRow(
+                    id=f"agent_operation:{op['id']}",
+                    kind=f"agent.{op['kind']}",
+                    subject=op["subject"] or "",
+                    status=_AGENT_STATUS[op["status"]],
+                    title=(
+                        f"{op['kind'].replace('_', ' ').capitalize()} {op['subject'] or ''}"
+                    ).strip(),
+                    source="ai_operations",
+                    source_id=op["id"],
+                    workflow_id=op["workflow_id"],
+                    run_id=op["workflow_run_id"],
+                    detail={
+                        "request": op["request"],
+                        "result": op["result"],
+                        "error": op["error"],
+                    },
+                ),
+                attribution=Attribution(
+                    op["principal"] or "browser", op["session"], op["via_tool"]
+                ),
+            )
 
     async def get(self, activity_id: str) -> ActivityRow | None:
         return await asyncio.to_thread(self._get, activity_id)

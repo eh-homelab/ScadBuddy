@@ -16,6 +16,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from temporalio.client import Client
 
+from scadbuddy.activity.component import ACTIVITY
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
@@ -201,6 +203,12 @@ def _reaper_client(reaper: WorkflowReaper) -> Client:
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def activity_index(client: TestClient) -> ActivityIndex:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state.components.get(ACTIVITY).index
 
 
 def job_file(client: TestClient, job_id: str, name: str) -> Path:

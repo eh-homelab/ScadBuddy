@@ -239,3 +239,13 @@ async def _delete_with_prelude(client: Client, library_queue: str, queue: str) -
     )
     done: Operation = await asyncio.wait_for(handle.result(), 120)
     return done
+
+
+@pytest.mark.requires_postgres
+async def test_the_print_workers_stores_write_activity(pg_conninfo: str, tmp_path: Path) -> None:
+    deps = await asyncio.to_thread(build_print_deps, print_settings(pg_conninfo, tmp_path))
+    try:
+        assert deps.print_runs.activity is not None
+        assert deps.operations.activity is not None
+    finally:
+        await deps.aclose()

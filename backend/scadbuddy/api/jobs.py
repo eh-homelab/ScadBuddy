@@ -15,6 +15,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.client import WorkflowUpdateFailedError
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     HEX_ID_PATTERN,
     AssetsDep,
@@ -385,6 +388,7 @@ async def render_model(
     assets: AssetsDep,
     fetcher: FetcherDep,
     fonts: FontsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted:
     if body.supersedes is not None and idempotency_key is None:
@@ -437,6 +441,7 @@ async def render_model(
             whole_inputs=pipeline,
             request_id=idempotency_key,
         )
+    await attribute_request(activity.index, f"render:{job.id}", request)
     return RenderAccepted(
         job_id=job.id,
         status_url=request.url_for("get_job", job_id=job.id).path,
