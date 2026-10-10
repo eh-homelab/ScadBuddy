@@ -27,7 +27,8 @@ export type DescribeSession = (workflowId: string) => Promise<SessionRunState>
 export const RUNNING_GRACE_MS = 120_000
 /** How long one describe may take before the row is left for the next pass. */
 const DESCRIBE_DEADLINE_MS = 3_000
-const BATCH = 100
+/** Rows described per pass, one at a time: a slow Temporal keeps a pass near the 30 s interval. */
+const BATCH = 10
 
 const LOST: Record<Exclude<SessionRunState, 'open'>, string> = {
   closed: "the turn ended without a result: the session's workflow has ended",
@@ -60,11 +61,13 @@ export class DurableRunningSweep {
         AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
       ORDER BY updated_at LIMIT ${BATCH}`
     const reset: string[] = []
+    let undescribed = 0
     for (const row of rows) {
       let state: SessionRunState
       try {
         state = await this.#deps.describe(sessionWorkflowId(row.id))
       } catch {
+        undescribed += 1
         continue
       }
       if (state === 'open') continue
@@ -83,6 +86,8 @@ export class DurableRunningSweep {
       events.committed(row.id, tail, done)
       reset.push(row.id)
     }
+    // Once per pass and payload-free, so a describe that always fails (codec, permission) shows.
+    if (undescribed) console.warn(`durable running sweep: ${undescribed} of ${rows.length} sessions' workflows could not be described`)
     return reset
   }
 
