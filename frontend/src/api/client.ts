@@ -1597,6 +1597,9 @@ export const api = {
       body: JSON.stringify({ add_usd: addUsd }),
     }),
 
+  /** #1288 — one session, as the browser user sees it; 404 when it is gone or not theirs to show. */
+  getAiSession: (id: string) => request<AiSessionView>(`/ai/sessions/${encodeURIComponent(id)}`),
+
   /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
   listAiSessionResources: (id: string) =>
     request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
