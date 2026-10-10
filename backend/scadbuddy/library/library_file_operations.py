@@ -157,37 +157,41 @@ def library_file_kinds(state: Core) -> list[OperationKind]:
         async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
             if len(files) == 1:
                 [only] = files
-                trashed = await client.delete_library_file(only["id"])
-                result.deleted.append(
-                    DeletedLibraryFile(
-                        id=only["id"],
-                        filename=only["filename"],
-                        trashed=trashed and not only["external"],
+                try:
+                    trashed = await client.delete_library_file(only["id"])
+                except ApiError as error:
+                    # A file its key's user did not add is Bambuddy's 403 here, as is a
+                    # key without the scope. The bulk delete skips the first and still
+                    # refuses the second, which tells them apart.
+                    if error.extensions.get("bambuddy_status") != status.HTTP_403_FORBIDDEN:
+                        raise
+                else:
+                    result.deleted.append(
+                        DeletedLibraryFile(
+                            id=only["id"],
+                            filename=only["filename"],
+                            trashed=trashed and not only["external"],
+                        )
                     )
+                    return result.model_dump(mode="json")
+            count = await client.bulk_delete_library_files([entry["id"] for entry in files])
+            # Bambuddy says only how many; any it skipped is still listed.
+            listed = (
+                await asyncio.gather(*(_still_listed(client, entry["id"]) for entry in files))
+                if count < len(files)
+                else [False] * len(files)
+            )
+        for entry, kept in zip(files, listed, strict=True):
+            if kept:
+                result.skipped.append(
+                    SkippedLibraryFile(id=entry["id"], filename=entry["filename"], reason=NOT_OWNED)
                 )
             else:
-                count = await client.bulk_delete_library_files([entry["id"] for entry in files])
-                # Bambuddy says only how many; any it skipped is still listed.
-                listed = (
-                    await asyncio.gather(*(_still_listed(client, entry["id"]) for entry in files))
-                    if count < len(files)
-                    else [False] * len(files)
+                result.deleted.append(
+                    DeletedLibraryFile(
+                        id=entry["id"], filename=entry["filename"], trashed=not entry["external"]
+                    )
                 )
-                for entry, kept in zip(files, listed, strict=True):
-                    if kept:
-                        result.skipped.append(
-                            SkippedLibraryFile(
-                                id=entry["id"], filename=entry["filename"], reason=NOT_OWNED
-                            )
-                        )
-                    else:
-                        result.deleted.append(
-                            DeletedLibraryFile(
-                                id=entry["id"],
-                                filename=entry["filename"],
-                                trashed=not entry["external"],
-                            )
-                        )
         return result.model_dump(mode="json")
 
     async def restore_check(request: dict[str, Any]) -> dict[str, Any]:

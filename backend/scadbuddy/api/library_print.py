@@ -77,11 +77,16 @@ async def get_library(
     uploads: UploadsDep,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
+    file_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
     Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
-    A file ScadBuddy uploaded names its ``output_id`` (#1864)."""
+    A file ScadBuddy uploaded names its ``output_id`` (#1864). ``file_id`` in place of
+    ``folder_id`` lists the folder that file is in, which a deep link to a file opens
+    (#2165); a file Bambuddy no longer has is its 404."""
     async with client_for(store.load()) as client:
+        if file_id is not None and folder_id is None:
+            folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
     made = await uploads.outputs_for_files(entry.id for entry in listing.files)
     for entry in listing.files:

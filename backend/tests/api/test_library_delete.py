@@ -40,9 +40,10 @@ def queue(*items: dict[str, Any]) -> respx.Route:
 
 
 def delete(client: TestClient, *ids: int) -> httpx.Response:
-    return client.post(
+    response: httpx.Response = client.post(
         "/api/v1/print/library/delete", json={"file_ids": list(ids)}, headers=press()
     )
+    return response
 
 
 @respx.mock
@@ -111,6 +112,57 @@ def test_several_files_are_one_bulk_delete_and_a_skipped_one_is_reported(
 
 
 @respx.mock
+def test_one_file_its_key_s_user_did_not_add_is_reported_skipped(client: TestClient) -> None:
+    """Bambuddy's single delete answers such a file with a 403, as it does a key
+    without the scope; the bulk delete skips it, which tells the two apart."""
+    configure(client)
+    files((92, False))
+    queue()
+    respx.delete(f"{API}/library/files/92").mock(
+        return_value=httpx.Response(403, json={"detail": "You can only delete your own files"})
+    )
+    bulk = respx.post(f"{API}/library/bulk-delete").mock(
+        return_value=httpx.Response(200, json={"deleted_files": 0, "deleted_folders": 0})
+    )
+
+    body = delete(client, 92).json()
+
+    assert body["deleted"] == []
+    assert [row["id"] for row in body["skipped"]] == [92]
+    assert bulk.called
+
+
+@respx.mock
+def test_a_deep_link_to_a_file_lists_its_folder(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/library/files/67").mock(
+        return_value=httpx.Response(200, json={"id": 67, "filename": "wand.3mf", "folder_id": 4})
+    )
+    respx.get(f"{API}/library/folders").mock(return_value=httpx.Response(200, json=[]))
+    listed = respx.get(f"{API}/library/files/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 67, "filename": "wand.3mf", "file_type": "3mf", "folder_id": 4},
+                {
+                    "id": 68,
+                    "filename": "linked.3mf",
+                    "file_type": "3mf",
+                    "folder_id": 4,
+                    "is_external": True,
+                },
+            ],
+        )
+    )
+
+    body = client.get("/api/v1/print/library", params={"file_id": 67}).json()
+
+    assert body["folder_id"] == 4
+    assert listed.calls.last.request.url.params["folder_id"] == "4"
+    assert {row["id"]: row["is_external"] for row in body["files"]} == {67: False, 68: True}
+
+
+@respx.mock
 def test_a_file_a_waiting_print_names_is_refused_before_anything_is_deleted(
     client: TestClient,
 ) -> None:
@@ -151,6 +203,9 @@ def test_a_key_without_manage_library_names_the_scope(client: TestClient) -> Non
     files((89, False))
     queue()
     respx.delete(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(403, json={"detail": "Forbidden"})
+    )
+    respx.post(f"{API}/library/bulk-delete").mock(
         return_value=httpx.Response(403, json={"detail": "Forbidden"})
     )
 

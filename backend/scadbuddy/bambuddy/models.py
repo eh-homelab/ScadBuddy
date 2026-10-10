@@ -477,6 +477,8 @@ class LibraryListRow(BambuddyModel):
     sliced_for_model: str | None = None
     #: When it was added to the library; naive, and UTC like Bambuddy's other times.
     created_at: datetime | None = None
+    #: Indexed from an external folder: a delete cannot be undone (#2167).
+    is_external: bool = False
 
 
 class LibraryPlate(BambuddyModel):
