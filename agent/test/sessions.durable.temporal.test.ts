@@ -453,7 +453,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       { type: 'error', code: 'turn_failed', message: expect.stringMatching(/never reached/) },
       { type: 'session.status', status: 'idle' },
     ])
-    // The workflow holds the live session's turn: that turn's end is its own.
+    // `live` has a workflow of its own that holds its turn: that turn's end is its own.
     expect(await status(live.id)).toBe('running')
     // The next send reaches the same workflow.
     await m.send(session.id, browser, 'hello again')
@@ -473,7 +473,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
 
     await expect(m.send(session.id, browser, 'hello again')).rejects.toMatchObject({
       code: 'closed',
-      message: expect.stringMatching(/continue in a new chat/),
+      message: expect.stringMatching(/has ended; continue in a new chat/),
     })
     expect(await describe(workflowId)).toBe('not_found')
     expect(await status(session.id)).toBe('idle')
@@ -487,6 +487,21 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     ])
     await expect(m.send(session.id, browser, 'and again')).rejects.toMatchObject({ code: 'closed' })
     expect(await describe(workflowId)).toBe('not_found')
+  }, 60_000)
+
+  it('refuses `closed`, as ended, a session whose workflow ran turns and ended but is still retained (#2078)', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
+    await finishTurn(session.id, [
+      { type: 'session.result', costUsd: 0.1, turns: 1, budgetUsd: 5 },
+      { type: 'session.status', status: 'idle' },
+    ])
+    await db.sql`UPDATE ai_sessions SET durable_offset = 3 WHERE id = ${session.id}`
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('ended')
+    // A plain Update to an ended workflow is NOT_FOUND too: the message must not say "removed".
+    const refused = await m.send(session.id, browser, 'hello again').catch((err: unknown) => err)
+    expect(refused).toMatchObject({ code: 'closed', message: expect.stringMatching(/has ended; continue in a new chat/) })
+    expect((refused as Error).message).not.toMatch(/removed/)
   }, 60_000)
 
   it("leaves a turn that was claimed again while its workflow was described", async () => {
