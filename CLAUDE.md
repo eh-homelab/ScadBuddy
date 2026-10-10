@@ -658,9 +658,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
   `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
   finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
-  issue for the PR. Non-blocking findings never gate and are never filed. Adding the
-  `claude-make-follow-up-issues` label to the PR files the outstanding Blocking ones as
-  `pr-feedback` issues automatically.
+  issue for the PR. Non-blocking findings never gate. A person adding the
+  `claude-make-follow-up-issues` label to the PR files every outstanding finding as
+  `pr-feedback` issues, Non-blocking ones in groups of their own titled `(non-blocking)`;
+  the label the review applies itself to a PR merged with Blocking findings outstanding
+  (a `Bot` sender) files the Blocking ones only.
 - When claude-code-action's workflow-validation guard skips the review (the PR's
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed

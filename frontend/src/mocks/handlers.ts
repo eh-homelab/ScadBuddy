@@ -2494,6 +2494,29 @@ export const handlers = [
       }
     }
 
+    // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
+    // chose that names a family not installed is refused, naming both.
+    const installedFamilies = new Set(state.fonts.map((font) => font.family.toLowerCase()))
+    const unfontedParams: string[] = []
+    const unfontedFamilies: string[] = []
+    for (const param of schema.parameters ?? []) {
+      const value = renderParams[param.name]
+      if (param.type !== 'font' || typeof value !== 'string' || value === param.initial) continue
+      const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
+      const missing = families.filter((family) => !installedFamilies.has(family.toLowerCase()))
+      if (missing.length === 0) continue
+      unfontedParams.push(param.name)
+      for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)
+    }
+    if (unfontedParams.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${unfontedParams[0]}' names font family '${unfontedFamilies[0]}', which is not installed`,
+        { parameters: unfontedParams, families: unfontedFamilies },
+      )
+    }
+
     const jobId = nextHexId()
     const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
@@ -3408,6 +3431,18 @@ export const handlers = [
 
   http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
 
+  // #1285 — a model whose includes all resolve; tests that need more override this.
+  http.post(`${base}/models/:slug/dependencies`, () =>
+    HttpResponse.json({
+      includes: [],
+      unresolved: 0,
+      fonts: [],
+      fonts_checked: true,
+      missing_checkouts: [],
+      truncated: false,
+    }),
+  ),
+
   // #93 — pins are per model: PUT clones at `ref` and pins it into this model alone.
   http.put(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
@@ -3486,6 +3521,9 @@ export const handlers = [
   }),
 
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
+  http.get(`${base}/ai/templates/blank`, () =>
+    HttpResponse.json({ source: '// A blank starter\n/* [Hidden] */\n$fn = 64;\n\ncube(10);\n' }),
+  ),
   http.get(`${base}/ai/settings/headless-browser`, () =>
     HttpResponse.json({ enabled: state.headlessBrowser }),
   ),

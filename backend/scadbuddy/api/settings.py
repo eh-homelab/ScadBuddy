@@ -111,6 +111,11 @@ class SettingsView(BaseModel):
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
+    #: What one read of a library 3MF may spend (#2087), each at most its ceiling.
+    read_max_objects: int
+    read_max_visits: int
+    read_max_triangles: int
+    read_max_paint_digits: int
 
     render_timeout: float
     template_activity_max_timeout: float
