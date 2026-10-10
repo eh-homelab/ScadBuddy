@@ -12,6 +12,18 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
+    reason:
+      "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
+      'Ruling 6); the route refuses an agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/decide',
+    reason:
+      "A flow's outward calls are approved by the browser user on the Workflows page only (spec §6.6, plan 6 " +
+      'Ruling 6); the route refuses an agent-authored request.',
+  },
+  {
     operation: 'DELETE /api/v1/workflow-runs/{run_id}',
     reason:
       "Forgets a flow run: its payload key, workflow and row (#1057). A person's decision on the Workflows " +

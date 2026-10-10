@@ -220,3 +220,38 @@ class TestWithoutAKey:
             response = start(client, definition["id"], "k")
         assert response.status_code == 503
         assert response.json()["type"].endswith("/flows-unavailable")
+
+
+def test_an_answer_reaches_the_run_once(client: TestClient) -> None:
+    definition = register(
+        client, script("a = await wait_for_human('Swap to pink?', 600)", "return a['answer']")
+    )
+    run_id = start(client, definition["id"], "w").json()["id"]
+    view = until(client, run_id, lambda v: v["status"] == "waiting" and v["pending"])
+    call_id = view["pending"][0]["call_id"]
+    url = f"/api/v1/workflow-runs/{run_id}/answer"
+    body = {"call_id": call_id, "answer": "yes"}
+    assert client.post(url, json=body).status_code == 428
+    refused = client.post(url, json=body, headers={"Idempotency-Key": "a0", **AGENT})
+    assert refused.status_code == 403
+    assert refused.json()["type"].endswith("/flow-entry-browser-only")
+    answered = client.post(url, json=body, headers={"Idempotency-Key": "a1"})
+    assert answered.status_code == 200, answered.text
+    assert answered.json()["outcome"] == "answered"
+    done = until(client, run_id, lambda v: v["status"] == "succeeded")
+    assert done["run"]["result"] == "result: 'yes'"
+    again = client.post(url, json=body, headers={"Idempotency-Key": "a2"})
+    assert again.status_code == 409
+
+
+def test_an_answer_to_a_call_not_waiting_is_stale(client: TestClient) -> None:
+    definition = register(client, script("await wait_for_human('q?', 600)"))
+    run_id = start(client, definition["id"], "w").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "waiting")
+    response = client.post(
+        f"/api/v1/workflow-runs/{run_id}/answer",
+        json={"call_id": "not-a-call", "answer": "x"},
+        headers={"Idempotency-Key": "s"},
+    )
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/stale-entry")

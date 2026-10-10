@@ -334,7 +334,10 @@ class FlowStore:
             )
 
     def _delete_run(self, run_id: str) -> bool:
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
+            # Its decisions go by cascade; the operations that made them carry the
+            # answers in their requests, so they go too.
+            conn.execute("DELETE FROM operations WHERE subject = %s", (f"flow:{run_id}",))
             cur = conn.execute("DELETE FROM workflow_runs WHERE id = %s", (run_id,))
         return cur.rowcount > 0
 
