@@ -106,7 +106,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     await drop()
   })
 
-  async function durableManager(options: { cancelTimeoutMs?: number } = {}): Promise<SessionManager> {
+  async function durableManager(
+    options: { cancelTimeoutMs?: number; sendTimeoutMs?: number; taskQueue?: string } = {},
+  ): Promise<SessionManager> {
     const m = manager({
       sql: db.sql,
       paths: await tempPaths(),
@@ -118,8 +120,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       client: env.client,
       sql: db.sql,
       events: m.events,
-      taskQueue: QUEUE,
+      taskQueue: options.taskQueue ?? QUEUE,
       ...(options.cancelTimeoutMs ? { cancelTimeoutMs: options.cancelTimeoutMs } : {}),
+      ...(options.sendTimeoutMs ? { sendTimeoutMs: options.sendTimeoutMs } : {}),
     })
     return m
   }
@@ -221,6 +224,47 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     await expect(m.send(session.id, agentA, 'mine now')).rejects.toMatchObject({ code: 'not_found' })
   }, 60_000)
 
+  it('keeps the claim when no worker takes the message in time, and the turn runs when one does', async () => {
+    const queue = `durable-late-${randomUUID()}`
+    const m = await durableManager({ sendTimeoutMs: 1_000, taskQueue: queue })
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    // No worker on the queue: the Update is admitted with the start but never accepted.
+    // Its outcome is unknown, so the claim stays and the turn is handed back.
+    const turn = await m.send(session.id, browser, 'hello')
+    expect((await m.get(session.id, browser)).status).toBe('running')
+    expect((await m.events.read(session.id)).at(-1)?.event).toMatchObject({ type: 'session.status', status: 'running' })
+    await expect(m.send(session.id, browser, 'again')).rejects.toMatchObject({ code: 'busy' })
+
+    const late = await Worker.create({ connection: env.nativeConnection, taskQueue: queue, workflowsPath: WORKFLOWS })
+    await late.runUntil(async () => {
+      // The workflow took the very message the row is running.
+      const handle = env.client.workflow.getHandle(sessionWorkflowId(session.id))
+      let messages: Record<string, unknown>[] = []
+      for (let i = 0; i < 100 && messages.length === 0; i++) {
+        messages = (await handle.query<Recorded>('recorded')).messages
+        if (messages.length === 0) await new Promise((r) => setTimeout(r, 100))
+      }
+      expect(messages).toMatchObject([{ turn_id: turn.turnId, text: 'hello' }])
+      expect((await m.get(session.id, browser)).status).toBe('running')
+      await finishTurn(session.id, [
+        { type: 'session.result', costUsd: 0.1, turns: 1, budgetUsd: 5 },
+        { type: 'session.status', status: 'idle' },
+      ])
+      expect(await turn.done).toEqual({ kind: 'result', subtype: 'success', costUsd: 0.1, turns: 1 })
+    })
+  }, 60_000)
+
+  it("gives the claim back, as `unavailable`, when the turn's images cannot be stored", async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await db.sql`ALTER TABLE ai_session_blobs RENAME TO ai_session_blobs_gone`
+    await expect(m.send(session.id, browser, 'hello', { images: [IMAGE] })).rejects.toMatchObject({
+      name: 'SessionError',
+      code: 'unavailable',
+    })
+    expect((await m.get(session.id, browser)).status).toBe('idle')
+  }, 60_000)
+
   it('interrupts with cancel_input, then the interrupt Signal', async () => {
     const m = await durableManager()
     const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
@@ -231,7 +275,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(await m.interrupt(session.id, browser)).toBe(false)
   }, 60_000)
 
-  it("hands off after cancel_input, and refuses (retryable) while it goes unanswered", async () => {
+  it("hands off, then ends the old owner's parked calls with cancel_input, or the interrupt Signal when it goes unanswered", async () => {
     const m = await durableManager({ cancelTimeoutMs: 1_000 })
     const { session } = await m.start(agentA, { origin: 'mcp', prompt: 'hello' })
     const taken = await m.handoff(session.id, browser, browser)
@@ -240,8 +284,32 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
 
     const other = (await m.start(agentA, { origin: 'mcp', prompt: 'hello' })).session
     await env.client.workflow.getHandle(sessionWorkflowId(other.id)).signal('hold_cancel')
-    await expect(m.handoff(other.id, browser, browser)).rejects.toMatchObject({ code: 'unavailable', status: 503 })
-    expect((await m.get(other.id, browser)).owner).toEqual(agentA)
+    const handing = m.handoff(other.id, browser, browser)
+    // The owner change is committed before cancel_input is sent: while it waits, the
+    // row is the new owner's and holds no lock (NOWAIT throws if locked).
+    await new Promise((r) => setTimeout(r, 300))
+    const [row] = await db.sql.begin((tx) => tx`SELECT owner_id FROM ai_sessions WHERE id = ${other.id} FOR UPDATE NOWAIT`)
+    expect(row?.owner_id).toBe(browser.id)
+    // A cancel that goes unanswered neither fails nor undoes the handoff.
+    expect((await handing).owner).toEqual(browser)
+    expect((await recorded(other.id)).calls).toEqual([
+      'cancel_input:the session was handed off to You',
+      'interrupt:the session was handed off to You',
+    ])
+  }, 60_000)
+
+  it('sends nothing to the workflow when the owner changed meanwhile', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(agentA, { origin: 'mcp', prompt: 'hello' })
+    const get = m.get.bind(m)
+    m.get = async (...args: Parameters<SessionManager['get']>) => {
+      const read = await get(...args)
+      // Another handoff applies between the read and this one's UPDATE.
+      await db.sql`UPDATE ai_sessions SET owner_kind = 'bearer', owner_id = 'token:b' WHERE id = ${session.id}`
+      return read
+    }
+    await expect(m.handoff(session.id, browser, browser)).rejects.toMatchObject({ code: 'busy' })
+    expect((await recorded(session.id)).calls).toEqual([])
   }, 60_000)
 
   it('hands off a durable session that never ran a turn (no workflow yet)', async () => {
