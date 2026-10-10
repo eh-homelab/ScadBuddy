@@ -25,7 +25,6 @@ def test_operations_yield_kinds_and_agent_rows_are_data() -> None:
     assert reg.get("missing") is None
 
 
-@pytest.mark.skip(reason="Task 4: render/activity.py exports the render kind")
 def test_render_kind_is_discovered() -> None:
     assert discover_kinds([], []).get("render") is not None
 
@@ -60,8 +59,8 @@ def test_duplicate_code_keys_fail(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_agent_rows_outside_prefix_are_ignored() -> None:
-    reg = discover_kinds([], [{"key": "render", "label": "x", "facets": [], "retired_at": None}])
-    assert reg.get("render") is None or reg.get("render").label != "x"  # type: ignore[union-attr]
+    reg = discover_kinds([], [{"key": "other.x", "label": "x", "facets": [], "retired_at": None}])
+    assert reg.get("other.x") is None
 
 
 def test_load_agent_kinds_without_the_agents_tables(pg_pool: PgPool) -> None:

@@ -12,8 +12,12 @@ from typing import Any
 from psycopg import Connection, sql
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+from starlette.requests import Request
 
 from scadbuddy.activity.models import FINISHED, ActivityRow
+from scadbuddy.activity.visibility import UNKNOWN_SESSION, session_owner
+from scadbuddy.api.agent_actor import AGENT_ACTOR_HEADER
+from scadbuddy.core.authorship import current_author
 from scadbuddy.core.events import ActivityEvent
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.render.pg_store import TransactionalEvents
@@ -168,3 +172,25 @@ class ActivityIndex:
                 (activity_id,),
             ).fetchone()
         return None if found is None else ActivityRow.model_validate(found)
+
+
+async def attribute_request(index: ActivityIndex, activity_id: str, request: Request) -> None:
+    """Who started ``activity_id``: the agent author, the headless-browser session's owner,
+    or the browser user (spec §3)."""
+    author = current_author()
+    session_marker = request.headers.get(AGENT_ACTOR_HEADER)
+    if author is not None and author.principal is not None:
+        await index.attribute(
+            activity_id, principal=author.principal, session=author.session, via_tool=author.tool
+        )
+    elif session_marker is not None:
+        principal = await session_owner(index.pool, session_marker)
+        tool = None if author is None else author.tool
+        await index.attribute(
+            activity_id,
+            principal=principal or UNKNOWN_SESSION,
+            session=session_marker,
+            via_tool=tool,
+        )
+    else:
+        await index.attribute(activity_id, principal="browser", session=None, via_tool=None)

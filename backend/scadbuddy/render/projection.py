@@ -21,6 +21,7 @@ from psycopg_pool import ConnectionPool
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.inputs import legacy_inputs
@@ -179,6 +180,8 @@ class JobProjection:
         self.conninfo = conninfo
         self.connect_timeout = connect_timeout
         self.events = events
+        #: Where the activity record is written (set by the ACTIVITY component).
+        self.activity: ActivityIndex | None = None
         #: This process's LISTEN connection, which the event bus shares.
         self.pg_listener = PgListener(conninfo, connect_timeout=connect_timeout)
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
@@ -215,6 +218,17 @@ class JobProjection:
     def _announce(self, conn: Connection[Any], job_id: str, slug: str, kind: JobKind) -> None:
         if self.events is not None:
             self.events.publish_in(conn, JobEvent(kind=kind, job_id=job_id, slug=slug))
+        if self.activity is not None:
+            from scadbuddy.render.activity import row_of  # activity imports this module
+
+            self.activity.upsert_in(conn, lambda: row_of(self._read_in(conn, job_id)))
+
+    def _read_in(self, conn: Connection[Any], job_id: str) -> Job:
+        columns = ", ".join(PROJECTION_COLUMNS)
+        row = conn.execute(f"SELECT {columns} FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
+        if row is None:
+            raise JobNotFoundError(job_id)
+        return _job(row)
 
     # -- the API's writes -------------------------------------------------------
 
