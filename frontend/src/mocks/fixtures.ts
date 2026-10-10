@@ -886,6 +886,7 @@ export const settingsDefaults = {
   worker_cache_max_bytes: 10_737_418_240,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
+  flow_approval_timeout_seconds: 0,
   event_log_retention_rows: 100_000,
   log_level: 'INFO',
   temporal_ui_url: null,

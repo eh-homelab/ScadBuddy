@@ -54,6 +54,21 @@ CONTAINER_FRONTEND_DIR = Path("/app/frontend/dist")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+#: The bounds of a flow approval timeout other than 0 (never), in seconds.
+MIN_APPROVAL_TIMEOUT_S = 10
+MAX_APPROVAL_TIMEOUT_S = 30 * 86_400
+
+
+def check_approval_timeout(value: int, name: str) -> int:
+    """0 (never), or a number of seconds within the bounds; refused, never clamped."""
+    if value != 0 and not MIN_APPROVAL_TIMEOUT_S <= value <= MAX_APPROVAL_TIMEOUT_S:
+        raise ValueError(
+            f"{name} must be 0 (never) or {MIN_APPROVAL_TIMEOUT_S} to"
+            f" {MAX_APPROVAL_TIMEOUT_S} seconds, not {value}"
+        )
+    return value
+
+
 class Settings(BaseSettings):
     """Environment configuration. Every field is overridable as ``SCADBUDDY_<FIELD>``."""
 
@@ -207,6 +222,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY: where the housekeeping Schedule's sweeps
     # run (#1054, spec 2026-10-01 §4.3, §4.4); this process serves it.
     temporal_task_queue_library: str = "library"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS: where flow runs run (#1057, spec 2026-10-01
+    # §4.3), served by `python -m scadbuddy.worker --queue projects`.
+    temporal_task_queue_projects: str = "projects"
     # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
     # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
     # an unregistered attribute fails the workflow task.
@@ -219,6 +237,9 @@ class Settings(BaseSettings):
     # API process (#1060), as SCADBUDDY_TEMPORAL_WORKER_INPROCESS does with every queue,
     # for a deployment without the `scadbuddy-print` worker.
     temporal_print_worker_inprocess: bool = False
+    # SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS: serve the `projects` queue (flow
+    # runs, #1057) inside the API process, as the print flag does for `bambuddy`.
+    temporal_projects_worker_inprocess: bool = False
     # SCADBUDDY_API_INTERNAL_URL: the API's cluster-internal URL, which the print worker
     # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5). Only that
     # worker reads it.
@@ -259,6 +280,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_render",
         "temporal_task_queue_bambuddy",
         "temporal_task_queue_library",
+        "temporal_task_queue_projects",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -284,6 +306,16 @@ class Settings(BaseSettings):
             name = f"SCADBUDDY_{(info.field_name or '').upper()}"
             raise ValueError(f"{name} must be at least 0, not {value}")
         return value
+
+    # SCADBUDDY_FLOW_APPROVAL_TIMEOUT_SECONDS (#1057): how long an outward host call of
+    # a flow run waits for a person's decision before it is denied. 0 is never. A flow
+    # may set its own, and a run may override both.
+    flow_approval_timeout_seconds: int = 0
+
+    @field_validator("flow_approval_timeout_seconds")
+    @classmethod
+    def _flow_approval_timeout_in_range(cls, value: int) -> int:
+        return check_approval_timeout(value, "SCADBUDDY_FLOW_APPROVAL_TIMEOUT_SECONDS")
 
     log_level: str = Field(default="INFO")
 
@@ -447,6 +479,13 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Whether this process runs a render worker at all, decided by how the deployment"
             " is laid out (one replica, or a separate worker Deployment)."
         ),
+        "temporal_task_queue_projects": (
+            "Paired with the Temporal address: the API starts flow runs on it, and the"
+            " worker that serves it must name the same queue."
+        ),
+        "temporal_projects_worker_inprocess": (
+            "A deployment choice: a one-process dev run serves flows itself."
+        ),
         "temporal_print_worker_inprocess": (
             "Whether this process serves the print queue itself, decided by whether the"
             " deployment runs the `scadbuddy-print` worker."
@@ -513,6 +552,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "duplicate_staging_max_age": "live",
         "event_log_retention_seconds": "live",
         "event_log_retention_rows": "live",
+        # Read by every flow run's start.
+        "flow_approval_timeout_seconds": "live",
         # A key change swaps the client and refetches the catalogue.
         "google_fonts_api_key": "live",
         "fonts_catalogue_ttl": "live",
