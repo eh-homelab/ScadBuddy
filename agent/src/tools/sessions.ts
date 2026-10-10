@@ -329,9 +329,15 @@ export const sessionTools: Tool[] = [
     description:
       'List the agent sessions this caller may see (its own, those it started, and those offered to it, flagged ' +
       'offered_to_you), newest first: id, title, origin, owner ("controlled by"), any pending handoff offer, ' +
-      'status, turns and cost. With `resource`, only the sessions whose tool calls touched it (sessions_resources).',
+      'status, turns and cost. With `resource`, only the sessions whose tool calls touched it (sessions_resources). ' +
+      'Archived sessions (put away by the user, read-only: a send or handoff is refused, a fork is not) are left out ' +
+      'unless `archived` asks for them; each row says whether it is archived.',
     input: z.object({
       status: z.enum(SESSION_STATUSES).optional(),
+      archived: z
+        .enum(['only', 'include'])
+        .optional()
+        .describe('Archived sessions: `only` lists just them, `include` lists them with the rest. Omitted, they are left out.'),
       origin: z.enum(ORIGINS).optional(),
       limit: z.number().int().min(1).max(MAX_EVENTS).default(50),
       resource: z
@@ -344,10 +350,11 @@ export const sessionTools: Tool[] = [
     }),
     risk: 'read',
     routes: [],
-    handler: async ({ status, origin, limit, resource }, ctx) => {
+    handler: async ({ status, archived, origin, limit, resource }, ctx) => {
       const sessions = await refusals(() =>
         manager(ctx).list(ownerOf(ctx.principal), {
           ...(status ? { status } : {}),
+          ...(archived ? { archived } : {}),
           ...(origin ? { origin } : {}),
           ...(resource ? { resource } : {}),
           limit,

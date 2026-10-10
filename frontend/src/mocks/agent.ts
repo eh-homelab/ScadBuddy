@@ -28,6 +28,7 @@ import type { RespondBody } from '../agent/respond'
 import {
   PROTOCOL_VERSION,
   type ClientMessage,
+  type Origin,
   type Owner,
   type SentImage,
   type ServerEvent,
@@ -83,8 +84,13 @@ export interface MockAgentSessions {
    * reply's message id: the fork keeps the conversation through it.
    */
   fork(sessionId: string, upTo?: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
-  /** #795 — renames a session or marks it done, as agent `sessions/edits.ts` does; the owner only. */
-  update(sessionId: string, edit: { title?: string; done?: boolean }): { title: string; status: SessionStatus; costUsd: number; budgetUsd: number; parentId: string | null } | { error: string; status: number }
+  /** #795, #1885 — renames a session, marks it done or archives it, as agent `sessions/edits.ts` does; the owner only. */
+  update(
+    sessionId: string,
+    edit: { title?: string; done?: boolean; archived?: boolean },
+  ): { title: string; status: SessionStatus; costUsd: number; budgetUsd: number; parentId: string | null; archivedAt: string | null } | { error: string; status: number }
+  /** #1885 — the archived sessions, newest first, as `GET /api/v1/ai/sessions?archived=true` lists them. */
+  archived(): { id: string; title: string; origin: Origin; status: SessionStatus; parentId: string | null; costUsd: number; budgetUsd: number; archivedAt: string }[]
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
@@ -120,6 +126,8 @@ interface MockSession extends SessionSummary {
   budgetUsd: number
   /** #795 — the session it was forked from. */
   parentId?: string
+  /** #1885 — when it was archived; the snapshot leaves it out, and a send is refused. */
+  archivedAt?: string
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -466,6 +474,15 @@ export function createMockAgentTransport({
           emit({ type: 'error', sessionId: s.sessionId, code: 'busy', message: 'A turn is already running in this session.' })
           return
         }
+        if (s?.archivedAt) {
+          emit({
+            type: 'error',
+            sessionId: s.sessionId,
+            code: 'archived',
+            message: `session ${s.sessionId} is archived, so it is read-only; unarchive it to continue it, or fork it`,
+          })
+          return
+        }
         if (s && s.owner.kind !== 'browser') {
           emit({ type: 'error', sessionId: s.sessionId, code: 'not_owner', message: `${s.owner.label} controls this session. Take over first.` })
           return
@@ -595,7 +612,7 @@ export function createMockAgentTransport({
   const snapshot = (): ServerEvent => ({
     v: PROTOCOL_VERSION,
     type: 'sessions.snapshot',
-    sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, mode }) => ({
+    sessions: [...sessions.values()].filter((s) => !s.archivedAt).map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, mode }) => ({
       sessionId,
       title,
       origin,
@@ -646,13 +663,34 @@ export function createMockAgentTransport({
       const s = sessions.get(sessionId)
       if (!s) return { error: `no session ${sessionId}`, status: 404 }
       if (s.owner.kind !== 'browser') return { error: `session ${sessionId} is controlled by ${s.owner.label}; take it over first`, status: 403 }
-      if (edit.done && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input')) {
+      const running = s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input'
+      if (edit.done && running) {
         return { error: `session ${sessionId} is running a turn; Stop it first, then mark it done`, status: 409 }
+      }
+      if (edit.archived && !s.archivedAt && running) {
+        return { error: `session ${sessionId} is running a turn; Stop it first, then archive it`, status: 409 }
       }
       if (edit.title !== undefined) s.title = edit.title
       if (edit.done && s.status !== 'done') setStatus(s, 'done')
+      if (edit.archived === true) s.archivedAt ??= new Date().toISOString()
+      if (edit.archived === false) delete s.archivedAt
       deliver(snapshot())
-      return { title: s.title, status: s.status, costUsd: s.costUsd, budgetUsd: s.budgetUsd, parentId: s.parentId ?? null }
+      return { title: s.title, status: s.status, costUsd: s.costUsd, budgetUsd: s.budgetUsd, parentId: s.parentId ?? null, archivedAt: s.archivedAt ?? null }
+    },
+    archived() {
+      return [...sessions.values()]
+        .filter((s): s is MockSession & { archivedAt: string } => !!s.archivedAt)
+        .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt))
+        .map((s) => ({
+          id: s.sessionId,
+          title: s.title,
+          origin: s.origin,
+          status: s.status,
+          parentId: s.parentId ?? null,
+          costUsd: s.costUsd,
+          budgetUsd: s.budgetUsd,
+          archivedAt: s.archivedAt,
+        }))
     },
     has(sessionId) {
       return sessions.has(sessionId)

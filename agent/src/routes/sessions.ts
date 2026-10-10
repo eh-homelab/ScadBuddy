@@ -25,9 +25,12 @@ import { ready, type RouteModule } from './module.js'
 // same-origin GET shows it. Approvals are decided through
 // /api/v1/ai/approvals (routes/approvals.ts, #258).
 //
-//   GET  /api/v1/ai/sessions[?status=&limit=&resource_type=&resource_id=]
+//   GET  /api/v1/ai/sessions[?status=&limit=&resource_type=&resource_id=&archived=]
 //                                                 list, newest first; with both resource_*
-//                                                 only the sessions that touched it (#931)
+//                                                 only the sessions that touched it (#931);
+//                                                 archived ones only with `archived=true` (the
+//                                                 panel's archive view, #1885) or
+//                                                 `archived=include`, never by default
 //   GET  /api/v1/ai/resources/:type/:id/sessions[?status=&limit=]
 //                                                 {sessions}: the same list, of the sessions
 //                                                 whose tool calls touched that resource (#931,
@@ -55,10 +58,13 @@ import { ready, type RouteModule } from './module.js'
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
-//   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true} → {session}: rename it, or
-//                                                 mark it done (#795, sessions/edits.ts). Owner-only
-//                                                 (403); done is refused while a turn runs and on a
-//                                                 durable session (409)
+//   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true, archived?} → {session}: rename
+//                                                 it, mark it done (#795), or archive or unarchive it
+//                                                 (#1885; sessions/edits.ts). Owner-only (403); done is
+//                                                 refused while a turn runs and on a durable session,
+//                                                 and archiving while a turn runs or anything is parked
+//                                                 on the user (409). A send or a handoff to an archived
+//                                                 session is refused (409, `archived`)
 //   POST /api/v1/ai/sessions/:id/fork             {title?, up_to?} → 201 {session}: a new session with the
 //                                                 transcript so far, or (`up_to`, a reply's panel message
 //                                                 id, #793) through that reply, and a fresh budget,
@@ -103,6 +109,9 @@ export type SessionView = {
   running: boolean
   created_at: string
   updated_at: string
+  /** Archived by its owner (#1885): out of the panel's list, and read-only until unarchived. */
+  archived: boolean
+  archived_at: string | null
 }
 
 /**
@@ -128,6 +137,8 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
     running: s.turnActive,
     created_at: s.createdAt,
     updated_at: s.updatedAt,
+    archived: s.archivedAt !== null,
+    archived_at: s.archivedAt,
   }
 }
 
@@ -144,8 +155,17 @@ const ForkBody = z.strictObject({
   up_to: z.string().min(1).max(MESSAGE_ID_MAX).optional(),
 })
 const UpdateBody = z
-  .strictObject({ title: z.string().trim().min(1).max(200).optional(), done: z.literal(true).optional() })
-  .refine((b) => b.title !== undefined || b.done !== undefined, { message: 'name a title, or done: true' })
+  .strictObject({
+    title: z.string().trim().min(1).max(200).optional(),
+    done: z.literal(true).optional(),
+    archived: z.boolean().optional(),
+  })
+  .refine((b) => b.title !== undefined || b.done !== undefined || b.archived !== undefined, {
+    message: 'name a title, done: true, or archived',
+  })
+
+/** `?archived=` on a list (#1885): `true` lists only archived sessions, `include` both, `false` (the default) none. */
+const ARCHIVED_QUERY = { true: 'only', include: 'include', false: 'exclude' } as const
 const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -237,7 +257,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (rawLimit !== undefined && (limit === undefined || limit < 1 || limit > LIST_LIMIT_MAX)) {
       return c.json({ detail: `limit must be an integer from 1 to ${LIST_LIMIT_MAX}` }, 400)
     }
+    const rawArchived = c.req.query('archived')
+    if (rawArchived !== undefined && !Object.hasOwn(ARCHIVED_QUERY, rawArchived)) {
+      return c.json({ detail: `archived must be one of ${Object.keys(ARCHIVED_QUERY).join(', ')}` }, 400)
+    }
     const list = await sessions.list(BROWSER_USER, {
+      ...(rawArchived ? { archived: ARCHIVED_QUERY[rawArchived as keyof typeof ARCHIVED_QUERY] } : {}),
       ...(status ? { status: status as SessionRecord['status'] } : {}),
       ...(limit ? { limit } : {}),
       ...(resource ? { resource } : {}),
@@ -379,6 +404,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const session = await sessions.edits.update(idOf(c), BROWSER_USER, {
         ...(body.value.title === undefined ? {} : { title: body.value.title }),
         ...(body.value.done ? { done: true as const } : {}),
+        ...(body.value.archived === undefined ? {} : { archived: body.value.archived }),
       })
       return c.json({ session: sessionView(session, BROWSER_USER) })
     }),
