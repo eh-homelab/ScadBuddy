@@ -305,7 +305,10 @@ export class TabHub implements BrowserTabs {
     signal?: AbortSignal,
   ): Promise<Resolved | { problem: string }> {
     if (target.sessionId !== undefined) {
-      const tabId = this.#sessionTabs.get(target.sessionId) ?? (await this.#storedSessionTab(target.sessionId, signal))
+      // With a store, its row is the session's tab: another replica may have
+      // paired the session since this one last did (#2086), and this one's map
+      // would still name the older tab. The map answers when there is no row.
+      const tabId = (await this.#storedSessionTab(target.sessionId, signal)) ?? this.#sessionTabs.get(target.sessionId)
       if (tabId !== undefined) return this.#reach(tabId, { via: 'session' })
     }
     if (target.principal.kind === 'browser') return { problem: NO_SESSION_TAB }
@@ -315,10 +318,12 @@ export class TabHub implements BrowserTabs {
     return this.#reach(paired.tabId, { via: 'pairing', pairing: paired })
   }
 
-  /** The tab another replica paired `sessionId` with; undefined when none did or it cannot be read. */
+  /** The tab `sessionId` was last paired with on any replica; undefined when there is no row or it cannot be read. */
   async #storedSessionTab(sessionId: string, signal?: AbortSignal): Promise<string | undefined> {
     if (!this.#sessionTabStore) return undefined
     try {
+      // This replica's own latest pairing first, so the row read is not older than it.
+      await this.#sessionTabWrites
       return await this.#sessionTabStore.get(sessionId, signal)
     } catch (err) {
       if (signal?.aborted) throw err
