@@ -4,6 +4,7 @@ import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
+import { missingFonts } from '../lib/fonts'
 import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
@@ -1200,6 +1201,11 @@ export function CustomizePage() {
               reveal={reveal}
               rendered={renderedOutput}
               growsWithPage={!full}
+              missingFonts={missingFonts(renderError)}
+              onFontInstalled={() => {
+                fontsState.reload()
+                retryRender()
+              }}
               toolbar={
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}

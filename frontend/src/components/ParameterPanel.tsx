@@ -1,5 +1,6 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import type { CustomizerSchema, FontFamily, ParamValue } from '../api/types'
+import type { CustomizerSchema, FontFamily, InstalledFamily, ParamValue } from '../api/types'
+import { missingFamiliesOf, type MissingFonts } from '../lib/fonts'
 import { diffFromDefaults, extrudersIn, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
 import { Button } from './ui/Button'
@@ -36,6 +37,10 @@ interface Props {
    * has a height of its own (the full-screen flyout).
    */
   growsWithPage?: boolean
+  /** #1286 — the render was refused for font families that are not installed: flagged on their fields. */
+  missingFonts?: MissingFonts
+  /** One of them was installed from its field. */
+  onFontInstalled?: (installed: InstalledFamily) => void
 }
 
 export function ParameterPanel({
@@ -50,6 +55,8 @@ export function ParameterPanel({
   reveal,
   rendered,
   growsWithPage = false,
+  missingFonts,
+  onFontInstalled,
 }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
   const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
@@ -98,6 +105,8 @@ export function ParameterPanel({
     [schema, values, rendered],
   )
   const extruderOf = (name: string) => extruders.get(name)
+  const missingOf = (name: string, value: ParamValue) =>
+    missingFonts ? missingFamiliesOf(missingFonts, name, String(value)) : undefined
 
   // The font picker previews what will actually be printed, so it needs the model's
   // own text: the first string parameter, which on the keychain is the name.
@@ -165,6 +174,8 @@ export function ParameterPanel({
                     fonts={fonts}
                     sampleText={sampleText}
                     extruder={extruderOf(param.name)}
+                    missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
+                    onFontInstalled={onFontInstalled}
                     onChange={(next) => onChange(param.name, next)}
                   />
                 </li>
@@ -185,6 +196,8 @@ export function ParameterPanel({
                   fonts={fonts}
                   sampleText={sampleText}
                   extruder={extruderOf(param.name)}
+                  missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
+                  onFontInstalled={onFontInstalled}
                   onChange={(next) => onChange(param.name, next)}
                 />
               </li>
