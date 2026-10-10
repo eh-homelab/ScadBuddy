@@ -15,7 +15,8 @@ import { redact } from '../secrets.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
 import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
-import type { TierResolver } from '../harness/permissions.js'
+import type { RiskTier, TierResolver } from '../harness/permissions.js'
+import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import {
   DEFAULT_MAX_BUDGET_USD,
   DEFAULT_MAX_TURNS,
@@ -572,8 +573,14 @@ export type SessionManagerDeps = {
     session: SessionRecord,
     turn: TurnPrincipal,
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy },
   ) => Record<string, McpSdkServerConfigWithInstance>
+  /**
+   * Settings → Plugins' overrides of the built-in tools (#1953,
+   * plugins/builtInTools.ts `BuiltInTools.policy`): read once per turn, as the
+   * remote plugins are.
+   */
+  builtInTools?: () => Promise<BuiltInPolicy>
   pluginPaths?: string[]
   /** ScadBuddy's own plugin (harness/ownPlugin.ts, #896); its Skill and Agent tools come with it. */
   ownPlugin?: string
@@ -1370,7 +1377,10 @@ export class SessionManager {
     // Widened with the plugins' tiers once they are loaded below, so the
     // panel shows a plugin tool at the tier the permission seam applies. The
     // headless browser's tools are tiered too (spec §5.3, "Tiers").
-    let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
+    // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
+    let builtIn: BuiltInPolicy | undefined
+    const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
+    let eventTierOf: TierResolver = (name, input) => raised(name, browserTierOf(name) ?? tierOf(name, input))
     // AskUserQuestion and ask_user (#940) only ask the user: shown and audited as `read`, as the harness tiers them.
     const asksUser = session.owner.kind === 'browser'
     const shownTierOf: TierResolver = (name, input) =>
@@ -1477,6 +1487,7 @@ export class SessionManager {
         // candidate's, since the turn may fall back to any of them.
         const candidates = await this.deps.credentials.candidates()
         secrets = candidates.map((c) => c.credential.secret)
+        builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
         forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
         const remotePlugins = forwarded?.plugins ?? []
         // Plugin header values (and their bare tokens) are redacted from the
@@ -1490,7 +1501,7 @@ export class SessionManager {
             ? this.deps.ownPlugin
             : undefined
         const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
-        eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
+        eventTierOf = (name, input) => raised(name, browserTierOf(name) ?? pluginTiers(name, input))
         // A plugin left out of this turn is said so in the session, not only in the log.
         const unavailable = (message: string) =>
           this.events.append(id, [
@@ -1645,6 +1656,7 @@ export class SessionManager {
           maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
           signal: controller.signal,
           tierOf,
+          ...(builtIn ? { builtInPolicy: builtIn } : {}),
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
           systemPromptAppend: systemAppend(browser !== undefined),
@@ -1664,6 +1676,7 @@ export class SessionManager {
                             ? { waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })) }
                             : {}),
                           turnContext: () => traced.context(),
+                          ...(builtIn ? { builtIn } : {}),
                         },
                       )
                     : {}),

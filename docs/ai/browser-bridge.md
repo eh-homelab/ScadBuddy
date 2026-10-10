@@ -341,13 +341,19 @@ sequenceDiagram
 - **Bodies are rows** in `ai_bridge_messages`, inserted in the transaction that sends
   the NOTIFY, because a NOTIFY payload is capped at 8000 bytes and a tab's result can be
   200 000. Taking a row with `DELETE … RETURNING` runs a call once even when a reconnect
-  leaves the tab id briefly on two replicas. Rows nobody took are swept after 10 minutes.
+  leaves the tab id briefly on two replicas. So a forwarded call's arguments and the
+  tab's result, page snapshots included, are written to Postgres. A row nobody took
+  stays there until a sweep finds it more than 10 minutes old, and a replica sweeps only
+  when it next forwards something, so such a row can outlive those 10 minutes.
 - **The channel is `scadbuddy_bridge`**, LISTENed on the event bus's connection
   (`events/pgListener.ts` `listenAlso`), not `scadbuddy_events`: the backend logs every
   payload on that one it cannot decode.
 - **No replica holds the tab:** nobody acks within 3 s (`ACK_TIMEOUT_MS`), and the call
   answers the usual "the paired ScadBuddy tab is not connected". The ack is what tells
-  that apart from a slow tab.
+  that apart from a slow tab. Before answering, the caller withdraws its request row;
+  when the row is already gone, a replica took it and its ack is late or was lost, so
+  the caller waits for the answer as if acked rather than report a tab that may be
+  running the call as not connected.
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s. `browser_status` asks the same way for the tab's route and live tools.

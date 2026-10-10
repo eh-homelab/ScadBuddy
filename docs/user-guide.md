@@ -466,7 +466,10 @@ recorded that turn doing; **Dismiss** clears it.
 
 All of these count on the **Assistant** button's badge (its tooltip breaks the count
 down), and the browser tab's title starts with the count, so you can leave the panel
-closed and still see that something is waiting for you.
+closed and still see that something is waiting for you. While any of your chats (or a
+Claude client's session) is working on a turn, a pulsing dot shows on the button too, so
+it says at a glance whether the assistant is idle, working, or waiting for you. It is
+read every 15 seconds and whenever you open or close the panel.
 
 Some buttons only you can press, whatever the assistant is allowed: Print, Send,
 Delete, Settings' **Save**, the approval and question cards, Fork, Take over, and every
@@ -563,7 +566,12 @@ browser are built in, each with **Enable**/**Disable**.
   listed; the only way past is to approve loading the package as it is, which runs its
   code with the assistant service's own access. A newer commit is **Fetch re-pin**,
   approved the same way.
-- **Plugin endpoints** (remote MCP servers). Give a **Name**, the **MCP endpoint URL**
+- **Plugins**. ScadBuddy's own tools come first, marked **Built in**: `scadbuddy` (the
+  assistant's ScadBuddy tools) and `playwright` (the headless browser's). **Review tools**
+  lists each one with its tier and **Disable**. A tier can only be raised above the one
+  ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
+  built-in is never removed. A durable session does not yet ask about a tool raised to
+  outward: it refuses the call instead. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
   and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never

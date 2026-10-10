@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import { raiseTier } from '../harness/permissions.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
@@ -93,6 +94,35 @@ export type ToolServices = {
   touched?: TouchedSink | undefined
   /** Tools Settings turned off (switches.ts, #1911): a call is refused before its handler runs. Every tool is on without it. */
   switchedOff?: SwitchedOff | undefined
+  /**
+   * Settings → Plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
+   * a raised tier or a disabled tool, read at each call. Every tool runs at its
+   * own tier without it.
+   */
+  toolOverrides?: ToolOverrides | undefined
+}
+
+/** One tool's override: a tier at or above its own, and whether it is disabled. */
+export type ToolOverride = { tier?: Risk; disabled: boolean }
+
+export type ToolOverrides = {
+  of(tool: string): Promise<ToolOverride>
+  /** Every disabled tool's name, for a tool list (/mcp). */
+  disabled(): Promise<ReadonlySet<string>>
+}
+
+/** What a tool runs at now: its tier raised by any override, whether that gates it, and whether it is disabled. */
+export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
+
+/**
+ * A tool's tier and gate with Settings' override applied (#1953). An override
+ * only raises, so a tool raised to `outward` is gated like any outward tool
+ * (`approval: 'none'` tools are outward already, so this never gates them).
+ */
+export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
+  const override = await services.toolOverrides?.of(tool.name)
+  const risk = raiseTier(tool.risk, override?.tier)
+  return { risk, gated: tool.gated || (risk === 'outward' && tool.risk !== 'outward'), disabled: override?.disabled === true }
 }
 
 export type ToolContext = ToolServices & {
@@ -434,15 +464,25 @@ async function runJudgedByResult(
   ctx: ToolContext,
   executed: () => Pick<Tool, 'name' | 'source'>,
 ): Promise<ToolRun> {
-  if (!hasTier(ctx.principal, tool.risk)) {
+  let effective: EffectiveTool
+  try {
+    effective = await effectiveTool(tool, ctx)
+  } catch {
+    // Fails closed: a database blip never runs a tool Settings disabled.
+    return refused(`${tool.name} is refused: its Settings → Plugins entry cannot be read`)
+  }
+  if (effective.disabled) {
+    return refused(`${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`)
+  }
+  if (!hasTier(ctx.principal, effective.risk)) {
     return refused(
-      `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
+      `${tool.name} needs the "${effective.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
     )
   }
   const off = await ctx.switchedOff?.(tool.name)
   if (off) return refused(off)
   try {
-    if (tool.gated && ctx.gate === undefined) {
+    if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
       const input = tool.parse(args)
       const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })

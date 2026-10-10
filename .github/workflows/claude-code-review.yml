@@ -1055,7 +1055,7 @@ jobs:
           **Outstanding findings**
           ${FINDINGS:-_none listed_}
 
-          Push a fix, or apply the \`claude-make-follow-up-issues\` label to file them as \`pr-feedback\` issues. Non-blocking findings in the review do not gate the merge and are not filed."
+          Push a fix, or apply the \`claude-make-follow-up-issues\` label to file them as \`pr-feedback\` issues. Non-blocking findings in the review do not gate the merge; the label files them too only when a person applies it."
 
       # ── THIS is the merge gate ──────────────────────────────────────────────
       #
