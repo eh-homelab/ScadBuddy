@@ -294,7 +294,8 @@ MAX_ARRANGE_COPIES = 2000
 
 
 #: Arrange's 422 for a library file whose objects cannot be read from its 3MF (#1863): a
-#: sliced file, one past the download cap, one painted or cut by a negative part.
+#: sliced file, one past the download cap, one painted in PrusaSlicer or cut by a negative
+#: part. A part painted in Bambu Studio is arranged with its painting (#1965).
 LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
 
 
@@ -550,8 +551,9 @@ def arrange_inputs(
     " goal, printer and spool plan (spec §7). No re-render. Outputs may come from any"
     " template; a library file ScadBuddy uploaded stands for the output it is a copy of"
     " (#1864), and any other 3MF or STL is read from the file itself (#1863; its objects:"
-    " GET /print/library/{file_id}/objects). A file that cannot be read (sliced, too"
-    " large, painted) is a 422 with code `library_file_not_arrangeable`. Poll the job"
+    " GET /print/library/{file_id}/objects). A part painted in Bambu Studio keeps its"
+    " painting (#1965). A file that cannot be read (sliced, too large, painted in"
+    " PrusaSlicer) is a 422 with code `library_file_not_arrangeable`. Poll the job"
     " with GET /jobs/{id}, then save it as an output under the job's `slug`.",
 )
 async def arrange_outputs(

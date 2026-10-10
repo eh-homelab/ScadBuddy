@@ -1154,21 +1154,33 @@ def test_a_model_file_s_meshes_are_read_into_arrays_and_left_out_of_the_tree() -
     assert mesh.faces.tolist() == [[0, 1, 2], [2, 1, 0], [0, 2, 1]]
     assert [mesh.pids[i] if i >= 0 else None for i in mesh.pid] == [None, "5", "7"]
     assert mesh.p1.tolist() == [-1, 1, -1]
-    assert not mesh.painted
+    assert mesh.paint is None and not mesh.prusa_painted
 
 
-@pytest.mark.parametrize("attribute", ['paint_color="8"', 'mmu_segmentation="4"'])
-def test_a_painted_triangle_marks_its_mesh(attribute: str) -> None:
-    namespace = 'xmlns:s="http://schemas.slic3r.org/3mf/2017/06" '
-    attribute = attribute if attribute.startswith("paint") else f"{namespace}s:{attribute}"
+def test_a_painted_mesh_keeps_each_triangles_paint_code() -> None:
+    # The first triangle is unpainted: a mesh's codes start once one is painted (#1965).
     archive = _model_zip(
-        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
-        f'<triangles><triangle v1="0" v2="0" v3="0" {attribute}/></triangles></mesh></object>'
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices><triangles>'
+        '<triangle v1="0" v2="0" v3="0"/><triangle v1="0" v2="0" v3="0" paint_color="8"/>'
+        '<triangle v1="0" v2="0" v3="0"/></triangles></mesh></object>'
     )
 
     (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
 
-    assert mesh.painted
+    assert mesh.paint == ("", "8", "") and not mesh.prusa_painted
+
+
+def test_prusaslicer_painting_marks_its_mesh() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        '<triangles><triangle v1="0" v2="0" v3="0"'
+        ' xmlns:s="http://schemas.slic3r.org/3mf/2017/06" s:mmu_segmentation="4"/>'
+        "</triangles></mesh></object>"
+    )
+
+    (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
+
+    assert mesh.prusa_painted and mesh.paint is None
 
 
 def test_a_model_file_past_its_cap_is_refused_whatever_its_header_says() -> None:

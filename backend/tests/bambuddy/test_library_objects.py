@@ -85,7 +85,7 @@ async def test_a_file_read_once_is_not_downloaded_or_parsed_again(
     assert download.call_count == 1 and len(parses) == 1
     assert second.objects == first.objects
     [obj] = second.objects
-    assert obj.part.startswith("lib1-") and obj.library_file_id == 88
+    assert obj.part.startswith("lib2-") and obj.library_file_id == 88
     assert obj.colours == ["#FF0000", "#0000FF"]
     # The pieces are stored as the file is read: nothing is left for the arrange to write.
     assert (blobs.dir_for(obj.part) / LAYOUT_NAME).is_file()

@@ -10,8 +10,13 @@ project (ScadBuddy's own files and a wrapped STL among them) names each part's e
 in ``Metadata/model_settings.config``, and its colour is that filament's in
 ``project_settings.config``; any other 3MF colours triangles by its ``basematerials``.
 
+A part painted in several colours in Bambu Studio (``paint_color``, #1965) is one part
+of its own, its painting carried as it is (:class:`~scadbuddy.render.split.Paint`):
+where each colour falls on it is the slicer's to work out again, as it was for the file.
+
 What cannot be read faithfully is refused (:class:`UnreadableObjectsError`) rather than
-guessed: a sliced file, a part painted in several colours, a negative part. Modifiers
+guessed: a sliced file, PrusaSlicer's painting, painting in a file with no Bambu Studio
+filaments for it to name, a painted part the file mirrors, a negative part. Modifiers
 and support blockers or enforcers print nothing and are dropped, with a note.
 
 The file is untrusted: the archive is bounded as the print path bounds it
@@ -55,7 +60,8 @@ from scadbuddy.render.bambu3mf import (
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PartSource, PlateLayout
-from scadbuddy.render.split import ColourPart, normalise_colour
+from scadbuddy.render.paint import PaintCodeError, states
+from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart, Paint, normalise_colour
 
 #: The most distinct objects one file is read as: Arrange takes 200 objects a request.
 MAX_OBJECTS = 200
@@ -88,6 +94,15 @@ MAX_TRIANGLES = 5_000_000
 
 class UnreadableObjectsError(ValueError):
     """The file's objects cannot be read faithfully; the message says why."""
+
+
+#: One mesh as read: its colour, vertices, faces, and its painting when painted.
+type _Piece = tuple[str, np.ndarray, np.ndarray, Paint | None]
+
+
+def _check_faces(faces: np.ndarray, points: np.ndarray) -> None:
+    if faces.size and (faces.min() < 0 or faces.max() >= len(points)):
+        raise UnreadableObjectsError("a triangle names a vertex the mesh lacks")
 
 
 @dataclass(frozen=True)
@@ -270,9 +285,10 @@ class _Reader:
         matrix: np.ndarray,
         extruder: int | None,
         depth: int = 0,
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
-        """(colour, vertices, faces) of every mesh the object is made of, transformed
-        by ``matrix``. ``extruder`` is the Bambu part's, which colours the whole mesh."""
+    ) -> Iterator[_Piece]:
+        """(colour, vertices, faces, painting) of every mesh the object is made of,
+        transformed by ``matrix``. ``extruder`` is the Bambu part's, which colours the
+        whole mesh but where it is painted."""
         if depth > _MAX_DEPTH:
             raise UnreadableObjectsError("the 3MF's components nest too deep")
         self._spend(visits=1)
@@ -304,7 +320,7 @@ class _Reader:
         mesh: ET.Element,
         matrix: np.ndarray,
         extruder: int | None,
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
+    ) -> Iterator[_Piece]:
         arrays = self.archive.meshes[mesh]
         if (
             mesh.find(f"{_CORE}vertices") is None
@@ -319,11 +335,16 @@ class _Reader:
         if not np.isfinite(points).all():
             raise UnreadableObjectsError("a vertex of the 3MF is not a finite number")
         points = (np.c_[points, np.ones(len(points))] @ matrix.T)[:, :3]
-        if arrays.painted:
+        name = obj.get("name") or obj.get("id")
+        if arrays.prusa_painted:
             raise UnreadableObjectsError(
-                f"object {obj.get('name') or obj.get('id')} is painted in several colours,"
-                " which Arrange cannot read"
+                f"object {name} is painted in PrusaSlicer, which Arrange cannot read;"
+                " paint it in Bambu Studio, or split it into a part per colour"
             )
+        mirrored = np.linalg.det(matrix[:3, :3]) < 0
+        if arrays.paint is not None:
+            yield self._painted(name, points, arrays.faces, arrays.paint, extruder, mirrored)
+            return
         buckets: dict[str, np.ndarray] = {}
         if extruder is not None:
             buckets[self.colour_of(extruder)] = arrays.faces
@@ -355,11 +376,45 @@ class _Reader:
             for colour, index in colours.items():
                 start = ends[index - 1] if index else 0
                 buckets[colour] = arrays.faces[order[start : ends[index]]]
-        mirrored = np.linalg.det(matrix[:3, :3]) < 0
         for colour, array in buckets.items():
-            if array.size and (array.min() < 0 or array.max() >= len(points)):
-                raise UnreadableObjectsError("a triangle names a vertex the mesh lacks")
-            yield colour, points, array[:, ::-1] if mirrored else array
+            _check_faces(array, points)
+            yield colour, points, array[:, ::-1] if mirrored else array, None
+
+    def _painted(
+        self,
+        name: str | None,
+        points: np.ndarray,
+        faces: np.ndarray,
+        codes: tuple[str, ...],
+        extruder: int | None,
+        mirrored: bool,
+    ) -> _Piece:
+        """A painted mesh, whole: its own colour the part's extruder's, its painting
+        naming the file's filaments by extruder number (#1965)."""
+        if extruder is None or not self.filaments:
+            raise UnreadableObjectsError(
+                f"object {name} is painted, but the file names no Bambu Studio filaments"
+                " for its paint"
+            )
+        if mirrored:
+            # Reversing each face to keep it facing out would move its painting: the
+            # code places colour by the face's own corners, in their order.
+            raise UnreadableObjectsError(
+                f"object {name} is painted and mirrored, which Arrange cannot carry over"
+            )
+        _check_faces(faces, points)
+        try:
+            used = {state for code in codes if code for state in states(code)}
+        except PaintCodeError as error:
+            raise UnreadableObjectsError(
+                f"object {name}'s painting cannot be read: {error}"
+            ) from None
+        if used and max(used) > len(self.filaments):
+            raise UnreadableObjectsError(
+                f"object {name} is painted with extruder {max(used)}, and the file has"
+                f" {len(self.filaments)} filaments"
+            )
+        return self.colour_of(extruder), points, faces, Paint(codes, tuple(self.filaments))
 
     def item(
         self, model: str, object_id: str, matrix: np.ndarray
@@ -374,13 +429,18 @@ class _Reader:
             )
         settings = self.settings.get(object_id) if self.settings is not None else None
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
+        # A painted mesh stays a part of its own: its faces are its painting's (#1965).
+        painted: list[tuple[str, trimesh.Trimesh, Paint]] = []
         notes: list[str] = []
 
-        def add(pieces: Iterator[tuple[str, np.ndarray, np.ndarray]]) -> None:
-            for colour, points, faces in pieces:
+        def add(pieces: Iterator[_Piece]) -> None:
+            for colour, points, faces, paint in pieces:
                 part = trimesh.Trimesh(vertices=points, faces=faces, process=False)
                 part.remove_unreferenced_vertices()
-                by_colour.setdefault(colour, []).append(part)
+                if paint is not None:
+                    painted.append((colour, part, paint))
+                else:
+                    by_colour.setdefault(colour, []).append(part)
 
         components = obj.find(f"{_CORE}components")
         if settings is None or components is None:
@@ -415,6 +475,9 @@ class _Reader:
             if not isinstance(joined, trimesh.Trimesh) or joined.is_empty:
                 continue
             parts.append(ColourPart(index, f"Color {index}", colour, joined))
+        for colour, mesh, paint in painted:
+            index = len(parts) + 1
+            parts.append(ColourPart(index, f"Color {index}", colour, mesh, paint))
         return parts, notes
 
 
@@ -562,10 +625,17 @@ def _hex(colour: str) -> str:
 
 def piece_mesh(parts: list[ColourPart]) -> bytes:
     """The object's colours as one core 3MF, a material each: the shape of a render's
-    split 3MF, so `split_by_material` reads it back part by part."""
+    split 3MF, so `split_by_material` reads it back part by part. A painted part's
+    triangles keep their ``paint_color``, renumbered to name the materials: each colour
+    its painting uses that no part has is a material of no triangle, after the parts'."""
+    palette = [part.colour for part in parts]
+    for part in parts:
+        if part.paint is not None:
+            palette += [c for c in part.paint.used() if c.upper() not in map(str.upper, palette)]
     bases = "".join(
-        f"<base name={quoteattr(part.name)} displaycolor={quoteattr(_hex(part.colour))}/>"
-        for part in parts
+        f"<base name={quoteattr(parts[index].name if index < len(parts) else f'Paint {index + 1}')}"
+        f" displaycolor={quoteattr(_hex(colour))}/>"
+        for index, colour in enumerate(palette)
     )
     vertices: list[str] = []
     triangles: list[str] = []
@@ -574,9 +644,16 @@ def piece_mesh(parts: list[ColourPart]) -> bytes:
         vertices += [
             f'<vertex x="{v[0]!r}" y="{v[1]!r}" z="{v[2]!r}"/>' for v in part.mesh.vertices.tolist()
         ]
+        codes = (
+            part.paint.renumbered(palette).codes
+            if part.paint is not None
+            else ("",) * len(part.mesh.faces)
+        )
         triangles += [
-            f'<triangle v1="{a}" v2="{b}" v3="{c}" pid="1" p1="{index}"/>'
-            for a, b, c in (part.mesh.faces + offset).tolist()
+            f'<triangle v1="{a}" v2="{b}" v3="{c}" pid="1" p1="{index}"'
+            + (f' {PAINT_ATTRIBUTE}="{code}"' if code else "")
+            + "/>"
+            for (a, b, c), code in zip((part.mesh.faces + offset).tolist(), codes, strict=True)
         ]
         offset += len(part.mesh.vertices)
     model = (
@@ -596,7 +673,8 @@ def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
     """Write ``obj`` into ``directory`` as a piece `write_output` places: the mesh file,
     then its ``layout.json`` (last, so a piece with a layout is whole). Returns its box."""
     parts = [
-        ColourPart(index, part.name, part.colour, part.mesh) for index, part in enumerate(obj.parts)
+        ColourPart(index, part.name, part.colour, part.mesh, part.paint)
+        for index, part in enumerate(obj.parts)
     ]
     (directory / PIECE_MESH_NAME).write_bytes(piece_mesh(parts))
     box = bounding_box(parts)

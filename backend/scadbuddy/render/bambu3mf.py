@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from array import array
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
 from xml.etree import ElementTree as ET
@@ -27,7 +27,7 @@ from scadbuddy.render.plate import (
     centre_on_plate,
     place_on_plate,
 )
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart
 from scadbuddy.render.thumbnail import PlateThumbnails
 
 #: Bambu Studio reads ``Metadata/project_settings.config`` only when the root
@@ -133,8 +133,14 @@ def object_model(part: ColourPart, object_id: int) -> str:
         f'\n     <vertex x="{_number(v[0])}" y="{_number(v[1])}" z="{_number(v[2])}"/>'
         for v in part.mesh.vertices
     )
+    codes = part.paint.codes if part.paint is not None else ("",) * len(part.mesh.faces)
+    if len(codes) != len(part.mesh.faces):
+        raise ValueError(f"part {part.name!r} has paint for another number of faces")
     triangles = "".join(
-        f'\n     <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"/>' for f in part.mesh.faces
+        f'\n     <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"'
+        + (f' {PAINT_ATTRIBUTE}="{code}"' if code else "")
+        + "/>"
+        for f, code in zip(part.mesh.faces, codes, strict=True)
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -176,8 +182,11 @@ class PlateParts:
     def tower(self) -> bool:
         """Whether this plate needs a prime tower: only when it uses more than one
         filament. One colour prints without one, so reserving room would refuse
-        plates that are perfectly printable."""
-        return len(set(self.extruders)) > 1
+        plates that are perfectly printable. A painted part prints with its painting's
+        filaments too (#1965)."""
+        return len(set(self.extruders)) > 1 or any(
+            part.paint is not None and part.paint.used() for part in self.parts
+        )
 
 
 def single_plate(parts: Sequence[ColourPart]) -> PlateParts:
@@ -585,6 +594,20 @@ def write_plates_3mf(
         raise ValueError("cover images are all or nothing: one set per plate")
     if any(not 1 <= extruder <= len(colours) for each in plates for extruder in each.extruders):
         raise ValueError("every part's extruder must name one of the filament colours")
+    # A painted part's codes name extruders by its own numbering: renumber them into
+    # the file's one filament list, which is what the slicer reads them against (#1965).
+    plates = [
+        replace(
+            each,
+            parts=tuple(
+                replace(part, paint=part.paint.renumbered(colours))
+                if part.paint is not None
+                else part
+                for part in each.parts
+            ),
+        )
+        for each in plates
+    ]
     covers = thumbnails is not None
     placements = [_placement(model_bounds(each.parts), plate, tower=each.tower) for each in plates]
     offsets = [
@@ -901,8 +924,9 @@ _TRIANGLES = f"{{{CORE_NS}}}triangles"
 #: Generous on purpose: far past any slicer's output, far below what memory notices.
 MAX_MESH_PIDS = 10_000
 _TRIANGLE = f"{{{CORE_NS}}}triangle"
-#: Per-triangle painting: Bambu Studio's, and PrusaSlicer's multi-material one.
-_PAINTED = ("paint_color", "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation")
+#: PrusaSlicer's per-triangle multi-material painting; Bambu Studio's is
+#: `PAINT_ATTRIBUTE`.
+_PRUSA_PAINT = "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation"
 
 
 @dataclass(frozen=True)
@@ -918,8 +942,11 @@ class MeshArrays:
     pids: tuple[str, ...]
     #: Each triangle's ``p1``, or -1 when it has none.
     p1: np.ndarray
-    #: Whether any triangle carries per-triangle painting.
-    painted: bool
+    #: Each triangle's Bambu Studio ``paint_color`` (``""`` for one without), or None
+    #: when no triangle carries one (#1965).
+    paint: tuple[str, ...] | None
+    #: Whether any triangle carries PrusaSlicer's multi-material painting.
+    prusa_painted: bool
 
 
 @dataclass(frozen=True)
@@ -952,7 +979,8 @@ class _MeshTarget:
         self._pid = array("i")
         self._pids: dict[str, int] = {}
         self._p1 = array("q")
-        self._painted = False
+        self._paint: list[str] | None = None
+        self._prusa_painted = False
         #: The ``<vertices>`` and ``<triangles>`` blocks this mesh has had.
         self._blocks: set[str] = set()
 
@@ -978,7 +1006,13 @@ class _MeshTarget:
             self._pid.append(-1 if pid is None else self._pids.setdefault(pid, len(self._pids)))
             p1 = attrs.get("p1")
             self._p1.append(-1 if p1 is None else int(p1 or 0))
-            self._painted = self._painted or any(attrs.get(name) for name in _PAINTED)
+            code = attrs.get(PAINT_ATTRIBUTE)
+            if code and self._paint is None:
+                # The faces before the first painted one are unpainted.
+                self._paint = [""] * (len(self._p1) - 1)
+            if self._paint is not None:
+                self._paint.append(code or "")
+            self._prusa_painted = self._prusa_painted or bool(attrs.get(_PRUSA_PAINT))
         else:
             if tag == _MESH:
                 if any(element.tag == _MESH for element in self._open):
@@ -1005,7 +1039,8 @@ class _MeshTarget:
                 pid=np.frombuffer(self._pid, dtype=np.int32),
                 pids=tuple(self._pids),
                 p1=np.frombuffer(self._p1, dtype=np.int64),
-                painted=self._painted,
+                paint=tuple(self._paint) if self._paint is not None else None,
+                prusa_painted=self._prusa_painted,
             )
             self._reset()
 

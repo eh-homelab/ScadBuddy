@@ -205,6 +205,8 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
     for plate in req.layout.plates:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
         names: dict[str, str] = {}
+        # Each painted copy is a part of its own: its faces are its painting's (#1965).
+        painted: list[ColourPart] = []
         for placed in plate.items:
             if placed.piece_key not in parts:
                 raise _unknown_piece(placed.piece_key)
@@ -219,18 +221,22 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                 mesh = part.mesh.copy()
                 mesh.apply_transform(matrix)
                 colour = part.colour.upper()
+                for used in [colour, *(part.paint.used() if part.paint is not None else [])]:
+                    if used.upper() not in colours:
+                        colours.append(used.upper())
+                if part.paint is not None:
+                    painted.append(
+                        ColourPart(colours.index(colour), part.name, colour, mesh, part.paint)
+                    )
+                    continue
                 by_colour.setdefault(colour, []).append(mesh)
                 names.setdefault(colour, part.name)
-                if colour not in colours:
-                    colours.append(colour)
         ordered = sorted(by_colour, key=colours.index)
+        joined = [ColourPart(colours.index(c), names[c], c, _joined(by_colour[c])) for c in ordered]
         plates.append(
             PlateParts(
-                tuple(
-                    ColourPart(colours.index(c), names[c], c, _joined(by_colour[c]))
-                    for c in ordered
-                ),
-                tuple(colours.index(c) + 1 for c in ordered),
+                (*joined, *painted),
+                tuple(colours.index(part.colour) + 1 for part in (*joined, *painted)),
             )
         )
     if not plates:
