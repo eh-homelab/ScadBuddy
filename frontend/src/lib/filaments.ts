@@ -33,11 +33,23 @@ export function spoolLabel(spool: SpoolOption): string {
 }
 
 /**
+ * An AMS unit's name as Bambuddy shows it: by letter, so `ams_id` 3 is "AMS-D", the
+ * fourth AMS, and 128 is "HT-A". 255 is the external spool and 6 the AMS Lite.
+ */
+export function amsUnitLabel(amsId: number): string {
+  if (amsId === 255) return 'External'
+  if (amsId === 6) return 'AMS Lite'
+  const letter = String.fromCharCode(65 + (amsId >= 128 ? amsId - 128 : amsId))
+  return amsId >= 128 ? `HT-${letter}` : `AMS-${letter}`
+}
+
+/**
  * Where a spool physically is, or `null` when it is on the shelf.
  *
- `tray_id` is the printer's 0-based index while Bambu's own UI counts AMS slots from
- * 1, so the human number wins. This is a label and nothing more: which tray the print
- * actually draws from is Bambuddy's to decide at dispatch.
+ * `tray_id` is the printer's 0-based index while Bambu's own UI counts AMS slots from
+ * 1, so the human number wins, and the unit is named as Bambuddy names it. This is a
+ * label and nothing more: which tray the print actually draws from is Bambuddy's to
+ * decide at dispatch.
  *
  * `printerId` is the printer the print is scoped to. A spool loaded somewhere else is
  * still a legitimate choice, and naming the other printer is the difference between
@@ -47,7 +59,7 @@ export function spoolLabel(spool: SpoolOption): string {
 export function loadedLabel(spool: SpoolOption, printerId?: number | null): string | null {
   const loaded = spool.loaded
   if (!loaded) return null
-  let where = `AMS ${loaded.ams_id} · slot ${loaded.tray_id + 1}`
+  let where = `${amsUnitLabel(loaded.ams_id)} · slot ${loaded.tray_id + 1}`
   if (printerId !== null && printerId !== undefined && loaded.printer_id !== printerId) {
     where += ` · on ${loaded.printer_name ?? 'another printer'}`
   }

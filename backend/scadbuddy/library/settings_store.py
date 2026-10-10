@@ -372,6 +372,10 @@ class SettingsPatch(BaseModel):
     asset_sweep_interval: float | None = None
     duplicate_staging_max_age: float | None = None
     media_upload_max_bytes: int | None = None
+    read_max_objects: int | None = None
+    read_max_visits: int | None = None
+    read_max_triangles: int | None = None
+    read_max_paint_digits: int | None = None
     #: Write-only, like the Bambuddy key; ``""`` clears it.
     google_fonts_api_key: str | None = None
     fonts_catalogue_ttl: float | None = None

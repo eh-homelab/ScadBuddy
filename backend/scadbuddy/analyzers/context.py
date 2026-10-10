@@ -28,6 +28,7 @@ from scadbuddy.bambuddy.resolver import TIERS, PrintChoices, printer_preset_name
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.geometry import GeometryAnalysis
 from scadbuddy.render.plate import PlateGeometry
+from scadbuddy.render.read_budget import ReadBudgetOverride
 from scadbuddy.render.schema import ParamValue
 
 #: The inputs an analyzer can declare it needs.
@@ -66,6 +67,9 @@ class AnalysisRequest(BaseModel):
     all_plates: bool = False
     copies: int | None = Field(default=None, ge=1, le=1000)
     options: PrintOptions = Field(default_factory=PrintOptions)
+    #: What reading a library file's 3MF for the mesh checks may spend (#2087), each
+    #: omitted budget the setting's; none past its ceiling.
+    read_budget: ReadBudgetOverride | None = None
 
 
 class FilamentSlot(BaseModel):

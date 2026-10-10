@@ -8,6 +8,9 @@ Each plate is read where the file places it (:func:`read_plate_parts`). Both are
 under ``cache/library-views/`` by the file's SHA-256 as Bambuddy states it and the plate,
 the newest :data:`MAX_CACHED` files kept: the same bytes are the same view, and a changed
 file is a new one. A file Bambuddy states no hash for is read each time.
+
+Each read spends a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087). Only a
+view is kept, never a refusal, so a larger budget always reads a refused file again.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printabl
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_geometry
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.objects3mf import PlateRead, UnreadableObjectsError, read_plate_parts
+from scadbuddy.render.read_budget import ReadBudget
 
 #: Where the views are kept, under the data volume's cache.
 CACHE_DIRNAME = "library-views"
@@ -44,7 +48,9 @@ class NotViewableError(Exception):
         self.reason = reason
 
 
-async def _read(client: BambuddyClient, file: LibraryFile, plate: int) -> PlateRead:
+async def _read(
+    client: BambuddyClient, file: LibraryFile, plate: int, budget: ReadBudget | None
+) -> PlateRead:
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
         raise NotViewableError(file, "it is sliced already, so ScadBuddy cannot read its mesh")
@@ -60,7 +66,7 @@ async def _read(client: BambuddyClient, file: LibraryFile, plate: int) -> PlateR
     if payload is None:
         raise NotViewableError(file, "it is too large to read, or holds no mesh ScadBuddy can read")
     try:
-        return await asyncio.to_thread(read_plate_parts, payload, plate)
+        return await asyncio.to_thread(read_plate_parts, payload, plate, budget)
     except UnreadableObjectsError as error:
         raise NotViewableError(file, str(error)) from None
 
@@ -100,7 +106,11 @@ def _analysis(read: PlateRead, plate: int) -> GeometryAnalysis:
 
 
 async def library_preview(
-    client: BambuddyClient, cache: Path, file_id: int, plate: int = 1
+    client: BambuddyClient,
+    cache: Path,
+    file_id: int,
+    plate: int = 1,
+    budget: ReadBudget | None = None,
 ) -> bytes:
     """Plate ``plate`` of library file ``file_id`` as a preview GLB, its parts in their
     colours. A file deleted in Bambuddy is the client's 404; one that cannot be read is
@@ -110,14 +120,18 @@ async def library_preview(
     path = _cached(cache, file, f"plate-{plate}.glb")
     if path is not None and await asyncio.to_thread(path.is_file):
         return await asyncio.to_thread(path.read_bytes)
-    data = await asyncio.to_thread(_glb, await _read(client, file, plate))
+    data = await asyncio.to_thread(_glb, await _read(client, file, plate, budget))
     if path is not None:
         await asyncio.to_thread(_store, path, data, MAX_CACHED)
     return data
 
 
 async def library_geometry(
-    client: BambuddyClient, cache: Path, file_id: int, plate: int = 1
+    client: BambuddyClient,
+    cache: Path,
+    file_id: int,
+    plate: int = 1,
+    budget: ReadBudget | None = None,
 ) -> GeometryAnalysis:
     """The mesh analysis of plate ``plate`` of library file ``file_id``, as
     ``OutputStore.geometry`` measures an output's; refused as :func:`library_preview`."""
@@ -131,7 +145,7 @@ async def library_geometry(
             cached = None
         if cached is not None and cached.version == ANALYSIS_VERSION:
             return cached
-    read = await _read(client, file, plate)
+    read = await _read(client, file, plate, budget)
     analysis = await asyncio.to_thread(_analysis, read, plate)
     if path is not None:
         data = (analysis.model_dump_json(indent=2) + "\n").encode("utf-8")

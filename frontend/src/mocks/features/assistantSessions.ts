@@ -178,6 +178,13 @@ export const handlers = [
     return HttpResponse.json(state.limits)
   }),
 
+  // #1288 — one session: a 404 for one that neither the open mock agent nor a test knows.
+  http.get(`${base}/sessions/:id`, ({ params }) => {
+    const id = String(params.id)
+    const known = state.views.get(id) ?? (mockAgentSessions()?.has(id) ? view({ id }) : undefined)
+    return known ? HttpResponse.json(known) : detail('session not found', 404)
+  }),
+
   http.get(`${base}/sessions/:id/resources`, ({ params }) => {
     const id = String(params.id)
     const resources = state.resources.get(id) ?? (mockAgentSessions()?.has(id) ? [] : undefined)

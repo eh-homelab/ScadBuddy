@@ -1,3 +1,4 @@
+import { ApiError } from '../api/client'
 import type { CatalogueFont, FontFamily } from '../api/types'
 
 const STYLE_SEPARATOR = ':style='
@@ -117,4 +118,37 @@ export function installedAsCatalogue(fonts: FontFamily[]): CatalogueFont[] {
 /** Regular is the sensible default when a family arrives with several faces. */
 export function preferredStyle(styles: string[]): string {
   return styles.find((style) => style === 'Regular') ?? styles[0] ?? ''
+}
+
+/**
+ * #1286 — a render or preset refused because a `// font` value names a family this
+ * image has not installed: the 422 `api/params.py` `require_installed_fonts` answers,
+ * which names the parameters and the missing families. Undefined for any other error.
+ */
+export interface MissingFonts {
+  parameters: string[]
+  families: string[]
+}
+
+export function missingFonts(error: unknown): MissingFonts | undefined {
+  if (!(error instanceof ApiError) || error.status !== 422) return undefined
+  const { parameters, families } = error.problem as { parameters?: unknown; families?: unknown }
+  const strings = (list: unknown) =>
+    Array.isArray(list) && list.every((item) => typeof item === 'string') ? (list as string[]) : undefined
+  const names = strings(parameters)
+  const missing = strings(families)
+  if (!names?.length || !missing?.length) return undefined
+  return { parameters: names, families: missing }
+}
+
+/**
+ * The missing families one field's value names. The problem lists them for every
+ * parameter together, so each field takes those its own value mentions; one it
+ * mentions none of (a spelling the server normalised) takes them all.
+ */
+export function missingFamiliesOf(problem: MissingFonts, name: string, value: string): string[] {
+  if (!problem.parameters.includes(name)) return []
+  const lower = value.toLowerCase()
+  const named = problem.families.filter((family) => lower.includes(family.toLowerCase()))
+  return named.length > 0 ? named : problem.families
 }
