@@ -58,8 +58,12 @@ SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
 ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
 _STATUS_SECONDS = 2.0
-#: The harness's callback behind a host function, by the function's name.
-_CALLBACK_FN = {"human_answer": "wait_for_human"}
+#: The host function behind a harness callback or gated tool, by the tool's name.
+_HOST_FN = {
+    "human_answer": "wait_for_human",
+    "approved_print": "queue_print",
+    "approved_arrange": "arrange",
+}
 
 ApprovalTimeout = int | Literal["never"]
 
@@ -348,7 +352,7 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
             PendingEntry(
                 call_id=approval.tool_id,
                 kind="approval",
-                fn=seen.fn if seen else approval.tool_name,
+                fn=seen.fn if seen else _HOST_FN.get(approval.tool_name, approval.tool_name),
                 since=seen.since if seen else None,
             )
         )
@@ -358,7 +362,7 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
             PendingEntry(
                 call_id=callback.tool_id,
                 kind="answer",
-                fn=seen.fn if seen else _CALLBACK_FN.get(callback.tool_name, callback.tool_name),
+                fn=seen.fn if seen else _HOST_FN.get(callback.tool_name, callback.tool_name),
                 prompt=seen.prompt if seen else None,
                 since=seen.since if seen else None,
             )
