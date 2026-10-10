@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -16,6 +17,8 @@ from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.events import AgentOperationEvent, Event, EventBus
 from scadbuddy.operations.component import OPERATIONS
+
+logger = logging.getLogger(__name__)
 
 KINDS_TTL = 60.0
 
@@ -63,6 +66,14 @@ async def _run(component: ActivityComponent) -> AsyncIterator[None]:
         task = loop.create_task(component.index.ingest_agent_operation(operation_id))
         pending.add(task)
         task.add_done_callback(pending.discard)
+        task.add_done_callback(failed)
+
+    def failed(task: asyncio.Task[None]) -> None:
+        if task.cancelled() or task.exception() is None:
+            return
+        logger.error("ingesting an agent operation failed", exc_info=task.exception())
+        if component.index.metrics is not None:
+            component.index.metrics.activity_write_failures.inc()
 
     def on_event(event: Event) -> None:
         if isinstance(event, AgentOperationEvent):

@@ -229,6 +229,18 @@ class ActivityIndex:
 
 async def attribute_request(index: ActivityIndex, activity_id: str, request: Request) -> None:
     """Who started ``activity_id``: the agent author, the headless-browser session's owner,
+    or the browser user (spec §3). Never raises: the start it follows is already accepted,
+    so a failure here is logged and counted, not a 500."""
+    try:
+        await _attribute_request(index, activity_id, request)
+    except Exception:
+        logger.exception("an activity attribution failed", extra={"activity_id": activity_id})
+        if index.metrics is not None:
+            index.metrics.activity_write_failures.inc()
+
+
+async def _attribute_request(index: ActivityIndex, activity_id: str, request: Request) -> None:
+    """Who started ``activity_id``: the agent author, the headless-browser session's owner,
     or the browser user (spec §3)."""
     author = current_author()
     session_marker = request.headers.get(AGENT_ACTOR_HEADER)

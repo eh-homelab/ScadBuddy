@@ -49,3 +49,34 @@ def test_the_activity_component_ingests_an_agent_operation_event(client: TestCli
     while not ingest.await_args_list and time.monotonic() < deadline:
         time.sleep(0.05)
     ingest.assert_awaited_with("x1")
+
+
+def test_a_failing_attribution_does_not_fail_the_render(client: TestClient, model: str) -> None:
+    from unittest.mock import AsyncMock
+
+    from scadbuddy.activity.component import ACTIVITY
+    from scadbuddy.api.deps import STATE_ATTR
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.components.get(ACTIVITY).index.attribute = AsyncMock(side_effect=RuntimeError("pool"))
+    response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 14}})
+    assert response.status_code == 202
+
+
+def test_a_failing_ingest_is_counted_not_lost(client: TestClient) -> None:
+    import time
+    from unittest.mock import AsyncMock
+
+    from scadbuddy.activity.component import ACTIVITY
+    from scadbuddy.api.deps import STATE_ATTR
+    from scadbuddy.core.events import AgentOperationEvent
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    index = state.components.get(ACTIVITY).index
+    index.ingest_agent_operation = AsyncMock(side_effect=RuntimeError("boom"))
+    before = index.metrics.activity_write_failures._value.get()
+    state.events.publish(AgentOperationEvent(operation_id="x2"))
+    deadline = time.monotonic() + 5
+    while index.metrics.activity_write_failures._value.get() == before:
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
