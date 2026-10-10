@@ -22,6 +22,9 @@
  *
  * #1885 — `PATCH` also archives or unarchives (`archived`), and `GET /sessions?archived=true`
  * lists the open mock agent's archived sessions, as the switcher's Archived view reads them.
+ *
+ * #1125 — `GET /sessions?status=running` lists `setRunningSessions(n)` running sessions (none
+ * by default), as the header's working indicator reads them; any other status lists none.
  */
 import { HttpResponse, http } from 'msw'
 import type { AiSessionView, ResourceRef, SessionLimits, SessionResource } from '../../api/types'
@@ -67,6 +70,8 @@ const state = {
   views: new Map<string, AiSessionView>(),
   /** #792 — every fork and edit, in order. */
   sessionWrites: [] as SessionWrite[],
+  /** #1125 — how many sessions `?status=running` lists. */
+  running: 0,
 }
 
 /** A fork or an edit the panel sent: the path under `/api/v1/ai` and the JSON body. */
@@ -84,12 +89,21 @@ export function reset(): void {
   state.limits = { ...DEFAULTS }
   state.writes = []
   state.sessionWrites = []
+  state.running = 0
   state.resources = new Map([[EXTERNAL_SESSION_ID, [...EXTERNAL_RESOURCES]]])
   state.views = new Map([
     [EXTERNAL_SESSION_ID, view({ id: EXTERNAL_SESSION_ID, title: 'Tune the gridfinity bin', origin: 'mcp', turns: 1 })],
   ])
 }
 reset()
+
+/** #1125 — how many of the user's sessions have a turn under way. */
+export function setRunningSessions(n: number): void {
+  state.running = n
+}
+
+/** agent `sessions/protocol.ts` SESSION_STATUSES. */
+const STATUSES = ['running', 'waiting_input', 'waiting_approval', 'idle', 'done', 'failed']
 
 /** #931 — what `GET /sessions/:id/resources` answers for one session, oldest first. */
 export function setSessionResources(
@@ -242,7 +256,18 @@ export const handlers = [
   }),
 
   http.get(`${base}/sessions`, ({ request }) => {
-    const archived = new URL(request.url).searchParams.get('archived')
+    const query = new URL(request.url).searchParams
+    const status = query.get('status')
+    if (status !== null) {
+      if (!STATUSES.includes(status)) return detail(`status must be one of ${STATUSES.join(', ')}`, 400)
+      const n = status === 'running' ? Math.min(state.running, Number(query.get('limit') ?? 50)) : 0
+      return HttpResponse.json({
+        sessions: Array.from({ length: n }, (_, i) =>
+          view({ id: `running-${i + 1}`, title: 'Working', status: 'running', running: true }),
+        ),
+      })
+    }
+    const archived = query.get('archived')
     if (archived !== null && !['true', 'false', 'include'].includes(archived)) {
       return detail('archived must be one of true, include, false', 400)
     }
