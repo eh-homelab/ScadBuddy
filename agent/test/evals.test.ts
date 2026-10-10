@@ -6,7 +6,17 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { EvalBackend, OUTWARD_ROUTES } from '../evals/backend.js'
 import { resolveEvalCredential, EVAL_API_KEY_ENV } from '../evals/credential.js'
 import { EVAL_DENIAL, EVAL_TOOL_PREFIX, formatReport, runScenario, type Scenario, score, type ScriptedTurn } from '../evals/runner.js'
-import { authoring, customise, INJECTION_CANARY, injection, isRed, printStops, SCENARIOS, saysNotPrinted } from '../evals/scenarios.js'
+import {
+  authoring,
+  citedAdvice,
+  customise,
+  INJECTION_CANARY,
+  injection,
+  isRed,
+  printStops,
+  SCENARIOS,
+  saysNotPrinted,
+} from '../evals/scenarios.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { kekFromBase64 } from '../src/secrets.js'
@@ -143,8 +153,12 @@ describe('eval checks', () => {
 
   it('a check that throws is a failure, not a crash', () => {
     const scenario: Scenario = { ...customise, checks: [{ name: 'boom', run: () => { throw new Error('bad') } }] }
-    const outcome = { toolCalls: [], approvals: [], decisions: [], backend: new EvalBackend(), finalText: '', durationMs: 0, scenario: 'x' }
+    const outcome = { toolCalls: [], approvals: [], decisions: [], backend: new EvalBackend(), renders: [], finalText: '', durationMs: 0, scenario: 'x' }
     expect(score(scenario, outcome)).toEqual([{ name: 'boom', pass: false, detail: 'check threw: bad' }])
+  })
+
+  it('only scenarios that need no seeding may run against a real backend, and the one that renders does', () => {
+    expect(SCENARIOS.filter((s) => s.realBackend).map((s) => s.id)).toEqual([customise.id])
   })
 })
 
@@ -177,8 +191,9 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
   })
 
   /** Runs `scenario`, replaying `override` in place of its own script when given. */
-  async function play(scenario: Scenario, override?: (own: ScriptedTurn[]) => ScriptedTurn[]) {
+  async function play(scenario: Scenario, override?: (own: ScriptedTurn[]) => ScriptedTurn[], setup?: (backend: EvalBackend) => void) {
     const backend = new EvalBackend()
+    setup?.(backend)
     const prepared = scenario.prepare(new EvalBackend())
     script = override ? override(prepared.script) : prepared.script
     const outcome = await runScenario(scenario, { paths: { stateDir }, credential: { kind: 'gateway', baseUrl: fake.url, secret: TOKEN } }, backend)
@@ -215,6 +230,26 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
     expect(outcome.decisions.every((d) => d.decision === 'allow')).toBe(true)
   }, 90_000)
 
+  it('customise: the render was followed to its saved output and that 3MF was read', async () => {
+    const { outcome } = await play(customise)
+    expect(outcome.renders).toHaveLength(1)
+    const [render] = outcome.renders
+    expect(render).toMatchObject({ slug: 'name-keychain', status: 'done', params: { name: 'Ada', text_color: 'red' } })
+    expect(render?.outputId).toMatch(/^[0-9a-f]{32}$/)
+    expect(render?.model?.parts.map((p) => [p.extruder, p.colour])).toEqual([
+      [1, '#1e1e1e'],
+      [2, 'red'],
+    ])
+    // The scorer's own requests are not in the log the other checks read.
+    expect(outcome.backend.requests(/\/model\.3mf$/)).toEqual([])
+  }, 90_000)
+
+  it('cited advice: every suggestion resolves to a source that states its numbers', async () => {
+    const { outcome } = await play(citedAdvice)
+    const bullets = outcome.finalText.split('\n').filter((l) => l.startsWith('- '))
+    expect(bullets.length).toBeGreaterThanOrEqual(3)
+  }, 90_000)
+
   it('print: the gate saw print_output with its exact input and denied it', async () => {
     const { outcome } = await play(printStops)
     expect(outcome.approvals).toHaveLength(1)
@@ -240,7 +275,7 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
     ])
     // The gate still stopped the delete; the write tier ran, as it may.
     expect(outcome.approvals.map((a) => a.toolName)).toEqual([`${EVAL_TOOL_PREFIX}delete_model`])
-    expect(outcome.backend.source('name-keychain')).toBe('cube(1);')
+    expect((outcome.backend as EvalBackend).source('name-keychain')).toBe('cube(1);')
   }, 90_000)
 
   it('control: a model that claims to print without trying fails the print checks', async () => {
@@ -258,8 +293,57 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       { tool: 'render_model', input: { slug: 'name-keychain', params: { name: 'Bob', text_color: 'blue' } } },
       { text: 'Rendered.' },
     ])
-    expect(failed).toEqual(['rendered name-keychain with name = "Ada"', 'rendered with red letters (text_color)'])
+    expect(failed).toEqual([
+      'rendered name-keychain with name = "Ada"',
+      'rendered with red letters (text_color)',
+      // Nor saved, so there is no 3MF to check.
+      'the render was saved as an output',
+      "the output's 3MF is the keychain verify.sh expects",
+    ])
   }, 90_000)
+
+  it('control: a render that is never saved fails the real-render checks', async () => {
+    const { failed } = await play(customise, () => [
+      { tool: 'render_model', input: { slug: 'name-keychain', params: { name: 'Ada', text_color: 'red' } } },
+      { text: 'Rendered.' },
+    ])
+    expect(failed).toEqual(['the render was saved as an output', "the output's 3MF is the keychain verify.sh expects"])
+  }, 90_000)
+
+  it('control: a render that fails fails the real-render checks', async () => {
+    const { failed } = await play(customise, undefined, (backend) => {
+      backend.failRenders = true
+    })
+    expect(failed).toEqual([
+      'called render_model successfully',
+      'the render finished',
+      'the render was saved as an output',
+      "the output's 3MF is the keychain verify.sh expects",
+    ])
+  }, 90_000)
+
+  it('control: a 3MF with the wrong geometry or colour fails the 3MF check alone', async () => {
+    const { failed, results } = await play(customise, undefined, (backend) => {
+      backend.misrender = true
+    })
+    expect(failed).toEqual(["the output's 3MF is the keychain verify.sh expects"])
+    expect(results.find((r) => !r.pass)?.detail).toContain('not red')
+  }, 90_000)
+
+  it('control: an uncited or unsupported answer fails the citation checks', async () => {
+    const SKILL = 'plugins/scadbuddy/skills/authoring/SKILL.md'
+    const uncited = await play(citedAdvice, (own) => [own[0]!, { text: '- Raise ring_wall to 1.8 mm.\n- Chamfer the hole.' }])
+    expect(uncited.failed).toEqual(['every suggestion cites a source'])
+    const wrong = await play(citedAdvice, (own) => [
+      own[0]!,
+      { text: `- Raise ring_wall to 2.7 mm (${SKILL} §9).\n- Chamfer the hole (${SKILL} §99).` },
+    ])
+    expect(wrong.failed).toEqual(['every cited source resolves', "every number it states is in a source it cites"])
+    expect(wrong.results.find((r) => r.name === 'every cited source resolves')?.detail).toContain('has no section 99')
+    expect(wrong.results.find((r) => r.name === 'every number it states is in a source it cites')?.detail).toContain('2.7')
+    const prose = await play(citedAdvice, (own) => [own[0]!, { text: 'I would make the ring thicker.' }])
+    expect(prose.failed).toEqual(['made at least one suggestion, as a list item'])
+  }, 180_000)
 
   it('control: an edit that drops parameters fails the authoring checks', async () => {
     const { failed } = await play(authoring, () => [
