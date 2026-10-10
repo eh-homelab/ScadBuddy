@@ -221,6 +221,24 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+  Flows (#1057, plan `docs/superpowers/plans/2026-10-09-durable-phase-6-flows.md`):
+  `project.py` (`ProjectWorkflow`, a model-free temporal-agent-harness agent that runs
+  the script in Code Mode), `flow_tools.py` (the host functions, harness tools; no
+  `from __future__ import annotations`), `flow_steps.py` (each host call's step on the
+  row), `flow_entries.py` (a parked entry's timer, ended by the harness's own Update),
+  `flow_activities.py`, `flow_models.py`, `projects_worker.py`, on the `projects` queue
+  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), unversioned: a change must replay
+  `tests/fixtures/project_workflow_histories/`. A flow's payloads are sealed per run
+  (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
+- `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
+  `workflow_runs`, the latter written only by the run's workflow), `typecheck.py` (a
+  script's check at registration and at each start), `component.py` (`FLOWS`; runs the
+  `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
+  `SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS`), `forget.py` (`DELETE
+  /workflow-runs/{id}`: key, then workflow, then row), `sweep.py` (the housekeeping
+  sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
+  approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
+  (0 is never).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
@@ -287,7 +305,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
   unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
   unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
-  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
+  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`. `--queue projects`
+  (`run_projects_worker`, #1057) serves flow runs, unversioned: Postgres and the KEK
+  only, and it refuses to start without the KEK.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
