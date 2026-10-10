@@ -407,7 +407,7 @@ describe('SettingsPage, live (#269)', () => {
     await seeded()
     await waitFor(() => expect(screen.getByTestId('ai-status')).toHaveAttribute('data-state', 'not_configured'))
     expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'Plugin endpoints' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Plugins' })).not.toBeInTheDocument()
     hidden.unmount()
 
     // The default handler answers as available.
@@ -415,7 +415,7 @@ describe('SettingsPage, live (#269)', () => {
     resetAiAvailability()
     renderPage(<SettingsPage />)
     expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Plugins' })).toBeInTheDocument()
     expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
   })
 

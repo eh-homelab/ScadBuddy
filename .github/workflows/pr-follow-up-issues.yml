@@ -58,32 +58,41 @@ jobs:
             2. Use `gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments` to get inline review comments
             3. Use `gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews` to get review bodies
 
-            ## Which findings to file: Blocking only
+            LABELLED BY: ${{ github.event.sender.login }} (${{ github.event.sender.type }})
 
-            File issues ONLY for outstanding **Blocking** findings. Never file a
-            `pr-feedback` issue for a Non-blocking finding — those do not gate the
-            merge and filing them is what flooded the backlog.
+            ## Which findings to file
+
+            Blocking findings always. Non-blocking findings too, but only when a
+            person applied the label: LABELLED BY above is type `User`. When the
+            label was applied by a bot (type `Bot`: the review workflow labels a PR
+            that merged with Blocking findings outstanding), file Blocking findings
+            only. Filing every Non-blocking finding on every merged PR is what
+            flooded the backlog (#1487); a person asking for this PR's findings is
+            not that.
 
             - The review summary (the latest `claude[bot]` comment ending in a
               `<!-- claude-review-sha: ... -->` marker) has a `## Blocking` and a
-              `## Non-blocking` section. Take findings from its `## Blocking`
-              section only, and only those still outstanding (not fixed by a later
-              push — the latest summary is authoritative for that).
+              `## Non-blocking` section. Take findings from those sections, and only
+              those still outstanding (not fixed by a later push: the latest
+              summary is authoritative for that).
             - A review summary with no `## Blocking` section is an older-format
-              review. From it, file only findings that are correctness bugs a user
-              can hit, security issues, data-loss / crash-consistency gaps, CI /
-              merge-gate integrity problems, violations of the repo's verified
-              facts (spec §3), or a change with no test at all. Skip extra
-              edge-case tests, wording, naming, style, refactors, small perf and
-              speculative hardening.
-            - Apply the same Blocking bar to human review comments and inline
-              comments: file them only if they meet it.
-            - If no outstanding Blocking findings remain, create no issues; post
-              the summary comment saying so.
+              review. Treat as Blocking only the findings that are correctness bugs
+              a user can hit, security issues, data-loss / crash-consistency gaps,
+              CI / merge-gate integrity problems, violations of the repo's verified
+              facts (spec §3), or a change with no test at all; the rest are
+              Non-blocking.
+            - Apply the same bar to human review comments and inline comments.
+            - Never put a Blocking and a Non-blocking finding in the same issue.
+              Title a Non-blocking group `[PR #<n> feedback] (non-blocking) <group>`
+              and start its body's `## Context` with the line
+              `Severity: Non-blocking (does not gate the merge).`; a Blocking group
+              has no marker and starts with `Severity: Blocking.`
+            - If nothing is left to file, create no issues; post the summary
+              comment saying so.
 
             ## Feedback Grouping
 
-            Group the outstanding Blocking findings into small, logically related chunks optimized for concurrent fixes. This prevents merge conflicts when multiple people address feedback simultaneously.
+            Group the findings to file into small, logically related chunks optimized for concurrent fixes. This prevents merge conflicts when multiple people address feedback simultaneously.
 
             ### Grouping Rules
 
@@ -159,7 +168,8 @@ jobs:
             ### Summary Comment
 
             After all feedback issues are created, post a single summary comment on the PR listing:
-            - Total number of Blocking findings filed (Non-blocking ones are never filed)
+            - How many Blocking and how many Non-blocking findings were filed (and, when
+              the label was applied by a bot, that Non-blocking ones were left out)
             - Number of groups created
             - Links to each created issue with its group title
             - Which groups can be fixed concurrently vs. which need sequencing
@@ -171,8 +181,9 @@ jobs:
 
             where `<numbers>` is a comma-separated list, no spaces, of every open
             `pr-feedback` issue that now tracks one of this PR's outstanding
-            Blocking findings (created or updated by this run, or already open and
-            still relevant), or `none` when there are no outstanding Blocking findings.
+            findings filed under the rules above (created or updated by this run,
+            or already open and still relevant), or `none` when there is nothing to
+            file.
             The workflow checks that this comment exists and that every issue it
             names is open, labelled `pr-feedback` and titled for this PR; a run
             whose summary is missing or wrong fails. Post the summary even when

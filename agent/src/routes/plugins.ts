@@ -3,7 +3,10 @@ import { z } from 'zod'
 import { RISK_TIERS } from '../harness/permissions.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
+import { UI_ACTOR } from '../audit/writes.js'
+import { BuiltInTools, type BuiltInToolSet } from '../plugins/builtInTools.js'
 import type { PluginForwarder } from '../plugins/forwarder.js'
+import { BuiltInPackages } from '../plugins/packages/builtins.js'
 import {
   assertEndpointAllowed,
   normalisePluginUrl,
@@ -33,6 +36,12 @@ import { ready, type RouteModule } from './module.js'
 // trusted proxy or loopback, the UI's origin, JSON bodies). Changing a plugin
 // is a settings write, outward tier (spec §8.1). No route returns the secret:
 // views carry the header NAME and the value's last four characters.
+//
+// ScadBuddy's own tool sets (#1953, plugins/builtInTools.ts) are listed first,
+// `built_in: true`. A PATCH may raise their tools' tiers and disable tools
+// (never lower a tier: 400), and switch a set that has a switch; anything a
+// remote plugin has and they do not (register, remove, URL, header, secret,
+// connection test) answers 409 `{ built_in: true }`.
 
 export type PluginRouteDeps = {
   /** Undefined when there is no database (spec §9). */
@@ -44,11 +53,16 @@ export type PluginRouteDeps = {
   resolveHost?: Resolver
   /** Runs the connection test against the checked `address` (testConnection.ts). */
   testPlugin: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
+  /** ScadBuddy's own tool sets (#1953). */
+  builtIns: BuiltInTools
+  /** The sets' switches (plugins/packages/builtins.ts); undefined without a database. */
+  switches: BuiltInPackages | undefined
 }
 
 export type PluginView = {
   name: string
   kind: PluginSummary['kind']
+  built_in: false
   url: string
   enabled: boolean
   /** The prefix of this plugin's tools in the harness. */
@@ -88,6 +102,7 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
   return {
     name: plugin.name,
     kind: plugin.kind,
+    built_in: false,
     url: plugin.url,
     enabled: plugin.enabled,
     tool_prefix: toolPrefix(plugin.name),
@@ -147,15 +162,23 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     await next()
   })
 
+  const builtIn = (name: string): BuiltInToolSet | undefined => deps.builtIns.named(name)
+  /** 409 for what a built-in cannot do. */
+  const isBuiltIn = (c: Context, name: string, what: string) =>
+    c.json({ detail: `"${name}" is built in: it cannot be ${what}`, built_in: true }, 409)
+
   app.get(base, async (c) => {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
-    return c.json((await repo.list()).map((p) => pluginView(p, deps.kek)))
+    const [builtIns, remote] = await Promise.all([deps.builtIns.list(), repo.list()])
+    return c.json([...builtIns, ...remote.map((p) => pluginView(p, deps.kek))])
   })
 
   app.get(`${base}/:name`, async (c) => {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    const set = builtIn(c.req.param('name'))
+    if (set) return c.json(await deps.builtIns.view(set))
     const plugin = await repo.get(c.req.param('name'))
     if (!plugin) return c.json({ detail: `no plugin named "${c.req.param('name')}"` }, 404)
     return c.json(pluginView(plugin, deps.kek))
@@ -166,6 +189,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, CreateBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
+    if (builtIn(body.name)) return isBuiltIn(c, body.name, 'added: it ships with the agent')
     try {
       // The endpoint is checked before anything is stored (egress + https).
       await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)
@@ -192,6 +216,30 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const body = await parseBody(c, PatchBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
+    const set = builtIn(c.req.param('name'))
+    if (set) {
+      if (body.url !== undefined || body.auth_header !== undefined || body.secret !== undefined) {
+        return isBuiltIn(c, set.name, 'given a URL, an auth header or a secret: it runs inside the agent')
+      }
+      if (body.enabled !== undefined && !set.switchable) {
+        return isBuiltIn(c, set.name, 'switched off as a whole: disable its tools one by one instead')
+      }
+      if (body.enabled !== undefined && !deps.switches) return c.json({ detail: NO_DATABASE }, 503)
+      const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
+      try {
+        // The overrides first: a refused one (400) writes nothing, the switch included.
+        if (body.tool_tiers !== undefined || body.disabled_tools !== undefined) {
+          await deps.builtIns.update(set, { tool_tiers: body.tool_tiers, disabled_tools: body.disabled_tools }, context)
+        }
+        if (body.enabled !== undefined) {
+          // The existing switch (builtins.ts): the same as Settings → Plugin packages.
+          await deps.switches!.setEnabled(set.name, body.enabled, context)
+        }
+        return c.json(await deps.builtIns.view(set))
+      } catch (err) {
+        return refusal(c, err)
+      }
+    }
     try {
       if (body.url !== undefined) await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)
       const saved = await repo.update(c.req.param('name'), body, kek())
@@ -204,6 +252,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
   app.delete(`${base}/:name`, async (c) => {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    if (builtIn(c.req.param('name'))) return isBuiltIn(c, c.req.param('name'), 'removed: disable its tools instead')
     if (!(await repo.delete(c.req.param('name')))) {
       return c.json({ detail: `no plugin named "${c.req.param('name')}"` }, 404)
     }
@@ -215,6 +264,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
 
   app.post(`${base}/:name/test`, async (c) => {
     const name = c.req.param('name')
+    if (builtIn(name)) return isBuiltIn(c, name, 'tested: it has no endpoint; its tools are listed with it')
     if (testing.has(name)) return c.json({ detail: 'a connection test for this plugin is already running' }, 429)
     testing.add(name)
     try {
@@ -266,6 +316,8 @@ export const route: RouteModule = {
       kek: deps.kek,
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
+      builtIns: new BuiltInTools(deps.settings),
+      switches: deps.settings ? new BuiltInPackages(deps.settings) : undefined,
       testPlugin:
         deps.testPlugin ??
         ((plugin, address) =>

@@ -53,6 +53,12 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 export const RISK_TIERS = ['read', 'write', 'outward'] as const
 export type RiskTier = (typeof RISK_TIERS)[number]
 
+/** The stricter of a tool's own tier and a Settings override (#1953: overrides only tighten). */
+export function raiseTier(tier: RiskTier, override: RiskTier | undefined): RiskTier {
+  if (override === undefined) return tier
+  return RISK_TIERS.indexOf(override) > RISK_TIERS.indexOf(tier) ? override : tier
+}
+
 /**
  * Maps a tool name as the SDK reports it (`mcp__{server}__{tool}` for MCP
  * tools, per https://code.claude.com/docs/en/agent-sdk/custom-tools) to its

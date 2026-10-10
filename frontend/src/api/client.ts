@@ -27,12 +27,14 @@ import type {
   AiSessionEdit,
   AiSessionView,
   SessionLimits,
+  BlankTemplate,
   SessionModeSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  DependencyReport,
   LibraryFileObjects,
   LibraryListing,
   LibraryPinRequest,
@@ -1083,6 +1085,9 @@ export const api = {
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
+  /** #1723 — the output's preview mesh, every part in its colour. */
+  outputPreviewGlbUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/preview.glb`,
+
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
@@ -1284,6 +1289,10 @@ export const api = {
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
 
+  /** #1723 — one plate of the library file as a preview mesh (#1753). */
+  libraryPreviewGlbUrl: (fileId: number, plate: number) =>
+    `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
+
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
   /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
@@ -1418,6 +1427,14 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * #1285 — what each `include`/`use` of the saved source resolves to, a library that
+   * would provide each unresolved one, and the `font = "…"` families not installed.
+   * Read-only; nothing is cloned.
+   */
+  checkDependencies: (slug: string) =>
+    request<DependencyReport>(`/models/${seg(slug)}/dependencies`, { method: 'POST' }),
+
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
     command<ModelSummary>(
@@ -1551,6 +1568,9 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ model }),
     }),
+
+  /** #1291 — New model's "Start from blank template", served by the agent service. */
+  getBlankTemplate: () => request<BlankTemplate>('/ai/templates/blank'),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
   getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),

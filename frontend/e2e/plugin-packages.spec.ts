@@ -118,7 +118,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
 
   test('tests a plugin endpoint and reviews its tool tiers', async ({ page }) => {
     await page.goto('/settings')
-    const section = page.getByRole('region', { name: 'Plugin endpoints' })
+    const section = page.getByRole('region', { name: 'Plugins', exact: true })
     const card = section.getByRole('listitem', { name: 'Plugin endpoint hindsight' })
     await expect(card).toContainText('Authorization: …9f3a')
     await card.getByRole('button', { name: 'Test connection' }).click()
