@@ -293,11 +293,17 @@ def test_a_bad_facet_value_is_a_400_problem(client: TestClient, agent_tables: Ag
             "INSERT INTO ai_activity_kinds VALUES ('agent.x', 'X', %s, NULL)",
             (json.dumps(facets),),
         )
-    for params in ({"facet.n": "many"}, {"facet.b": "maybe"}):
+    for params in (
+        {"facet.n": "many"},
+        {"facet.n": "nan"},
+        {"facet.n": "inf"},
+        {"facet.n": "-Infinity"},
+        {"facet.b": "maybe"},
+    ):
         response = client.get("/api/v1/activity", params={"kind": "agent.x", **params})
         assert response.status_code == 400, (params, response.text)
         assert response.json()["type"] == "https://scadbuddy.dev/problems/bad-parameter-value"
     ok = client.get(
-        "/api/v1/activity", params={"kind": "agent.x", "facet.n": "2", "facet.b": "true"}
+        "/api/v1/activity", params={"kind": "agent.x", "facet.n": "2.5", "facet.b": "true"}
     )
     assert ok.status_code == 200, ok.text

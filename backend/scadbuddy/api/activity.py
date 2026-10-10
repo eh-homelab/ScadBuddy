@@ -10,6 +10,8 @@ runtime (``api/components.py``).
 """
 
 import asyncio
+import contextlib
+import math
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any
@@ -184,13 +186,15 @@ def _facet_filters(request: Request, kinds: KindRegistry, selected: list[str]) -
 
 def _facet_value(facet: Facet, value: str) -> Any:
     if facet.type == "number":
-        try:
+        with contextlib.suppress(ValueError):
             return int(value)
+        try:
+            number = float(value)
         except ValueError:
-            try:
-                return float(value)
-            except ValueError:
-                raise ApiError(400, f"facet {facet.name!r} is a number", type_=BAD_VALUE) from None
+            number = math.nan
+        if not math.isfinite(number):
+            raise ApiError(400, f"facet {facet.name!r} is a number", type_=BAD_VALUE)
+        return number
     if facet.type == "bool":
         if value not in ("true", "false"):
             raise ApiError(400, f"facet {facet.name!r} is true or false", type_=BAD_VALUE)
