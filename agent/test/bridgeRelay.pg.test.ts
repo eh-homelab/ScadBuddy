@@ -39,9 +39,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
   let a: Replica
   let b: Replica
 
-  function replica(): Replica {
+  /** `hears` filters the NOTIFYs this replica's relay is given (default: all of them). */
+  function replica(hears: (payload: string) => boolean = () => true): Replica {
     const listener = new PgEventListener(url, { searchPath: 'public', log: () => {} })
-    const relay = new PgTabRelay(db.sql, { listen: (c, f) => listener.listenAlso(c, f), ackTimeoutMs: 500, log: () => {} })
+    const relay = new PgTabRelay(db.sql, {
+      listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload) ? f(payload) : undefined)),
+      ackTimeoutMs: 500,
+      log: () => {},
+    })
     listener.start()
     const hub = new TabHub({
       pairings: new PostgresPairingStore(db.sql),
@@ -165,6 +170,38 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     // That tab is connected nowhere: not the old one's answer.
     const outcome = await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })
     expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser' } })
+  })
+
+  it('waits for a call an owner took although its ack never arrived, rather than answer not connected', async () => {
+    a.hub.close()
+    await a.listener.close()
+    a = replica((payload) => JSON.parse(payload).t !== 'ack')
+    await a.listener.ready()
+    const t = await tab(b.hub, () => undefined)
+    a.hub.pairSession('s1', TAB)
+    const call = a.hub.call({ principal: browser, sessionId: 's1' }, 'navigate', { to: '/' }, { signal: signal() })
+    // Past the 500 ms ack timeout: the tab is running the call, so the caller must still be waiting.
+    await vi.waitFor(() => expect(t.calls).toHaveLength(1))
+    await new Promise((r) => setTimeout(r, 800))
+    await t.conn.receive(JSON.stringify({ v: 1, type: 'result', id: t.calls[0]!.id, outcome: { ok: true, result: 'done' } }))
+    expect(await call).toEqual({ ok: true, result: 'done' })
+  })
+
+  it('answers not connected when the tab left the owner between being claimed and run', async () => {
+    b.relay.serve({ holds: () => true, run: async () => ({ op: 'gone' }) })
+    a.hub.pairSession('s1', TAB)
+    const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
+    expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
+  })
+
+  it('gives up on an owner that acked and then never answered', async () => {
+    b.relay.serve({ holds: () => true, run: () => new Promise(() => {}) })
+    a.hub.pairSession('s1', TAB)
+    const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal(), timeoutMs: 300 })
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: { code: 'no_answer', message: expect.stringMatching(/replica holding the tab did not answer/) },
+    })
   })
 
   it('keeps a tab connected here local: nothing goes through the database', async () => {

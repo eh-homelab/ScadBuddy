@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { setRunningSessions } from '../mocks/features/assistantSessions'
 import { setPendingAnswers, setPendingApprovals } from '../mocks/features/pendingInput'
 import { server } from '../mocks/server'
 import {
@@ -10,6 +11,8 @@ import {
   attentionDetail,
   attentionLabel,
   fetchPendingInput,
+  fetchRunning,
+  RUNNING_PATH,
   summaryLabel,
   totalOf,
   useAttention,
@@ -109,7 +112,71 @@ describe('fetchPendingInput', () => {
   })
 })
 
+describe('fetchRunning (#1125)', () => {
+  it("says whether any of the user's sessions has a turn under way", async () => {
+    expect(await fetchRunning()).toBe(false)
+    setRunningSessions(2)
+    expect(await fetchRunning()).toBe(true)
+  })
+
+  it('asks for one running session, which is enough to say yes', () => {
+    const query = new URL(RUNNING_PATH, 'http://x').searchParams
+    expect(query.get('status')).toBe('running')
+    expect(query.get('limit')).toBe('1')
+  })
+
+  it('is unknown (null), not idle, when the agent cannot answer', async () => {
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ detail: 'no database' }, { status: 503 })))
+    expect(await fetchRunning()).toBeNull()
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.text('<html></html>')))
+    expect(await fetchRunning()).toBeNull()
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ running: true })))
+    expect(await fetchRunning()).toBeNull()
+  })
+
+  it('gives up on an agent that accepts and never answers', async () => {
+    server.use(http.get('/api/v1/ai/sessions', () => new Promise<never>(() => {})))
+    expect(await fetchRunning(20)).toBeNull()
+  })
+})
+
 describe('useAttention', () => {
+  it('says when a session is running, and keeps that through a failed read (#1125)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { result } = renderHook(() => useAttention(true))
+    await waitFor(() => expect(result.current.running).toBe(false))
+
+    setRunningSessions(1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
+    })
+    await waitFor(() => expect(result.current.running).toBe(true))
+
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
+    })
+    expect(result.current.running).toBe(true)
+  })
+
+  it('reads whether anything is running only while the assistant is on (#1125)', async () => {
+    const seen = vi.fn()
+    server.use(
+      http.get('/api/v1/ai/sessions', () => {
+        seen()
+        return HttpResponse.json({ sessions: [] })
+      }),
+    )
+    const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: false } })
+    await act(async () => {})
+    expect(result.current.running).toBeNull()
+    expect(seen).not.toHaveBeenCalled()
+    rerender({ on: true })
+    await waitFor(() => expect(result.current.running).toBe(false))
+    rerender({ on: false })
+    expect(result.current.running).toBeNull()
+  })
+
   it('reads nothing while the assistant is off', async () => {
     const seen = vi.fn()
     server.use(

@@ -27,12 +27,14 @@ import type {
   AiSessionEdit,
   AiSessionView,
   SessionLimits,
+  BlankTemplate,
   SessionModeSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  DependencyReport,
   LibraryFileObjects,
   LibraryListing,
   LibraryPinRequest,
@@ -1425,6 +1427,14 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * #1285 — what each `include`/`use` of the saved source resolves to, a library that
+   * would provide each unresolved one, and the `font = "…"` families not installed.
+   * Read-only; nothing is cloned.
+   */
+  checkDependencies: (slug: string) =>
+    request<DependencyReport>(`/models/${seg(slug)}/dependencies`, { method: 'POST' }),
+
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
     command<ModelSummary>(
@@ -1558,6 +1568,9 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ model }),
     }),
+
+  /** #1291 — New model's "Start from blank template", served by the agent service. */
+  getBlankTemplate: () => request<BlankTemplate>('/ai/templates/blank'),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
   getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),

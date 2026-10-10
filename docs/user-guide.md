@@ -466,7 +466,10 @@ recorded that turn doing; **Dismiss** clears it.
 
 All of these count on the **Assistant** button's badge (its tooltip breaks the count
 down), and the browser tab's title starts with the count, so you can leave the panel
-closed and still see that something is waiting for you.
+closed and still see that something is waiting for you. While any of your chats (or a
+Claude client's session) is working on a turn, a pulsing dot shows on the button too, so
+it says at a glance whether the assistant is idle, working, or waiting for you. It is
+read every 15 seconds and whenever you open or close the panel.
 
 Some buttons only you can press, whatever the assistant is allowed: Print, Send,
 Delete, Settings' **Save**, the approval and question cards, Fork, Take over, and every

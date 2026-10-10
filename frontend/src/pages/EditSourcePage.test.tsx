@@ -10,6 +10,16 @@ import { server } from '../mocks/server'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { EditSourcePage } from './EditSourcePage'
 
+// Monaco's diff editor does not run in jsdom: the two sides, as text.
+vi.mock('../components/SourceDiff', () => ({
+  SourceDiff: ({ original, modified }: { original: string; modified: string }) => (
+    <div data-testid="source-diff">
+      <pre data-testid="diff-original">{original}</pre>
+      <pre data-testid="diff-modified">{modified}</pre>
+    </div>
+  ),
+}))
+
 vi.mock('../components/SourceEditor', () => ({
   SourceEditor: ({
     value,
@@ -466,6 +476,32 @@ describe('EditSourcePage, live (#269)', () => {
     await user.click(save)
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
     expect(await api.getSource('name-keychain')).toBe('sphere(2);\n')
+  })
+
+  it('compares their version with the buffer before choosing (#1287)', async () => {
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('sphere(2);\n')
+    await api.replaceSource('name-keychain', THEIRS)
+    emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+    const banner = await screen.findByTestId('changed-elsewhere')
+    expect(screen.queryByTestId('source-diff')).not.toBeInTheDocument()
+
+    await user.click(within(banner).getByRole('button', { name: 'Compare' }))
+    expect(screen.getByTestId('diff-original')).toHaveTextContent(THEIRS.trim())
+    expect(screen.getByTestId('diff-modified')).toHaveTextContent('sphere(2);')
+    // The buffer stays editable, and the diff follows it.
+    await user.type(editor, '// mine')
+    expect(screen.getByTestId('diff-modified')).toHaveTextContent('// mine')
+
+    await user.click(within(banner).getByRole('button', { name: 'Hide changes' }))
+    expect(screen.queryByTestId('source-diff')).not.toBeInTheDocument()
+    await user.click(within(banner).getByRole('button', { name: 'Compare' }))
+    await user.click(within(banner).getByRole('button', { name: 'Load their version' }))
+    expect(editor).toHaveValue(THEIRS)
+    expect(screen.queryByTestId('source-diff')).not.toBeInTheDocument()
   })
 
   it('takes a change that lands before the first read answers, with no banner', async () => {
