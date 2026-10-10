@@ -952,6 +952,40 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
 
+### The agent-durable sidecar (durable sessions, #1056)
+
+Durable chat sessions (spec 2026-10-01 §6) run on a third container in the
+ScadBuddy pod, `ghcr.io/eh-homelab/scadbuddy-agent-durable` (the Dockerfile's
+`--target agent-durable`, published by the `agent-durable` job in
+`build-image.yml` with the same tags). It runs the `agent` task queue's worker:
+`DurableSession` and the Claude Code segments. Each tool call is an activity on
+`agent-tools`, which the `agent` container serves. The plan with its rulings is
+`docs/superpowers/plans/2026-10-10-durable-phase-5e-deploy.md`.
+
+- It answers `GET /healthz` on `8082` and opens no other port. The body's
+  `worker` says `running`, `not configured` (a variable is missing), or
+  `failed to start`. It is always 200 while the process serves, so liveness is
+  the only probe it needs.
+- Set the same variables the agent has: `SCADBUDDY_DATABASE_URL`,
+  `SCADBUDDY_SECRET_KEY_FILE` (the agent's KEK mount; add
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` during a rotation),
+  `SCADBUDDY_TEMPORAL_ADDRESS` and `SCADBUDDY_TEMPORAL_NAMESPACE`. The image
+  sets its own paths: `SCADBUDDY_DURABLE_TOOLS_JSON` (the agent's tool manifest
+  from the same build), `SCADBUDDY_DURABLE_SKILLS_DIR` and
+  `SCADBUDDY_DURABLE_CWD=/srv/agent`.
+- It runs as uid 10001 and writes only under `/srv/agent` (`HOME`, Claude
+  Code's config and its working directory) and `/tmp`, so mount an `emptyDir`
+  at each and keep the root filesystem read-only.
+- Several replicas are safe: a session is one workflow, and any worker
+  continues it, because the conversation lives in the workflow (5c Ruling 1).
+- `deploy.reusable.yml` pins its line in `applications/scadbuddy/scadbuddy.yaml`
+  to the build's digest once clusters has one. A manifest without the line
+  deploys without it.
+- Until a worker polls `agent`, new chats fall back to classic and say why
+  (5d Ruling 2b).
+- The new GHCR package needs the one-time **public** visibility step
+  described above.
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:
