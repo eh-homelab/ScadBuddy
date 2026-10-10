@@ -35,6 +35,7 @@ from temporalio.api.sdk.v1 import WorkflowMetadata
 from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.contrib.workflow_streams import WorkflowStreamClient
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.flow_entries import (
@@ -102,6 +103,10 @@ def effects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _effects(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+async def _read_effects(path: Path) -> list[dict[str, Any]]:
+    return _effects(path)
 
 
 class Probe:
@@ -236,8 +241,11 @@ async def test_the_same_update_id_runs_one_execute(probe: Probe, effects: Path) 
     again = await probe.send(wf_id, script, update_id="key-1")
     assert again.turn_number == first.turn_number
     assert await probe.reply(wf_id) == "result: 1"
-    await asyncio.sleep(1)
-    assert _effects(effects) == [{"tool": "step", "n": 1}]
+    await _until(lambda: _read_effects(effects), bool)
+    # The first effect is in; a duplicate execute would add a second within this window.
+    for _ in range(20):
+        assert _effects(effects) == [{"tool": "step", "n": 1}]
+        await asyncio.sleep(0.1)
 
 
 # 4
@@ -312,6 +320,26 @@ async def test_an_answer_that_beats_the_timeout_update_is_the_result(
         wf_id, _ = await probe.start(_script("a = await wait('anyone?', 2)", "return a['answer']"))
         assert await probe.reply(wf_id) == "result: 'just in time'"
         assert (await AgentClient(probe.client, wf_id).get_status()).pending_callbacks == []
+
+
+@activity.defn(name=FLOW_ENTRY_TIMEOUT)
+async def timeout_refused(entry: EntryTimeout) -> bool:
+    """The harness refuses the timeout's Update: the activity fails for good."""
+    raise ApplicationError("refused", type="EntryRefused", non_retryable=True)
+
+
+# 7, the timeout's own failure: the script still sees one TimeoutError (#2095).
+async def test_a_failed_timeout_reaches_the_script_as_a_timeout(temporal_address: str) -> None:
+    async with _probe(temporal_address, timeout_refused) as probe:
+        wf_id, _ = await probe.start(
+            _script(
+                "try:",
+                "    await wait('anyone?', 2)",
+                "except TimeoutError:",
+                "    return 'timed out'",
+            )
+        )
+        assert await probe.reply(wf_id) == "result: 'timed out'"
 
 
 # 8

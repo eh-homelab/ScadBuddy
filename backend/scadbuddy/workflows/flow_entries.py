@@ -15,6 +15,7 @@ approval-timeout decision (plan open question 5).
 """
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
@@ -22,7 +23,7 @@ from typing import Any
 from pydantic import BaseModel
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
@@ -82,13 +83,22 @@ async def run_callback(
     try:
         await workflow.wait_condition(call.done, timeout=timedelta(seconds=timeout_s))
     except TimeoutError:
-        timed_out = await workflow.execute_activity(
-            FLOW_ENTRY_TIMEOUT,
-            EntryTimeout(workflow_id=workflow.info().workflow_id, call_id=call_id),
-            result_type=bool,
-            start_to_close_timeout=timedelta(seconds=10),
-            retry_policy=TIMEOUT_RETRY,
-        )
+        try:
+            timed_out = await workflow.execute_activity(
+                FLOW_ENTRY_TIMEOUT,
+                EntryTimeout(workflow_id=workflow.info().workflow_id, call_id=call_id),
+                result_type=bool,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=TIMEOUT_RETRY,
+            )
+        except ActivityError as err:
+            # The harness never ended the entry: stop waiting on it, so the caller sees
+            # its timeout and no task is left behind. The entry stays listed until the
+            # run closes (Ruling 11, "When the activity itself fails").
+            call.cancel()
+            with contextlib.suppress(asyncio.CancelledError, agent.CallbackToolError):
+                await call
+            raise TimeoutError(f"no answer within {timeout_s:g} seconds") from err
     try:
         return await call
     except agent.CallbackToolError as err:
