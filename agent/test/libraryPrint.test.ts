@@ -314,3 +314,36 @@ describe('coverage (#1756)', () => {
     }
   })
 })
+
+describe('deleting library files (#2167)', () => {
+  it('is outward, sends the ids with an Idempotency-Key, and passes the skipped files on', async () => {
+    let sent: { body: unknown; key: string | null } | undefined
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/delete`, async ({ request }) => {
+        sent = { body: await request.json(), key: request.headers.get('Idempotency-Key') }
+        return HttpResponse.json({
+          deleted: [{ id: 1, filename: 'a.3mf', trashed: true }],
+          skipped: [{ id: 2, filename: 'b.3mf', reason: "Bambuddy deletes only files its API key's user added" }],
+        })
+      }),
+    )
+    expect(tool('delete_library_files').risk).toBe('outward')
+    expect(tool('restore_library_files').risk).toBe('outward')
+    const result = firstText(await tool('delete_library_files').execute({ file_ids: [1, 2] }, ctx())) as {
+      deleted: unknown[]
+      skipped: { id: number }[]
+    }
+    expect(sent?.body).toEqual({ file_ids: [1, 2] })
+    expect(sent?.key).toBeTruthy()
+    expect(result.deleted).toHaveLength(1)
+    expect(result.skipped.map((file) => file.id)).toEqual([2])
+  })
+
+  it('restores from the trash', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/restore`, () => HttpResponse.json({ restored: [1], skipped: [] })),
+    )
+    const result = firstText(await tool('restore_library_files').execute({ file_ids: [1] }, ctx()))
+    expect(result).toEqual({ restored: [1], skipped: [] })
+  })
+})
