@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -14,12 +14,20 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
+from scadbuddy.activity.index import ActivityIndex, Attribution
 from scadbuddy.bambuddy.runs import PrintRunError, TransactionalEvents
 from scadbuddy.core.events import OperationEvent
+from scadbuddy.operations.activity import row_of
+
+if TYPE_CHECKING:
+    from scadbuddy.workflows.operation_models import OperationAuthor
 
 OperationStatus = Literal["running", "succeeded", "failed"]
 
-_COLUMNS = "id, kind, subject, status, result, error, created_at, finished_at"
+_COLUMNS = (
+    "id, kind, subject, status, result, error, created_at, finished_at,"
+    " workflow_id, workflow_run_id"
+)
 
 
 class Operation(BaseModel):
@@ -53,9 +61,15 @@ class OperationStore:
         pool: ConnectionPool[Connection[DictRow]],
         *,
         events: TransactionalEvents | None = None,
+        activity: ActivityIndex | None = None,
     ) -> None:
         self._pool = pool
         self.events = events
+        self.activity = activity
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        return self._pool
 
     async def find(self, operation_key: str) -> Operation | None:
         """The key's newest operation, whatever its status: one key is one effect."""
@@ -86,6 +100,7 @@ class OperationStore:
         workflow_run_id: str,
         retention: timedelta | None,
         idempotency_key: str | None = None,
+        author: OperationAuthor | None = None,
     ) -> Operation:
         """Record an accepted operation; the execution's row if it has one already (a
         retried activity), announced only when inserted. Prunes operations that finished
@@ -101,6 +116,7 @@ class OperationStore:
             workflow_run_id,
             retention,
             idempotency_key,
+            author,
         )
 
     async def finish(
@@ -118,7 +134,19 @@ class OperationStore:
         ``running`` that was accepted more than ``older_than`` ago."""
         return await asyncio.to_thread(self._running_executions, older_than)
 
-    def _announce(self, conn: Connection[DictRow], op: Operation) -> None:
+    def _announce(
+        self,
+        conn: Connection[DictRow],
+        op: Operation,
+        row: DictRow,
+        attribution: Attribution | None = None,
+    ) -> None:
+        if self.activity is not None:
+            self.activity.upsert_in(
+                conn,
+                lambda: row_of(op, row["workflow_id"], row["workflow_run_id"]),
+                attribution=attribution,
+            )
         if self.events is not None:
             self.events.publish_in(
                 conn, OperationEvent(operation_id=op.id, op_kind=op.kind, subject=op.subject)
@@ -170,6 +198,7 @@ class OperationStore:
         workflow_run_id: str,
         retention: timedelta | None,
         idempotency_key: str | None,
+        author: OperationAuthor | None,
     ) -> Operation:
         with self._pool.connection() as conn, conn.transaction():
             if retention is not None:
@@ -193,7 +222,12 @@ class OperationStore:
             ).fetchone()
             if row is not None:
                 op = Operation.model_validate(row)
-                self._announce(conn, op)
+                attribution = (
+                    Attribution(author.principal or "browser", author.session, author.tool)
+                    if author is not None
+                    else Attribution("browser", None, None)
+                )
+                self._announce(conn, op, row, attribution)
                 return op
             existing = conn.execute(
                 f"SELECT {_COLUMNS} FROM operations"
@@ -220,7 +254,7 @@ class OperationStore:
             ).fetchone()
             if row is not None:
                 op = Operation.model_validate(row)
-                self._announce(conn, op)
+                self._announce(conn, op, row)
                 return op
             current = conn.execute(
                 f"SELECT {_COLUMNS} FROM operations WHERE id = %s", (op_id,)

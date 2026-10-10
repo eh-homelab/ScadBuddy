@@ -34,6 +34,8 @@ class OperationAuthor(BaseModel):
 
     principal: str | None = None
     session: str | None = None
+    #: The agent tool that made the call, for activity.
+    tool: str | None = None
 
 
 class PreludeStep(BaseModel):

@@ -22,11 +22,15 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Response, status
 from fastapi.responses import JSONResponse
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.activity.visibility import UNKNOWN_SESSION, session_owner
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
@@ -233,10 +237,19 @@ def _answer(
 MAX_REQUEST_BYTES = 128 * 1024
 
 
-def _author() -> OperationAuthor | None:
-    """The request's agent author, for the run's commits (#252)."""
+async def _author(pool: ConnectionPool[Connection[DictRow]]) -> OperationAuthor | None:
+    """The request's agent author, for the run's commits (#252) and its activity row. A
+    headless-browser request has the session marker only (``author_from`` puts it in
+    ``session``), so its principal is that session's owner, as ``attribute_request``
+    resolves it. The routes pass no ``Request`` to ``run_operation``, so the context
+    variable is all there is to read."""
     author = current_author()
-    return None if author is None else OperationAuthor(**vars(author))
+    if author is None:
+        return None
+    principal = author.principal
+    if principal is None and author.session is not None:
+        principal = await session_owner(pool, author.session) or UNKNOWN_SESSION
+    return OperationAuthor(**{**vars(author), "principal": principal})
 
 
 @dataclass(frozen=True)
@@ -412,7 +425,7 @@ async def _run_operation(
         run_attempts=kind.run_attempts,
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
-        author=_author(),
+        author=await _author(ops.store.pool),
         prelude=prelude,
         idempotency_key=idempotency_key,
     )

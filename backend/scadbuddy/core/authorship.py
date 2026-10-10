@@ -102,8 +102,8 @@ def author_from(headers: Headers) -> AgentAuthor | None:
     principal = headers.get(AUTHOR_HEADER)
     session = headers.get(AUTHOR_SESSION_HEADER) or headers.get(ACTOR_HEADER)
     tool = headers.get(TOOL_HEADER)
-    if principal is None and session is None and tool is None:
-        return None
+    if principal is None and session is None:
+        return None  # a tool alone labels nothing
     if principal is not None and not _PRINCIPAL.match(principal):
         raise InvalidAuthorError(
             f"{AUTHOR_HEADER} must be 1 to {MAX_PRINCIPAL} printable characters, no spaces"
