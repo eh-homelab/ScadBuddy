@@ -51,6 +51,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.flows.keys import payload_keys
+from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
@@ -870,7 +871,12 @@ async def run_projects_worker(
         )
         store = FlowStore(settings_store.pool, events=events)
         queue = settings.temporal_task_queue_projects
-        worker = projects_worker(client, queue, FlowActivities(store).all())
+        decisions = operation_activities(
+            OperationStore(settings_store.pool, events=events),
+            settings_store,
+            {kind.name: kind for kind in flow_kinds(store)},
+        )
+        worker = projects_worker(client, queue, [*FlowActivities(store).all(), *decisions])
         server = (
             _health_server(settings, metrics, None, health_port, queue)
             if health_port is not None

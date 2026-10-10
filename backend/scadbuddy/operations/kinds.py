@@ -17,9 +17,13 @@ if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
 
 #: Which worker runs a kind (§4.3): the one that holds what its effect needs.
-Queue = Literal["bambuddy", "library"]
+Queue = Literal["bambuddy", "library", "projects"]
 #: What a user checks when a kind's effect may have happened unrecorded, by queue.
-WHERE: dict[Queue, str] = {"bambuddy": "Bambuddy", "library": "the model and its libraries"}
+WHERE: dict[Queue, str] = {
+    "bambuddy": "Bambuddy",
+    "library": "the model and its libraries",
+    "projects": "the flow run",
+}
 
 #: The route's refusals: raises ``ApiError`` to refuse, writes nothing, and returns what
 #: ``run`` needs (JSON).

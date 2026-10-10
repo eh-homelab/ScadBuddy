@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Any
 
 from temporalio.client import Client
 
@@ -25,6 +25,7 @@ from scadbuddy.flows.keys import payload_keys
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flows_client import connect_flows
+from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys
 from scadbuddy.workflows.projects_worker import projects_worker
 
@@ -43,6 +44,9 @@ class Flows:
     connect: Connect | None = None
     #: Connected when the app runs; None without a KEK (or before then).
     client: Client | None = field(default=None)
+    #: The `projects` queue's operation activities (the flow decisions), built when the
+    #: in-process worker starts: the operations component reads this one's kinds.
+    operation_activities: Callable[[], list[Callable[..., Any]]] = field(default=lambda: [])
 
     @property
     def queue(self) -> str:
@@ -58,11 +62,20 @@ FLOWS: Key[Flows] = Key("flows")
 
 def _build(core: Core, components: Components) -> Flows:
     keys = payload_keys(core.settings)
+
+    def projects_operations() -> list[Callable[..., Any]]:
+        from scadbuddy.operations.component import OPERATIONS
+
+        ops = components.get(OPERATIONS)
+        kinds = {name: kind for name, kind in ops.kinds.items() if kind.queue == "projects"}
+        return operation_activities(ops.store, core.settings_store, kinds)
+
     return Flows(
         store=FlowStore(core.projection.pool, events=transactional_events(core.events)),
         settings=core.settings,
         keys=keys[0] if keys is not None else None,
         connect=keys[1] if keys is not None else None,
+        operation_activities=projects_operations,
     )
 
 
@@ -86,7 +99,11 @@ async def _run(flows: Flows) -> AsyncIterator[None]:
     if not inprocess:
         yield
         return
-    worker = projects_worker(flows.client, flows.queue, FlowActivities(flows.store).all())
+    worker = projects_worker(
+        flows.client,
+        flows.queue,
+        [*FlowActivities(flows.store).all(), *flows.operation_activities()],
+    )
     task = asyncio.create_task(worker.run())
     try:
         yield
