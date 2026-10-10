@@ -449,4 +449,193 @@ describe('ModelLibrariesButton, live (#269)', () => {
     const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
     expect(within(pinned).getByRole('listitem', { name: 'BOSL2' })).toBeInTheDocument()
   })
+  describe('Includes (#1285)', () => {
+    const clean = {
+      includes: [],
+      unresolved: 0,
+      fonts: [],
+      fonts_checked: true,
+      missing_checkouts: [],
+      truncated: false,
+    }
+    const unresolvedBosl2 = {
+      file: 'model.scad',
+      line: 3,
+      kind: 'include',
+      target: 'BOSL2/std.scad',
+      status: 'unresolved',
+      path: null,
+      library: null,
+      reason: 'no pinned library has it',
+      suggestion: {
+        name: 'BOSL2',
+        source: 'catalogue',
+        url: BOSL2_URL,
+        ref: 'v2.0.761',
+        commit: null,
+        has_file: null,
+        pinned_by: null,
+      },
+    }
+
+    /** Answers each check with the next report (the last one repeats), counting them. */
+    function reports(...answers: object[]) {
+      const asked: string[] = []
+      server.use(
+        http.post('/api/v1/models/:slug/dependencies', ({ params }) => {
+          asked.push(String(params.slug))
+          return HttpResponse.json(answers[Math.min(asked.length, answers.length) - 1])
+        }),
+      )
+      return asked
+    }
+
+    it('says every include resolves when the check finds nothing', async () => {
+      reports({
+        ...clean,
+        includes: [
+          {
+            ...unresolvedBosl2,
+            status: 'resolved',
+            suggestion: null,
+            reason: null,
+          },
+        ],
+      })
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      const includes = within(dialog).getByRole('region', { name: 'Includes' })
+      expect(
+        await within(includes).findByText('Every include and use resolves.'),
+      ).toBeInTheDocument()
+      expect(within(includes).queryByRole('list', { name: 'Unresolved' })).not.toBeInTheDocument()
+    })
+
+    it('lists an unresolved include, pins the library it suggests, and checks again', async () => {
+      const seen = watchPins()
+      const asked = reports({ ...clean, includes: [unresolvedBosl2], unresolved: 1 }, clean)
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+
+      const unresolved = await within(dialog).findByRole('list', {
+        name: 'Unresolved',
+      })
+      const include = within(unresolved).getByRole('listitem', {
+        name: '<BOSL2/std.scad>',
+      })
+      expect(include).toHaveTextContent('include <BOSL2/std.scad>')
+      expect(include).toHaveTextContent('model.scad:3 — no pinned library has it')
+      expect(include).toHaveTextContent('BOSL2 from the catalogue provides it.')
+
+      await user.click(within(include).getByRole('button', { name: 'Pin BOSL2' }))
+
+      expect(
+        await within(dialog).findByText('The source has no include or use.'),
+      ).toBeInTheDocument()
+      expect(seen).toEqual([`PUT BOSL2 ${JSON.stringify({ url: BOSL2_URL, ref: 'v2.0.761' })}`])
+      expect(asked.length).toBeGreaterThanOrEqual(2)
+      expect(asked.every((slug) => slug === 'name-keychain')).toBe(true)
+    })
+
+    it('installs a font the source names that is not installed, then checks again', async () => {
+      const font = {
+        file: 'model.scad',
+        line: 7,
+        font: 'Pacifico',
+        families: ['Pacifico'],
+        missing: ['Pacifico'],
+      }
+      const asked = reports(
+        { ...clean, fonts: [font] },
+        { ...clean, fonts: [{ ...font, missing: [] }] },
+      )
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+
+      const row = await within(dialog).findByRole('listitem', {
+        name: 'Font Pacifico',
+      })
+      expect(row).toHaveTextContent('Not installed')
+      const checksBefore = asked.length
+      await user.click(within(row).getByRole('button', { name: 'Install Pacifico' }))
+
+      expect(
+        await within(dialog).findByText(
+          'The source has no include or use, and every font it names is installed.',
+        ),
+      ).toBeInTheDocument()
+      expect(asked.length).toBeGreaterThan(checksBefore)
+    })
+
+    it('says why a font could not be installed, on its row', async () => {
+      const font = {
+        file: 'model.scad',
+        line: 2,
+        font: 'Playfair Display',
+        families: ['Playfair Display'],
+        missing: ['Playfair Display'],
+      }
+      reports({ ...clean, fonts: [font] })
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      const row = await within(dialog).findByRole('listitem', {
+        name: 'Font Playfair Display',
+      })
+      await user.click(within(row).getByRole('button', { name: 'Install Playfair Display' }))
+      expect(await within(row).findByRole('alert')).toHaveTextContent(/could not be downloaded/)
+    })
+
+    it('says which pinned checkouts are missing, that fonts went unchecked, and that the check stopped short', async () => {
+      reports({
+        ...clean,
+        fonts: [
+          {
+            file: 'model.scad',
+            line: 1,
+            font: 'Roboto',
+            families: ['Roboto'],
+            missing: [],
+          },
+        ],
+        fonts_checked: false,
+        missing_checkouts: ['BOSL2'],
+        truncated: true,
+      })
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      const includes = within(dialog).getByRole('region', { name: 'Includes' })
+      expect(
+        await within(includes).findByText(/Not on the volume yet: BOSL2\./),
+      ).toBeInTheDocument()
+      expect(within(includes).getByText(/The fonts were not checked/)).toBeInTheDocument()
+      expect(within(includes).getByText(/The check stopped short/)).toBeInTheDocument()
+    })
+
+    it('says so when the check fails, and the rest of the dialog still works', async () => {
+      server.use(
+        http.post('/api/v1/models/:slug/dependencies', () =>
+          HttpResponse.json({ detail: 'the model source could not be read' }, { status: 500 }),
+        ),
+      )
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      const includes = within(dialog).getByRole('region', { name: 'Includes' })
+      expect(await within(includes).findByRole('alert')).toHaveTextContent(
+        /Could not check the includes/,
+      )
+      expect(within(dialog).getByRole('list', { name: 'Catalogue' })).toBeInTheDocument()
+    })
+  })
 })
