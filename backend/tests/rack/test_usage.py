@@ -14,7 +14,13 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.rack import usage
 from scadbuddy.rack.rank import Usage, rank_rack
-from scadbuddy.rack.usage import STATEMENT_TIMEOUT_MS, PickedHotend, RackUsageStore
+from scadbuddy.rack.usage import (
+    STATEMENT_TIMEOUT_MS,
+    PickedHotend,
+    PickedSpool,
+    RackUsageStore,
+    SpoolUse,
+)
 from scadbuddy.render import pg_store
 from tests.rack.helpers import group, serial, slot
 
@@ -297,3 +303,88 @@ async def test_migrating_waits_out_another_process_holding_the_lock(
     with store._ready().connection() as conn:
         row = conn.execute("SHOW statement_timeout").fetchone()
     assert row is not None and row["statement_timeout"] == "200ms"
+
+
+def _picked(serial: str, *spools: PickedSpool, group_id: int = 0) -> PickedHotend:
+    return PickedHotend(group_id=group_id, position=2, serial=serial, spools=list(spools))
+
+
+GREEN = PickedSpool(
+    slot_id=1,
+    spool_id=7,
+    label="Bambu PLA Basic Green",
+    material="PLA",
+    colour="#3F8E43",
+    grams=10.0,
+)
+BLACK = PickedSpool(
+    slot_id=2, spool_id=8, label="Inland PLA Black", material="PLA", colour="#000000", grams=2.5
+)
+
+
+async def test_each_spool_that_ran_through_a_hotend_is_recorded_by_its_serial(
+    store: RackUsageStore,
+) -> None:
+    """#2170: the spools follow the serial, whichever position, printer or item named it."""
+    await store.record_picks(51, 1, [_picked(A, GREEN, BLACK)])
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=600, grams=12.5
+    )
+    later = AT + timedelta(hours=1)
+    await store.record_picks(52, 2, [_picked(A, GREEN)])
+    await store.record_prints(
+        archive_id=102, queue_item_id=52, settled_at=later, print_seconds=60, grams=10.0
+    )
+    # Picked, never settled: not history yet.
+    await store.record_picks(53, 1, [_picked(A, BLACK)])
+    await store.record_picks(54, 1, [_picked(B, BLACK)])
+
+    history = await store.spool_history([A, B, ""])
+
+    assert list(history) == [A]
+    assert history[A] == [
+        SpoolUse(
+            spool_id=7,
+            label=GREEN.label,
+            material="PLA",
+            colour="#3F8E43",
+            prints=2,
+            grams=20.0,
+            last_used_at=later,
+        ),
+        SpoolUse(
+            spool_id=8,
+            label=BLACK.label,
+            material="PLA",
+            colour="#000000",
+            prints=1,
+            grams=2.5,
+            last_used_at=AT,
+        ),
+    ]
+
+
+async def test_a_slot_with_no_inventory_spool_is_kept_by_its_label(
+    store: RackUsageStore,
+) -> None:
+    await store.record_picks(
+        51,
+        1,
+        [
+            _picked(
+                A,
+                PickedSpool(slot_id=1, label="PLA", material="PLA", colour="#FFFFFF"),
+                PickedSpool(slot_id=2, label="PETG", material="PETG", colour="#FFFFFF"),
+            )
+        ],
+    )
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=600, grams=None
+    )
+
+    history = await store.spool_history([A])
+
+    assert sorted((use.spool_id, use.label, use.grams) for use in history[A]) == [
+        (None, "PETG", 0.0),
+        (None, "PLA", 0.0),
+    ]
