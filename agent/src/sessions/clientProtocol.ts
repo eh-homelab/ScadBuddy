@@ -78,8 +78,8 @@ export type ClientMessage = z.infer<typeof ClientMessageSchema>
  * loaded before #1941 does (#1959): the panel shows it as it is.
  */
 export const STALE_TAB_IMAGES =
-  'This page is out of date and sent its images in a way the assistant no longer takes, so the message was not sent. ' +
-  'Copy your message, reload the page, then attach the images and send it again.'
+  'This page is out of date: it sent your images in a way the assistant no longer takes, so your message was not sent. ' +
+  'Please reload the page, then send the message with its images again.'
 
 /**
  * A refusal the panel should show as an answer to what the user sent rather
