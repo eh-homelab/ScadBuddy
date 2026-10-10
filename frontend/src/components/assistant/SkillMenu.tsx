@@ -131,13 +131,11 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
   const menu = (
     <>
       {open && (
-        <div
-          id={listId}
-          role="listbox"
-          aria-label="Skills"
-          className="absolute inset-x-2.5 bottom-full z-10 mb-1 max-h-56 overflow-y-auto rounded-[6px] border border-line bg-surface-2 py-1 text-[13px] shadow-lg"
-        >
-          {matches.map((skill, i) => (
+        <div className="absolute inset-x-2.5 bottom-full z-10 mb-1 max-h-56 overflow-y-auto rounded-[6px] border border-line bg-surface-2 py-1 text-[13px] shadow-lg">
+          {/* Options only: the line said when there are none sits beside it, and the
+              status above says it to screen readers. */}
+          <div id={listId} role="listbox" aria-label="Skills">
+            {matches.map((skill, i) => (
             <div
               key={skill.name}
               id={optionId(i)}
@@ -153,8 +151,13 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
             >
               /{skill.name}
             </div>
-          ))}
-          {!matches.length && <p className="px-2.5 py-1 text-faint">{status}</p>}
+            ))}
+          </div>
+          {!matches.length && (
+            <p data-testid="skill-menu-notice" aria-hidden="true" className="px-2.5 py-1 text-faint">
+              {status}
+            </p>
+          )}
         </div>
       )}
       <p className="sr-only" role="status" aria-label="Skill suggestions">

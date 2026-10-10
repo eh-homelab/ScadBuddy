@@ -12,6 +12,9 @@ import { AppShell } from '../AppShell'
 
 vi.mock('../../agent/chat/availability', () => ({ useAiAvailability: () => ({ available: true }) }))
 
+// The panel is a lazy chunk: on a cold transform cache the first test waits past the 1 s default.
+const SLOW = { timeout: 5000 }
+
 let agent: MockAgentTransport
 const factory = () => {
   agent = createMockAgentTransport({ stepMs: 0 })
@@ -31,11 +34,17 @@ async function openComposer() {
     { route: '/m/name-keychain' },
   )
   await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
-  const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+  const box = await screen.findByRole('textbox', { name: 'Message the assistant' }, SLOW)
   return { view, box }
 }
 
 const optionNames = (list: HTMLElement) => within(list).getAllByRole('option').map((o) => o.textContent)
+
+/** The popup's line when there is no option: beside the listbox, which holds options only. */
+function notice(list: HTMLElement, text: string): HTMLElement {
+  expect(list.children).toHaveLength(0)
+  return within(list.parentElement!).getByText(text, { selector: '[data-testid="skill-menu-notice"]' })
+}
 
 describe('the "/" skill menu (#1920)', () => {
   it('lists the loaded skills when the draft starts with "/", wired to the composer', async () => {
@@ -44,7 +53,7 @@ describe('the "/" skill menu (#1920)', () => {
     expect(box).toHaveAttribute('aria-autocomplete', 'list')
 
     await view.user.type(box, '/')
-    const list = await screen.findByRole('listbox', { name: 'Skills' })
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
     await waitFor(() =>
       expect(optionNames(list)).toEqual(['/scadbuddy:authoring', '/scadbuddy:customize', '/scadbuddy:print']),
     )
@@ -60,13 +69,13 @@ describe('the "/" skill menu (#1920)', () => {
   it('filters as you type and closes once the draft is no longer one "/" word', async () => {
     const { view, box } = await openComposer()
     await view.user.type(box, '/pri')
-    const list = await screen.findByRole('listbox', { name: 'Skills' })
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
     await waitFor(() => expect(optionNames(list)).toEqual(['/scadbuddy:print']))
     expect(screen.getByRole('status', { name: 'Skill suggestions' })).toHaveTextContent('1 skill.')
 
     await view.user.type(box, 'zz')
     await waitFor(() => expect(within(list).queryAllByRole('option')).toHaveLength(0))
-    expect(within(list).getByText('No skill matches “/prizz”.')).toBeInTheDocument()
+    expect(notice(list, 'No skill matches “/prizz”.')).toBeInTheDocument()
 
     await view.user.type(box, ' ')
     expect(screen.queryByRole('listbox', { name: 'Skills' })).toBeNull()
@@ -78,7 +87,7 @@ describe('the "/" skill menu (#1920)', () => {
   it('moves with the arrow keys, inserts the invocation on Enter, and sends nothing', async () => {
     const { view, box } = await openComposer()
     await view.user.type(box, '/')
-    const list = await screen.findByRole('listbox', { name: 'Skills' })
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
     await waitFor(() => expect(within(list).getAllByRole('option')).toHaveLength(3))
 
     await view.user.keyboard('{ArrowDown}{ArrowDown}')
@@ -116,7 +125,7 @@ describe('the "/" skill menu (#1920)', () => {
   it('closes on Escape, keeps the draft, and stays closed until the "/" is typed again', async () => {
     const { view, box } = await openComposer()
     await view.user.type(box, '/cu')
-    await screen.findByRole('listbox', { name: 'Skills' })
+    await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
     await view.user.keyboard('{Escape}')
     expect(screen.queryByRole('listbox', { name: 'Skills' })).toBeNull()
     expect(box).toHaveValue('/cu')
@@ -127,14 +136,14 @@ describe('the "/" skill menu (#1920)', () => {
 
     await view.user.clear(box)
     await view.user.type(box, '/')
-    expect(await screen.findByRole('listbox', { name: 'Skills' })).toBeInTheDocument()
+    expect(await screen.findByRole('listbox', { name: 'Skills' }, SLOW)).toBeInTheDocument()
   })
 
   it('sends on Enter as before when no skill matches', async () => {
     const { view, box } = await openComposer()
     await view.user.type(box, '/nothing')
-    const list = await screen.findByRole('listbox', { name: 'Skills' })
-    await within(list).findByText('No skill matches “/nothing”.')
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
+    await waitFor(() => notice(list, 'No skill matches “/nothing”.'))
     await view.user.keyboard('{Enter}')
     await waitFor(() => expect(sentMessages().map((m) => m.text)).toEqual(['/nothing']))
   })
@@ -170,7 +179,7 @@ describe('the "/" skill menu (#1920)', () => {
     )
     const { view, box } = await openComposer()
     await view.user.type(box, '/')
-    const list = await screen.findByRole('listbox', { name: 'Skills' })
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
     await waitFor(() => expect(optionNames(list)).toEqual(['/scadbuddy:print', '/greeter:hello']))
   })
 
@@ -178,8 +187,8 @@ describe('the "/" skill menu (#1920)', () => {
     server.use(http.get('/api/v1/ai/plugin-packages', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
     const { view, box } = await openComposer()
     await view.user.type(box, '/')
-    const list = await screen.findByRole('listbox', { name: 'Skills' })
-    expect(await within(list).findByText('The skills could not be read: down')).toBeInTheDocument()
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
+    await waitFor(() => notice(list, 'The skills could not be read: down'))
     await view.user.keyboard('{Enter}')
     await waitFor(() => expect(sentMessages().map((m) => m.text)).toEqual(['/']))
   })
