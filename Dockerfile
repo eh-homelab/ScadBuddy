@@ -322,16 +322,25 @@ RUN uv sync --frozen --no-dev
 
 # ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
 COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
+# The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
+# becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
+# same build serves, so the two never disagree on a tool's name or schema (#1056, 5e).
+COPY --from=agent-build /src/agent/dist/tools.json /app/agent-durable/tools.json
 
 # Fails the build when the bundled Claude Code is missing for this platform or
-# is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin).
-RUN .venv/bin/python -m scadbuddy_durable.check_cli_version
+# is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin),
+# or when the tool manifest does not parse or is empty (rather than at the worker's start).
+RUN .venv/bin/python -m scadbuddy_durable.check_cli_version \
+    && .venv/bin/python -c "import sys; from scadbuddy_durable.session.tools import load_manifest; sys.exit(0 if load_manifest(sys.argv[1]) else 1)" /app/agent-durable/tools.json
 
 ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev
 ENV PATH=/app/agent-durable/.venv/bin:$PATH \
     HOME=/srv/agent \
     CLAUDE_CONFIG_DIR=/srv/agent/claude \
+    SCADBUDDY_DURABLE_TOOLS_JSON=/app/agent-durable/tools.json \
+    SCADBUDDY_DURABLE_SKILLS_DIR=/app/plugins/scadbuddy \
+    SCADBUDDY_DURABLE_CWD=/srv/agent \
     SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
     SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
 
