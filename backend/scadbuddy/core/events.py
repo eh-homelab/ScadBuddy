@@ -182,6 +182,17 @@ class OperationEvent(BaseEvent):
     subject: str
 
 
+class FlowRunEvent(BaseEvent):
+    """A flow run (#1057, spec 2026-10-01 §7.3) started, moved or ended: re-read
+    ``GET /workflow-runs/{run_id}``. Published on ``workflow-runs`` and
+    ``workflow-run:<run id>``."""
+
+    kind: Literal["flow_run.changed"] = "flow_run.changed"
+    run_id: str
+    definition_id: str
+    status: str
+
+
 class LibraryChanged(BaseEvent):
     """A library was pinned to, re-pinned on, or removed from a model."""
 
@@ -296,6 +307,7 @@ Event = Annotated[
     | PrintEvent
     | PrintRunEvent
     | OperationEvent
+    | FlowRunEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled
