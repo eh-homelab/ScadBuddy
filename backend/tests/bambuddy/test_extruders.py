@@ -297,12 +297,22 @@ def test_a_nozzle_of_the_other_flow_still_beats_another_size(
     assert slicer_nozzle_stats(status, _size("0.2")) == expected
 
 
+def test_both_sides_with_the_size_are_both_offered() -> None:
+    """#2181, queue item 268: both sides carry the chosen nozzle. Leaving the file's own
+    stats let a library file made for one extruder offer the slicer only the left, so
+    every colour went there; both sides are offered outright instead."""
+    status = _nozzles(("HS00", "0.2"), ("HS00", "0.2"))
+    assert slicer_nozzle_stats(status, _size("0.2")) == ["Standard#1", "Standard#1"]
+    high_flow = _nozzles(("HH01", "0.4"), ("HH01", "0.4"))
+    assert slicer_nozzle_stats(high_flow, _choose("0.4", "high_flow")) == [
+        "High Flow#1",
+        "High Flow#1",
+    ]
+
+
 @pytest.mark.parametrize(
     ("status", "size"),
     [
-        # Both sides have it (the owner's case (a)): either may print, so the slicer
-        # keeps its own choice.
-        (_nozzles(("HS00", "0.2"), ("HS00", "0.2")), "0.2"),
         # Neither has it: stating no nozzle anywhere fails the slice, and the printer
         # may swap one in (#768), so the file is left as it was.
         (fts_status(), "0.6"),
@@ -357,11 +367,11 @@ def test_the_warning_says_which_side_and_both_flows() -> None:
 
 def test_either_side_the_slicer_may_choose_is_warned_about() -> None:
     """High Flow chosen for the left and Standard for the right, with the 0.2s mounted
-    the other way round: neither side has its flow, so the slicer is left to choose, and
+    the other way round: neither side has its flow, so both are offered (#2181), and
     each side is warned of in its own flow."""
     status = _nozzles(("HH01", "0.2"), ("HS00", "0.2"))
     nozzles = _choose("0.2", "high_flow", "standard")
-    assert slicer_nozzle_stats(status, nozzles) is None
+    assert slicer_nozzle_stats(status, nozzles) == ["High Flow#1", "Standard#1"]
     assert high_flow_warnings(status, nozzles) == [
         high_flow_warning(RIGHT, "standard"),
         high_flow_warning(LEFT, "high_flow"),

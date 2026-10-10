@@ -1337,7 +1337,7 @@ FLOW_MISMATCHES = [
         _mounted(("HH01", "0.2"), ("HS00", "0.2")),
         [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "standard"}],
         [(RIGHT, "standard"), (LEFT, "high_flow")],
-        None,
+        ["High Flow#1", "Standard#1"],
         ["High Flow", "Standard"],
         id="neither-side-of-its-flow",
     ),
