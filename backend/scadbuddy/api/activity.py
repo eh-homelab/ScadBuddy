@@ -37,6 +37,7 @@ ActivityDep = Annotated[ActivityComponent, component_dep(ACTIVITY)]
 
 UNKNOWN_PARAMETER = "https://scadbuddy.dev/problems/unknown-parameter"
 BAD_CURSOR = "https://scadbuddy.dev/problems/bad-cursor"
+BAD_VALUE = "https://scadbuddy.dev/problems/bad-parameter-value"
 FACET_PREFIX = "facet."
 LIST_PARAMS = frozenset(
     {
@@ -189,10 +190,10 @@ def _facet_value(facet: Facet, value: str) -> Any:
             try:
                 return float(value)
             except ValueError:
-                raise ApiError(400, f"facet {facet.name!r} is a number") from None
+                raise ApiError(400, f"facet {facet.name!r} is a number", type_=BAD_VALUE) from None
     if facet.type == "bool":
         if value not in ("true", "false"):
-            raise ApiError(400, f"facet {facet.name!r} is true or false")
+            raise ApiError(400, f"facet {facet.name!r} is true or false", type_=BAD_VALUE)
         return value == "true"
     return value
 

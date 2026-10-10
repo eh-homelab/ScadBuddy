@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import uuid
 
+import psycopg
 from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex
@@ -279,3 +281,23 @@ def test_a_tool_written_row_is_its_session_owners(
     assert client.get("/api/v1/activity/render:a", headers=headers).status_code == 200
     facets = client.get("/api/v1/activity/facets", headers=headers).json()
     assert [p["value"] for p in facets["principals"]] == [encoded]
+
+
+def test_a_bad_facet_value_is_a_400_problem(client: TestClient, agent_tables: AgentTables) -> None:
+    with psycopg.connect(agent_tables.conninfo, autocommit=True) as conn:
+        facets = [
+            {"name": "n", "type": "number", "label": "N"},
+            {"name": "b", "type": "bool", "label": "B"},
+        ]
+        conn.execute(
+            "INSERT INTO ai_activity_kinds VALUES ('agent.x', 'X', %s, NULL)",
+            (json.dumps(facets),),
+        )
+    for params in ({"facet.n": "many"}, {"facet.b": "maybe"}):
+        response = client.get("/api/v1/activity", params={"kind": "agent.x", **params})
+        assert response.status_code == 400, (params, response.text)
+        assert response.json()["type"] == "https://scadbuddy.dev/problems/bad-parameter-value"
+    ok = client.get(
+        "/api/v1/activity", params={"kind": "agent.x", "facet.n": "2", "facet.b": "true"}
+    )
+    assert ok.status_code == 200, ok.text
