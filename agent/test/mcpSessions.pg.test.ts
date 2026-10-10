@@ -244,6 +244,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
     expect(await db.sql`SELECT 1 FROM ai_mcp_sessions WHERE id_hash = ${sessionHash(id)}`).toHaveLength(1)
   })
 
+  it('relays answers of every size whole, however much their JSON escapes', async () => {
+    // Names full of quotes: a tool result is JSON inside a JSON string inside a
+    // NOTIFY payload, so each quote is escaped twice on the way.
+    const models = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ ...MODELS[0], slug: `m${i}`, name: `${'"'.repeat(40)}${'\\'.repeat(20)} ${i}` }))
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    let via: Replica = a
+    const client = await connect(token, () => via)
+    // Every count up to 60: past some size each answer goes in a row, below it
+    // in the NOTIFY, and the boundary is where escaping can push a chunk over.
+    for (let n = 1; n <= 60; n++) {
+      const listed = models(n)
+      backend.use(http.get(`${BACKEND}/api/v1/models`, () => HttpResponse.json(listed)))
+      via = a
+      const direct = await client.callTool({ name: 'list_models', arguments: { limit: 100 } })
+      via = b
+      const relayed = await client.callTool({ name: 'list_models', arguments: { limit: 100 } })
+      expect(relayed.isError, `${n} models`).toBeFalsy()
+      expect(relayed.content, `${n} models`).toEqual(direct.content)
+    }
+  })
+
   it('ends a relayed answer with an error when the owner dies mid-call', async () => {
     let reached!: () => void
     const backendReached = new Promise<void>((r) => (reached = r))

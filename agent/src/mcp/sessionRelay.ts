@@ -53,8 +53,12 @@ export const ACK_TIMEOUT_MS = 3_000
 export const BEAT_MS = 10_000
 /** Beats missed before the owner is taken for gone. */
 const SILENT_AFTER_BEATS = 3
-/** NOTIFY payloads are capped at 8000 bytes; a chunk past this goes in a row. */
-const INLINE_MAX_BYTES = 6_000
+/**
+ * NOTIFY payloads are capped at 8000 bytes; a chunk whose whole payload, as
+ * serialised, is past this goes in a row. Measured on the payload, not the
+ * text: JSON escapes the text again, and an SSE chunk of JSON is mostly quotes.
+ */
+const INLINE_MAX_BYTES = 7_500
 /** Relay rows older than this are nobody's any more. */
 const STALE_MESSAGES = '10 minutes'
 const SWEEP_EVERY_MS = 60_000
@@ -429,11 +433,14 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     this.#running.set(req, controller)
     // One message at a time, so they commit, and so are heard, in order.
     let queue = Promise.resolve()
+    /** A message could not be sent: the answer is incomplete, and ends as an error. */
+    let lost = false
     const send = (h: Header, row?: { row: string; value: unknown }) => {
       // Closed: this replica is going away, and says nothing more.
       if (this.#closed) return queue
       queue = queue.then(() => this.#send(h, row)).catch((err: unknown) => {
         this.#failed(err)
+        lost = true
         controller.abort()
       })
       return queue
@@ -470,7 +477,8 @@ export class PgMcpSessionRelay implements McpSessionRelay {
             const { done, value } = await reader.read()
             const text = done ? decoder.decode() : decoder.decode(value, { stream: true })
             if (text) {
-              if (Buffer.byteLength(text, 'utf8') <= INLINE_MAX_BYTES) await send({ t: 'chunk', req, to, text })
+              const inline: Header = { t: 'chunk', req, to, text }
+              if (Buffer.byteLength(JSON.stringify(inline), 'utf8') <= INLINE_MAX_BYTES) await send(inline)
               else {
                 const row = randomUUID()
                 await send({ t: 'chunk', req, to, row }, { row, value: { text } })
@@ -482,7 +490,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           controller.signal.removeEventListener('abort', cancel)
         }
       }
-      await send({ t: 'end', req, to })
+      await send(lost ? { t: 'end', req, to, error: true } : { t: 'end', req, to })
     } catch (err) {
       if (!controller.signal.aborted) this.#failed(err)
       if (!headSent) {
