@@ -726,7 +726,8 @@ class InventoryRemain(BambuddyModel):
 
 
 class QueueItem(BambuddyModel):
-    """``POST /api/v1/queue/`` and ``GET /api/v1/queue/{id}`` — the same schema.
+    """``POST /api/v1/queue/``, ``GET /api/v1/queue/{id}`` and a row of ``GET
+    /api/v1/queue/`` — the same schema.
 
     ``waiting_reason`` is the field that explains a queued item that is not printing,
     and it is Bambuddy's own sentence ("No active H2C printers in …"). It is separate
@@ -749,6 +750,43 @@ class QueueItem(BambuddyModel):
     error_message: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    # What the farm's queue view reads (#1912).
+    archive_name: str | None = None
+    #: A model-targeted item waits for any idle printer of this model.
+    target_model: str | None = None
+    sliced_for_model: str | None = None
+    scheduled_time: datetime | None = None
+    manual_start: bool = False
+    filament_short: bool = False
+    print_time_seconds: int | None = None
+    filament_used_grams: float | None = None
+    filament_type: str | None = None
+    filament_color: str | None = None
+    batch_name: str | None = None
+    created_at: datetime | None = None
+
+
+class ArchiveStats(BambuddyModel):
+    """``GET /api/v1/archives/stats`` (``ArchiveStats``): the farm's totals over its
+    archives, optionally within a date window. The per-printer maps are keyed by the
+    **stringified** printer id, as JSON keys must be."""
+
+    total_prints: int
+    successful_prints: int
+    failed_prints: int
+    cancelled_prints: int = 0
+    total_print_time_hours: float
+    total_filament_grams: float
+    total_cost: float
+    prints_by_filament_type: dict[str, int] = Field(default_factory=dict)
+    prints_by_printer: dict[str, int] = Field(default_factory=dict)
+    printer_names: dict[str, str] = Field(default_factory=dict)
+    #: Percent: how close the slicer's estimate came to the actual time.
+    average_time_accuracy: float | None = None
+    time_accuracy_by_printer: dict[str, float] | None = None
+    total_energy_kwh: float = 0.0
+    total_energy_cost: float = 0.0
+    total_wear_cost: float = 0.0
 
 
 class ExternalLink(BambuddyModel):

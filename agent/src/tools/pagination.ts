@@ -190,6 +190,40 @@ export async function backendPage<T>(
   }
 }
 
+/**
+ * One page of a backend list route that takes `limit` and `offset` and gives no total
+ * (farm/archives, #1912). A later page re-reads the cursor's own item at its old offset
+ * first: if something else is there now, the list moved under the cursor (a new item
+ * ahead of it) and the cursor is stale, as in page(), rather than a page that repeats
+ * or skips items. One item more than the page says whether another follows.
+ */
+export async function offsetPage<T>(
+  args: PageArgs,
+  key: (item: T) => string,
+  tool: string,
+  read: (window: { limit: number; offset: number }) => Promise<T[]>,
+): Promise<Page<T>> {
+  const scope = scopeOf(tool, args)
+  const after = resume(args, tool, scope)
+  const size = args.limit ?? DEFAULT_PAGE_SIZE
+  const window =
+    after === undefined
+      ? await read({ limit: size + 1, offset: 0 })
+      : await read({ limit: size + 2, offset: after.position })
+  if (after !== undefined) {
+    const first = window.shift()
+    if (first === undefined || key(first) !== after.key) throw new StaleCursorError(tool)
+  }
+  const start = after === undefined ? 0 : after.position + 1
+  const slice = window.slice(0, size)
+  const last = slice.at(-1)
+  return {
+    items: slice,
+    next_cursor: window.length > size && last !== undefined ? encode(key(last), start + slice.length - 1, scope) : null,
+    total: null,
+  }
+}
+
 /** The whole list's length a paged backend route answered in `X-Total-Count`, or null. */
 export function totalCount(response: Response): number | null {
   const header = response.headers.get('X-Total-Count')
