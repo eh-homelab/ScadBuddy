@@ -127,8 +127,12 @@ test.describe('print dialog', () => {
       await expect(dialog.getByRole('button', { name: 'Print', exact: true })).toBeInViewport({ ratio: 1 })
     }
     await fits('Advanced off')
+    // Headless Chromium has no toolbars, so dvh and vh measure the same here: pin the unit.
+    const cap = await dialog.evaluate((panel) => panel.className)
+    expect(cap, 'bounded by the visible height').toContain('100dvh')
     const chosen = dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })
     const spool = await chosen.getAttribute('value')
+    expect(spool, 'a spool is chosen for slot 1').not.toBeNull()
 
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
     await expect(dialog.getByRole('group', { name: 'Nozzles' })).toBeVisible()
@@ -139,7 +143,7 @@ test.describe('print dialog', () => {
     await fits('Advanced off again')
     await expect(dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })).toHaveAttribute(
       'value',
-      spool ?? '',
+      spool!,
     )
   })
 
