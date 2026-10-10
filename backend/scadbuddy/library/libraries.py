@@ -98,6 +98,17 @@ class CatalogueLibrary(BaseModel):
     ref: str
     licence: str
     homepage: str
+    description: str = Field(default="", description="What the library is for, in a sentence")
+    tags: list[str] = Field(
+        default_factory=list, description="Lower-case words a search matches, besides the name"
+    )
+
+    def matches(self, query: str) -> bool:
+        """Whether every word of ``query`` is in the name, the description or a tag,
+        ignoring case (#1913)."""
+        fields = [self.name.casefold(), self.description.casefold()]
+        fields.extend(tag.casefold() for tag in self.tags)
+        return all(any(word in field for field in fields) for word in query.casefold().split())
 
 
 class LibraryPin(BaseModel):
@@ -126,6 +137,9 @@ CURATED: tuple[CatalogueLibrary, ...] = (
         ref="v2.0.761",
         licence="BSD-2-Clause",
         homepage="https://github.com/BelfrySCAD/BOSL2",
+        description="The Belfry OpenSCAD Library: shapes, attachments, rounding, "
+        "threading, gears, hinges, paths and transforms.",
+        tags=["general", "shapes", "attachments", "rounding", "threads", "gears", "screws"],
     ),
     CatalogueLibrary(
         name="dotSCAD",
@@ -133,6 +147,9 @@ CURATED: tuple[CatalogueLibrary, ...] = (
         ref="v3.3",
         licence="LGPL-3.0",
         homepage="https://github.com/JustinSDK/dotSCAD",
+        description="Paths, curves, sweeps, polyhedra, turtle graphics, mazes and "
+        "other generative shapes.",
+        tags=["paths", "curves", "sweep", "generative", "turtle", "maze"],
     ),
     CatalogueLibrary(
         name="NopSCADlib",
@@ -140,6 +157,9 @@ CURATED: tuple[CatalogueLibrary, ...] = (
         ref="v21.43.1",
         licence="GPL-3.0",
         homepage="https://github.com/nophead/NopSCADlib",
+        description="Vitamins (screws, nuts, bearings, motors, electronics) and "
+        "printed parts for building projects, with bills of materials.",
+        tags=["vitamins", "hardware", "screws", "nuts", "bearings", "electronics", "enclosures"],
     ),
     CatalogueLibrary(
         name="Round-Anything",
@@ -147,6 +167,8 @@ CURATED: tuple[CatalogueLibrary, ...] = (
         ref="1.0.4",
         licence="MIT",
         homepage="https://github.com/Irev-Dev/Round-Anything",
+        description="Rounded and filleted polygons, extrusions and shells.",
+        tags=["rounding", "fillets", "polygons"],
     ),
     CatalogueLibrary(
         name="MCAD",
@@ -154,6 +176,22 @@ CURATED: tuple[CatalogueLibrary, ...] = (
         ref="master",
         licence="LGPL-2.1",
         homepage="https://github.com/openscad/MCAD",
+        description="OpenSCAD's original parts library: gears, nuts and bolts, "
+        "bearings, motors and regular shapes.",
+        tags=["gears", "nuts", "bolts", "bearings", "motors", "shapes"],
+    ),
+    # #1913. The repository's one release (a lightweight tag, at 910e22d, MIT). Its
+    # entry points include their own `src/` by relative path, so
+    # `use <gridfinity-rebuilt-openscad/gridfinity-rebuilt-bins.scad>` resolves.
+    CatalogueLibrary(
+        name="gridfinity-rebuilt-openscad",
+        url="https://github.com/kennetek/gridfinity-rebuilt-openscad.git",
+        ref="2.0.0",
+        licence="MIT",
+        homepage="https://github.com/kennetek/gridfinity-rebuilt-openscad",
+        description="Gridfinity bins, baseplates and lids: the modular storage "
+        "system, rebuilt in OpenSCAD.",
+        tags=["gridfinity", "storage", "bins", "baseplate", "organizer"],
     ),
 )
 
@@ -928,8 +966,11 @@ class LibraryStore:
             removed.append(entry.name)
         return removed
 
-    def entries(self) -> list[CatalogueLibrary]:
-        return list(self.catalogue.values())
+    def entries(self, query: str | None = None) -> list[CatalogueLibrary]:
+        """The catalogue, or the entries matching ``query`` (:meth:`CatalogueLibrary.matches`)."""
+        if not query:
+            return list(self.catalogue.values())
+        return [entry for entry in self.catalogue.values() if entry.matches(query)]
 
     def installed(self, name: str | None = None) -> list[tuple[str, str]]:
         """``(name, commit)`` for every checkout on the volume, or ``name``'s alone.
