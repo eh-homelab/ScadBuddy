@@ -409,6 +409,10 @@ the page you are on, so "make the text bigger" on a model's page means that mode
 
 - Type and press **Enter** (Shift+Enter for a new line). **Image** attaches up to four
   PNG, JPEG, GIF or WebP pictures; pasting or dropping them works too.
+- Type **/** at the start of a message to list the skills the assistant loads
+  (ScadBuddy's own `/scadbuddy:authoring`, `customize` and `print`, and those of enabled
+  plugin packages). Keep typing to filter; **Up**/**Down** move, **Enter** or **Tab**
+  puts the skill in the message, **Esc** closes the list. Nothing is sent until you send it.
 - The microphone is **Voice input** (press to talk and again to stop, or hold it), and
   **Read replies aloud** speaks the answers. Inside Bambuddy's frame, voice needs
   ScadBuddy open in a tab of its own.

@@ -19,6 +19,9 @@
  * #792 — a fork takes `up_to` (a reply's message id, #793), and `PATCH /sessions/:id`
  * renames a session or marks it done (#795), on the open mock agent as the real routes
  * do. `sessionWrites()` lists the forks and edits the panel sent, for tests.
+ *
+ * #1885 — `PATCH` also archives or unarchives (`archived`), and `GET /sessions?archived=true`
+ * lists the open mock agent's archived sessions, as the switcher's Archived view reads them.
  */
 import { HttpResponse, http } from 'msw'
 import type { AiSessionView, ResourceRef, SessionLimits, SessionResource } from '../../api/types'
@@ -199,15 +202,22 @@ export const handlers = [
     const body = (await request.json()) as Record<string, unknown>
     const id = String(params.id)
     state.sessionWrites.push({ method: 'PATCH', path: `/sessions/${id}`, body })
-    const extra = Object.keys(body).filter((k) => k !== 'title' && k !== 'done')
+    const extra = Object.keys(body).filter((k) => k !== 'title' && k !== 'done' && k !== 'archived')
     if (extra.length) return detail(`body: unrecognized key(s) ${extra.join(', ')}`, 400)
     const title = typeof body.title === 'string' ? body.title.trim() : undefined
     if (title === '' || (title?.length ?? 0) > 200) return detail('title: must be 1 to 200 characters', 400)
     if (body.done !== undefined && body.done !== true) return detail('done: must be true', 400)
-    if (title === undefined && body.done === undefined) return detail('body: name a title, or done: true', 400)
+    if (body.archived !== undefined && typeof body.archived !== 'boolean') return detail('archived: must be a boolean', 400)
+    if (title === undefined && body.done === undefined && body.archived === undefined) {
+      return detail('body: name a title, done: true, or archived', 400)
+    }
     const agent = mockAgentSessions()
     if (!agent) return detail('the assistant is not connected', 503)
-    const updated = agent.update(id, { ...(title === undefined ? {} : { title }), ...(body.done ? { done: true } : {}) })
+    const updated = agent.update(id, {
+      ...(title === undefined ? {} : { title }),
+      ...(body.done ? { done: true } : {}),
+      ...(typeof body.archived === 'boolean' ? { archived: body.archived } : {}),
+    })
     if ('error' in updated) return detail(updated.error, updated.status)
     return HttpResponse.json({
       session: view({
@@ -218,7 +228,36 @@ export const handlers = [
         cost_usd: updated.costUsd,
         budget_usd: updated.budgetUsd,
         updated_at: new Date().toISOString(),
+        archived: updated.archivedAt !== null,
+        archived_at: updated.archivedAt,
       }),
+    })
+  }),
+
+  http.get(`${base}/sessions`, ({ request }) => {
+    const archived = new URL(request.url).searchParams.get('archived')
+    if (archived !== null && !['true', 'false', 'include'].includes(archived)) {
+      return detail('archived must be one of true, include, false', 400)
+    }
+    const agent = mockAgentSessions()
+    if (!agent) return detail('the assistant is not connected', 503)
+    // Only the archive view's read is modelled: the panel's main list is the socket's snapshot.
+    if (archived !== 'true') return detail('the mock lists only archived sessions (?archived=true)', 400)
+    return HttpResponse.json({
+      sessions: agent.archived().map((s) =>
+        view({
+          id: s.id,
+          title: s.title,
+          origin: s.origin,
+          status: s.status,
+          parent_id: s.parentId,
+          cost_usd: s.costUsd,
+          budget_usd: s.budgetUsd,
+          updated_at: s.archivedAt,
+          archived: true,
+          archived_at: s.archivedAt,
+        }),
+      ),
     })
   }),
 

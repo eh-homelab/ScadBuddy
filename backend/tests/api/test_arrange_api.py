@@ -389,7 +389,7 @@ def test_a_plain_library_file_arranges_beside_an_output(
     [inputs] = arranger.inputs
     [_, item] = inputs.items
     key = item.part.piece_key
-    assert key.startswith("lib1-") and item.count == 3
+    assert key.startswith("lib2-") and item.count == 3
     assert item.part.colours == ["#FF0000", "#0000FF"]
     assert "#FF0000" in inputs.colours and "#0000FF" in inputs.colours
     assert inputs.provenance[key].library_file_id == 88
@@ -410,7 +410,7 @@ def test_a_library_file_with_part_omitted_keeps_its_own_count(
     assert listed.status_code == 200, listed.text
     [obj] = listed.json()["objects"]
     assert obj["count"] == 1 and obj["colours"] == ["#FF0000", "#0000FF"]
-    assert obj["part"].startswith("lib1-") and obj["name"] == "plain"
+    assert obj["part"].startswith("lib2-") and obj["name"] == "plain"
     assert [round(v) for v in obj["size"]] == [10, 10, 9]
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger

@@ -1,0 +1,40 @@
+# The backend pins temporal-agent-harness by the full SHA of its 0.6.0 tag (plan
+# 2026-10-09-durable-phase-6-flows.md Ruling 1). A tag can be moved or a
+# repository rewritten; images already built keep the package, but rebuilds
+# fail. Remedy: a reviewed bump that carries the diff between the two SHAs.
+name: harness pin
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Fetch the pinned commit
+        id: lock
+        run: .github/scripts/agent-durable-pin.sh backend
+      - name: Open an issue
+        if: failure() && steps.lock.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="backend: the temporal-agent-harness pin no longer resolves"
+          if gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number' | grep -q .; then
+            echo "already open"; exit 0
+          fi
+          gh issue create --title "$title" --label dependencies --body \
+            "The weekly pin check (\`.github/scripts/agent-durable-pin.sh backend\`: \`uv lock --check\`, then a no-cache \`uv sync\` that fetches the pinned commit) failed: $RUN_URL. The pinned commit of temporal-community/temporal-agent-harness may be gone. Running images are unaffected; rebuilds fail. Bump the pin in a reviewed PR that carries the diff between the two SHAs and passes \`tests/flows/test_harness_facts.py\` (plan 2026-10-09-durable-phase-6-flows.md Ruling 1)."

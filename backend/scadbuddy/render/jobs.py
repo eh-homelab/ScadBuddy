@@ -234,18 +234,22 @@ class PlateLayout:
         def part(entry: dict[str, Any]) -> tuple[ColourPart, PartSource]:
             source = PartSource(entry["file"], entry["solid"])
             if source.solid:
-                mesh = solid_mesh(work / source.file)
+                mesh, paint = solid_mesh(work / source.file), None
                 if mesh is None:
                     raise ValueError(f"{source.file} holds no solid")
             else:
                 if source.file not in splits:
                     splits[source.file] = split_by_material(work / source.file)
-                mesh = next(
-                    split.mesh
+                split = next(
+                    split
                     for split in splits[source.file]
                     if split.material_index == entry["material_index"]
                 )
-            return ColourPart(entry["material_index"], entry["name"], entry["colour"], mesh), source
+                mesh, paint = split.mesh, split.paint
+            return (
+                ColourPart(entry["material_index"], entry["name"], entry["colour"], mesh, paint),
+                source,
+            )
 
         plates: list[PlateParts] = []
         sources: list[tuple[PartSource, ...]] = []
@@ -388,14 +392,15 @@ async def plate_layout(
 def result_parts(layout: PlateLayout) -> list[PartInfo]:
     """One entry per extruder: the name the first plate to use it gives it, and whether
     every plate's part of that colour is a closed solid. A slot no plate uses (a planned
-    filament order keeps its place, §7) has no part to name and is left out."""
+    filament order keeps its place, §7) has no part to name and is left out. A painted
+    part names the filaments its painting uses too (#1965)."""
     infos: list[PartInfo] = []
     for extruder, colour in enumerate(layout.colours, start=1):
         parts = [
             part
             for plate in layout.plates
             for part, number in zip(plate.parts, plate.extruders, strict=True)
-            if number == extruder
+            if number == extruder or colour.upper() in _painted_colours(part)
         ]
         if not parts:
             continue
@@ -418,10 +423,23 @@ def result_plates(layout: PlateLayout) -> list[PlateInfo]:
         PlateInfo(
             index=index,
             bbox_mm=bounding_box(plate.parts),
-            colors=[layout.colours[extruder - 1] for extruder in plate.extruders],
+            colors=list(
+                dict.fromkeys(
+                    colour
+                    for part, extruder in zip(plate.parts, plate.extruders, strict=True)
+                    for colour in [
+                        layout.colours[extruder - 1],
+                        *(c for c in layout.colours if c.upper() in _painted_colours(part)),
+                    ]
+                )
+            ),
         )
         for index, plate in enumerate(layout.plates, start=1)
     ]
+
+
+def _painted_colours(part: ColourPart) -> set[str]:
+    return {c.upper() for c in part.paint.used()} if part.paint is not None else set()
 
 
 async def plate_thumbnails(

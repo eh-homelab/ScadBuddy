@@ -18,7 +18,7 @@ so the dot is an underscore.
 
 | Tool | Tier | What it does |
 |---|---|---|
-| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1) |
+| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1). Archived sessions are left out unless `archived` is `only` or `include`; each row has `archived` (#1885) |
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
 | `sessions_send` | `write` | A user turn in a session the caller owns, with optional `images` by reference (below); refused while a turn runs |
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
@@ -311,6 +311,14 @@ Design: `docs/superpowers/specs/2026-10-09-session-switcher-design.md`.
   principal's chat is taken over first.
 - **Done ends a chat:** it takes no more messages, and Fork continues it. Done is
   refused while a turn runs, and on a durable session.
+- **Archive** (#1885, the same `PATCH` with `archived`) puts one of the user's chats
+  away: it leaves **Sessions** (the snapshot leaves it out) for the **Archived** view,
+  which reads `GET /api/v1/ai/sessions?archived=true` and offers Open and Unarchive.
+  An archived chat is read-only: a send or a handoff is refused with `archived` (409),
+  its composer is locked with an Unarchive button, and Fork still continues it.
+  Archiving is refused while a turn runs or anything waits on the user; an undismissed
+  done summary is dismissed with it. The decisions are in the switcher spec's
+  "Archive (#1885)".
 
 ## 5. Not built yet
 

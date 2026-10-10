@@ -46,6 +46,15 @@ export function OriginBadge({ origin }: { origin: Origin }) {
   )
 }
 
+/** Plan 5d — a session that runs as a durable Temporal workflow (spec §6.1). */
+export function DurableBadge() {
+  return (
+    <Pill className="border-accent/50 text-accent" title="Runs as a durable workflow: a turn survives a restart of the assistant">
+      Durable
+    </Pill>
+  )
+}
+
 export function OwnerBadge({ owner }: { owner: Owner }) {
   return owner.kind === 'browser' ? (
     <Pill className="border-ok/50 text-ok">you</Pill>

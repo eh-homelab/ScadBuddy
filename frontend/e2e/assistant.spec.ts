@@ -340,11 +340,57 @@ test.describe('the session switcher at 390 px (#795)', () => {
     await panel.getByRole('button', { name: 'Sessions (2)' }).click()
 
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
-    for (const name of ['Rename Tune the gridfinity bin (fork)', 'Mark Tune the gridfinity bin (fork) done']) {
+    for (const name of [
+      'Rename Tune the gridfinity bin (fork)',
+      'Mark Tune the gridfinity bin (fork) done',
+      'Archive Tune the gridfinity bin (fork)',
+    ]) {
       const box = (await sessions.getByRole('button', { name }).boundingBox())!
       expect(box.x + box.width, name).toBeLessThanOrEqual(390)
     }
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+  })
+
+  // #1885 — archive a chat, find it in Archived, open it read-only, and unarchive it.
+  test('archives a chat, lists it under Archived, opens it read-only and unarchives it', async ({ page }) => {
+    const OWN = 'Tune the gridfinity bin (fork)'
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /^Tune the gridfinity bin/ }).click()
+    await panel.getByRole('button', { name: 'Fork', exact: true }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText(OWN)
+    await panel.getByRole('button', { name: 'Sessions (2)' }).click()
+    const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+
+    await sessions.getByRole('button', { name: `Archive ${OWN}` }).click()
+    await expect(panel.getByRole('button', { name: 'Sessions (1)' })).toBeVisible()
+    await expect(sessions.getByRole('button', { name: `Rename ${OWN}` })).toHaveCount(0)
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeDisabled()
+
+    await panel.getByRole('button', { name: 'New chat' }).click()
+    await expect(composer).toBeEnabled()
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await sessions.getByRole('button', { name: 'Archived' }).click()
+    const archived = sessions.getByRole('list', { name: 'Archived chats' })
+    for (const name of [`Open ${OWN}`, `Unarchive ${OWN}`]) {
+      const box = (await archived.getByRole('button', { name }).boundingBox())!
+      expect(box.x + box.width, name).toBeLessThanOrEqual(390)
+    }
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+
+    await archived.getByRole('button', { name: `Open ${OWN}` }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText(OWN)
+    await expect(panel.getByRole('log', { name: 'Conversation' }).getByText('Done: the bin is now 3 units (21 mm) tall.')).toBeVisible()
+    await expect(composer).toBeDisabled()
+    await expect(panel.getByText(/This chat is archived, so it is read-only/)).toBeVisible()
+
+    await panel.getByRole('button', { name: 'Unarchive', exact: true }).click()
+    await expect(composer).toBeEnabled()
+    await expect(composer).toBeFocused()
+    await expect(panel.getByRole('button', { name: 'Sessions (2)' })).toBeVisible()
   })
 })
 

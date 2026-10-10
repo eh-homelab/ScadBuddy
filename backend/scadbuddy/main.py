@@ -56,7 +56,7 @@ from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
@@ -288,6 +288,11 @@ async def _sweep_blobs_logged(state: AppState) -> None:
             removed = await sweep_content(
                 state.store.content, state.refs, grace=state.config.job_ttl
             )
+            backend = state.store.content.backend
+            if isinstance(backend, BambuddyContentBackend):
+                # #701: an upload whose process died before its row was written.
+                cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
+                removed += await backend.sweep_unrecorded(cutoff=cutoff)
             if isinstance(state.store.blobs, CachedBlobStore):
                 await asyncio.to_thread(state.store.blobs.evict)
     except Exception:

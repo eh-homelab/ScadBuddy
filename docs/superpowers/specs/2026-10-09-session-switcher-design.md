@@ -99,5 +99,50 @@ parent, spend and last activity in the list, a Fork button, "Fork from here", an
 ## Left alone
 
 - #1284 (handoff offers in the UI) belongs with #300's hand-off.
-- #1885 (archive) is its own change: a column, a filter and `sessions_list`.
+- #1885 (archive) is its own change: a column, a filter and `sessions_list`. It has
+  since landed; its decisions are below.
+
+### Archive (#1885)
+
+An `archived_at` column on `ai_sessions` (migration `20261010T0933Z_session_archive.sql`),
+set and cleared by `PATCH /api/v1/ai/sessions/:id {archived}` in `sessions/edits.ts`.
+
+1. **Read-only.** A send to an archived chat is refused with a new `archived` error, 409
+   over HTTP and an `error` frame on the chat socket. It is never unarchived by a send.
+   `sessions_send` and `sessions_handoff` are refused the same way; `sessions_fork` is
+   allowed, as on a done session (decision 6), and the fork is not archived. Unarchiving
+   is explicit: `PATCH {archived: false}`.
+   - *Why:* a send that unarchived would undo the user's choice as a side effect. Fork is
+     already how a closed chat continues.
+2. **Running turn or pending input.** Archiving is refused with 409 while a turn runs or
+   any approval, question, attention request or durable entry is parked, as done is. An
+   undismissed `done` summary does not block it: it is dismissed in the same
+   transaction (cancelled, "the chat was archived", audited like any cancelled question).
+   - *Why:* stopping a turn or cancelling what is parked is a separate decision with
+     consequences (an outward call not made); refusing keeps archive harmless. A done
+     summary asks nothing, so blocking on it would only make the user dismiss it first.
+3. **Badge.** It follows from 2: an archived session has nothing parked and no undismissed
+   summary, so it adds nothing to `GET /api/v1/ai/pending-input`
+   (`test/sessionArchive.pg.test.ts` pins it).
+4. **Where the archive view reads from.** The socket's `sessions.snapshot` leaves archived
+   sessions out, and the switcher's Archived view reads `GET /api/v1/ai/sessions?archived=true`
+   over HTTP. Archiving or unarchiving changes the snapshot (re-read every 5 s), and the
+   panel applies the route's answer at once, so the chat leaves or rejoins the list live.
+   - *Why:* it keeps the snapshot, sent to every open panel, the size of the working set.
+5. **Who may archive.** Owner-only, like rename and done: another principal's session is
+   taken over first. No tool archives; it is the user's.
+6. **Default for agents.** `sessions_list` leaves archived sessions out unless
+   `archived: 'only' | 'include'` asks for them, and every row carries `archived`. The HTTP
+   lists do the same (`?archived=true | include | false`, `false` by default), so the
+   per-resource list (#931) leaves them out too.
+
+In the panel, the user's own chats have an Archive action in the switcher, beside Rename
+and Done (hidden while a turn runs). The switcher has a Chats / Archived toggle; the
+Archived view lists archived chats with Open and Unarchive. An open archived chat shows
+an "Archived" badge, and its composer is disabled with a note and an Unarchive button;
+Fork stays available.
+
+A durable session's send checks the archive before it reaches its workflow; its own claim
+in `sessions/durable.ts` does not re-check it, so an archive landing between the two is a
+narrow race left to the stuck-session work (#2001), which owns that file.
 - Fork of a durable session is left to #1056: the fork reads `ai_session_entries`.
