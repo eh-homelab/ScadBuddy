@@ -51,6 +51,7 @@ import { AgentWorker } from './temporal/worker.js'
 import { PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { DurableTurns } from './sessions/durable.js'
+import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -424,6 +425,18 @@ if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClien
 if (sessions && temporalClient && payloadKeys && database) {
   sessions.durableTurns = new DurableTurns({ client: temporalClient, sql: database.sql, events: sessions.events })
 }
+// Every 30 s, beside the lease reaper: durable sessions left `running` whose workflow
+// has ended or never started (#2001); a durable turn takes no lease.
+const stopDurableSweep =
+  sessions && temporalClient && database
+    ? new DurableRunningSweep({ sql: database.sql, events: sessions.events, describe: durableDescriber(temporalClient) }).start(
+        SESSION_REAP_MS,
+        {
+          ready: database.ready,
+          onError: (err) => console.error('durable running sweep failed:', (err as Error).message),
+        },
+      )
+    : undefined
 // Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
 const stopOrphanSweep =
   sessions && temporalClient
@@ -519,6 +532,7 @@ async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
   stopOrphanSweep?.()
+  stopDurableSweep?.()
   stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()
