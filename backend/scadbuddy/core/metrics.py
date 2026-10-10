@@ -151,6 +151,11 @@ class Metrics:
             ["reason"],
             registry=r,
         )
+        self.activity_write_failures = Counter(
+            "scadbuddy_activity_write_failures",
+            "Activity rows a source could not write; the repair pass restores them.",
+            registry=r,
+        )
         self.events_received = Counter(
             "scadbuddy_events_received",
             "Events this process heard on scadbuddy_events and delivered to its subscribers.",
