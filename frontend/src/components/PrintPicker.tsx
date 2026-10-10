@@ -821,18 +821,26 @@ export function PrintPicker({
                   <Button size="sm" variant="ghost" onClick={() => setPreviewOpen(true)} data-testid="plate-preview-open">
                     Preview in 3D
                   </Button>
-                  <PlatePreviewDialog
-                    open={previewOpen}
-                    onClose={() => setPreviewOpen(false)}
-                    url={sourceApi(source).previewUrl(plate === 'all' ? 1 : plate)}
-                    label={
-                      // An output's preview is the whole output; a library file's, one plate.
-                      source.kind === 'output' && picker.plates.length > 1
-                        ? 'Every plate'
-                        : plateLabel(picker.plates, plate === 'all' ? 1 : plate)
-                    }
-                    colors={previewColors}
-                  />
+                  {/* Mounted only while open, keyed by plate: each open starts on Colors,
+                      with no cut left over from another plate. */}
+                  {previewOpen && (
+                    <PlatePreviewDialog
+                      key={plate}
+                      open
+                      onClose={() => setPreviewOpen(false)}
+                      url={sourceApi(source).previewUrl(plate === 'all' ? 1 : plate)}
+                      label={
+                        // An output's preview is the whole output; a library file's, one
+                        // plate, the first when every plate prints.
+                        source.kind === 'output' && picker.plates.length > 1
+                          ? 'Every plate'
+                          : plate === 'all' && picker.plates.length > 1
+                            ? `${plateLabel(picker.plates, 1)} (first of ${picker.plates.length} plates)`
+                            : plateLabel(picker.plates, plate === 'all' ? 1 : plate)
+                      }
+                      colors={previewColors}
+                    />
+                  )}
                 </div>
               )}
 

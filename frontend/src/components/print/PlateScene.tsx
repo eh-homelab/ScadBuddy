@@ -3,9 +3,10 @@ import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
-import { normalizeHex } from '../../lib/format'
+import { designColorOf } from '../../lib/glbColor'
 import { cameraFraming } from '../../lib/previewFrame'
 import { ErrorBoundary } from '../ErrorBoundary'
+import { Button } from '../ui/Button'
 
 type Props = {
   url: string
@@ -28,10 +29,13 @@ export function PlateScene({ url, colors, cutAt, onHeight, background }: Props) 
     <ErrorBoundary
       resetKey={url}
       onError={() => useLoader.clear(GLTFLoader, url)}
-      fallback={() => (
-        <p role="alert" className="p-4 text-[13px] text-warn">
+      fallback={(_, retry) => (
+        <div role="alert" className="flex items-center gap-3 p-4 text-[13px] text-warn">
           The plate's preview could not be loaded.
-        </p>
+          <Button size="sm" onClick={retry}>
+            Try again
+          </Button>
+        </div>
       )}
     >
       <Canvas
@@ -72,7 +76,7 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
       const owned = materials.map((material) => {
         const own = material.clone() as THREE.MeshStandardMaterial
-        own.userData.designColor = normalizeHex(`#${own.color.getHexString()}`)
+        own.userData.designColor = designColorOf(mesh, own)
         own.side = THREE.DoubleSide
         return own
       })
@@ -84,6 +88,17 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
   }, [gltf])
 
   useEffect(() => onHeight(size[2]), [onHeight, size])
+
+  // The copies' materials are this component's own: free them with it.
+  useEffect(
+    () => () =>
+      scene.traverse((node) => {
+        const mesh = node as THREE.Mesh
+        if (!mesh.isMesh) return
+        for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) material.dispose()
+      }),
+    [scene],
+  )
 
   useEffect(() => {
     scene.traverse((node) => {
