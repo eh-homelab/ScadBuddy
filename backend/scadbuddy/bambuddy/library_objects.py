@@ -16,6 +16,10 @@ the file's SHA-256 as Bambuddy states it (as :mod:`~scadbuddy.bambuddy.library_v
 keeps a preview), so the dialog's next listing and the arrange after it download and
 parse nothing. A kept list whose pieces were swept since is read again; a file Bambuddy
 states no hash for is read each time.
+
+Each read runs within a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087). A kept
+list answers any budget, since keeping it costs nothing to read; a kept refusal answers
+only a budget its own covers, so a request with a larger one reads the file again.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from scadbuddy.render.objects3mf import (
     read_objects,
     write_piece,
 )
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.store import BlobStore
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.cache import StaleBlobError
@@ -83,6 +88,8 @@ class _Kept(BaseModel):
 
     objects: list[ManifestObject] = []
     refused: str | None = None
+    #: The budget a refusal was read within: one kept before #2087 had the defaults.
+    budget: ReadBudget = ReadBudget()
 
 
 def piece_key(digest: str, index: int) -> str:
@@ -115,11 +122,18 @@ async def _stored(blobs: BlobStore, key: str) -> bool:
 
 
 async def read_library_objects(
-    client: BambuddyClient, file_id: int, *, blobs: BlobStore, cache: Path
+    client: BambuddyClient,
+    file_id: int,
+    *,
+    blobs: BlobStore,
+    cache: Path,
+    budget: ReadBudget | None = None,
 ) -> LibraryObjects:
     """``file_id``'s objects, their pieces in ``blobs``: kept in ``cache`` by the file's
-    hash, else downloaded and read. A file deleted in Bambuddy is the client's 404; one
-    that cannot be arranged is :class:`NotArrangeableError`."""
+    hash, else downloaded and read within ``budget`` (the defaults when None). A file
+    deleted in Bambuddy is the client's 404; one that cannot be arranged is
+    :class:`NotArrangeableError`."""
+    spend = budget or ReadBudget()
     file = await client.library_file(file_id)
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
@@ -134,9 +148,13 @@ async def read_library_objects(
         )
     path = _kept_at(cache, file)
     kept = None if path is None else await asyncio.to_thread(_load, path)
-    if kept is not None and kept.refused is not None:
+    if kept is not None and kept.refused is not None and kept.budget.covers(spend):
         raise NotArrangeableError(file_id, file.filename, kept.refused)
-    if kept is not None and all([await _stored(blobs, obj.part) for obj in kept.objects]):
+    if (
+        kept is not None
+        and kept.refused is None
+        and all([await _stored(blobs, obj.part) for obj in kept.objects])
+    ):
         # Another library file with the same bytes kept them: these are this file's.
         objects = [obj.model_copy(update={"library_file_id": file_id}) for obj in kept.objects]
         return LibraryObjects(file_id, file.filename, objects)
@@ -146,13 +164,13 @@ async def read_library_objects(
     payload = await source.fetch_3mf(client)
     if payload is None:
         reason = "it is too large to read, or holds no mesh ScadBuddy can read"
-        await _keep(path, _Kept(refused=reason))
+        await _keep(path, _Kept(refused=reason, budget=spend))
         raise NotArrangeableError(file_id, file.filename, reason)
     digest = hashlib.sha256(payload).hexdigest()
     try:
-        read = await asyncio.to_thread(read_objects, payload)
+        read = await asyncio.to_thread(read_objects, payload, spend)
     except UnreadableObjectsError as error:
-        await _keep(path, _Kept(refused=str(error)))
+        await _keep(path, _Kept(refused=str(error), budget=spend))
         raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):

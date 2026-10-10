@@ -228,6 +228,18 @@ on shutdown.
   The upload is streamed to the data volume, never held in memory. Images (and
   posters) are also capped at 10 MiB, since they are committed to the models'
   history; videos are not committed.
+- **Reading library 3MFs** (Arrange, and a library file's preview and print checks,
+  #2087): one read may spend at most `SCADBUDDY_READ_MAX_OBJECTS` distinct objects
+  (default 200, at most 2000), `SCADBUDDY_READ_MAX_VISITS` objects visited through
+  components (20000, at most 200000), `SCADBUDDY_READ_MAX_TRIANGLES` triangles
+  (5000000, at most 10000000) and `SCADBUDDY_READ_MAX_PAINT_DIGITS` digits of Bambu
+  Studio painting (20000000, at most 50000000). Settings can change each, at once
+  (Projects & files, Advanced). One request may override any of them: `read_budget`
+  in an arrange's or a print check's body, `?max_triangles=` and the like on
+  `GET /print/library/{id}/objects` and `/preview.glb`. The ceilings bound what the
+  API pod's memory holds, so neither a setting nor a request goes past them. A file
+  past a budget is refused naming it; a refusal kept for a file hash is read again by
+  a request with a larger budget.
 - **Render queue.** By default every render request is accepted and runs on
   Temporal: the API records the job in `render_jobs` and starts its workflow, and
   the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview

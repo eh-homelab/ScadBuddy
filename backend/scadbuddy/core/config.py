@@ -99,6 +99,23 @@ DEFAULT_DUPLICATE_STAGING_MAX_AGE = 3600.0
 # The largest template video (#274) or print attachment (#309) one upload may carry.
 # SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES sets it; the upload route streams it to disk.
 DEFAULT_MEDIA_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
+# The budgets one read of a library 3MF spends (#2087, `render/read_budget.py`):
+# SCADBUDDY_READ_MAX_<BUDGET> sets each, and one request may override it, never past its
+# ceiling. A ceiling is what the API pod's memory can hold, not a preference; a default
+# is about what a real file at the archive cap reaches.
+DEFAULT_READ_MAX_OBJECTS = 200
+DEFAULT_READ_MAX_VISITS = 20_000
+DEFAULT_READ_MAX_TRIANGLES = 5_000_000
+DEFAULT_READ_MAX_PAINT_DIGITS = 20_000_000
+#: Distinct objects: an Arrange lays out at most 2000 copies a request.
+READ_MAX_OBJECTS_CEILING = 2000
+#: Objects visited, components included: each visit is a little XML and a matrix.
+READ_MAX_VISITS_CEILING = 200_000
+#: Triangles: every instance's faces and vertices are held at once, then joined per
+#: colour, so twice the default is about what the API pod's 4 GiB holds.
+READ_MAX_TRIANGLES_CEILING = 10_000_000
+#: Paint digits: each placed copy of a painted mesh carries its codes as strings.
+READ_MAX_PAINT_DIGITS_CEILING = 50_000_000
 
 
 @dataclass(frozen=True)
