@@ -131,6 +131,13 @@ export type ThumbnailKeyed = Pick<
 >
 
 /** The optional parts of a model upload besides its source (#179). */
+/** #1289 — `GET /jobs/{id}/colours.png`: tile `i` shows where `colours[i]` goes. */
+export interface ColourBreakdown {
+  image: Blob
+  colours: string[]
+  columns: number
+}
+
 export interface UploadExtras {
   /** What the source is called on the wire, which is where the slug comes from. */
   filename?: string
@@ -1004,6 +1011,24 @@ export const api = {
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
+
+  /**
+   * #1289 — the job drawn once per colour (`GET /jobs/{id}/colours.png`): the grid, and
+   * its tiles' colours row by row with the grid's width, from the route's own headers.
+   */
+  getJobColours: async (jobId: string, view: string, signal?: AbortSignal): Promise<ColourBreakdown> => {
+    const response = await send(`${API_BASE}/jobs/${seg(jobId)}/colours.png?view=${encodeURIComponent(view)}`, {
+      headers: { Accept: 'image/png' },
+      ...(signal ? { signal } : {}),
+    })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const colours = (response.headers.get('X-ScadBuddy-Colours') ?? '').split(',').filter(Boolean)
+    const columns = Number(response.headers.get('X-ScadBuddy-Colour-Columns'))
+    if (colours.length === 0 || !Number.isInteger(columns) || columns < 1) {
+      throw new ApiError({ title: 'The colour breakdown came without its legend', status: response.status })
+    }
+    return { image: await response.blob(), colours, columns }
+  },
 
   /** A file under a template's `ui/` (spec 2026-09-27 §4.1): pinned by revision when there is one. */
   uiFileUrl: (slug: string, version: string | undefined, path: string) =>
