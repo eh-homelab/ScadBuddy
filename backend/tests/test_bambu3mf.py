@@ -1170,6 +1170,21 @@ def test_a_painted_mesh_keeps_each_triangles_paint_code() -> None:
     assert mesh.paint == ("", "8", "") and not mesh.prusa_painted
 
 
+def test_a_paint_code_past_its_cap_is_refused_as_it_is_parsed() -> None:
+    # The archive cap bounds a code's bytes, not what decoding one costs: refused while
+    # parsing, before any decode sees it (#1965).
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices><triangles>'
+        f'<triangle v1="0" v2="0" v3="0" paint_color="{"4" * (MAX_CODE_DIGITS + 1)}"/>'
+        "</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="paint_color"):
+        parse_model(archive, "3D/3dmodel.model")
+
+
 def test_prusaslicer_painting_marks_its_mesh() -> None:
     archive = _model_zip(
         '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'

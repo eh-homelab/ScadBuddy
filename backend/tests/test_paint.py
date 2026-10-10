@@ -58,3 +58,15 @@ def test_a_state_past_the_cap_is_refused() -> None:
         remap("4", {1: 256})
     with pytest.raises(PaintCodeError):
         states("F" * 40 + "C")
+
+
+def test_a_code_past_the_length_cap_is_refused_before_it_is_expanded() -> None:
+    # One leaf state 1 ("4") padded with split nodes: a code a hostile file can make as
+    # long as its archive allows. Refused by its length, not decoded into bits (#1965).
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    long = "4" * (MAX_CODE_DIGITS + 1)
+    with pytest.raises(PaintCodeError, match="longer"):
+        states(long)
+    with pytest.raises(PaintCodeError, match="longer"):
+        remap(long, {1: 2})

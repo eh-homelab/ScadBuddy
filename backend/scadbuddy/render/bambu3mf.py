@@ -19,6 +19,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
+from scadbuddy.render.paint import MAX_CODE_DIGITS
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -1007,6 +1008,10 @@ class _MeshTarget:
             p1 = attrs.get("p1")
             self._p1.append(-1 if p1 is None else int(p1 or 0))
             code = attrs.get(PAINT_ATTRIBUTE)
+            if code and len(code) > MAX_CODE_DIGITS:
+                raise ValueError(
+                    f"a triangle's {PAINT_ATTRIBUTE} is longer than {MAX_CODE_DIGITS} digits"
+                )
             if code and self._paint is None:
                 # The faces before the first painted one are unpainted.
                 self._paint = [""] * (len(self._p1) - 1)

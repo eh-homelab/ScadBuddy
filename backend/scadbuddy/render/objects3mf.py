@@ -90,6 +90,12 @@ MAX_VISITS = 20_000
 #: The most triangles one read produces, every instance of a mesh counted: about what a
 #: model file at the archive cap can hold, so a real file never reaches it.
 MAX_TRIANGLES = 5_000_000
+#: The most ``paint_color`` digits one read carries, every instance of a painted mesh
+#: counted, as `MAX_TRIANGLES` counts its faces (#1965): each placed copy of a painted
+#: mesh carries its codes into its piece and the output. Four digits a face at the
+#: triangle cap; a real project averages about two (library file 688: 26,884 digits over
+#: 13,873 faces).
+MAX_PAINT_DIGITS = 20_000_000
 
 
 class UnreadableObjectsError(ValueError):
@@ -268,12 +274,19 @@ class _Reader:
     filaments: list[str]
     visits: int = 0
     triangles: int = 0
+    paint_digits: int = 0
+    #: Each painted mesh's extruders, decoded once however often it is placed: by the
+    #: codes tuple's id, the tuple kept so the id stays its own.
+    painted_states: dict[int, tuple[tuple[str, ...], set[int]]] = field(default_factory=dict)
 
-    def _spend(self, visits: int = 0, triangles: int = 0) -> None:
+    def _spend(self, visits: int = 0, triangles: int = 0, paint_digits: int = 0) -> None:
         self.visits += visits
         self.triangles += triangles
+        self.paint_digits += paint_digits
         if self.visits > MAX_VISITS or self.triangles > MAX_TRIANGLES:
             raise UnreadableObjectsError("the 3MF expands to too many objects or triangles to read")
+        if self.paint_digits > MAX_PAINT_DIGITS:
+            raise UnreadableObjectsError("the 3MF expands to too much painting to read")
 
     def colour_of(self, extruder: int) -> str:
         return self.filaments[extruder - 1] if extruder <= len(self.filaments) else STL_COLOUR
@@ -403,12 +416,17 @@ class _Reader:
                 f"object {name} is painted and mirrored, which Arrange cannot carry over"
             )
         _check_faces(faces, points)
-        try:
-            used = {state for code in codes if code for state in states(code)}
-        except PaintCodeError as error:
-            raise UnreadableObjectsError(
-                f"object {name}'s painting cannot be read: {error}"
-            ) from None
+        # Charged on every placement, as its faces are: each copy carries its codes on.
+        self._spend(paint_digits=sum(map(len, codes)))
+        if id(codes) not in self.painted_states:
+            try:
+                found = {state for code in codes if code for state in states(code)}
+            except PaintCodeError as error:
+                raise UnreadableObjectsError(
+                    f"object {name}'s painting cannot be read: {error}"
+                ) from None
+            self.painted_states[id(codes)] = (codes, found)
+        used = self.painted_states[id(codes)][1]
         if used and max(used) > len(self.filaments):
             raise UnreadableObjectsError(
                 f"object {name} is painted with extruder {max(used)}, and the file has"

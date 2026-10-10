@@ -23,6 +23,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+#: The longest code read, in hex digits. A triangle's code grows with how finely its
+#: painting split it: the longest in a real two-colour Bambu Studio project (Bambuddy
+#: library file 688, 13,873 painted faces) is 84. Bounded because the archive's size cap
+#: bounds a code's bytes, not what decoding it costs: each digit becomes four bits here.
+MAX_CODE_DIGITS = 4096
 #: The highest extruder a code is read or written with: far past any printer's filament
 #: count, and it bounds how long a hostile leaf's run of ``1111`` groups may be.
 MAX_STATE = 255
@@ -35,6 +40,8 @@ class PaintCodeError(ValueError):
 def _bits(code: str) -> list[int]:
     if not code:
         raise PaintCodeError("an empty paint code")
+    if len(code) > MAX_CODE_DIGITS:
+        raise PaintCodeError(f"a paint code is longer than {MAX_CODE_DIGITS} digits")
     bits: list[int] = []
     for digit in reversed(code):
         try:

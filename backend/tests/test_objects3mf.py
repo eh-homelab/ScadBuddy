@@ -385,6 +385,27 @@ def test_a_written_piece_loads_back_as_a_layout(tmp_path: Path) -> None:
     assert len(layout.plates[0].parts[1].mesh.faces) == len(blue.mesh.faces)
 
 
+def test_painting_counts_against_a_budget_each_time_its_mesh_is_placed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A box has 12 faces, each painted "8": 12 digits each time a painted mesh is
+    # placed. Two painted parts spend 24, so a budget of 20 takes one and not two.
+    monkeypatch.setattr(objects3mf, "MAX_PAINT_DIGITS", 20)
+    once = bambu_project(
+        items=[at(0, 0)],
+        parts={1: (_box(20, 10, 5), "normal_part", 1)},
+        triangle_extra=' paint_color="8"',
+    )
+    assert read_objects(once)
+    twice = bambu_project(
+        items=[at(0, 0)],
+        parts={1: (_box(20, 10, 5), "normal_part", 1), 2: (_box(20, 10, 5), "normal_part", 1)},
+        triangle_extra=' paint_color="8"',
+    )
+    with pytest.raises(UnreadableObjectsError, match="too much painting"):
+        read_objects(twice)
+
+
 def test_a_painted_piece_loads_back_with_its_painting(tmp_path: Path) -> None:
     body = _box(20, 10, 5)
     payload = bambu_project(
