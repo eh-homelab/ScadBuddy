@@ -4,6 +4,7 @@
 import uuid
 from collections.abc import AsyncIterator, Iterator
 
+import httpx
 import pytest
 
 from scadbuddy.flows.store import FlowStore
@@ -11,6 +12,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.projects_worker import projects_worker
+from tests.flows.fake_api import FakeApi, Outward, outward_worker
 from tests.flows.flows_support import Flows, Keys
 from tests.support.temporal import temporal_available, temporal_server
 
@@ -46,3 +48,18 @@ async def flows(temporal_address: str, jobs: JobProjection) -> AsyncIterator[Flo
             for worker, task in flows.cleanup:
                 await worker.shutdown()
                 await task
+
+
+@pytest.fixture
+def api() -> FakeApi:
+    return FakeApi()
+
+
+@pytest.fixture
+async def outward(
+    temporal_address: str, jobs: JobProjection, api: FakeApi
+) -> AsyncIterator[Outward]:
+    transport = httpx.ASGITransport(app=api.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://api") as client:
+        async for flows in outward_worker(temporal_address, jobs, client):
+            yield flows
