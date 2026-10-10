@@ -23,6 +23,7 @@ from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_routes import FlowRoutes, route_key
+from scadbuddy.workflows.flow_tools import outward_activity_id
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 from scadbuddy.workflows.projects_worker import projects_worker
@@ -246,6 +247,14 @@ async def test_print_waits_for_approval_then_runs_once_under_its_key(
     expected = route_key(run_id, run.workflow_run_id, call_id)
     assert (body["request_id"], key) == (expected, expected)
     assert list(api.runs) == [f"run-{expected}"]
+    history = await outward.client.get_workflow_handle(f"flow-{run_id}").fetch_history()
+    scheduled = [
+        e.activity_task_scheduled_event_attributes.activity_id
+        for e in history.events
+        if e.HasField("activity_task_scheduled_event_attributes")
+    ]
+    # The one thing a Reset preview can read of an outward send (Ruling 14).
+    assert scheduled.count(outward_activity_id("queue_print", call_id)) == 1
     assert [(s.fn, s.outward, s.status) for s in run.steps] == [("queue_print", True, "succeeded")]
 
 

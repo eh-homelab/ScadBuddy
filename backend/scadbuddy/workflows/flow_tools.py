@@ -110,6 +110,7 @@ _FOLLOW_RETRY = RetryPolicy(non_retryable_error_types=[ROUTE_REFUSED])
 _HEARTBEAT = timedelta(seconds=30)
 _JOB_SETTLED = ["done", "failed", "cancelled"]
 _RUN_SETTLED = ["succeeded", "failed"]
+OUTWARD_PREFIX = "outward-"
 
 
 def _refusal(err: ActivityError) -> BaseException:
@@ -119,13 +120,28 @@ def _refusal(err: ActivityError) -> BaseException:
     return err
 
 
-async def _send(call_id: str, path: str, body: dict[str, Any], *, suffix: str = "") -> Any:
+def outward_activity_id(fn: str, call_id: str) -> str:
+    """An outward send's activity id, the one thing a Reset preview reads of it: its
+    input is sealed (plan Ruling 14)."""
+    return f"{OUTWARD_PREFIX}{fn}-{call_id}"
+
+
+async def _send(
+    call_id: str,
+    path: str,
+    body: dict[str, Any],
+    *,
+    suffix: str = "",
+    outward: str | None = None,
+) -> Any:
+    """Send one command; `outward` names the gated host function whose effect it is."""
     owner: StepOwner = workflow.instance()
     key = route_key(owner.run_id, workflow.info().run_id, call_id + suffix)
     try:
         answer: RouteAnswer = await workflow.execute_activity(
             FLOW_ROUTE_SEND,
             RouteSend(path=path, body=body, key=key),
+            activity_id=None if outward is None else outward_activity_id(outward, call_id),
             result_type=RouteAnswer,
             start_to_close_timeout=_SEND,
             retry_policy=_SEND_RETRY,
@@ -206,7 +222,7 @@ async def approved_print(call: str, path: str, request: dict[str, Any]) -> Print
     await _approved(call_id)
     owner: StepOwner = workflow.instance()
     body = {**request, "request_id": route_key(owner.run_id, workflow.info().run_id, call_id)}
-    accepted = await _send(call_id, path, body)
+    accepted = await _send(call_id, path, body, outward="queue_print")
     run = accepted
     if run["status"] not in _RUN_SETTLED:
         run = await _follow(f"/api/v1/print/runs/{run['id']}", _RUN_SETTLED, timedelta(hours=24))
@@ -223,7 +239,7 @@ async def approved_arrange(call: str, request: dict[str, Any]) -> ArrangeResult:
     """The arrange itself, run once a person approved it, then saved as an output."""
     call_id = call
     await _approved(call_id)
-    accepted = await _send(call_id, "/api/v1/outputs/arrange", request)
+    accepted = await _send(call_id, "/api/v1/outputs/arrange", request, outward="arrange")
     job = await _follow(f"/api/v1/jobs/{accepted['id']}", _JOB_SETTLED, timedelta(hours=2))
     result = ArrangeResult(job_id=job["id"], status=job["status"], error=job.get("error"))
     if job["status"] == "done":
