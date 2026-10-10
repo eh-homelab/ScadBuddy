@@ -13,16 +13,15 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Annotated
 
-import psycopg
 from temporalio.client import Client
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
-from scadbuddy.core.secrets import SecretKeyError, load_kek
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.keys import payload_keys
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flows_client import connect_flows
@@ -55,26 +54,6 @@ class Flows:
 
 
 FLOWS: Key[Flows] = Key("flows")
-
-
-def payload_keys(settings: Settings) -> tuple[PgPayloadKeys, Connect] | None:
-    """The flow payload keys over the database's `ai_payload_keys`, or None without a
-    usable KEK (logged, never raised: the rest of the app runs without flows)."""
-    if settings.secret_key_file is None:
-        return None
-    try:
-        kek = load_kek(settings.secret_key_file)
-    except SecretKeyError as err:
-        logger.warning("flows are unavailable: %s", err)
-        return None
-    url = settings.database_url
-
-    @asynccontextmanager
-    async def connect() -> AsyncIterator[psycopg.AsyncConnection[Any]]:
-        async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
-            yield conn
-
-    return PgPayloadKeys(connect, kek), connect
 
 
 def _build(core: Core, components: Components) -> Flows:

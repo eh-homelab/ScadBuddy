@@ -290,6 +290,34 @@ async def test_the_second_signal_stops_now() -> None:
     assert stop_now.is_set()
 
 
+def test_the_projects_queue_is_a_choice() -> None:
+    assert worker_module.parse_queue(["--queue", "projects"]) == "projects"
+
+
+async def test_the_projects_queue_runs_the_projects_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: list[str] = []
+
+    async def run(settings: Settings, **kwargs: Any) -> None:
+        ran.append("projects")
+
+    monkeypatch.setattr(worker_module, "run_projects_worker", run)
+    await worker_module._main(cast(Settings, None), "projects")
+    assert ran == ["projects"]
+
+
+async def test_the_projects_worker_refuses_to_start_without_a_key(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        secret_key_file=None,
+    )
+    with pytest.raises(worker_module.ProjectsKeyMissingError, match="SCADBUDDY_SECRET_KEY_FILE"):
+        await worker_module.run_projects_worker(settings, health_port=None)
+
+
 @pytest.mark.parametrize("queue", ["render", "bambuddy"])
 async def test_both_workers_are_handed_the_second_signal(
     queue: worker_module.Queue, monkeypatch: pytest.MonkeyPatch
