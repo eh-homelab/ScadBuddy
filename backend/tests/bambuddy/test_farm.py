@@ -174,12 +174,24 @@ async def test_the_inventory_joins_spools_to_their_slots_and_remaining_grams(
 
 
 @respx.mock
-async def test_the_inventory_of_one_printer_asks_only_that_printer(
+async def test_the_inventory_of_one_printer_still_places_spools_loaded_elsewhere(
     bambuddy: BambuddyClient,
 ) -> None:
-    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
+    """``printer_id`` narrows the slots, never the placements: a spool loaded in another
+    printer must not read as free (review on #1996)."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    elsewhere = {
+        "id": 99,
+        "spool_id": 2,
+        "printer_id": 5,
+        "printer_name": "Other",
+        "ams_id": 0,
+        "tray_id": 2,
+    }
     assignments = respx.get(f"{API}/inventory/assignments").mock(
-        return_value=httpx.Response(200, json=[])
+        return_value=httpx.Response(200, json=[*recording("inventory-assignments.json"), elsewhere])
     )
     printer = respx.get(f"{API}/printers/1").mock(
         return_value=httpx.Response(200, json=recording("printer.json"))
@@ -191,8 +203,11 @@ async def test_the_inventory_of_one_printer_asks_only_that_printer(
     view = await inventory_view(bambuddy, printer_id=1)
 
     assert printer.called and remain.called
-    assert assignments.calls.last.request.url.params["printer_id"] == "1"
+    assert "printer_id" not in assignments.calls.last.request.url.params
     assert {slot.printer_id for slot in view.slots} == {1}
+    spool = next(spool for spool in view.spools if spool.id == 2)
+    assert spool.loaded is not None
+    assert (spool.loaded.printer_id, spool.loaded.printer_name) == (5, "Other")
 
 
 @respx.mock

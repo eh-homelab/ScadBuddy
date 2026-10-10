@@ -84,7 +84,8 @@ async def get_inventory(
     store: SettingsStoreDep,
     include_archived: bool = False,
     printer_id: Annotated[
-        int | None, Query(description="Only this printer's slots and assignments")
+        int | None,
+        Query(description="Only this printer's loaded slots; every spool keeps its placement"),
     ] = None,
 ) -> InventoryView:
     """Every spool in Bambuddy's inventory, with where it is loaded, and every loaded

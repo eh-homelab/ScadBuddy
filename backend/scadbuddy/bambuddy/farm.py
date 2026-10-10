@@ -122,9 +122,10 @@ async def inventory_view(
     client: BambuddyClient, *, include_archived: bool = False, printer_id: int | None = None
 ) -> InventoryView:
     """Every spool, with where it is loaded, and every loaded slot of each active printer
-    (or of ``printer_id`` alone) with its remaining grams."""
+    (or of ``printer_id`` alone) with its remaining grams. ``printer_id`` narrows only the
+    slots: every spool keeps its placement, so one loaded elsewhere never reads as free."""
     spools = await client.spools(include_archived=include_archived)
-    assignments = await client.spool_assignments(printer_id=printer_id)
+    assignments = await client.spool_assignments()
     printers = (
         [await client.printer(printer_id)] if printer_id is not None else await client.printers()
     )

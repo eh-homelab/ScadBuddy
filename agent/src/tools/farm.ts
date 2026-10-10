@@ -94,8 +94,8 @@ export const farmTools: Tool[] = [
     description:
       "Bambuddy's spool inventory: every spool with its material, colour, brand, label weight and what is left, " +
       'and where it is loaded; and every loaded slot of each active printer (AMS, tray, extruder) with the ' +
-      "remaining grams Bambuddy reconciled from the AMS. `printer_id` limits the slots to one printer; archived " +
-      'spools only with `include_archived`.',
+      "remaining grams Bambuddy reconciled from the AMS. `printer_id` limits the slots to one printer; every " +
+      "spool still says where it is loaded, on any printer. Archived spools only with `include_archived`.",
     input: z.object({ include_archived: z.boolean().optional(), printer_id: printerId.optional() }),
     risk: 'read',
     source: SOURCE,
