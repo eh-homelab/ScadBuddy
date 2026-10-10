@@ -184,6 +184,7 @@ export class DurableTurns {
     const id = session.id
     const blobs = blobsOf(turn.images)
     // The status before the claim, which a give-back restores (a refused send keeps `failed`).
+    // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus }[]>(
       `WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', updated_at = now() FROM prior

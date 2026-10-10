@@ -9,6 +9,7 @@ import type { Database } from '../src/db.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../src/safety/untrusted.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import { type DescribeSession, DurableRunningSweep, durableDescriber } from '../src/sessions/durableSweep.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { UserImage } from '../src/sessions/images.js'
 import { type SessionManager, type SessionRecord, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
@@ -281,10 +282,21 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       BEGIN RAISE EXCEPTION 'give-back refused'; END $$;
       CREATE TRIGGER keep_running BEFORE UPDATE OF status ON ai_sessions
         FOR EACH ROW WHEN (OLD.status = 'running' AND NEW.status <> 'running') EXECUTE FUNCTION keep_running();`)
-    await expect(m.send(session.id, browser, 'hello', { images: [IMAGE] })).rejects.toMatchObject({
-      name: 'SessionError',
-      code: 'unavailable',
-    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await expect(m.send(session.id, browser, 'hello', { images: [IMAGE] })).rejects.toMatchObject({
+        name: 'SessionError',
+        code: 'unavailable',
+      })
+      // The give-back's failure is said once, payload-free: the session id, no prompt, no cause.
+      expect(warn).toHaveBeenCalledTimes(1)
+      const [line] = warn.mock.calls[0] as [string]
+      expect(line).toContain(session.id)
+      expect(line).not.toContain('hello')
+      expect(line).not.toContain('give-back refused')
+    } finally {
+      warn.mockRestore()
+    }
   }, 60_000)
 
   it("gives the claim back, as `unavailable`, when the turn's images cannot be stored", async () => {
@@ -363,6 +375,79 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     m.durableTurns = undefined
     await expect(m.send(session.id, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable' })
     expect((await m.get(session.id, browser)).status).toBe('idle')
+  }, 60_000)
+
+  const sweepOf = (m: SessionManager, options: { graceMs?: number; describe?: DescribeSession } = {}) =>
+    new DurableRunningSweep({
+      sql: db.sql,
+      events: m.events,
+      describe: options.describe ?? durableDescriber(env.client),
+      graceMs: options.graceMs ?? 0,
+    })
+
+  const status = async (id: string) =>
+    (await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`)[0]?.status
+
+  it("resets a running session whose workflow was terminated mid-turn, as finish_turn would, and leaves a live one", async () => {
+    const m = await durableManager()
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
+    const live = (await m.start(browser, { origin: 'chat', prompt: 'still going' })).session
+    expect(await status(session.id)).toBe('running')
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('gone')
+
+    expect(await sweepOf(m).sweep()).toEqual([session.id])
+    expect(await status(session.id)).toBe('idle')
+    expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
+      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/workflow has ended/) },
+      { type: 'session.status', status: 'idle' },
+    ])
+    expect(await turn!.done).toMatchObject({ kind: 'failed' })
+    // A running workflow's turn is its own to end.
+    expect(await status(live.id)).toBe('running')
+    // Nothing is written twice.
+    expect(await sweepOf(m).sweep()).toEqual([])
+  }, 60_000)
+
+  it('resets a running session whose workflow was never started (not found), only past the grace period', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    // A first send whose update-with-start never reached Temporal keeps the claim (Ruling 16).
+    await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() WHERE id = ${session.id}`
+    // Within the grace period a start may still be in flight: not described, not reset.
+    const described: string[] = []
+    const watch: DescribeSession = (id) => {
+      described.push(id)
+      return durableDescriber(env.client)(id)
+    }
+    expect(await sweepOf(m, { graceMs: 60_000, describe: watch }).sweep()).toEqual([])
+    expect(described).toEqual([])
+    expect(await status(session.id)).toBe('running')
+
+    expect(await sweepOf(m, { describe: watch }).sweep()).toEqual([session.id])
+    expect(described).toEqual([sessionWorkflowId(session.id)])
+    expect(await status(session.id)).toBe('idle')
+    expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
+      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/never started/) },
+      { type: 'session.status', status: 'idle' },
+    ])
+    // The next send starts the workflow afresh.
+    await m.send(session.id, browser, 'hello again')
+    expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello again'])
+  }, 60_000)
+
+  it("leaves a turn that was claimed again while its workflow was described", async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await db.sql`UPDATE ai_sessions SET status = 'running' WHERE id = ${session.id}`
+    // While the sweep waits on Temporal, the old claim ends and a new turn claims the row.
+    const racing: DescribeSession = async () => {
+      await db.sql`UPDATE ai_sessions SET status = 'idle' WHERE id = ${session.id}`
+      await m.send(session.id, browser, 'a new turn')
+      return 'closed'
+    }
+    expect(await sweepOf(m, { describe: racing }).sweep()).toEqual([])
+    expect(await status(session.id)).toBe('running')
+    expect((await m.events.read(session.id)).at(-1)?.event).toMatchObject({ type: 'session.status', status: 'running' })
   }, 60_000)
 
   it('falls back from the default, and refuses an asked-for durable start, while no durable worker polls', async () => {
