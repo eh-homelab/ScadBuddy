@@ -128,7 +128,7 @@ model is created or deleted. What each backend event updates is `affectedBy()` i
   ([`agent/src/mcp/eventStore.ts`](../../agent/src/mcp/eventStore.ts), 1000 per
   session). A client that reconnects with `Last-Event-ID` gets what it missed, as the
   transport's "Resumability and Redelivery" describes.
-- **After an agent restart** the session id answers 404 and, per the transport's
+- **After an agent restart** (of the replica holding the session) the session id answers 404 and, per the transport's
   "Session Management", the client "MUST start a new session", then subscribes again.
   Subscriptions are not persisted (spec §9 records why).
 
@@ -158,8 +158,10 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
   cluster" ([CloudNativePG: Service management](https://cloudnative-pg.io/docs/devel/service_management)).
 - **Replicas need nothing extra.** Postgres delivers a NOTIFY to every session
   listening on the channel ([NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html)),
-  so every agent and backend replica hears every event. An MCP session lives on the
-  replica that opened it, so each replica notifies only its own sessions.
+  so every agent and backend replica hears every event. An MCP session's transport and
+  subscriptions live on the replica that opened it, so each replica notifies only its
+  own sessions; a GET stream that reached another replica gets them through the session
+  relay below.
 - **No transaction-mode pooler in between.** `LISTEN` belongs to a server session; a
   pooler that hands the connection to someone else between transactions would drop it.
   **Unverified** for any particular pooler.
@@ -187,6 +189,57 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
   the agent and the backend must share a schema; channels are per database, so two
   deployments sharing a database would hear each other (the same caveat the backend's
   `pg_events.py` states).
+
+### Sessions across replicas (#2086)
+
+A session is held by the replica that opened it: its transport, McpServer, resource
+subscriptions and replay log are live objects in that process. A load balancer without
+session affinity (the deployed `/mcp` route has none) sends the client's next request to
+any replica, so a request for a session another replica holds is relayed there through
+Postgres ([`agent/src/mcp/sessionRelay.ts`](../../agent/src/mcp/sessionRelay.ts)), the
+way browser calls are ([browser-bridge.md](browser-bridge.md#replicas)):
+
+```mermaid
+sequenceDiagram
+  participant C as client
+  participant B as replica the request reached
+  participant PG as Postgres
+  participant A as replica holding the session
+  C->>B: POST/GET/DELETE /mcp (Mcp-Session-Id)
+  B->>B: HTTPS, Origin, auth: the principal
+  B->>PG: owner of sha256(id)? (ai_mcp_sessions)
+  B->>PG: INSERT request row + NOTIFY req (to A)
+  PG-->>A: NOTIFY
+  A->>PG: DELETE … RETURNING the row, NOTIFY ack
+  loop until the answer ends
+    A->>PG: NOTIFY head / chunk / beat
+    PG-->>B: NOTIFY
+    B-->>C: status, headers, body as written
+  end
+```
+
+- **The directory.** `ai_mcp_sessions` names the replica holding each session, keyed by
+  the session id's SHA-256 (the id is a credential and is never stored). It is written
+  before the `initialize` answer leaves, so the client's next request finds it. The
+  session limits (`maxSessions`, `maxSessionsPerCaller`) count its rows, across every
+  replica; if it cannot be read, a replica counts its own sessions.
+- **Streaming.** The owner sends the answer as it is written: status and headers, then
+  each body chunk (in the NOTIFY when small, else as a row in `ai_mcp_relay_messages`).
+  So SSE works through any replica: a `tools/call` that reports progress, and the
+  standing GET stream that carries resource notifications, wherever it landed. A client
+  that goes away cancels the owner's read.
+- **The owner went away.** Nobody acks within 3 s (`ACK_TIMEOUT_MS`): the directory row
+  is removed and the request answers 404, so the client starts a new session, as the
+  transport's "Session Management" requires. An owner that acked beats every 10 s
+  (`BEAT_MS`) until it has answered; after 3 missed beats a request still waiting for
+  its head answers 503, and a body already streaming ends with an error, so the client
+  reconnects and meets the 404.
+- **Who may use it.** The replica the request reached runs every gate (HTTPS, Origin,
+  auth) and relays the principal; the owner still refuses another caller's principal
+  with 403, as it does for its own requests.
+- **Not covered.** A NOTIFY sent while a replica's listening connection is down is lost
+  (the same limit as the bridge relay): the request then times out as an owner that went
+  away.
 
 ### What is not here yet
 

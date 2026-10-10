@@ -29,6 +29,7 @@ import { createExternalServer } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
 import { recordFailure, tracer } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
+import { type McpSessionRelay, type RelayedRequest, sessionHash } from './sessionRelay.js'
 
 // `/mcp`: the external projection over the MCP Streamable HTTP transport
 // (spec D5, §8.3–§8.4; https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
@@ -82,6 +83,13 @@ export type McpEndpointDeps = {
   idleSessionMs?: number
   /** How often idle sessions are swept, on a timer of its own (default 1 min). */
   sweepIntervalMs?: number
+  /**
+   * Sessions across replicas (#2086, mcp/sessionRelay.ts): a request for a
+   * session another replica holds is relayed to it, and the session limits
+   * count every replica's sessions. Left out, a session is served only by the
+   * replica that opened it.
+   */
+  relay?: McpSessionRelay | undefined
 }
 
 type Session = {
@@ -93,7 +101,12 @@ type Session = {
   /** What `maxSessionsPerCaller` counts by. */
   callerKey: string
   lastSeen: number
+  /** The session id's SHA-256: the relay's name for it. */
+  hash: string
 }
+
+/** Headers a relayed request does not carry: they describe the hop, not the request. */
+const HOP_HEADERS: ReadonlySet<string> = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'keep-alive'])
 
 /** What `mountMcp` hands back: the open-session count and a shutdown hook. */
 export type McpHandle = { sessions: () => number; close: () => Promise<void> }
@@ -275,11 +288,81 @@ export function mountMcp(
   const sweeper = setInterval(() => void sweep(performance.now()), deps.sweepIntervalMs ?? 60_000)
   sweeper.unref()
 
+  /** Sessions by `hash`, for the requests other replicas relay here. */
+  const byHash = new Map<string, string>()
+  const relay = deps.relay
+
   async function end(id: string): Promise<void> {
     const session = sessions.get(id)
     sessions.delete(id)
-    session?.detach()
-    await session?.server.close().catch(() => {})
+    if (!session) return
+    byHash.delete(session.hash)
+    session.detach()
+    await Promise.all([session.server.close().catch(() => {}), relay?.remove(session.hash)])
+  }
+
+  /** Serves `request` on `session`, which is held here, as `principal`. */
+  function serveHere(session: Session, principal: Principal, request: Request): Promise<Response> {
+    // A session belongs to whoever opened it: the same token for bearer
+    // callers, the holder of the session id for anonymous ones. Another
+    // principal, even a valid one, may not ride on it.
+    if (session.principalId !== principal.id) return Promise.resolve(jsonRpcError(403, -32001, 'Session belongs to another caller'))
+    session.lastSeen = performance.now()
+    void relay?.touch(session.hash)
+    return traced(request, (req, options) => session.transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }))
+  }
+
+  // Requests other replicas relay here, for sessions this replica holds. The
+  // relaying replica has already passed them through every gate below and
+  // worked out the principal; the session's own check still applies.
+  relay?.serve({
+    run: async (hash, principal, request) => {
+      const id = byHash.get(hash)
+      const session = id === undefined ? undefined : sessions.get(id)
+      if (!session) {
+        await relay.remove(hash)
+        return jsonRpcError(404, -32001, 'Session not found')
+      }
+      return serveHere(session, principal, request)
+    },
+  })
+
+  /** `request`, for a session another replica holds, sent there; 404 when no replica has it. */
+  async function relayed(sessionId: string, principal: Principal, request: Request): Promise<Response> {
+    if (!relay) return jsonRpcError(404, -32001, 'Session not found')
+    let body: string | null = null
+    if (request.method === 'POST') {
+      const read = await readRequestBody(request, DEFAULT_MAX_REQUEST_BODY_SIZE)
+      if (read.tooLarge) return jsonRpcError(413, -32000, requestBodyTooLargeMessage(DEFAULT_MAX_REQUEST_BODY_SIZE))
+      body = read.text
+    }
+    const forwarded: RelayedRequest = {
+      method: request.method,
+      url: request.url,
+      headers: [...request.headers.entries()].filter(([name]) => !HOP_HEADERS.has(name.toLowerCase())),
+      body,
+    }
+    let response: Response | undefined
+    try {
+      response = await relay.forward(sessionHash(sessionId), principal, forwarded, request.signal)
+    } catch (err) {
+      if (request.signal.aborted) return new Response(null, { status: 499 })
+      console.error(`mcp: relaying a request failed: ${err instanceof Error ? err.message : String(err)}`)
+      return jsonRpcError(503, -32000, 'The MCP session could not be reached; try again later')
+    }
+    return response ?? jsonRpcError(404, -32001, 'Session not found')
+  }
+
+  /** Open sessions, across every replica when there is a relay (this replica's alone if it cannot be read). */
+  async function openSessions(key: string): Promise<{ total: number; caller: number }> {
+    if (relay) {
+      try {
+        return await relay.counts(key, idleSessionMs)
+      } catch (err) {
+        console.error(`mcp: counting sessions failed, counting this replica's: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    return { total: sessions.size, caller: [...sessions.values()].filter((s) => s.callerKey === key).length }
   }
 
   async function sweep(now: number): Promise<void> {
@@ -337,29 +420,23 @@ export function mountMcp(
 
     const sessionId = request.headers.get('mcp-session-id')
     if (sessionId !== null) {
-      const session = sessions.get(sessionId)
-      if (!session) return jsonRpcError(404, -32001, 'Session not found')
       const principal = sessionPrincipal(auth.principal, sessionId)
-      // A session belongs to whoever opened it: the same token for bearer
-      // callers, the holder of the session id for anonymous ones. Another
-      // principal, even a valid one, may not ride on it.
-      if (session.principalId !== principal.id) return jsonRpcError(403, -32001, 'Session belongs to another caller')
-      session.lastSeen = performance.now()
-      return traced(request, (req, options) => session.transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }))
+      const session = sessions.get(sessionId)
+      return session ? serveHere(session, principal, request) : relayed(sessionId, principal, request)
     }
 
     if (request.method !== 'POST') return jsonRpcError(400, -32000, 'Mcp-Session-Id header is required')
     await sweep(performance.now())
     const key = callerKey(auth.principal)
-    const own = [...sessions.values()].filter((s) => s.callerKey === key).length
-    if (own >= maxPerCaller) {
+    const open = await openSessions(key)
+    if (open.caller >= maxPerCaller) {
       return jsonRpcError(
         429,
         -32000,
-        `This caller already has ${own} open MCP sessions (the limit is ${maxPerCaller}); end one with DELETE /mcp`,
+        `This caller already has ${open.caller} open MCP sessions (the limit is ${maxPerCaller}); end one with DELETE /mcp`,
       )
     }
-    if (sessions.size >= maxSessions) return jsonRpcError(503, -32000, 'Too many MCP sessions; try again later')
+    if (open.total >= maxSessions) return jsonRpcError(503, -32000, 'Too many MCP sessions; try again later')
 
     // Minted before the transport so the anonymous principal can carry it
     // from the initialize request on.
@@ -372,8 +449,15 @@ export function mountMcp(
     const transport: WebStandardStreamableHTTPServerTransport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => id,
       eventStore: new BoundedEventStore(),
-      onsessioninitialized: (sid) => {
-        sessions.set(sid, { transport, server, detach, principalId: principal.id, callerKey: key, lastSeen: performance.now() })
+      onsessioninitialized: async (sid) => {
+        const hash = sessionHash(sid)
+        sessions.set(sid, { transport, server, detach, principalId: principal.id, callerKey: key, lastSeen: performance.now(), hash })
+        byHash.set(hash, sid)
+        // Before the initialize answer leaves: the client's next request may
+        // reach another replica, which finds the session by this row.
+        await relay?.register(hash, key).catch((err: unknown) => {
+          console.error(`mcp: recording a session for other replicas failed; it is served here only: ${err instanceof Error ? err.message : String(err)}`)
+        })
       },
       onsessionclosed: (sid) => {
         void end(sid)
@@ -396,6 +480,7 @@ export function mountMcp(
     close: async () => {
       clearInterval(sweeper)
       await Promise.all([...sessions.keys()].map(end))
+      relay?.close()
     },
   }
 }

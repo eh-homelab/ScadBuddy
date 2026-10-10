@@ -6,8 +6,9 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 //
 // In memory, one store per MCP session, bounded, and deliberately so (#264):
 // it lives exactly as long as the session it replays for. A session is itself
-// in memory, on the replica that opened it (src/mcp/http.ts), so after a
-// restart the session id answers 404 and the client starts a new session and
+// in memory, on the replica that opened it (src/mcp/http.ts; other replicas
+// relay to it, src/mcp/sessionRelay.ts), so after that replica restarts the
+// session id answers 404 and the client starts a new session and
 // re-subscribes, as the transport spec requires ("When a client receives HTTP
 // 404 in response to a request containing an MCP-Session-Id, it MUST start a
 // new session", Session Management). A Postgres copy of this log would replay

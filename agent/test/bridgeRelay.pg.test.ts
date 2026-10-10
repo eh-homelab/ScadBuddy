@@ -4,6 +4,7 @@ import { TabHub, type TabConnection } from '../src/bridge/hub.js'
 import { PostgresPairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame, CallOutcome } from '../src/bridge/protocol.js'
 import { PgTabRelay } from '../src/bridge/relay.js'
+import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
 import type { Database } from '../src/db.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -42,7 +43,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     const listener = new PgEventListener(url, { searchPath: 'public', log: () => {} })
     const relay = new PgTabRelay(db.sql, { listen: (c, f) => listener.listenAlso(c, f), ackTimeoutMs: 500, log: () => {} })
     listener.start()
-    const hub = new TabHub({ pairings: new PostgresPairingStore(db.sql), relay, callTimeoutMs: 2_000, log: () => {} })
+    const hub = new TabHub({
+      pairings: new PostgresPairingStore(db.sql),
+      relay,
+      sessionTabs: new PostgresSessionTabStore(db.sql),
+      callTimeoutMs: 2_000,
+      log: () => {},
+    })
     return { hub, relay, listener }
   }
 
@@ -51,7 +58,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     expect(await db.ready()).toBe(true)
   })
   beforeEach(async () => {
-    await db.sql`TRUNCATE ai_browser_pairings, ai_bridge_messages`
+    await db.sql`TRUNCATE ai_browser_pairings, ai_bridge_messages, ai_session_tabs`
     a = replica()
     b = replica()
     await Promise.all([a.listener.ready(), b.listener.ready()])
@@ -112,6 +119,52 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     const call = a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: stop.signal })
     setTimeout(() => stop.abort(), 200)
     await expect(call).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  // #2086: a durable session's tool call is an activity on `agent-tools`, which
+  // any replica's worker may take, so it can run where the session's chat
+  // socket never paired it. The pairing is read from Postgres there.
+  async function chatSession(): Promise<string> {
+    const [row] = await db.sql<{ id: string }[]>`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (gen_random_uuid(), 'chat', 'browser', 'browser', 'you', 'browser', 'browser', 'idle', 10, 1)
+      RETURNING id`
+    return row!.id
+  }
+  const until = async (check: () => Promise<boolean>) => {
+    const deadline = performance.now() + 3_000
+    while (!(await check())) {
+      if (performance.now() > deadline) throw new Error('timed out')
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+
+  it("runs a durable session's call on a replica its messages never reached, on the tab it paired", async () => {
+    const t = await tab(b.hub, () => ({ ok: true, result: 'from b' }))
+    const session = await chatSession()
+    // The chat socket (and the tab) are on B; the activity runs on A.
+    b.hub.pairSession(session, TAB)
+    await until(async () => (await db.sql`SELECT 1 FROM ai_session_tabs WHERE session_id = ${session}`).length === 1)
+    expect(await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
+      ok: true,
+      result: 'from b',
+    })
+    expect(t.calls).toHaveLength(1)
+    expect(await a.hub.status({ principal: browser, sessionId: session })).toMatchObject({ attached: true, via: 'session' })
+  })
+
+  it('follows the session to the tab the user sends from next, whatever the replica', async () => {
+    await tab(b.hub, () => ({ ok: true, result: 'old tab' }))
+    const session = await chatSession()
+    b.hub.pairSession(session, TAB)
+    b.hub.pairSession(session, 'tab-bbbbbbbbbbbbbbbbbbbbbb')
+    await until(async () => {
+      const [row] = await db.sql<{ tab_id: string }[]>`SELECT tab_id FROM ai_session_tabs WHERE session_id = ${session}`
+      return row?.tab_id === 'tab-bbbbbbbbbbbbbbbbbbbbbb'
+    })
+    // That tab is connected nowhere: not the old one's answer.
+    const outcome = await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })
+    expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser' } })
   })
 
   it('keeps a tab connected here local: nothing goes through the database', async () => {

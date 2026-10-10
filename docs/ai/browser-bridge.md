@@ -317,9 +317,14 @@ agent needs a pairing token that the user accepts **in the tab**, in every auth 
 
 ## Replicas
 
-The tabs are held by the process their socket reached. A turn runs where its chat socket
-started it, and `/mcp` sessions are already per replica (`mcp/http.ts`), so the tab a
-call is for may be connected to another replica. Then the call goes there through
+The tabs are held by the process their socket reached. A classic turn runs where its chat
+socket started it, a durable session's tool call on whichever replica's `agent-tools`
+worker took the activity, and an `/mcp` call on the replica holding its session
+([mcp-resources.md](mcp-resources.md#sessions-across-replicas-2086)), so the tab a
+call is for may be connected to another replica. A chat session's tab is therefore kept
+in Postgres as well as in the hub (`ai_session_tabs`,
+[`bridge/sessionTabs.ts`](../../agent/src/bridge/sessionTabs.ts), #2086): a call that runs
+where the session's messages never arrived reads it there. Then the call goes there through
 Postgres (#1916, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts)):
 
 ```mermaid
