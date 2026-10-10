@@ -182,6 +182,23 @@ class OperationEvent(BaseEvent):
     subject: str
 
 
+class ActivityEvent(BaseEvent):
+    """An activity row changed (spec 2026-10-09): re-read ``GET /activity/{id}``."""
+
+    kind: Literal["activity.changed"] = "activity.changed"
+    activity_id: str
+    principal: str | None = None
+
+
+class AgentOperationEvent(BaseEvent):
+    """The agent recorded or ended an ``ai_operations`` row; the agent publishes it
+    itself (``agent/src/operations/store.ts``). The activity component ingests it; it
+    goes to no WebSocket topic."""
+
+    kind: Literal["ai_operation.changed"] = "ai_operation.changed"
+    operation_id: str
+
+
 class LibraryChanged(BaseEvent):
     """A library was pinned to, re-pinned on, or removed from a model."""
 
@@ -296,6 +313,8 @@ Event = Annotated[
     | PrintEvent
     | PrintRunEvent
     | OperationEvent
+    | ActivityEvent
+    | AgentOperationEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled

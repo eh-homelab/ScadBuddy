@@ -64,6 +64,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
+    ActivityEvent,
+    AgentOperationEvent,
     AnalyzerDecisionEvent,
     BusResync,
     Event,
@@ -107,7 +109,9 @@ MAX_FRAME_CHARS = 16_384
 #: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-COLLECTION_TOPICS = frozenset({"models", "outputs", "libraries", "fonts", "settings", "analyzers"})
+COLLECTION_TOPICS = frozenset(
+    {"models", "outputs", "libraries", "fonts", "settings", "analyzers", "activity"}
+)
 
 
 def _strip_anchors(pattern: str) -> str:
@@ -123,6 +127,8 @@ _TOPIC = re.compile(
             f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
             # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
             r"print:library:[1-9][0-9]{0,17}",
+            # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
+            r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
             *sorted(COLLECTION_TOPICS),
         ]
     )
@@ -159,6 +165,10 @@ def topics_of(event: Event) -> list[str]:
             return ["settings"]
         case AnalyzerDecisionEvent():
             return ["analyzers"]
+        case ActivityEvent():
+            return ["activity", f"activity:{event.activity_id}"]
+        case AgentOperationEvent():
+            return []
         case OperationEvent():
             # Followed by `GET /operations/{id}` (#1053); the event log keeps it.
             return []
