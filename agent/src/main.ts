@@ -50,6 +50,7 @@ import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
 import { PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
+import { DurableTurns } from './sessions/durable.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -418,6 +419,11 @@ const temporalClient = temporal
   : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// A durable session's turns (plan 5c PR 3): only with the codec, so a session's
+// payloads are never sent to Temporal unsealed; without it a durable start is refused.
+if (sessions && temporalClient && payloadKeys && database) {
+  sessions.durableTurns = new DurableTurns({ client: temporalClient, sql: database.sql, events: sessions.events })
+}
 // Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
 const stopOrphanSweep =
   sessions && temporalClient

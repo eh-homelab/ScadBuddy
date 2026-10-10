@@ -9,7 +9,9 @@ container's (spec 2026-10-01 §6.3a):
 - ``SCADBUDDY_DURABLE_TOOLS_JSON``: the agent's tool manifest (``dist/tools.json``);
 - ``SCADBUDDY_DURABLE_CWD``: the engine's working directory (default ``/srv/agent``);
 - ``SCADBUDDY_DURABLE_SKILLS_DIR``: a plugin directory the engine loads skills from
-  (optional).
+  (optional);
+- ``SCADBUDDY_DURABLE_SCRIPTED=1``: tests only. The segment runner is a scripted model
+  (``session/scripted.py``) instead of Claude, for the agent service's end-to-end test.
 
 The client and the worker seal every payload of a durable subject (``codec``).
 """
@@ -36,6 +38,7 @@ from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.events import SessionEvents
 from scadbuddy_durable.session.models import TASK_QUEUE
 from scadbuddy_durable.session.runner import ScadBuddyRunner, SegmentRunner
+from scadbuddy_durable.session.scripted import scripted_runner
 from scadbuddy_durable.session.workflow import DurableSession
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
@@ -51,6 +54,7 @@ class Config:
     skills_dir: str | None
     kek_file: str
     previous_kek_file: str | None
+    scripted: bool = False
 
     def __repr__(self) -> str:  # the database URL can carry a password
         return f"Config(temporal={self.temporal_address}, namespace={self.namespace})"
@@ -79,6 +83,7 @@ def config_from_env(env: dict[str, str] | None = None) -> Config:
         skills_dir=e.get("SCADBUDDY_DURABLE_SKILLS_DIR") or None,
         kek_file=e["SCADBUDDY_SECRET_KEY_FILE"],
         previous_kek_file=e.get("SCADBUDDY_SECRET_KEY_PREVIOUS_FILE") or None,
+        scripted=e.get("SCADBUDDY_DURABLE_SCRIPTED") == "1",
     )
 
 
@@ -130,6 +135,13 @@ def build_worker(
     )
 
 
+def segment_runner(cfg: Config, connect: Connect, kek: Kek) -> SegmentRunner:
+    """The model's runner: Claude through ScadBuddyRunner, or the tests' scripted one."""
+    if cfg.scripted:
+        return scripted_runner()
+    return ScadBuddyRunner(connect, kek, cwd=cfg.cwd, plugin_dir=cfg.skills_dir)
+
+
 async def connect_client(cfg: Config, connect: Connect, kek: Kek, previous: Kek | None) -> Client:
     keys = PgPayloadKeys(connect, kek, previous=previous)
     return await Client.connect(
@@ -148,5 +160,4 @@ async def start(cfg: Config) -> Worker:
     )
     connect = connector(cfg.database_url)
     client = await connect_client(cfg, connect, kek, previous)
-    runner = ScadBuddyRunner(connect, kek, cwd=cfg.cwd, plugin_dir=cfg.skills_dir)
-    return build_worker(client, connect, runner)
+    return build_worker(client, connect, segment_runner(cfg, connect, kek))

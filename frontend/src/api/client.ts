@@ -26,6 +26,7 @@ import type {
   AttachmentView,
   AiSessionView,
   SessionLimits,
+  SessionModeSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
@@ -1518,6 +1519,15 @@ export const api = {
     request<ImageSettings>('/ai/settings/images', {
       method: 'PUT',
       body: JSON.stringify({ long_edge: longEdge }),
+    }),
+
+  /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
+  getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),
+
+  putSessionMode: (mode: SessionModeSetting['mode']) =>
+    request<SessionModeSetting>('/ai/settings/session-mode', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
     }),
 
   /**
