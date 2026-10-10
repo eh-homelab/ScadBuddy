@@ -18,6 +18,9 @@ SEND_MESSAGE_UPDATE = "send_message"
 # What the segment runner reads from its workflow: the turn's images (Ruling 5) and the
 # system prompt's append (SegmentContext).
 SEGMENT_CONTEXT_QUERY = "segment_context"
+# The turn the workflow holds (taken, running, or finishing), or None between turns:
+# what the agent's sweep reads to give back a claim no turn will end (plan 5c Ruling 18).
+TURN_QUERY = "turn"
 # What a segment that starts with nothing left to spend ends with; the workflow reads it
 # from the plugin's error to end the turn as `budget_exhausted` (plan 5c Ruling 3).
 BUDGET_EXHAUSTED = "budget_exhausted: the chat used its budget"

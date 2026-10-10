@@ -25,7 +25,7 @@ import type { OriginPolicy } from '../http/origins.js'
 import { requestFacts, type RemoteAddress } from '../routes/guard.js'
 import { installResources } from '../resources/server.js'
 import type { ResourceHub } from '../resources/hub.js'
-import { createExternalServer } from '../tools/projections.js'
+import { createExternalServer, refreshOfferedTools } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
 import { recordFailure, tracer } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
@@ -302,13 +302,14 @@ export function mountMcp(
   }
 
   /** Serves `request` on `session`, which is held here, as `principal`. */
-  function serveHere(session: Session, principal: Principal, request: Request): Promise<Response> {
+  async function serveHere(session: Session, principal: Principal, request: Request): Promise<Response> {
     // A session belongs to whoever opened it: the same token for bearer
     // callers, the holder of the session id for anonymous ones. Another
     // principal, even a valid one, may not ride on it.
-    if (session.principalId !== principal.id) return Promise.resolve(jsonRpcError(403, -32001, 'Session belongs to another caller'))
+    if (session.principalId !== principal.id) return jsonRpcError(403, -32001, 'Session belongs to another caller')
     session.lastSeen = performance.now()
     void relay?.touch(session.hash)
+    await refreshOfferedTools(session.server)
     return traced(request, (req, options) => session.transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }))
   }
 
@@ -463,6 +464,7 @@ export function mountMcp(
         void end(sid)
       },
     })
+    await refreshOfferedTools(server)
     await server.connect(transport)
     const response = await traced(request, (req, options) =>
       transport.handleRequest(req, { ...options, authInfo: authInfoFor(principal) }),

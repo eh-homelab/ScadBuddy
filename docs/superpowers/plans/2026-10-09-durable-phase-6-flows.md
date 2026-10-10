@@ -50,6 +50,9 @@ Facts this plan relies on. 6a pins each one with a test (Task A3), so a pin bump
   - `runner.run_tool(call_id, tool, /, *args, injections=None, **kwargs)` applies the tool's approval gate in the tool's own prologue. So a tool body may call `run_tool` on another tool and gets that tool's gate (Task A3 pins it).
 - **Approvals.** `ToolApprovalPolicy.allow_inherently_safe()` lets a tool marked `inherently_safe` through and parks every other call until `tool_approval`. There is **no approval timeout**: a call waits until it is decided or the workflow closes. `approve_tool(tool_id, *, approved, reason=None, remember=False, update_id=None)`; an unknown or settled id raises `ToolApprovalError` (`UnknownToolApproval`, `ToolApprovalAlreadyResolved`).
 - **Callbacks.** `provide_callback_result(tool_id, *, result=None, error=None, update_id=None)`. Errors are `UnknownCallback`, `CallbackAlreadyResolved` and `MalformedCallbackResult`; a malformed result does not consume the entry.
+  - The callback gate's only timeout is the decorator's, fixed for every call.
+  - **A cancelled wait keeps its entry** (measured in 6a, facts case 7). Cancelling the `run_tool` of a callback, for example with `asyncio.wait_for`, skips the gate's `finalize_callback`. The entry stays in `agent_status.pending_callbacks` until the workflow closes, and a late `provide_callback_result` for it is accepted, with nobody waiting.
+  - So a per-call timeout never cancels the wait (Ruling 11).
 - **Events.** Topic `turn_events`. `tool_start` (`tool_id`, `tool_name`, `tool_input`), `tool_end` (`tool_output: str`) and `tool_error` per call. In Code Mode each host call's `tool_id` is `workflow.uuid4()`. There is no continue-as-new in the harness.
 - **Large payloads.** `AgentHarnessPlugin(large_payload_offload=...)` defaults to local-disk storage, which is single-host only. ScadBuddy passes `None` (Ruling 9).
 - **Reset** (spike, 0.6.0 and main):
@@ -90,10 +93,18 @@ Facts this plan relies on. 6a pins each one with a test (Task A3), so a pin bump
   - `backend/scadbuddy/workflows/payload_codec.py` ports `agent-durable/src/scadbuddy_durable/codec.py` unchanged in behaviour. It opens every vector in `agent/test/fixtures/payload-vectors.json` and re-seals each byte for byte.
   - It reads and creates `ai_payload_keys` rows under the same advisory lock and tombstone check (`ai_forgotten_subjects`) as the other two, with the backend's KEK (`core/secrets.py`, `SCADBUDDY_SECRET_KEY_FILE`).
   - Flows are refused 503 `flows-unavailable` without a KEK or without the `ai_payload_keys` table, never run unsealed. See open question 2.
-- **Ruling 11, `wait_for_human`'s timeout.** The harness's callback timeout is fixed at decoration, so the host function is an inline wrapper. `wait_for_human(question, timeout_s=3600)` checks `10 <= timeout_s <= 86400`, raising `ValueError` at run time for a computed value. It then runs the callback tool `human_answer` (`callback_tool_defn(inherently_safe=True, timeout=timedelta(seconds=86400))`) through `runner.run_tool` inside `asyncio.wait_for(..., timeout_s)`.
-  - On timeout the host call raises `TimeoutError` and never returns an answer (§6.6's table). Task A3 pins that cancelling the wait removes the entry from `pending_callbacks`.
+- **Ruling 11, a parked entry's timer: `flow_entry_timeout`** (revised after 6a's facts case 7). The harness's callback timeout is fixed at decoration, and cancelling a callback's wait leaves its entry listed and answerable. So a per-call timeout runs beside the wait and ends the entry through the harness's own Update, as a person's answer would be (decisions A and B). It is built in #2058 (6a; this revision merges after it) as `backend/scadbuddy/workflows/flow_entries.py`:
+  - `run_callback(run_tool, tool, timeout_s, *, call_id=None, **kwargs)` starts `runner.run_tool(call_id, tool, ...)` as a task and waits on it with `workflow.wait_condition(call.done, timeout=timeout_s)`.
+  - When the timer fires, it runs the activity `flow_entry_timeout(EntryTimeout{workflow_id, call_id})`. That sends the public `provide_callback_result(call_id, error="timed out", update_id=f"timeout-{call_id}")` through `activity.client()`.
+  - The harness then ends the call its own way, with `CallbackToolError`, and `run_callback` re-raises it as `TimeoutError`. The entry leaves `pending_callbacks`, and a late answer is refused (`CallbackAlreadyResolved`).
+  - If an answer reached the harness first, the activity gets `CallbackAlreadyResolved` or `UnknownCallback`, returns `False`, and the caller gets the answer.
+  - The activity has `start_to_close_timeout` 10 s and retries a transport failure at most 5 times, with Temporal's default backoff (1 s, doubling); the same Update id makes a resend safe. Any other refusal from the harness is non-retryable (`EntryRefused`), so the host call fails rather than retrying forever. The worst case before a timed-out call fails is therefore about 65 s past its timer: 5 attempts × 10 s, plus the 1 + 2 + 4 + 8 s backoff between them. A change to the retry policy changes this number.
+  - **When the activity itself fails** (`EntryRefused`, or its 5 attempts spent), the host call raises that failure and the callback's `run_tool` task stays parked. Accepted, and named: an uncaught failure ends the script, so `execute` writes `failed` and closes the run (Ruling 8), and the harness's close ends the entry: the callback gate's `wait_condition` also wakes on close and finalizes the call as closed (`agent_workflow.py`, `AgentWorkflowRunner.await_callback_result`, line 2786, `wait_condition(lambda: … or self._closed)` then `finalize_callback(closed=self._closed, …)`, at 04a49d1). Only a script that catches the failure and carries on leaves the entry answerable until the run closes. An answer sent then is accepted and unused, as with any answer to a closed question, and the run's step already shows the call `failed`.
+  - The activity runs on `projects`, the worker that runs the flow (Task B4 registers it).
+  - `wait_for_human(question, timeout_s=3600)` is the first user. It checks `10 <= timeout_s <= 86400`, raising `ValueError` at run time for a computed value. It runs the callback tool `human_answer` (`callback_tool_defn(inherently_safe=True, timeout=timedelta(seconds=86400))`, the decorator's timeout as a backstop) through `run_callback`, under the call id its step records (Task B3). On timeout the host call raises `TimeoutError` and never returns an answer (§6.6's table).
   - A literal `timeout_s` outside the range is refused at registration and at run start by `flows/typecheck.py`, an `ast` pass beside `code_mode_type_check`.
-- **Ruling 12, approvals have no timer.** The harness has no approval timeout, and this plan adds none. An outward call waits until a person decides, the run is reset, or the run is closed. The Workflows page shows how long each entry has waited.
+  - Approvals are the mechanism's second user once the approval timeout is decided (open question 5). That would be the public `tool_approval` deny (`approve_tool(call_id, approved=False, reason="timed out")`) at `approval_expiry_seconds`. It stays unwired until then.
+- **Ruling 12, approvals have no timer** (pending open question 5). The harness has no approval timeout, and this plan adds none until the user decides. If they choose one, it is Ruling 11's mechanism. An outward call waits until a person decides, the run is reset, or the run is closed. The Workflows page shows how long each entry has waited.
 - **Ruling 13, worker versioning.** The `projects` worker is unversioned, like `library` and `agent-tools`: a flow may run for weeks, and a pinned build would hold a drain for that long. So `ProjectWorkflow` sets no versioning behavior. Every change to it, to its host functions or to the harness pin must replay the recorded histories in `backend/tests/fixtures/project_workflow_histories/` (Task B4). A change that cannot replay goes behind `workflow.patched()`.
 
 ## Global Constraints
@@ -127,6 +138,7 @@ Backend, new:
 - `backend/scadbuddy/workflows/flows_client.py`: `connect_flows`, the converter, and the `AgentHarnessPlugin` list.
 - `backend/scadbuddy/workflows/project.py`: `ProjectWorkflow`, `RunFlow`, `FlowStart`.
 - `backend/scadbuddy/workflows/flow_tools.py`: the host functions (harness tools). No `from __future__ import annotations`.
+- `backend/scadbuddy/workflows/flow_entries.py`: `run_callback` and the `flow_entry_timeout` activity (Ruling 11; built in 6a).
 - `backend/scadbuddy/workflows/flow_steps.py`: `step(...)`, the context manager every host function records its step and waits through.
 - `backend/scadbuddy/workflows/flow_activities.py`: `FlowActivities` (record, project, close, and in 6c the route calls).
 - `backend/scadbuddy/workflows/flow_models.py`: what crosses the history (`FlowStep`, `FlowWaiting`, `ProjectionWrite`).
@@ -199,6 +211,8 @@ Expected: prints a function. `git diff uv.lock` shows `temporal-agent-harness` w
   - `flows_converter(keys: PayloadKeys) -> DataConverter`.
   - `async connect_flows(address: str, namespace: str, keys: PayloadKeys, *, lazy: bool = False) -> Client`.
   - `harness_plugins(tools: Sequence[Callable[..., Any]]) -> list[AgentHarnessPlugin]`.
+
+As built in #2058: the backend's tests run in an image that holds only `backend/`. So they read copies of `agent/test/fixtures/payload-vectors.json` and the agent's `20261009T0421Z_payload_keys.sql` under `backend/tests/fixtures/`. `.github/scripts/lint-codec-copies.sh` (lint job) fails CI when a copy differs from the agent's file, or when the backend's codec differs from agent-durable's outside its imports, docstrings and converter function.
 
 - [ ] **Step 1: Failing vector test.**
 
@@ -323,7 +337,7 @@ async def connect_flows(
   - `step(n) -> StepResult` (activity, `inherently_safe=True`);
   - `outward(what) -> str` (activity, gated);
   - `human_answer(question) -> HumanAnswer` (`callback_tool_defn(inherently_safe=True, timeout=timedelta(seconds=86400))`);
-  - `wait(question: str, timeout_s: int, runner: Injected[AgentWorkflowRunner]) -> HumanAnswer` (inline, `inherently_safe=True`), which runs `human_answer` through `runner.run_tool(str(workflow.uuid4()), human_answer, question=question)` under `asyncio.wait_for(..., timeout_s)`;
+  - `wait(question: str, timeout_s: int, runner: Injected[AgentWorkflowRunner]) -> HumanAnswer` (inline, `inherently_safe=True`), which runs `human_answer` through `run_callback(runner.run_tool, human_answer, timeout_s, question=question)` (Ruling 11);
   - `gated_via_nested(what: str, runner: Injected[AgentWorkflowRunner]) -> str` (inline, `inherently_safe=True`), which runs `outward` through `runner.run_tool`;
   - `child(n) -> int` (inline), which starts a child with id `probe-child-{workflow.info().workflow_id}-{workflow.info().run_id}-{n}` (Ruling 4).
 
@@ -336,7 +350,12 @@ async def connect_flows(
   4. A gated `outward` parks: `AgentClient.get_status().pending_approvals` lists it. `approve_tool(id, approved=True)` runs it once; a second `approve_tool` raises `ToolApprovalError` with `error_type == "ToolApprovalAlreadyResolved"`.
   5. `gated_via_nested` parks under the nested `run_tool`'s id: the gate is in the tool's prologue (the fact Ruling 11 and 6d rely on).
   6. A denial reaches the script as an exception whose text starts `ToolApprovalDenied`.
-  7. `wait('q', 1)` with no answer: the script sees `TimeoutError`; afterwards `get_status().pending_callbacks` is empty, and `provide_callback_result` for the old id raises `CallbackResultError` (`UnknownCallback` or `CallbackAlreadyResolved`).
+  7. `wait('q', 3)` with no answer, through `flow_entry_timeout`. Three assertions:
+     - the script sees `TimeoutError`;
+     - afterwards `get_status().pending_callbacks` is empty;
+     - `provide_callback_result` for the old id raises `CallbackResultError` (`UnknownCallback` or `CallbackAlreadyResolved`).
+
+     And the race: with a `flow_entry_timeout` that delivers an answer before calling the real activity, the real activity returns `False` and the script gets the answer.
   8. `wait('q', 60)` answered with `{"answer": "pink"}` returns it. A malformed result raises `MalformedCallbackResult`, and a corrected one is then accepted.
   9. After `execute` returns, the workflow is still `RUNNING`. The `close` Signal sent from an activity's `activity.client()` completes it.
   10. Reset to the workflow task after `step(1)` completed: `step(1)` does not run again and `step(2)` does. Reset to before the Update was accepted: the script runs again from the top (spike cases 4 and 5).
@@ -495,10 +514,10 @@ async def test_oversized_script() -> None:
     - `flow_project(ProjectionWrite) -> None` (local activity);
     - `flow_close(str) -> None` (activity: signals `close` to the workflow id).
 
-- [ ] **Step 1: Failing tests.** One worker per test: `Worker(client, task_queue=q, workflows=[ProjectWorkflow], activities=FlowActivities(store).all(), plugins=harness_plugins(FLOW_TOOLS))`. The cases:
+- [ ] **Step 1: Failing tests.** One worker per test: `Worker(client, task_queue=q, workflows=[ProjectWorkflow], activities=[*FlowActivities(store).all(), flow_entry_timeout], plugins=harness_plugins(FLOW_TOOLS))`. The cases:
   1. A script `await sleep(1); return 7`: the row goes `running` → `succeeded`, `result == "result: 7"`, two steps are recorded in order, and the execution completes (Ruling 8).
   2. `wait_for_human('Swap to pink?')`: the row is `waiting` with `waiting_on == [{call_id, kind: "answer", fn: "wait_for_human", prompt: "Swap to pink?"}]`, and `AgentClient.get_status().pending_callbacks` lists `human_answer`. `provide_callback_result(id, result={"answer": "ok"})` → the row is `succeeded` and `waiting_on == []`.
-  3. `wait_for_human('q', timeout_s=10)` unanswered (time-skipping is not available with the harness's stream, so the test uses `timeout_s=10` and waits): the run is `failed` with `Script error (TimeoutError`, and `waiting_on == []`.
+  3. `wait_for_human('q', timeout_s=10)` unanswered (time-skipping is not available with the harness's stream, so the test uses `timeout_s=10` and waits): the run is `failed` with `Script error (TimeoutError`, `waiting_on == []`, `pending_callbacks == []`, and a late `AgentClient.provide_callback_result` for the call raises `CallbackResultError` (`CallbackAlreadyResolved`). 6c's tests cover the route's 409.
   4. A `Script error` (a `raise ValueError`): the row is `failed`, and the result holds the error line.
   5. A result over 4 KiB is stored truncated, with `result_truncated` true.
   6. A second `execute` on the same workflow id with a new `update_id` fails the Update with `AlreadyExecuted`, and the script ran once.
@@ -565,7 +584,6 @@ Every wrapper records its step through the run's projection (Ruling 7) and deriv
 ids from the run id, the Temporal run id and its harness call id (Ruling 4).
 """
 
-import asyncio
 from datetime import timedelta
 
 from pydantic import BaseModel
@@ -575,7 +593,14 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner, Injected
 
-    from scadbuddy.workflows.flow_steps import step  # the context manager, below
+    # Passed through like the harness it wraps: it holds no module state, and its
+    # workflow calls (a task, a timer, an activity) go through `workflow.*`, which
+    # resolves the running workflow per call, as the harness's own tools do.
+    from scadbuddy.workflows.flow_entries import run_callback
+
+# Not passed through: it keeps a per-run step counter, which the sandbox's reload gives
+# each workflow run.
+from scadbuddy.workflows.flow_steps import step  # the context manager, below
 
 MIN_WAIT_S = 10
 MAX_WAIT_S = 86_400
@@ -603,9 +628,10 @@ async def wait_for_human(
         raise ValueError(f"timeout_s must be {MIN_WAIT_S} to {MAX_WAIT_S} seconds")
     call_id = str(workflow.uuid4())
     async with step("wait_for_human", call_id, outward=False, waiting="answer", prompt=question):
-        return await asyncio.wait_for(
-            runner.run_tool(call_id, human_answer, question=question), timeout_s
+        answer: HumanAnswer = await run_callback(
+            runner.run_tool, human_answer, timeout_s, call_id=call_id, question=question
         )
+        return answer
 
 
 @agent.tool_defn(inherently_safe=True)
@@ -775,6 +801,9 @@ class ProjectWorkflow:
 - [ ] **Step 2: The worker factory.**
 
 ```python
+from scadbuddy.workflows.flow_entries import flow_entry_timeout
+
+
 def projects_worker(
     client: Client, queue: str, activities: Sequence[Callable[..., Any]],
     *, workflows: Sequence[type] = (ProjectWorkflow, OperationWorkflow),
@@ -785,7 +814,9 @@ def projects_worker(
         client,
         task_queue=queue,
         workflows=list(workflows),
-        activities=list(activities),
+        # flow_entry_timeout: a parked entry's timer (Ruling 11). Always added here,
+        # so a caller never passes it (a name registered twice fails worker start).
+        activities=[*activities, flow_entry_timeout],
         plugins=harness_plugins(FLOW_TOOLS),
         workflow_runner=SandboxedWorkflowRunner(
             restrictions=SandboxRestrictions.default.with_passthrough_modules(

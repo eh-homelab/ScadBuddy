@@ -37,6 +37,7 @@ import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
+import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
 import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/registry.js'
 
@@ -186,6 +187,12 @@ export type HarnessRun = {
   headlessBrowser?: HeadlessBrowserOptions
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
+  /**
+   * Settings → Plugins' overrides of the built-in tools (#1953,
+   * plugins/builtInTools.ts): raised tiers, applied over every other tier
+   * here, and disabled tools, put in `disallowedTools`.
+   */
+  builtInPolicy?: BuiltInPolicy
   onDecision?: DecisionListener
   /**
    * Parks outward calls until a human decides (#258, src/approvals/). Without
@@ -449,6 +456,15 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       }
     }
   }
+  const policy = run.builtInPolicy
+  if (policy) {
+    // Last, so an override raises whatever tier the steps above resolved.
+    const resolved = tierOf
+    tierOf = (name, input) => {
+      const tier = resolved(name, input)
+      return tier === undefined ? undefined : policy.tierOf(name, tier)
+    }
+  }
   const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
   const abort = new AbortController()
   const options: Options = {
@@ -479,7 +495,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     ),
     permissionMode: 'default',
   }
-  if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools
+  const disallowed = [...remote.disallowedTools, ...(policy?.disallowed ?? [])]
+  if (disallowed.length) options.disallowedTools = disallowed
   if (run.model !== undefined) options.model = run.model
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId
@@ -518,7 +535,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     // "The `Bash` tool definition is removed from the request. Claude does not
     // see the tool and cannot attempt it." (spec §3.1, permissions). Measured
     // for a plugin server's tools too (test/headlessBrowser.e2e.test.ts).
-    options.disallowedTools = [...remote.disallowedTools, ...disallowedBrowserTools()]
+    options.disallowedTools = [...disallowed, ...disallowedBrowserTools()]
     // Measured on Claude Code 2.1.283 and 2.1.287: with `strictMcpConfig` a
     // plugin's MCP servers are not started at all (the init message lists the
     // plugin but no server). The option exists to ignore MCP configs from

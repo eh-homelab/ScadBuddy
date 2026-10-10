@@ -417,8 +417,9 @@ export class ChatConnection {
           // else a root (spec 2026-10-01 §4); a malformed one is ignored.
           const parent = contextFrom(message.traceparent)
           if (!message.sessionId) {
+            const mode = message.mode ? { mode: message.mode } : {}
             const { session } = await otelContext.with(parent, () =>
-              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images }),
+              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images, ...mode }),
             )
             await this.claim(session.id, attached)
             this.pairTab(session.id)
@@ -427,6 +428,8 @@ export class ChatConnection {
             return
           }
           const id = message.sessionId
+          // Set at insert and never changed (spec §6.1).
+          if (message.mode) throw new SessionError('invalid', `session ${id} exists: its mode is set when it starts`)
           // Ownership first, every time (get() refuses another owner's session):
           // pairing this tab must never outrun the check that send() repeats.
           await this.sessions.get(id, this.principal)

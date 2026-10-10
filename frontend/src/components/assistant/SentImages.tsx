@@ -84,7 +84,7 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
                   <img
                     src={dataUrl(image)}
                     alt={`${name(shown)}, preview`}
-                    className="mx-auto max-h-[calc(100vh-12rem)] w-full max-w-3xl object-contain"
+                    className="mx-auto max-h-[calc(100dvh-12rem)] w-full max-w-3xl object-contain"
                   />
                 )}
                 {full && (
@@ -97,7 +97,7 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
                     hidden={load !== 'loaded'}
                     onLoad={() => setLoad('loaded')}
                     onError={() => setLoad('failed')}
-                    className="mx-auto max-h-[calc(100vh-12rem)] max-w-full object-contain"
+                    className="mx-auto max-h-[calc(100dvh-12rem)] max-w-full object-contain"
                   />
                 )}
               </Dialog>

@@ -60,8 +60,8 @@ export const arrangeTools: Tool[] = [
       "colours, then any the others add). The result is filed under `slug`, one of the outputs' templates " +
       "(omit for the first object's); with library files alone, slug is required and may be any template. Waits for the job; if it outlasts the wait, the still-running job " +
       'is returned: poll it with get_render_job, then save_output under its slug. An output saved before ' +
-      'Arrange existed is refused: the user re-renders it from Arrange in History. A sliced library file, ' +
-      'or one painted in several colours, cannot be arranged.',
+      'Arrange existed is refused: the user re-renders it from Arrange in History. A part painted in ' +
+      'Bambu Studio keeps its painting; a sliced library file, or one painted in PrusaSlicer, cannot be arranged.',
     input: z.object({
       objects: z.array(arrangeObject).min(1).max(200),
       goal: goal.default('fewest_plates'),

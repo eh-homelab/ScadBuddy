@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { BLANK_TEMPLATE } from '../src/tools/templates.js'
 import type { MessagesBody } from './support/fakeAnthropic.js'
 import { DONE, HELLO, KEYCHAIN, NOT_DONE, SCENARIOS, scriptedReply, TOOL_PREFIX } from './support/realAgentScript.js'
 
@@ -82,5 +83,14 @@ describe('the real-agent script', () => {
   it('runs only the latest marked turn of a session', () => {
     const reply = scriptedReply(body(prompt('[outward]'), call('x'), result('{}'), { role: 'assistant', content: 'Done.' }, prompt('[keychain]')))
     expect(reply).toMatchObject({ toolUse: { name: `${TOOL_PREFIX}render_model` } })
+  })
+
+  it("patches text the blank template still has, so a template edit fails here and not only in the opt-in e2e", () => {
+    const created = { text: '{"slug": "plate"}', isError: false }
+    const pinned = { text: '{"version": "v1"}', isError: false }
+    const patch = SCENARIOS.bosl2!.find((step) => step.tool === 'apply_patch')!
+    const { edits } = patch.input([created, pinned], 'Plate') as { edits: { search: string }[] }
+    expect(edits.length).toBeGreaterThan(0)
+    for (const { search } of edits) expect(BLANK_TEMPLATE).toContain(search)
   })
 })

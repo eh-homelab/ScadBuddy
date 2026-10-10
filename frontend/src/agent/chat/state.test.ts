@@ -50,6 +50,15 @@ describe('the session switcher’s fields (#795)', () => {
     expect(forked.order).toEqual(['f9', 's1'])
     expect(forked.sessions.f9).toMatchObject({ title: 'fork', parentId: 's1', origin: 'chat', owner: you, status: 'idle', items: [] })
   })
+
+  it('#1885 — keeps an archive a list read before it left out, and drops it when a newer list has the chat again', () => {
+    const archived = run([{ type: 'session-patched', patch: { id: 'f1', archived: true, updatedAt: '2026-10-09T03:00:00Z' } }], run([listed()], started))
+    expect(archived.sessions.f1?.archived).toBe(true)
+    // Read before the archive landed: still listed, and older than what the panel knows.
+    expect(run([listed()], archived).sessions.f1?.archived).toBe(true)
+    // Unarchived elsewhere: listed again, and newer.
+    expect(run([listed({ updatedAt: '2026-10-09T04:00:00Z' })], archived).sessions.f1?.archived).toBe(false)
+  })
 })
 
 describe('chatReducer', () => {

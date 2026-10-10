@@ -115,7 +115,11 @@ only the Postgres tests.
 Evals (`agent/evals/`, `docs/ai/evals.md`): `test/evals.test.ts` replays each scenario
 against the fake endpoint in `pnpm test`; `pnpm evals` runs them live with the
 credential saved in Settings (or `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, CI only; the
-manual `ai-evals.yml` workflow) and skips cleanly without one.
+manual `ai-evals.yml` workflow) and skips cleanly without one. The render scenario
+runs live only against a real backend (`SCADBUDDY_EVAL_BACKEND_URL`, the image; it
+skips without one), and its render is checked `verify.sh`-style on the saved output's
+3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
+#1924).
 
 Durable sessions (`agent-durable/`, Python 3.12, uv; the `agent-durable` CI job, #1056):
 
