@@ -285,12 +285,13 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         },
       })
       if ('reconnected' in verdict && verdict.reconnected) {
-        // reconnected() runs on whichever replica saw the tab. Back on another one, it
-        // cannot be reached from here and nothing here will end a later wait but its
-        // timer (#1308), so the rest of the turn does not wait. A failed check does not latch.
+        // reconnected() runs on whichever replica saw the tab. isBack reaches a tab on
+        // another replica too (bridge/relay.ts, #1916); when it still finds none, nothing
+        // here will end a later wait but its timer (#1308), so the rest of the turn does
+        // not wait. A failed check does not latch.
         if (!(await isBack(turn).catch(() => true))) {
           gaveUp =
-            'The tab reconnected, but not to this agent replica, so it cannot be reached from here. Carry on ' +
+            'The tab reconnected, but it cannot be reached from this agent replica now. Carry on ' +
             'without the tab for the rest of this turn.'
         }
         return { back: true, why: 'reconnected' }
