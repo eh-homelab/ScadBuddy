@@ -39,6 +39,8 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flows.component import FLOWS
+from scadbuddy.flows.sweep import sweep_flow_runs
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
@@ -73,6 +75,7 @@ from scadbuddy.workflows.client import (
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     BACKFILL_SWEEP,
+    FLOWS_SWEEP,
     HEARTBEAT_TIMEOUT,
     REAP_SWEEP,
     SWEEPS,
@@ -396,6 +399,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A scan of every output's directory can be slow on a network volume: heartbeat.
         await _heartbeating(_reap_output_holds_logged(state))
 
+    @activity.defn(name=FLOWS_SWEEP)
+    async def sweep_flow_runs() -> None:
+        await _heartbeating(_sweep_flow_runs_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -404,6 +411,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_claims,
         sweep_backfills,
         reap_output_holds,
+        sweep_flow_runs,
     ]
 
 
@@ -421,6 +429,20 @@ async def _sweep_claims_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not sweep operation claims")
         raise
+
+
+async def _sweep_flow_runs_logged(state: AppState) -> None:
+    flows = state.components.get(FLOWS)
+    if flows.client is None:
+        logger.debug("no flow-run sweep: flows are unavailable without the secret key file")
+        return
+    try:
+        ended = await sweep_flow_runs(flows.store, flows.client)
+    except Exception:
+        logger.exception("could not sweep flow runs")
+        raise
+    if ended:
+        logger.info("ended flow runs whose execution closed", extra={"count": len(ended)})
 
 
 async def _reap_output_holds_logged(state: AppState) -> None:
