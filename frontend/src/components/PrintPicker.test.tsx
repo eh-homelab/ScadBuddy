@@ -74,6 +74,7 @@ describe('PrintPicker · 3D preview (#1723)', () => {
     renderPicker()
     await loaded()
     const slot = screen.getByTestId('filament-slot-1')
+    fireEvent.click(screen.getByTestId('change-slot-1'))
     const other = within(slot)
       .getAllByRole('radio')
       .find((radio) => !(radio as HTMLInputElement).checked)!
@@ -196,6 +197,7 @@ describe('PrintPicker', () => {
     await loaded()
     await showAdvanced()
     const slot = screen.getByTestId('filament-slot-2')
+    fireEvent.click(screen.getByTestId('change-slot-2'))
     // Spool 9 feeds the right extruder (the 0.2), spool 22 the left (the 0.4).
     expect(within(slot).getByTestId('spool-9')).toBeEnabled()
     fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
@@ -416,6 +418,7 @@ describe('PrintPicker', () => {
     const { user } = renderPicker()
     await loaded()
     const slot1 = screen.getByTestId('filament-slot-1')
+    await user.click(screen.getByTestId('change-slot-1'))
     const other = within(slot1)
       .getAllByRole('radio')
       .find((radio) => !(radio as HTMLInputElement).checked) as HTMLInputElement
@@ -441,6 +444,9 @@ describe('PrintPicker', () => {
 
   /** Slot 1's checked spool, and one that is not. */
   function slot1Radios() {
+    if (screen.getByTestId('change-slot-1').getAttribute('aria-expanded') === 'false') {
+      fireEvent.click(screen.getByTestId('change-slot-1'))
+    }
     const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[]
     return { checked: radios.find((radio) => radio.checked)!, other: radios.find((radio) => !radio.checked)! }
   }
@@ -2009,6 +2015,7 @@ describe('PrintPicker · Remembered choices', () => {
     await user.selectOptions(screen.getByLabelText('Printer'), '2')
     await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('2'))
     const slot = await screen.findByTestId('filament-slot-2')
+    await user.click(within(slot).getByTestId('change-slot-2'))
     await user.click(within(slot).getByTestId('spool-22'))
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
@@ -2041,6 +2048,7 @@ describe('PrintPicker · Remembered choices', () => {
     const onRan = vi.fn()
     const { user } = renderPicker({ onRan })
     await loaded()
+    await user.click(screen.getByTestId('change-slot-2'))
     await user.click(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22'))
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
@@ -2506,6 +2514,7 @@ describe('PrintPicker · A library file (#313)', () => {
     await loaded()
 
     // A changed spool, a plate, a preset override and an option, all for the output.
+    await user.click(screen.getByTestId('change-slot-2'))
     await user.click(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22'))
     await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
@@ -2810,6 +2819,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(select.value).toBe('least_used')
     // What the reopened dialog sets before the save lands must survive it.
     await user.selectOptions(screen.getByLabelText('Plate'), 'Engineering Plate')
+    fireEvent.click(screen.getByTestId('change-slot-2'))
     const spool = within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')
     fireEvent.click(spool)
     expect(spool).toBeChecked()
