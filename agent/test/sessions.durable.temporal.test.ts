@@ -377,12 +377,13 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await m.get(session.id, browser)).status).toBe('idle')
   }, 60_000)
 
-  const sweepOf = (m: SessionManager, options: { graceMs?: number; describe?: DescribeSession } = {}) =>
+  const sweepOf = (m: SessionManager, options: { graceMs?: number; describe?: DescribeSession; batch?: number } = {}) =>
     new DurableRunningSweep({
       sql: db.sql,
       events: m.events,
       describe: options.describe ?? durableDescriber(env.client),
       graceMs: options.graceMs ?? 0,
+      ...(options.batch ? { batch: options.batch } : {}),
     })
 
   const status = async (id: string) =>
@@ -448,6 +449,29 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(await sweepOf(m, { describe: racing }).sweep()).toEqual([])
     expect(await status(session.id)).toBe('running')
     expect((await m.events.read(session.id)).at(-1)?.event).toMatchObject({ type: 'session.status', status: 'running' })
+  }, 60_000)
+
+  it('pages past rows it cannot resolve, so they never starve the rest, and a hung describe does not stall the pass', async () => {
+    const m = await durableManager()
+    const ids: string[] = []
+    for (let i = 0; i < 4; i++) ids.push((await m.start(browser, { origin: 'chat', title: `t${i}` })).session.id)
+    await db.sql`UPDATE ai_sessions SET status = 'running' WHERE id = ANY(${ids})`
+    const sorted = [...ids].sort()
+    // The first two (in the order a page reads them) are long, live turns; the third
+    // never answers; only the last can be resolved.
+    const described: string[] = []
+    const describe: DescribeSession = (workflowId) => {
+      described.push(workflowId)
+      if (workflowId === sessionWorkflowId(sorted[2]!)) return new Promise(() => {})
+      return Promise.resolve(workflowId === sessionWorkflowId(sorted[3]!) ? 'not_found' : 'open')
+    }
+    const sweep = new DurableRunningSweep({ sql: db.sql, events: m.events, describe, graceMs: 0, batch: 2, describeTimeoutMs: 200 })
+    expect(await sweep.sweep()).toEqual([])
+    expect(await sweep.sweep()).toEqual([sorted[3]])
+    expect(described).toEqual(sorted.map((id) => sessionWorkflowId(id)))
+    // Past the end, the next pass starts over.
+    await sweep.sweep()
+    expect(described.slice(4)).toEqual(sorted.slice(0, 2).map((id) => sessionWorkflowId(id)))
   }, 60_000)
 
   it('falls back from the default, and refuses an asked-for durable start, while no durable worker polls', async () => {

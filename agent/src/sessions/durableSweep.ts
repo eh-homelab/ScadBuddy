@@ -27,7 +27,8 @@ export type DescribeSession = (workflowId: string) => Promise<SessionRunState>
 export const RUNNING_GRACE_MS = 120_000
 /** How long one describe may take before the row is left for the next pass. */
 const DESCRIBE_DEADLINE_MS = 3_000
-const BATCH = 100
+/** Rows described per pass, one at a time: a slow Temporal keeps a pass near the 30 s interval. */
+const BATCH = 10
 
 const LOST: Record<Exclude<SessionRunState, 'open'>, string> = {
   closed: "the turn ended without a result: the session's workflow has ended",
@@ -40,31 +41,52 @@ export type DurableRunningSweepDeps = {
   describe: DescribeSession
   /** A row written to within this long is not described (default RUNNING_GRACE_MS). */
   graceMs?: number
+  /** Rows described per pass (default BATCH). */
+  batch?: number
+  /** How long the sweep waits on one describe, whatever `describe` does (default DESCRIBE_DEADLINE_MS + 1 s). */
+  describeTimeoutMs?: number
 }
 
 export class DurableRunningSweep {
   readonly #deps: DurableRunningSweepDeps
   readonly #graceMs: number
+  readonly #batch: number
+  readonly #describeTimeoutMs: number
+  /**
+   * The last id a pass described: the next pass reads the page after it, and starts over
+   * past the end. Rows that stay unresolved (a long live turn, a describe that keeps
+   * failing) thus never fill every page and starve the rows behind them. In memory, so
+   * a restart starts from the beginning; no column is needed.
+   */
+  #after = ''
 
   constructor(deps: DurableRunningSweepDeps) {
     this.#deps = deps
     this.#graceMs = deps.graceMs ?? RUNNING_GRACE_MS
+    this.#batch = deps.batch ?? BATCH
+    this.#describeTimeoutMs = deps.describeTimeoutMs ?? DESCRIBE_DEADLINE_MS + 1_000
   }
 
   /** One pass; returns the sessions reset. */
   async sweep(): Promise<string[]> {
     const { sql, events } = this.#deps
-    const rows = await sql<{ id: string; event_seq: string }[]>`
+    const page = (after: string) => sql<{ id: string; event_seq: string }[]>`
       SELECT id, event_seq FROM ai_sessions
-      WHERE mode = 'durable' AND status = 'running'
+      WHERE mode = 'durable' AND status = 'running' AND id::text > ${after}
         AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
-      ORDER BY updated_at LIMIT ${BATCH}`
+      ORDER BY id::text LIMIT ${this.#batch}`
+    let rows = await page(this.#after)
+    // Past the end: start over in this pass rather than spend it on nothing.
+    if (rows.length === 0 && this.#after) rows = await page('')
+    this.#after = rows.length < this.#batch ? '' : (rows.at(-1)?.id ?? '')
     const reset: string[] = []
+    let undescribed = 0
     for (const row of rows) {
       let state: SessionRunState
       try {
-        state = await this.#deps.describe(sessionWorkflowId(row.id))
+        state = await this.#describe(sessionWorkflowId(row.id))
       } catch {
+        undescribed += 1
         continue
       }
       if (state === 'open') continue
@@ -83,7 +105,18 @@ export class DurableRunningSweep {
       events.committed(row.id, tail, done)
       reset.push(row.id)
     }
+    // Once per pass and payload-free, so a describe that always fails (codec, permission) shows.
+    if (undescribed) console.warn(`durable running sweep: ${undescribed} of ${rows.length} sessions' workflows could not be described`)
     return reset
+  }
+
+  /** `describe`, abandoned past its timeout so one hung call cannot stall the pass. */
+  #describe(workflowId: string): Promise<SessionRunState> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('describe timed out')), this.#describeTimeoutMs)
+    })
+    return Promise.race([this.#deps.describe(workflowId), timeout]).finally(() => clearTimeout(timer))
   }
 
   /** Runs `sweep` every `intervalMs`, as PendingInputSweep does; returns the stop. */
