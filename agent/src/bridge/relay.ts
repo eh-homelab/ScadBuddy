@@ -29,9 +29,11 @@ import { CallOutcomeSchema, type CallOutcome } from './protocol.js'
 // its row, and DELETE … RETURNING makes the claim once, so a tab id briefly on
 // two replicas (a reconnect overtaking its old socket) runs the call once.
 //
-// No owner: nobody acks within `ackTimeoutMs`, and the call answers "not
-// connected", as an unknown tab does on one replica. An ack is what separates
-// that from a slow tab, so the call's own timeout still applies to the tab.
+// No owner: nobody acks within `ackTimeoutMs`, the caller withdraws its request
+// row, and the call answers "not connected", as an unknown tab does on one
+// replica. An ack is what separates that from a slow tab, so the call's own
+// timeout still applies to the tab. A row already gone when withdrawn was taken,
+// with its ack late or lost, so the caller then waits as if acked.
 // The owner applies that timeout itself, as it would to a local call; the
 // caller waits a little longer before giving up on the owner.
 //
@@ -145,11 +147,19 @@ export class PgTabRelay implements TabRelay {
         reject(abortError())
       }
       const unclaimed = () => {
-        done()
-        // Nobody holds the tab: the request row would wait for the sweep.
-        this.#sql`DELETE FROM ai_bridge_messages WHERE id = ${row}`.then(
-          () => resolve(undefined),
+        // Withdrawn here, the request can no longer be taken. When it is already
+        // gone an owner took it and its ack is late or was lost, so the tab may be
+        // running the call: wait for it as if acked rather than say "not connected".
+        this.#sql<{ id: string }[]>`DELETE FROM ai_bridge_messages WHERE id = ${row} RETURNING id`.then(
+          (withdrawn) => {
+            const waiter = this.#waiting.get(req)
+            if (!waiter) return
+            if (withdrawn.length === 0) return waiter.acked()
+            done()
+            resolve(undefined)
+          },
           (err: unknown) => {
+            done()
             this.#failed(err)
             resolve(undefined)
           },

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { z } from 'zod'
 import { isDoneSummary, PendingInputSchema } from './chat/protocol'
 
 /**
@@ -41,7 +42,35 @@ export interface PendingCounts {
 export const totalOf = (c: PendingCounts): number => c.approvals + c.questions + c.attention
 
 /** What the agent lists as parked on the user, or null when it did not answer as the agent. Never throws, and settles within `timeoutMs`. */
-export async function fetchPendingInput(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<PendingCounts | null> {
+export function fetchPendingInput(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<PendingCounts | null> {
+  return withDeadline(read, timeoutMs)
+}
+
+/**
+ * #1125 — the user's sessions with a turn under way: `GET /api/v1/ai/sessions?status=running`
+ * (agent routes/sessions.ts), every origin the browser user can see, so a background or MCP
+ * session counts as one this tab's socket never hears of. One row says yes.
+ */
+export const RUNNING_PATH = '/api/v1/ai/sessions?status=running&limit=1'
+const RunningSchema = z.object({ sessions: z.array(z.unknown()) })
+
+/** Whether any of the user's sessions is running, or null when the agent did not answer. Never throws, and settles within `timeoutMs`. */
+export function fetchRunning(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<boolean | null> {
+  return withDeadline(readRunning, timeoutMs)
+}
+
+async function readRunning(signal: AbortSignal): Promise<boolean | null> {
+  try {
+    const response = await fetch(RUNNING_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
+    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) return null
+    const parsed = RunningSchema.safeParse(await response.json())
+    return parsed.success ? parsed.data.sessions.length > 0 : null
+  } catch {
+    return null
+  }
+}
+
+async function withDeadline<T>(run: (signal: AbortSignal) => Promise<T | null>, timeoutMs: number): Promise<T | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), timeoutMs)
   // Raced as well as aborted, as `fetchAiAvailability` does: a fetch that ignores the
@@ -50,7 +79,7 @@ export async function fetchPendingInput(timeoutMs = ATTENTION_TIMEOUT_MS): Promi
     controller.signal.addEventListener('abort', () => resolve(null), { once: true })
   })
   try {
-    return await Promise.race([read(controller.signal), deadline])
+    return await Promise.race([run(controller.signal), deadline])
   } finally {
     clearTimeout(timer)
   }
@@ -87,6 +116,11 @@ export interface Attention {
   waiting: number | null
   /** The same, by kind; null exactly when `waiting` is. */
   counts: PendingCounts | null
+  /**
+   * #1125 — whether one of the user's sessions has a turn under way: the last known
+   * answer when a read fails, and null until one has succeeded.
+   */
+  running: boolean | null
   /** Reads again now (the panel was toggled, so a decision may just have landed). */
   refresh: () => void
 }
@@ -94,6 +128,7 @@ export interface Attention {
 /** Polls what is waiting on the user while `enabled`, and again whenever the tab comes back into view. */
 export function useAttention(enabled: boolean): Attention {
   const [counts, setCounts] = useState<PendingCounts | null>(null)
+  const [running, setRunning] = useState<boolean | null>(null)
   const generation = useRef(0)
   // One read at a time: while the agent is slow to answer, the timer, focus and
   // toggles must not pile requests up behind it. Held per generation, so a read
@@ -104,10 +139,12 @@ export function useAttention(enabled: boolean): Attention {
     if (!enabled || inflight.current === generation.current) return
     const started = generation.current
     inflight.current = started
-    void fetchPendingInput().then((c) => {
+    void Promise.all([fetchPendingInput(), fetchRunning()]).then(([c, r]) => {
       if (inflight.current === started) inflight.current = null
-      // A failed read keeps the last count: an outage is not "nothing is waiting".
-      if (c !== null && started === generation.current) setCounts(c)
+      if (started !== generation.current) return
+      // A failed read keeps the last answer: an outage is not "nothing is waiting", or "idle".
+      if (c !== null) setCounts(c)
+      if (r !== null) setRunning(r)
     })
   }, [enabled])
 
@@ -115,6 +152,7 @@ export function useAttention(enabled: boolean): Attention {
     if (!enabled) {
       generation.current += 1
       setCounts(null)
+      setRunning(null)
       return
     }
     refresh()
@@ -131,11 +169,14 @@ export function useAttention(enabled: boolean): Attention {
     }
   }, [enabled, refresh])
 
-  return { waiting: counts === null ? null : totalOf(counts), counts, refresh }
+  return { waiting: counts === null ? null : totalOf(counts), counts, running, refresh }
 }
 
 /** The most rows of one kind the agent lists (agent `approvals/service.ts` `list`, `questions/service.ts` `listPending`, `LIMIT 500`). */
 export const APPROVALS_LIST_MAX = 500
+
+/** #1125 — what the header says while a session's turn is under way. */
+export const WORKING_LABEL = 'working'
 
 /** The count as shown: past a full page from the agent, `500+`. */
 export function attentionCount(n: number): string {
