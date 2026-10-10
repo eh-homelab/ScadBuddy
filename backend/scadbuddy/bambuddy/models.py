@@ -457,6 +457,9 @@ class LibraryFile(BambuddyModel):
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None
+    #: A file Bambuddy only indexes from an external folder: a delete drops its record
+    #: for good instead of moving it to the trash (#2167).
+    is_external: bool = False
 
 
 class LibraryListRow(BambuddyModel):
