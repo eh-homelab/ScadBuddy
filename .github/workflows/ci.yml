@@ -307,6 +307,16 @@ jobs:
       - name: Test the plugin lint
         run: .github/scripts/lint-plugin.test.sh
 
+      # The payload codec is kept in agent/, agent-durable/ and backend/; the
+      # backend's tests run in an image without agent/, so they read copies of the
+      # agent's vectors and key migration (plan 2026-10-09-durable-phase-6-flows.md
+      # Ruling 10). This fails when a copy, or one Python codec, drifts.
+      - name: Check the payload codec copies
+        run: .github/scripts/lint-codec-copies.sh
+
+      - name: Test the codec copy check
+        run: .github/scripts/lint-codec-copies.test.sh
+
       # The Claude Code hook (.claude/settings.json) that bumps a plugin's
       # version on its first change in a branch, then lints it (#896).
       - name: Test the plugin edit hook
@@ -618,6 +628,14 @@ jobs:
       - name: Check the pin still resolves
         working-directory: .
         run: .github/scripts/agent-durable-pin.test.sh
+
+      # The same check on the backend's temporal-agent-harness pin (plan
+      # 2026-10-09-durable-phase-6-flows.md Ruling 1). It runs here only because
+      # this job already sets up uv on the runner; the backend's own jobs run in
+      # the image.
+      - name: Check the harness pin still resolves
+        working-directory: .
+        run: .github/scripts/harness-pin.test.sh
 
       - name: Install
         run: uv sync --frozen
