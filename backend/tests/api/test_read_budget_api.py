@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import get_render
 from scadbuddy.api.outputs import LIBRARY_FILE_NOT_ARRANGEABLE
 from scadbuddy.render.read_budget import CEILINGS
+from tests.api.test_analyzers import _run_library, bambuddy_routes, library_routes
 from tests.api.test_arrange_api import Arranger, two_colour_3mf
 from tests.api.test_print_library import library_file
 from tests.api.test_send import configure
@@ -102,3 +103,32 @@ def test_an_arrange_reads_within_its_own_budget(
     assert refused.status_code == 422, refused.text
     assert refused.json()["code"] == LIBRARY_FILE_NOT_ARRANGEABLE
     assert client.post("/api/v1/outputs/arrange", json=body).status_code == 202
+
+
+@respx.mock
+def test_a_preview_reads_within_its_own_budget(client: TestClient, tmp_path: Path) -> None:
+    configure(client)
+    library_file(88, content=two_colour_3mf(tmp_path))
+    path = "/api/v1/print/library/88/preview.glb"
+    refused = client.get(path, params={"max_triangles": TRIANGLES - 1})
+    assert refused.status_code == 422, refused.text
+    assert "max_triangles read budget" in refused.json()["detail"]
+    assert client.get(path).status_code == 200
+
+
+@respx.mock
+def test_the_print_checks_read_within_their_own_budget(client: TestClient, tmp_path: Path) -> None:
+    configure(client)
+    bambuddy_routes()
+    library_routes(89, two_colour_3mf(tmp_path))
+
+    def geometry(request: dict[str, object]) -> dict[str, object]:
+        report = _run_library(client, 89, request=request)
+        found: dict[str, object] = next(
+            row for row in report["inputs"] if row["name"] == "geometry"
+        )
+        return found
+
+    small = geometry({"read_budget": {"max_triangles": TRIANGLES - 1}})
+    assert not small["available"] and "max_triangles read budget" in str(small["reason"])
+    assert geometry({})["available"]

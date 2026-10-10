@@ -237,7 +237,9 @@ on shutdown.
   (Projects & files, Advanced). One request may override any of them: `read_budget`
   in an arrange's or a print check's body, `?max_triangles=` and the like on
   `GET /print/library/{id}/objects` and `/preview.glb`. The ceilings bound what the
-  API pod's memory holds, so neither a setting nor a request goes past them. A file
+  API pod's memory holds, so neither a setting nor a request goes past them: a
+  `SCADBUDDY_READ_MAX_*` past its ceiling stops the backend at start, as any
+  out-of-bounds `SCADBUDDY_*` does, rather than being clamped. A file
   past a budget is refused naming it; a refusal kept for a file hash is read again by
   a request with a larger budget.
 - **Render queue.** By default every render request is accepted and runs on

@@ -44,7 +44,7 @@ from scadbuddy.render.objects3mf import (
     read_objects,
     write_piece,
 )
-from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.render.read_budget import CEILINGS, ReadBudget
 from scadbuddy.store import BlobStore
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.cache import StaleBlobError
@@ -164,7 +164,9 @@ async def read_library_objects(
     payload = await source.fetch_3mf(client)
     if payload is None:
         reason = "it is too large to read, or holds no mesh ScadBuddy can read"
-        await _keep(path, _Kept(refused=reason, budget=spend))
+        # No budget decides this one, so no larger budget would read it: kept as the
+        # ceilings', which cover every budget.
+        await _keep(path, _Kept(refused=reason, budget=ReadBudget(**CEILINGS)))
         raise NotArrangeableError(file_id, file.filename, reason)
     digest = hashlib.sha256(payload).hexdigest()
     try:
