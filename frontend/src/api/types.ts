@@ -87,6 +87,8 @@ export type InstalledFamily = Schemas['InstalledFamily']
 
 /** #93 — third-party OpenSCAD libraries: the curated catalogue, and each model's own pins. */
 export type CatalogueLibrary = Schemas['CatalogueLibrary']
+export type DependencyReport = Schemas['DependencyReport']
+export type IncludeTarget = Schemas['IncludeTarget']
 export type ModelLibrary = Schemas['ModelLibrary']
 /** #217 — a `libraries` entry in model.json that is not a pin, and why. */
 export type InvalidLibraryEntry = Schemas['InvalidLibraryEntry']
@@ -289,6 +291,14 @@ export interface PrinterCameraSetting {
  */
 export interface ModelSetting {
   model: string | null
+}
+
+/**
+ * #1291 — the blank starter template (`GET /api/v1/ai/templates/blank`, agent
+ * `src/routes/templates.ts`), the source the agent's create_from_template writes.
+ */
+export interface BlankTemplate {
+  source: string
 }
 
 /**

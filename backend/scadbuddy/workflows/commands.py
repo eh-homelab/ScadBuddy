@@ -268,4 +268,16 @@ async def start_command[T](
         if isinstance(cause, ApplicationError) and cause.type == UPDATE_OUTLIVED:
             raise CommandClosedError(id) from error
         raise
+    finally:
+        _retrieve_start_error(operation)
     return answer
+
+
+def _retrieve_start_error(operation: WithStartWorkflowOperation[object, object]) -> None:
+    """Mark the start's error read (#2065). A start that fails also sets the same error
+    on the operation's handle future (temporalio 1.34.0 ``client/_client.py``
+    ``on_start_error``), which nothing here awaits: it is raised above and handled there,
+    but asyncio would log the future's copy as "Future exception was never retrieved"."""
+    handle = operation._workflow_handle  # the SDK exposes it only through an await
+    if handle.done() and not handle.cancelled():
+        handle.exception()

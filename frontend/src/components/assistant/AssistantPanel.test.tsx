@@ -8,7 +8,7 @@ import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
-import { setSessionResources } from '../../mocks/features/assistantSessions'
+import { setRunningSessions, setSessionResources } from '../../mocks/features/assistantSessions'
 import { setMcpAuthMode } from '../../mocks/features/mcpTokens'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
@@ -334,6 +334,36 @@ describe('assistant panel', () => {
     expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
     expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
+  })
+
+  it('shows a running session on the header button with the panel closed, apart from what waits (#1125)', async () => {
+    setRunningSessions(1)
+    const { user } = renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, working' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): working')
+    expect(within(button).getByTestId('assistant-working')).toBeInTheDocument()
+    expect(within(button).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    // Announced in its own region, so the waiting count is not read out again.
+    const live = screen.getByTestId('assistant-working-live')
+    expect(live).toHaveAttribute('aria-live', 'polite')
+    expect(live).toHaveTextContent('The assistant is working')
+    expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
+
+    // Running and waiting at once (another session asked for an approval).
+    setPendingApprovals(1)
+    await user.click(button)
+    expect(await screen.findByRole('button', { name: 'Assistant, working, 1 waiting for you' })).toHaveAttribute(
+      'title',
+      'Assistant (Ctrl+`): working, 1 waiting for you (1 approval)',
+    )
+
+    // Idle: neither is shown. The click opened the panel, this one closes it.
+    setRunningSessions(0)
+    setPendingApprovals(0)
+    await user.click(screen.getByRole('button', { name: 'Assistant, working, 1 waiting for you' }))
+    const plain = await screen.findByRole('button', { name: 'Assistant' })
+    expect(within(plain).queryByTestId('assistant-working')).not.toBeInTheDocument()
+    expect(screen.getByTestId('assistant-working-live')).toBeEmptyDOMElement()
   })
 
   it('shows a done summary beside the badge, not in the waiting count or the tab title (#815)', async () => {

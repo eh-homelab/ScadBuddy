@@ -3431,6 +3431,18 @@ export const handlers = [
 
   http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
 
+  // #1285 — a model whose includes all resolve; tests that need more override this.
+  http.post(`${base}/models/:slug/dependencies`, () =>
+    HttpResponse.json({
+      includes: [],
+      unresolved: 0,
+      fonts: [],
+      fonts_checked: true,
+      missing_checkouts: [],
+      truncated: false,
+    }),
+  ),
+
   // #93 — pins are per model: PUT clones at `ref` and pins it into this model alone.
   http.put(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
@@ -3509,6 +3521,9 @@ export const handlers = [
   }),
 
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
+  http.get(`${base}/ai/templates/blank`, () =>
+    HttpResponse.json({ source: '// A blank starter\n/* [Hidden] */\n$fn = 64;\n\ncube(10);\n' }),
+  ),
   http.get(`${base}/ai/settings/headless-browser`, () =>
     HttpResponse.json({ enabled: state.headlessBrowser }),
   ),

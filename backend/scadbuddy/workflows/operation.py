@@ -21,6 +21,7 @@ from typing import Any
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
 from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRunError
@@ -42,12 +43,15 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.problems import (
         OPERATION_CANCELLED,
         OPERATION_CANCELLED_RUNNING,
+        OPERATION_CHECK_TIMED_OUT,
         OPERATION_UNEXPECTED_DETAIL,
         OPERATION_UNEXPECTED_RUNNING_DETAIL,
         problem_of,
     )
 
 #: §4.2 step 4: the check answers well inside the route's deadline; retries go on.
+#: A slow check answers its own 504 at ``CHECK_BUDGET_SECONDS``, below this, so an attempt
+#: that reaches it is the worker not completing the task at all (#2065).
 CHECK_TIMEOUT = timedelta(seconds=8)
 #: One 3MF upload (``DEFAULT_UPLOAD_TIMEOUT``, 180 s) and a margin; a kind may set its own.
 #: The browser's ``operationFollowMs`` (frontend ``client.ts``) is reckoned from it: change
@@ -108,11 +112,14 @@ class OperationWorkflow:
         except (ActivityError, asyncio.CancelledError) as error:
             # Nothing was written: the execution fails, and a retry may start again. A
             # cancel answers the Update too, so it is never outlived by its execution.
-            self.refusal = (
-                OPERATION_CANCELLED
-                if is_cancelled_exception(error)
-                else problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
-            )
+            if is_cancelled_exception(error):
+                self.refusal = OPERATION_CANCELLED
+            elif isinstance(error, ActivityError) and isinstance(error.cause, TemporalTimeoutError):
+                # No attempt answered in time (#2065): not a refusal the check made, and
+                # not "unexpected" either. Nothing was written, so it may be sent again.
+                self.refusal = OPERATION_CHECK_TIMED_OUT
+            else:
+                self.refusal = problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)
             self._upsert(STATUS.value_set("refused"))
             await workflow.wait_condition(workflow.all_handlers_finished)
             if is_cancelled_exception(error):
