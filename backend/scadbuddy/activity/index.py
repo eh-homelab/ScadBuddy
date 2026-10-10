@@ -125,7 +125,7 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
     except (binascii.Error, UnicodeError) as error:
         raise ValueError("not a cursor") from error
     created, sep, activity_id = raw.partition("|")
-    if not sep or not activity_id:
+    if not sep or not activity_id or "\x00" in activity_id:
         raise ValueError("not a cursor")
     at = datetime.fromisoformat(created)
     if at.tzinfo is None:
@@ -137,15 +137,17 @@ def _escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _visible(pinned: str | None) -> list[sql.Composable]:
+def _visible(pinned: str | None) -> tuple[list[sql.Composable], list[Any]]:
     """Placeholders are never read; a pinned request reads its principal's rows only,
     and one pinned to an unknown session reads none."""
     where: list[sql.Composable] = [sql.SQL("source <> ''")]
     if pinned == UNKNOWN_SESSION:
         where.append(sql.SQL("false"))
     elif pinned is not None:
-        where.append(sql.SQL("principal = {}").format(sql.Literal(pinned)))
-    return where
+        # A placeholder, never a literal: an encoded principal holds `%`.
+        where.append(sql.SQL("principal = %s"))
+        return where, [pinned]
+    return where, []
 
 
 def _where(conditions: list[sql.Composable]) -> sql.Composable:
@@ -332,8 +334,7 @@ class ActivityIndex:
     ) -> tuple[builtins.list[ActivityRow], str | None]:
         if not 1 <= limit <= MAX_LIMIT:
             raise ValueError(f"limit must be 1 to {MAX_LIMIT}")
-        where = _visible(pinned)
-        params: list[Any] = []
+        where, params = _visible(pinned)
 
         def add(condition: str, *values: Any) -> None:
             where.append(sql.SQL(condition))  # fixed text from this module only
@@ -378,11 +379,12 @@ class ActivityIndex:
         return await asyncio.to_thread(self._children, activity_id, pinned)
 
     def _children(self, activity_id: str, pinned: str | None) -> builtins.list[ActivityRow]:
-        where = [*_visible(pinned), sql.SQL("parent_id = %s")]
+        visible, params = _visible(pinned)
+        where = [*visible, sql.SQL("parent_id = %s")]
         with self.pool.connection() as conn:
             found = conn.execute(
                 sql.SQL("{} WHERE {} ORDER BY created_at, id").format(_SELECT, _where(where)),
-                (activity_id,),
+                [*params, activity_id],
             ).fetchall()
         return [ActivityRow.model_validate(r) for r in found]
 
@@ -393,7 +395,8 @@ class ActivityIndex:
 
     def _counts(self, since: datetime | None, pinned: str | None) -> Counts:
         start = since if since is not None else datetime.now(UTC) - FACETS_WINDOW
-        where = _where([*_visible(pinned), sql.SQL("created_at >= %s")])
+        visible, params = _visible(pinned)
+        where = _where([*visible, sql.SQL("created_at >= %s")])
         counted: dict[str, list[Count]] = {}
         with self.pool.connection() as conn:
             for column, blank in (("principal", None), ("via_tool", None), ("subject", "")):
@@ -405,7 +408,7 @@ class ActivityIndex:
                         "SELECT {c} AS value, count(*) AS count FROM activity"
                         " WHERE {where} AND {present} GROUP BY {c} ORDER BY count DESC, {c}"
                     ).format(c=sql.Identifier(column), where=where, present=present),
-                    (start,),
+                    [*params, start],
                 ).fetchall()
                 counted[column] = [Count(r["value"], r["count"]) for r in found]
         return Counts(counted["principal"], counted["via_tool"], counted["subject"])

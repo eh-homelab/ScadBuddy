@@ -10,6 +10,7 @@ runtime (``api/components.py``).
 """
 
 import asyncio
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -51,9 +52,10 @@ LIST_PARAMS = frozenset(
         "q",
         "cursor",
         "limit",
+        "advanced",
     }
 )
-#: The row's fields a detail answers only with ``?advanced=1``.
+#: The row's fields an answer carries only with ``?advanced=1``.
 ADVANCED_FIELDS = frozenset(
     {"workflow_id", "run_id", "traceparent", "source", "source_id", "facets"}
 )
@@ -61,8 +63,45 @@ ADVANCED_FIELDS = frozenset(
 ADVANCED_DETAIL = frozenset({"request", "result", "error"})
 
 
+class ActivityItem(BaseModel):
+    """An activity row as answered: the fields in ``ADVANCED_FIELDS`` are left out, and
+    ``detail`` has no raw ``request``/``result``/``error``, unless ``?advanced=1``."""
+
+    id: str
+    kind: str
+    principal: str | None
+    session: str | None
+    via_tool: str | None
+    subject: str
+    status: ActivityStatus
+    title: str
+    parent_id: str | None
+    detail: dict[str, Any]
+    created_at: datetime | None
+    updated_at: datetime | None
+    finished_at: datetime | None
+    facets: dict[str, Any] | None = None
+    source: str | None = None
+    source_id: str | None = None
+    workflow_id: str | None = None
+    run_id: str | None = None
+    traceparent: str | None = None
+
+
+def _item(row: ActivityRow, advanced: bool) -> ActivityItem:
+    fields = row.model_dump()
+    if not advanced:
+        fields = {k: v for k, v in fields.items() if k not in ADVANCED_FIELDS}
+        fields["detail"] = _plain(row.detail)
+    return ActivityItem(**fields)
+
+
+def _plain(detail: Mapping[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in detail.items() if k not in ADVANCED_DETAIL}
+
+
 class ActivityPage(BaseModel):
-    items: list[ActivityRow]
+    items: list[ActivityItem]
     next_cursor: str | None
 
 
@@ -100,10 +139,18 @@ class LinkOut(BaseModel):
 
 class ActivityDetail(BaseModel):
     #: The row; its advanced fields only with ``?advanced=1``.
-    row: dict[str, Any]
-    children: list[ActivityRow]
+    row: ActivityItem
+    children: list[ActivityItem]
     links: list[LinkOut]
     detail: dict[str, Any]
+
+
+def _no_nul(request: Request, *values: str) -> None:
+    """A NUL byte in any query parameter or path value is 400, before it reaches
+    Postgres (whose text cannot hold one)."""
+    texts = [*values, *(t for item in request.query_params.multi_items() for t in item)]
+    if any("\x00" in text for text in texts):
+        raise ApiError(400, "a query parameter or path holds a NUL byte")
 
 
 def _unknown(request: Request, allowed: frozenset[str]) -> None:
@@ -150,7 +197,7 @@ def _facet_value(facet: Facet, value: str) -> Any:
     return value
 
 
-@router.get("", response_model=ActivityPage)
+@router.get("", response_model=ActivityPage, response_model_exclude_unset=True)
 async def list_activity(
     request: Request,
     activity: ActivityDep,
@@ -166,10 +213,12 @@ async def list_activity(
     q: str | None = None,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
+    advanced: bool = False,
 ) -> ActivityPage:
     """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. Filter
     by any field, and by ``facet.<name>=<value>`` for a filterable facet of a selected
     ``kind``."""
+    _no_nul(request)
     kinds = await asyncio.to_thread(activity.kinds)
     facets = _facet_filters(request, kinds, kind or [])
     position = None
@@ -197,7 +246,7 @@ async def list_activity(
         cursor=position,
         limit=limit,
     )
-    return ActivityPage(items=rows, next_cursor=next_cursor)
+    return ActivityPage(items=[_item(r, advanced) for r in rows], next_cursor=next_cursor)
 
 
 def _counts(counts: list[Count]) -> list[CountOut]:
@@ -210,6 +259,7 @@ async def activity_facets(
 ) -> ActivityFacets:
     """What the filter bar offers: every kind with its facets, the statuses, and the
     principals, tools and subjects present since ``since`` (default the last 7 days)."""
+    _no_nul(request)
     _unknown(request, frozenset({"since"}))
     kinds = await asyncio.to_thread(activity.kinds)
     pinned = await pinned_principal(request, activity.index.pool)
@@ -233,12 +283,13 @@ async def activity_facets(
     )
 
 
-@router.get("/{activity_id}", response_model=ActivityDetail)
+@router.get("/{activity_id}", response_model=ActivityDetail, response_model_exclude_unset=True)
 async def get_activity(
     request: Request, activity_id: str, activity: ActivityDep, advanced: bool = False
 ) -> ActivityDetail:
     """One row with its children, its links and its kind's detail. A row the request
     may not read answers 404, as a missing one does."""
+    _no_nul(request, activity_id)
     _unknown(request, frozenset({"advanced"}))
     pinned = await pinned_principal(request, activity.index.pool)
     row = await activity.index.get(activity_id)
@@ -249,14 +300,9 @@ async def get_activity(
     kind = kinds.get(row.kind)
     links = [] if kind is None else kind.links(row)
     detail = dict(row.detail if kind is None or kind.detail is None else kind.detail(row))
-    shown = row.model_dump(mode="json")
-    if not advanced:
-        shown = {k: v for k, v in shown.items() if k not in ADVANCED_FIELDS}
-        shown["detail"] = {k: v for k, v in row.detail.items() if k not in ADVANCED_DETAIL}
-        detail = {k: v for k, v in detail.items() if k not in ADVANCED_DETAIL}
     return ActivityDetail(
-        row=shown,
-        children=children,
+        row=_item(row, advanced),
+        children=[_item(c, advanced) for c in children],
         links=[LinkOut(rel=link.rel, label=link.label, href=link.href) for link in links],
-        detail=detail,
+        detail=detail if advanced else _plain(detail),
     )

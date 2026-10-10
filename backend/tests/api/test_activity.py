@@ -4,6 +4,7 @@ headless browser pinned to its session owner."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import uuid
 
 from fastapi.testclient import TestClient
@@ -14,6 +15,7 @@ from tests.api.conftest import AgentTables, SeedActivity
 from tests.support.operations import press
 
 SESSION_HEADER = "X-ScadBuddy-Agent-Session"
+ADVANCED = {"workflow_id", "run_id", "traceparent", "source", "source_id", "facets"}
 
 
 def ids(page: dict[str, object]) -> list[str]:
@@ -230,3 +232,50 @@ def test_headless_operation_is_its_session_owners(
     assert operations, page
     assert all(r["principal"] == "token:t1" for r in operations)
     assert all(r["session"] == sid for r in operations)
+
+
+def test_a_nul_byte_is_a_400_problem(client: TestClient, seed_activity: SeedActivity) -> None:
+    seed_activity(id="render:a", facets={"slug": "box"})
+    nul_cursor = base64.urlsafe_b64encode(b"2026-10-10T00:00:00+00:00|render:\x00").decode()
+    for path, params in (
+        ("/api/v1/activity", {"q": "a\x00b"}),
+        ("/api/v1/activity", {"principal": "\x00"}),
+        ("/api/v1/activity", {"kind": "render", "facet.slug": "b\x00x"}),
+        ("/api/v1/activity", {"cursor": nul_cursor}),
+        ("/api/v1/activity/render:%00", {}),
+    ):
+        response = client.get(path, params=params)
+        assert response.status_code == 400, (path, params, response.text)
+        assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_advanced_fields_only_with_advanced(
+    client: TestClient, seed_activity: SeedActivity
+) -> None:
+    seed_activity(id="render:a", workflow_id="render-x", detail={"request": {"w": 1}})
+    seed_activity(id="render:b", parent_id="render:a", workflow_id="render-y")
+    for item in client.get("/api/v1/activity").json()["items"]:
+        assert not ADVANCED & item.keys(), item
+        assert "request" not in item["detail"]
+    children = client.get("/api/v1/activity/render:a").json()["children"]
+    assert [c["id"] for c in children] == ["render:b"]
+    assert not ADVANCED & children[0].keys()
+    shown = client.get("/api/v1/activity", params={"advanced": "1"}).json()["items"]
+    assert {r["workflow_id"] for r in shown} == {"render-x", "render-y"}
+    advanced = client.get("/api/v1/activity/render:a", params={"advanced": "1"}).json()
+    assert advanced["children"][0]["workflow_id"] == "render-y"
+
+
+def test_a_tool_written_row_is_its_session_owners(
+    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
+) -> None:
+    owner = "oidc:https://idp.example#ünï code"
+    sid = agent_tables.insert_session(owner_kind="oidc", owner_id=owner)
+    # What a tool's request is attributed to: its X-ScadBuddy-Agent-Author, encoded.
+    encoded = "oidc:https://idp.example#%C3%BCn%C3%AF%20code"
+    seed_activity(id="render:a", principal=encoded)
+    headers = {SESSION_HEADER: sid}
+    assert ids(client.get("/api/v1/activity", headers=headers).json()) == ["render:a"]
+    assert client.get("/api/v1/activity/render:a", headers=headers).status_code == 200
+    facets = client.get("/api/v1/activity/facets", headers=headers).json()
+    assert [p["value"] for p in facets["principals"]] == [encoded]

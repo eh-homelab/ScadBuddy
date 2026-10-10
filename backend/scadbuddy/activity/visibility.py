@@ -12,6 +12,7 @@ from psycopg_pool import ConnectionPool
 from starlette.requests import Request
 
 from scadbuddy.api.agent_actor import AGENT_ACTOR_HEADER, _session_id
+from scadbuddy.core.authorship import principal_header
 
 UNKNOWN_SESSION = "session:unknown"
 
@@ -32,7 +33,7 @@ async def session_owner(pool: ConnectionPool[Connection[DictRow]], session_id: s
                 return None
         if row is None:
             return None
-        return "browser" if row["owner_kind"] == "browser" else row["owner_id"]
+        return "browser" if row["owner_kind"] == "browser" else principal_header(row["owner_id"])
 
     return await asyncio.to_thread(read)
 
