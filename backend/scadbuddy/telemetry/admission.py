@@ -44,14 +44,17 @@ from scadbuddy.core.proxies import Network, client_address
 from scadbuddy.core.settings import Settings
 
 #: Per process, so per pod rather than cluster-wide: with N API replicas the ceiling is
-#: N times this. The API runs one replica (2026-10-01, ``replicas: 1`` in
-#: eh-homelab/clusters ``applications/scadbuddy/scadbuddy.yaml``); a change there has to
-#: adjust these. A bucket shared in Postgres would cost a write per batch on a path whose
-#: only job is to be cheap.
-PROCESS_BURST: Final = 100
+#: N times this. A bucket shared in Postgres would cost a write per batch on a path whose
+#: only job is to be cheap. The bursts are 10x the sustained budget's first sizing (100
+#: and 20, 2026-10-01): a page flushing after a long idle, or several tabs opening at
+#: once, sends many batches together, and the API is going to more than one replica, so
+#: the per-pod ceiling multiplies anyway. Accepted as billed-ingest exposure in
+#: eh-homelab/clusters#1760. The sustained rates are unchanged: they, not the bursts,
+#: bound what a pod sends over minutes.
+PROCESS_BURST: Final = 1000
 PROCESS_PER_SECOND: Final = 20.0
 #: A page's exporter sends about one batch every 5 s (frontend `RelayExporter`).
-CLIENT_BURST: Final = 20
+CLIENT_BURST: Final = 200
 CLIENT_PER_SECOND: Final = 2.0
 #: Clients with a bucket of their own; the least recently seen is forgotten past it.
 MAX_TRACKED_CLIENTS: Final = 4096

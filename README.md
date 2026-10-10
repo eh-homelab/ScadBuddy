@@ -1046,7 +1046,7 @@ but those same origins keeps only its origin, since that host has none of the ro
 No user agent and no `exception.message` is forwarded, wherever the page put it. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
 answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
 export, arrives with row 4 of #988). Its rate
-limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
+limits are per pod (1000 batches at once and 20 a second overall; 200 and 2 a second per
 client, an IPv6 client being its /64), so with more than one API replica the overall
 ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers
