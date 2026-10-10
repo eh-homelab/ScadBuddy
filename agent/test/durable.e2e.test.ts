@@ -78,7 +78,8 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
   beforeAll(async () => {
     env = await localTemporal()
     let schema: string
-    ;({ db, schema, drop } = await throwawayDatabase())
+    let url: string
+    ;({ db, url, schema, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     const dir = await mkdtemp(path.join(os.tmpdir(), 'durable-e2e-'))
     const kekB64 = randomBytes(32).toString('base64')
@@ -89,7 +90,7 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
       cwd: DURABLE_DIR,
       env: {
         ...process.env,
-        SCADBUDDY_DATABASE_URL: withSearchPath(TEST_DATABASE_URL!, schema),
+        SCADBUDDY_DATABASE_URL: withSearchPath(url, schema),
         SCADBUDDY_TEMPORAL_ADDRESS: env.address,
         SCADBUDDY_TEMPORAL_NAMESPACE: 'default',
         SCADBUDDY_SECRET_KEY_FILE: path.join(dir, 'kek'),

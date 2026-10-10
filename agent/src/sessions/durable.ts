@@ -183,14 +183,17 @@ export class DurableTurns {
   async send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
     const id = session.id
     const blobs = blobsOf(turn.images)
-    const claimed = await this.#sql.unsafe(
-      `UPDATE ai_sessions SET status = 'running', updated_at = now()
+    // The status before the claim, which a give-back restores (a refused send keeps `failed`).
+    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus }[]>(
+      `WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = $1 FOR UPDATE)
+       UPDATE ai_sessions SET status = 'running', updated_at = now() FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
-         AND ${POOL_COST} < ${POOL_BUDGET}`,
+         AND ${POOL_COST} < ${POOL_BUDGET}
+       RETURNING prior.prior_status`,
       [id, turn.author.kind, turn.author.id],
     )
-    if (claimed.count === 0) return undefined
+    if (!claimed) return undefined
     let seq = 0
     try {
       await this.#blobs.put(id, blobs).catch(() => {
@@ -211,7 +214,10 @@ export class DurableTurns {
       await this.#sendMessage(session, turn, blobs)
     } catch (err) {
       if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
-      await this.#giveBack(id)
+      // The refusal is what the caller hears, whatever the give-back meets.
+      await this.#giveBack(id, claimed.prior_status).catch(() => {
+        console.warn(`durable send: session ${id}'s claim could not be given back`)
+      })
       throw err
     }
     return this.#turn(id, turn.turnId, seq)
@@ -278,11 +284,11 @@ export class DurableTurns {
     }
   }
 
-  /** Gives back a claim whose message the workflow refused (Ruling 7). */
-  async #giveBack(id: string): Promise<void> {
+  /** Gives back a claim whose message the workflow refused (Ruling 7), to the status it had. */
+  async #giveBack(id: string, prior: SessionStatus): Promise<void> {
     const released = await this.#sql`
-      UPDATE ai_sessions SET status = 'idle', updated_at = now() WHERE id = ${id} AND status = 'running'`
-    if (released.count > 0) await this.#events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
+      UPDATE ai_sessions SET status = ${prior}, updated_at = now() WHERE id = ${id} AND status = 'running'`
+    if (released.count > 0) await this.#events.append(id, [event({ type: 'session.status', sessionId: id, status: prior })])
   }
 
   /** The turn's end, as finish_turn wrote it (agent-durable session/activities.py). */
@@ -354,6 +360,9 @@ export class DurableTurns {
     } catch (err) {
       if (err instanceof WorkflowNotFoundError) return
     }
-    await this.#gate.interrupt(session.id, reason).catch(() => {})
+    await this.#gate.interrupt(session.id, reason).catch(() => {
+      // Payload-free: the parked calls may outlive the handoff until the workflow answers.
+      console.warn(`durable handoff: session ${session.id}'s workflow could not be reached; its waiting calls were not ended`)
+    })
   }
 }

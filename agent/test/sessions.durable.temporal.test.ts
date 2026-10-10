@@ -2,13 +2,16 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import type { Client } from '@temporalio/client'
+import type { Sql } from 'postgres'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../src/safety/untrusted.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import type { EventLog } from '../src/sessions/eventLog.js'
 import type { UserImage } from '../src/sessions/images.js'
-import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { type SessionManager, type SessionRecord, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
@@ -227,7 +230,10 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
   it('keeps the claim when no worker takes the message in time, and the turn runs when one does', async () => {
     const queue = `durable-late-${randomUUID()}`
     const m = await durableManager({ sendTimeoutMs: 1_000, taskQueue: queue })
+    // No worker polls this queue yet; the start must still be durable (5d would fall back).
+    m.durableTurns!.unready = () => Promise.resolve(undefined)
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    expect(session.mode).toBe('durable')
     // No worker on the queue: the Update is admitted with the start but never accepted.
     // Its outcome is unknown, so the claim stays and the turn is handed back.
     const turn = await m.send(session.id, browser, 'hello')
@@ -251,6 +257,33 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
         { type: 'session.status', status: 'idle' },
       ])
       expect(await turn.done).toEqual({ kind: 'result', subtype: 'success', costUsd: 0.1, turns: 1 })
+    })
+  }, 60_000)
+
+  it('gives back the status the row had before the claim, so a refused send keeps `failed`', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await m.send(session.id, browser, 'hello')
+    // The row says failed (a turn failed), the workflow still runs one: its validator refuses.
+    await db.sql`UPDATE ai_sessions SET status = 'failed' WHERE id = ${session.id}`
+    await expect(m.send(session.id, browser, 'again')).rejects.toMatchObject({ code: 'busy' })
+    expect((await m.get(session.id, browser)).status).toBe('failed')
+    expect((await m.events.read(session.id)).at(-1)?.event).toMatchObject({ type: 'session.status', status: 'failed' })
+  }, 60_000)
+
+  it('rethrows the refusal, not the give-back\'s own failure', async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await db.sql`ALTER TABLE ai_session_blobs RENAME TO ai_session_blobs_gone`
+    // The give-back cannot write either.
+    await db.sql.unsafe(`
+      CREATE FUNCTION keep_running() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'give-back refused'; END $$;
+      CREATE TRIGGER keep_running BEFORE UPDATE OF status ON ai_sessions
+        FOR EACH ROW WHEN (OLD.status = 'running' AND NEW.status <> 'running') EXECUTE FUNCTION keep_running();`)
+    await expect(m.send(session.id, browser, 'hello', { images: [IMAGE] })).rejects.toMatchObject({
+      name: 'SessionError',
+      code: 'unavailable',
     })
   }, 60_000)
 
@@ -345,4 +378,25 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const durable = await durableManager()
     expect((await durable.start(browser, { origin: 'chat', title: 't' })).session.mode).toBe('durable')
   }, 60_000)
+})
+
+describe("a durable handoff whose workflow cannot be reached", () => {
+  it('warns, with no payload, when even the interrupt Signal is not sent', async () => {
+    const down = () => Promise.reject(new Error('connection refused'))
+    const client = {
+      withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
+      workflow: { getHandle: () => ({ executeUpdate: down, signal: down }) },
+    } as unknown as Client
+    const turns = new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await turns.handoff({ id: 'f0e1d2c3-0000-4000-8000-000000000000' } as SessionRecord, 'the session was handed off to You')
+      expect(warn).toHaveBeenCalledTimes(1)
+      const [line] = warn.mock.calls[0] as [string]
+      expect(line).toContain('f0e1d2c3-0000-4000-8000-000000000000')
+      expect(line).not.toContain('handed off')
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })
