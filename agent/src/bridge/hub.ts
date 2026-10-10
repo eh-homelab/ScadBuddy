@@ -198,6 +198,7 @@ export class TabHub implements BrowserTabs {
   readonly #pairings: PairingStore | undefined
   readonly #relay: TabRelay | undefined
   readonly #sessionTabStore: SessionTabStore | undefined
+  #sessionTabWrites: Promise<void> = Promise.resolve()
   readonly #callTimeoutMs: number
   readonly #pollMs: number
   readonly #log: (message: string) => void
@@ -262,7 +263,12 @@ export class TabHub implements BrowserTabs {
     const before = this.#sessionTabs.get(sessionId)
     // Written when it changes, not on every message: other replicas read it (#2086).
     if (before !== tabId && this.#sessionTabStore) {
-      void this.#sessionTabStore.set(sessionId, tabId).catch((err: unknown) => this.logError(err))
+      const store = this.#sessionTabStore
+      // One write at a time, in pairing order: two in flight could commit out of
+      // order and leave the earlier tab stored.
+      this.#sessionTabWrites = this.#sessionTabWrites.then(() =>
+        store.set(sessionId, tabId).catch((err: unknown) => this.logError(err)),
+      )
     }
     this.#sessionTabs.delete(sessionId)
     this.#sessionTabs.set(sessionId, tabId)

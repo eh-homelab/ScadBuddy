@@ -248,8 +248,12 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           reject(abortError())
         }
       }
-      const ownerGone = () => {
+      const ownerGone = async () => {
         done()
+        // Forgotten first, so the client's reconnect meets the 404.
+        await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner}`.catch((err: unknown) =>
+          this.#failed(err),
+        )
         if (!settled) {
           settle(
             Response.json(
@@ -258,9 +262,6 @@ export class PgMcpSessionRelay implements McpSessionRelay {
             ),
           )
         } else stream?.error(new Error('the agent replica holding this MCP session stopped answering'))
-        void this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner}`.catch((err: unknown) =>
-          this.#failed(err),
-        )
       }
       signal.addEventListener('abort', onAbort, { once: true })
       this.#waiting.set(req, {
@@ -271,7 +272,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
         acked: () => {
           clearTimeout(ackTimer)
           liveness = setInterval(() => {
-            if (Date.now() - lastHeard > this.#beatMs * SILENT_AFTER_BEATS) ownerGone()
+            if (Date.now() - lastHeard > this.#beatMs * SILENT_AFTER_BEATS) void ownerGone()
           }, this.#beatMs)
         },
         head: (status, headers) => {
