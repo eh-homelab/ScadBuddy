@@ -672,7 +672,7 @@ def test_only_a_failed_connect_says_nothing_was_queued(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
-    assert "cannot reach Temporal" in response.text
+    assert "background service" in response.text and "Temporal" not in response.text
     assert "Nothing was queued" in response.text
     assert response.json()["may_have_started"] is False
 
@@ -701,7 +701,7 @@ def test_an_unavailable_temporal_may_have_started_the_run(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
-    assert "cannot reach Temporal" in response.text
+    assert "background service" in response.text and "Temporal" not in response.text
     assert "Nothing was queued" not in response.text
     assert "follow it if it started" in response.text
     # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).

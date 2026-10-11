@@ -20,6 +20,7 @@ from scadbuddy.render.bambu3mf import (
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.jobs import LAYOUT_NAME, PlateLayout
 from scadbuddy.render.objects3mf import (
+    OverBudgetError,
     UnreadableObjectsError,
     read_objects,
     read_plate_parts,
@@ -621,7 +622,7 @@ def test_a_model_storing_more_triangles_than_the_budget_stops_as_it_is_parsed() 
     )
     assert read_objects(payload, budget=ReadBudget(max_triangles=12))
     assert read_objects(two, budget=ReadBudget(max_triangles=24))
-    with pytest.raises(UnreadableObjectsError, match="stores more than 23 triangles"):
+    with pytest.raises(OverBudgetError, match=r"stores more than 23 triangles.*the file is"):
         read_objects(two, budget=ReadBudget(max_triangles=23))
 
 
@@ -640,6 +641,11 @@ def test_model_files_past_what_the_triangle_budget_allows_are_refused(
             )
         }
     )
-    with pytest.raises(UnreadableObjectsError, match=r"inflate past 7,169 bytes.*max_triangles"):
+    with pytest.raises(OverBudgetError) as refused:
         read_objects(padded, budget=small)
+    message = str(refused.value)
+    # What limits it (the budget and its setting) and how large the file is.
+    assert "inflate to 9," in message and "past the 7,169 bytes" in message
+    assert "max_triangles read budget" in message and "SCADBUDDY_READ_MAX_TRIANGLES" in message
+    assert f"(the file is {len(padded):,} bytes; its model files 9," in message
     assert read_objects(padded, budget=ReadBudget(max_triangles=100, max_paint_digits=1))

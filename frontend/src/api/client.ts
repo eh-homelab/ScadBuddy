@@ -106,112 +106,122 @@ import type {
   UrlImport,
   VersionDiff,
   NeedsBackfillProblem,
-} from './types'
+} from "./types";
 import type {
   McpAuthSetting,
   McpAuthUpdate,
   McpTokenCreate,
   McpTokenList,
   MintedMcpToken,
-} from './mcpTokens'
+} from "./mcpTokens";
 import type {
   AiConnectionTest,
   AiCredentialCreate,
   AiCredentialEntry,
   AiCredentialList,
   AiCredentialSave,
-} from './aiCredential'
-import type { PrintFilters } from '../lib/printsQuery'
-import type { DefinitionFile } from '../lib/lsp'
-import type { JsonObject } from '../lib/inputs'
-import type { Within } from '../lib/traceAction'
+} from "./aiCredential";
+import type { PrintFilters } from "../lib/printsQuery";
+import type { DefinitionFile } from "../lib/lsp";
+import type { JsonObject } from "../lib/inputs";
+import type { Within } from "../lib/traceAction";
 
-export const API_BASE = '/api/v1'
+export const API_BASE = "/api/v1";
 
 /**
  * #1424 — the backend's `THUMBNAIL_VERSION` (`api/media.py`): a media thumbnail is
  * cached as `immutable` only when asked for at this version. Bump the two together;
  * `client.test.ts` fails when they differ (#1691).
  */
-export const MEDIA_THUMBNAIL_VERSION = 1
+export const MEDIA_THUMBNAIL_VERSION = 1;
 
 /** What a model thumbnail's URL is keyed on (#179). */
 export type ThumbnailKeyed = Pick<
   ModelSummary,
-  'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id' | 'thumbnail_preview_id'
->
+  | "slug"
+  | "version"
+  | "thumbnail_source"
+  | "thumbnail_output_id"
+  | "thumbnail_preview_id"
+>;
 
 /** #1289 — `GET /jobs/{id}/colours.png`: tile `i` shows where `colours[i]` goes. */
 export interface ColourBreakdown {
-  image: Blob
-  colours: string[]
-  columns: number
+  image: Blob;
+  colours: string[];
+  columns: number;
 }
 
 /** The optional parts of a model upload besides its source (#179). */
 export interface UploadExtras {
   /** What the source is called on the wire, which is where the slug comes from. */
-  filename?: string
+  filename?: string;
   /** A bundled model's `model.json`. */
-  meta?: File
-  thumbnail?: File
-  readme?: File
+  meta?: File;
+  thumbnail?: File;
+  readme?: File;
 }
 
 export class ApiError extends Error {
-  readonly status: number
-  readonly detail: string
-  readonly problem: Problem
+  readonly status: number;
+  readonly detail: string;
+  readonly problem: Problem;
 
   /** A bare `(status, detail)` is the shorthand tests and callers use for a plain refusal. */
   constructor(problemOrStatus: Problem | number, detail?: string) {
     const problem: Problem =
-      typeof problemOrStatus === 'number'
-        ? { title: detail ?? String(problemOrStatus), status: problemOrStatus, detail }
-        : problemOrStatus
+      typeof problemOrStatus === "number"
+        ? {
+            title: detail ?? String(problemOrStatus),
+            status: problemOrStatus,
+            detail,
+          }
+        : problemOrStatus;
     // The detail is the sentence written for a person ("OpenSCAD could not build a
     // customizer schema from this model's source"); the title is the status name.
-    super(problem.detail ?? problem.title)
-    this.name = 'ApiError'
-    this.status = problem.status
-    this.detail = problem.detail ?? problem.title
-    this.problem = problem
+    super(problem.detail ?? problem.title);
+    this.name = "ApiError";
+    this.status = problem.status;
+    this.detail = problem.detail ?? problem.title;
+    this.problem = problem;
   }
 }
-
 
 /**
  * How long a `GET /settings` in flight is shared. A read that has not answered by then
  * may never (fetch has no timeout): later callers start their own instead of joining
  * it, so one hung request cannot wedge every reader of the settings (#1856).
  */
-export const SETTINGS_SHARE_MS = 5_000
+export const SETTINGS_SHARE_MS = 5_000;
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
-let settingsInFlight: { read: Promise<Settings>; started: number } | undefined
+let settingsInFlight: { read: Promise<Settings>; started: number } | undefined;
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  return (await requestWithStatus<T>(path, init)).body
+  return (await requestWithStatus<T>(path, init)).body;
 }
 
 /** `request`, keeping the status: a 202 from an operation's route is not its body. */
-async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
+async function requestWithStatus<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ status: number; body: T }> {
   const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
-      Accept: 'application/json',
+      Accept: "application/json",
       ...(init?.body instanceof FormData || init?.body instanceof Blob
         ? {}
-        : { 'Content-Type': 'application/json' }),
+        : { "Content-Type": "application/json" }),
       ...init?.headers,
     },
-  })
+  });
 
   if (!response.ok) {
-    throw new ApiError(await readProblem(response))
+    throw new ApiError(await readProblem(response));
   }
   if (response.status === 204) {
-    return { status: 204, body: undefined as T }
+    return { status: 204, body: undefined as T };
   }
-  return { status: response.status, body: (await response.json()) as T }
+  return { status: response.status, body: (await response.json()) as T };
 }
 
 /**
@@ -220,11 +230,13 @@ async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{
  * (`GET /models/{slug}/readme`, text/markdown).
  */
 async function requestText(path: string): Promise<string> {
-  const response = await send(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
+  const response = await send(`${API_BASE}${path}`, {
+    headers: { Accept: "text/plain" },
+  });
   if (!response.ok) {
-    throw new ApiError(await readProblem(response))
+    throw new ApiError(await readProblem(response));
   }
-  return await response.text()
+  return await response.text();
 }
 
 /**
@@ -232,28 +244,30 @@ async function requestText(path: string): Promise<string> {
  * described the failure: a proxy's own error page in front of it (Envoy's 504 at 15 s,
  * Cloudflare's 524 at ~100 s), or no answer at all (#470).
  */
-export const UNANSWERED = 'urn:scadbuddy:unanswered'
+export const UNANSWERED = "urn:scadbuddy:unanswered";
 /** The `type` of the problem for an `/api/v1/ai` read the backend's SPA fallback answered. */
-export const AI_NOT_ROUTED = 'urn:scadbuddy:ai-not-routed'
+export const AI_NOT_ROUTED = "urn:scadbuddy:ai-not-routed";
 /** The `type` of the problem for a request the offline browser could not send. */
-export const OFFLINE = 'urn:scadbuddy:offline'
+export const OFFLINE = "urn:scadbuddy:offline";
 /**
  * The `type` of the problem `command()` writes when it stops following an operation
  * still running after `printRunPoll.operationFollowMs`. The client writes it, so it is a
  * `urn:scadbuddy:` type like `UNANSWERED`, not a server's `https://scadbuddy.dev/problems/`.
  */
-export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
+export const OPERATION_UNFINISHED = "urn:scadbuddy:operation-unfinished";
 /**
  * The backend's problem for a Bambuddy call that timed out, dropped or answered an
  * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
  * enqueue, and Bambuddy may have done it.
  */
-export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+export const BAMBUDDY_UNAVAILABLE =
+  "https://scadbuddy.dev/problems/bambuddy-unavailable";
 /**
  * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
  * `needs_backfill` and `output_ids` names every one, to re-render before arranging.
  */
-export const NEEDS_BACKFILL = 'needs_backfill' satisfies NeedsBackfillProblem['code']
+export const NEEDS_BACKFILL =
+  "needs_backfill" satisfies NeedsBackfillProblem["code"];
 
 /**
  * The failure no problem body explained, said by its status. The detail is what the
@@ -261,7 +275,7 @@ export const NEEDS_BACKFILL = 'needs_backfill' satisfies NeedsBackfillProblem['c
  * Over HTTP/2 there is no status text, so the title falls back to the code.
  */
 function unansweredProblem(status: number, statusText: string): Problem {
-  const code = `HTTP ${status}`
+  const code = `HTTP ${status}`;
   const detail =
     status === 504 || status === 524 || status === 408
       ? `The server took too long to answer (${code}).`
@@ -271,16 +285,21 @@ function unansweredProblem(status: number, statusText: string): Problem {
           ? `That is too large for the server to accept (${code}).`
           : status >= 500
             ? `The server hit an error it did not describe (${code}).`
-            : `The server refused the request without saying why (${code}).`
-  return { type: UNANSWERED, title: statusText || code, status, detail }
+            : `The server refused the request without saying why (${code}).`;
+  return { type: UNANSWERED, title: statusText || code, status, detail };
 }
 
 /** A body is a problem when it says something: a `title` or a `detail`. */
-function parsedProblem(body: unknown, status: number, statusText: string): Problem {
-  if (typeof body !== 'object' || body === null) return unansweredProblem(status, statusText)
-  const problem = body as Partial<Problem>
+function parsedProblem(
+  body: unknown,
+  status: number,
+  statusText: string,
+): Problem {
+  if (typeof body !== "object" || body === null)
+    return unansweredProblem(status, statusText);
+  const problem = body as Partial<Problem>;
   if (problem.title === undefined && problem.detail === undefined) {
-    return unansweredProblem(status, statusText)
+    return unansweredProblem(status, statusText);
   }
   // Spread first so the standard members win, but the extensions survive.
   return {
@@ -288,7 +307,7 @@ function parsedProblem(body: unknown, status: number, statusText: string): Probl
     title: problem.title ?? (statusText || `HTTP ${status}`),
     status: problem.status ?? status,
     detail: problem.detail,
-  }
+  };
 }
 
 /**
@@ -296,57 +315,70 @@ function parsedProblem(body: unknown, status: number, statusText: string): Probl
  * connection test, #1000). Only the delay form; an HTTP date is left out.
  */
 function withRetryAfter(problem: Problem, header: string | null): Problem {
-  if (problem.status !== 429 && problem.status !== 503) return problem
-  const seconds = Number(header)
-  return header && seconds > 0 ? { ...problem, retry_after: seconds } : problem
+  if (problem.status !== 429 && problem.status !== 503) return problem;
+  const seconds = Number(header);
+  return header && seconds > 0 ? { ...problem, retry_after: seconds } : problem;
 }
 
 async function readProblem(response: Response): Promise<Problem> {
-  let body: unknown
+  let body: unknown;
   try {
-    body = await response.json()
+    body = await response.json();
   } catch {
-    return withRetryAfter(unansweredProblem(response.status, response.statusText), response.headers.get('Retry-After'))
+    return withRetryAfter(
+      unansweredProblem(response.status, response.statusText),
+      response.headers.get("Retry-After"),
+    );
   }
-  return withRetryAfter(parsedProblem(body, response.status, response.statusText), response.headers.get('Retry-After'))
+  return withRetryAfter(
+    parsedProblem(body, response.status, response.statusText),
+    response.headers.get("Retry-After"),
+  );
 }
 
 /** `readProblem` for an `XMLHttpRequest` that has finished. */
 function xhrProblem(xhr: XMLHttpRequest): Problem {
-  let body: unknown
+  let body: unknown;
   try {
-    body = JSON.parse(xhr.responseText)
+    body = JSON.parse(xhr.responseText);
   } catch {
-    return withRetryAfter(unansweredProblem(xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
+    return withRetryAfter(
+      unansweredProblem(xhr.status, xhr.statusText),
+      xhr.getResponseHeader("Retry-After"),
+    );
   }
-  return withRetryAfter(parsedProblem(body, xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
+  return withRetryAfter(
+    parsedProblem(body, xhr.status, xhr.statusText),
+    xhr.getResponseHeader("Retry-After"),
+  );
 }
 
 /** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */
 async function send(url: string, init?: RequestInit): Promise<Response> {
   // Read before sending: a connection that goes offline while a long request waits
   // may already have delivered it, so that is "no answer", not "could not send".
-  const offline = navigator.onLine === false
+  const offline = navigator.onLine === false;
   try {
-    return await fetch(url, init)
+    return await fetch(url, init);
   } catch (cause) {
-    if (init?.signal?.aborted) throw cause
+    if (init?.signal?.aborted) throw cause;
     throw new ApiError(
       offline
         ? {
             type: OFFLINE,
-            title: 'Offline',
+            title: "Offline",
             status: 0,
-            detail: 'This browser is offline, so ScadBuddy could not reach its server.',
+            detail:
+              "This browser is offline, so ScadBuddy could not reach its server.",
           }
         : {
             type: UNANSWERED,
-            title: 'No answer',
+            title: "No answer",
             status: 0,
             detail:
-              'ScadBuddy could not reach its server, or the connection dropped before it answered.',
+              "ScadBuddy could not reach its server, or the connection dropped before it answered.",
           },
-    )
+    );
   }
 }
 
@@ -363,16 +395,18 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
-  if (!(error instanceof ApiError)) return false
+  if (!(error instanceof ApiError)) return false;
   // Its run may be checking still, and will print once it is accepted (#1052).
-  if (error.problem.type === STILL_ACCEPTING) return true
+  if (error.problem.type === STILL_ACCEPTING) return true;
   // Temporal may hold a start of it: only the same key follows it (review #1316 (13) 1a).
-  if (error.problem.may_have_started === true) return true
-  if (error.problem.type === OPERATION_UNFINISHED) return true
-  if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
-  if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
-  if (error.problem.type !== UNANSWERED) return false
-  return [0, 502, 504, 524].includes(error.status)
+  if (error.problem.may_have_started === true) return true;
+  if (error.problem.type === OPERATION_UNFINISHED) return true;
+  if (typeof error.problem.may_have_queued === "boolean")
+    return error.problem.may_have_queued;
+  if (error.problem.type === BAMBUDDY_UNAVAILABLE)
+    return bambuddyUnanswered(error.problem);
+  if (error.problem.type !== UNANSWERED) return false;
+  return [0, 502, 504, 524].includes(error.status);
 }
 
 /**
@@ -382,12 +416,12 @@ export function mayHaveRun(error: unknown): boolean {
  * unless it is a proxy's in front of Bambuddy that gave up waiting.
  */
 function bambuddyUnanswered(problem: Problem): boolean {
-  const answered = problem.bambuddy_status
-  if (typeof answered === 'number') return [502, 504, 524].includes(answered)
-  return problem.status === 502 || problem.status === 504
+  const answered = problem.bambuddy_status;
+  if (typeof answered === "number") return [502, 504, 524].includes(answered);
+  return problem.status === 502 || problem.status === 504;
 }
 
-const seg = encodeURIComponent
+const seg = encodeURIComponent;
 
 /**
  * How often `runPrint` reads a running print run (#470), how many times it tries a
@@ -412,7 +446,7 @@ export const printRunPoll = {
   acceptingMs: 240_000,
   followMs: 3_600_000,
   operationFollowMs: 1_260_000,
-}
+};
 
 /**
  * How long the print dialog waits for one rack-algorithm save before counting it as
@@ -424,17 +458,17 @@ export const printRunPoll = {
  * the store is not bounded, so a save held up there can still land after the next one:
  * each save's version orders them (#1216), and the server refuses the older one.
  */
-export const rackAlgorithmSave = { timeoutMs: 25_000 }
+export const rackAlgorithmSave = { timeoutMs: 25_000 };
 
-let lastRackAlgorithmVersion = 0
+let lastRackAlgorithmVersion = 0;
 /**
  * #1216 — the version a rack-algorithm save is sent with: the clock, but never less than
  * one above the last, so it grows across saves, dialogs and page loads in this browser.
  * A count that started again at 1 on each load would be refused for good after a reload.
  */
 export function nextRackAlgorithmVersion(): number {
-  lastRackAlgorithmVersion = Math.max(Date.now(), lastRackAlgorithmVersion + 1)
-  return lastRackAlgorithmVersion
+  lastRackAlgorithmVersion = Math.max(Date.now(), lastRackAlgorithmVersion + 1);
+  return lastRackAlgorithmVersion;
 }
 
 /**
@@ -443,14 +477,18 @@ export function nextRackAlgorithmVersion(): number {
  * `getRandomValues`, not `randomUUID`, which only secure contexts have.
  */
 export function newRequestId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16))
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 /** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
-export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+export const STILL_ACCEPTING =
+  "https://scadbuddy.dev/problems/command-still-accepting";
 /** Temporal did not answer: nothing was started, or a start that reached it is unknown. */
-export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-unavailable'
+export const TEMPORAL_UNAVAILABLE =
+  "https://scadbuddy.dev/problems/temporal-unavailable";
 
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
@@ -459,29 +497,32 @@ export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-una
  * may hold a start of it (`may_have_started`, review #1066 (10) 4): the same key follows it.
  */
 function unanswered(caught: unknown): boolean {
-  if (!(caught instanceof ApiError)) return false
-  if (caught.problem.type === STILL_ACCEPTING) return true
-  if (caught.problem.may_have_started === true) return true
-  return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
+  if (!(caught instanceof ApiError)) return false;
+  if (caught.problem.type === STILL_ACCEPTING) return true;
+  if (caught.problem.may_have_started === true) return true;
+  return (
+    caught.problem.type === UNANSWERED &&
+    [0, 502, 503, 504, 524].includes(caught.status)
+  );
 }
 
 /** `ms` of waiting that `signal` cuts short, rejecting with its reason. */
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason)
-      return
+      reject(signal.reason);
+      return;
     }
     const abort = () => {
-      clearTimeout(timer)
-      reject(signal?.reason)
-    }
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
     const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', abort)
-      resolve()
-    }, ms)
-    signal?.addEventListener('abort', abort, { once: true })
-  })
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 /**
@@ -495,36 +536,48 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
 async function reattach<T>(
   attempt: () => Promise<T>,
   signal?: AbortSignal,
-  { bounded = false, finish = false, within }: { bounded?: boolean; finish?: boolean; within?: Within } = {},
+  {
+    bounded = false,
+    finish = false,
+    within,
+  }: { bounded?: boolean; finish?: boolean; within?: Within } = {},
 ): Promise<T> {
   // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
-  const began = performance.now()
-  let last = false
+  const began = performance.now();
+  let last = false;
   for (let tries = 0; ; ) {
     try {
-      return await (within ? within(attempt) : attempt())
+      return await (within ? within(attempt) : attempt());
     } catch (caught) {
-      if (last || !unanswered(caught)) throw caught
+      if (last || !unanswered(caught)) throw caught;
       if (signal?.aborted) {
-        if (!finish) throw caught
-        last = true
-        continue
+        if (!finish) throw caught;
+        last = true;
+        continue;
       }
-      const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
+      const accepting =
+        caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING;
       if (
         accepting && !bounded
           ? performance.now() - began >= printRunPoll.acceptingMs
           : tries++ >= printRunPoll.reattempts
       ) {
-        throw caught
+        throw caught;
       }
       // The server's Retry-After paces a re-send it answered (review #1061 4a).
-      const after = caught instanceof ApiError ? caught.problem.retry_after : undefined
+      const after =
+        caught instanceof ApiError ? caught.problem.retry_after : undefined;
       try {
-        await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+        await wait(
+          Math.max(
+            printRunPoll.intervalMs,
+            typeof after === "number" ? after * 1000 : 0,
+          ),
+          signal,
+        );
       } catch (reason) {
-        if (!finish) throw reason
-        last = true
+        if (!finish) throw reason;
+        last = true;
       }
     }
   }
@@ -541,12 +594,24 @@ export async function command<T>(
   path: string,
   init: RequestInit = {},
   /** Where the operation is followed: the backend's, or the agent's own (`/ai/operations`, #1055). */
-  operations = '/operations',
+  operations = "/operations",
+  /**
+   * The press's key. A caller offering "Try again" after a failure passes the failed
+   * attempt's, so the retry follows a start that may have happened rather than doing it
+   * a second time; a new press gets a new one.
+   */
+  key: string = newRequestId(),
 ): Promise<T> {
-  const signal = init.signal ?? undefined
-  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
-  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
-  return followOperation<T>(first, signal, operations)
+  const signal = init.signal ?? undefined;
+  const headers = {
+    ...(init.headers as Record<string, string> | undefined),
+    "Idempotency-Key": key,
+  };
+  const first = await reattach(
+    () => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }),
+    signal,
+  );
+  return followOperation<T>(first, signal, operations);
 }
 
 /**
@@ -557,35 +622,38 @@ export async function command<T>(
 async function followOperation<T>(
   first: { status: number; body: T | OperationAccepted },
   signal?: AbortSignal,
-  operations = '/operations',
+  operations = "/operations",
 ): Promise<T> {
-  if (first.status !== 202) return first.body as T
-  let op: Operation = first.body as OperationAccepted
-  const began = performance.now()
-  while (op.status === 'running') {
+  if (first.status !== 202) return first.body as T;
+  let op: Operation = first.body as OperationAccepted;
+  const began = performance.now();
+  while (op.status === "running") {
     if (performance.now() - began >= printRunPoll.operationFollowMs) {
       throw new ApiError({
         type: OPERATION_UNFINISHED,
-        title: 'Still running',
+        title: "Still running",
         status: 504,
         detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,
-      })
+      });
     }
-    await wait(printRunPoll.intervalMs, signal)
-    const id = op.id
-    op = await reattach(() => request<Operation>(`${operations}/${seg(id)}`, { signal }), signal)
+    await wait(printRunPoll.intervalMs, signal);
+    const id = op.id;
+    op = await reattach(
+      () => request<Operation>(`${operations}/${seg(id)}`, { signal }),
+      signal,
+    );
   }
-  if (op.status === 'failed') {
-    const error = op.error
+  if (op.status === "failed") {
+    const error = op.error;
     throw new ApiError({
       ...error?.extensions,
       type: error?.type,
-      title: error?.title ?? 'Failed',
+      title: error?.title ?? "Failed",
       status: error?.status ?? 500,
-      detail: error?.detail ?? 'The operation ended without a result.',
-    })
+      detail: error?.detail ?? "The operation ended without a result.",
+    });
   }
-  return (op.result ?? undefined) as T
+  return (op.result ?? undefined) as T;
 }
 
 /**
@@ -604,43 +672,52 @@ async function followPrintRun(
   within?: Within,
 ): Promise<PrintRunResult> {
   let run = await reattach(
-    () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
+    () =>
+      request<PrintRun>(path, {
+        method: "POST",
+        body: JSON.stringify(body),
+        signal,
+      }),
     signal,
     { within },
-  )
-  const began = performance.now()
-  while (run.status === 'running') {
+  );
+  const began = performance.now();
+  while (run.status === "running") {
     if (performance.now() - began >= printRunPoll.followMs) {
       throw new ApiError({
-        type: 'urn:scadbuddy:print-run-unfinished',
-        title: 'Still preparing',
+        type: "urn:scadbuddy:print-run-unfinished",
+        title: "Still preparing",
         status: 504,
-        detail: 'ScadBuddy is still preparing this print after an hour. Check Bambuddy’s queue before printing it again.',
+        detail:
+          "ScadBuddy is still preparing this print after an hour. Check Bambuddy’s queue before printing it again.",
         // It may be queued by now: the dialog says to check before printing again.
         may_have_queued: true,
-      })
+      });
     }
-    await wait(printRunPoll.intervalMs, signal)
-    const id = run.id
-    run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
+    await wait(printRunPoll.intervalMs, signal);
+    const id = run.id;
+    run = await reattach(
+      () => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }),
+      signal,
+    );
   }
-  if (run.status === 'failed' || !run.result) {
-    const error = run.error
-    const detail = error?.detail ?? 'The print run ended without a result.'
+  if (run.status === "failed" || !run.result) {
+    const error = run.error;
+    const detail = error?.detail ?? "The print run ended without a result.";
     throw new ApiError({
       ...error?.extensions,
       // The problem's type, so the failure reads as a synchronous answer would have.
       type: error?.type,
-      title: error?.title ?? 'Print failed',
+      title: error?.title ?? "Print failed",
       status: error?.status ?? 500,
       detail,
       // Whether the run had already tried to queue (a queue call that timed out, a
       // later plate failing after an earlier one was queued, or a run lost while
       // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
       may_have_queued: run.may_have_queued,
-    })
+    });
   }
-  return run.result
+  return run.result;
 }
 
 export const api = {
@@ -648,28 +725,37 @@ export const api = {
   // a decision is an operation, keyed per call (`command`); a stale one is a 409
   // `stale-entry`.
   listFlowRuns: (query: { session?: string; definition_id?: string } = {}) => {
-    const params = new URLSearchParams()
-    if (query.session) params.set('session', query.session)
-    if (query.definition_id) params.set('definition_id', query.definition_id)
-    const search = params.toString()
-    return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ''}`)
+    const params = new URLSearchParams();
+    if (query.session) params.set("session", query.session);
+    if (query.definition_id) params.set("definition_id", query.definition_id);
+    const search = params.toString();
+    return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ""}`);
   },
 
   getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
 
   answerFlowRun: (id: string, callId: string, answer: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify({ call_id: callId, answer }),
     }),
 
-  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string) =>
+  decideFlowRun: (
+    id: string,
+    callId: string,
+    approved: boolean,
+    reason?: string,
+  ) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
-      method: 'POST',
-      body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+      method: "POST",
+      body: JSON.stringify({
+        call_id: callId,
+        approved,
+        ...(reason ? { reason } : {}),
+      }),
     }),
 
-  listModels: () => request<ModelSummary[]>('/models'),
+  listModels: () => request<ModelSummary[]>("/models"),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
@@ -679,19 +765,22 @@ export const api = {
    * dropped `models/<slug>/` sends `model.scad`, which would otherwise become `model`.
    */
   uploadModel: (file: File, extras: UploadExtras = {}) => {
-    const body = new FormData()
-    body.append('file', file, extras.filename ?? file.name)
-    if (extras.meta) body.append('meta', extras.meta)
-    if (extras.thumbnail) body.append('thumbnail', extras.thumbnail)
-    if (extras.readme) body.append('readme', extras.readme)
-    return command<ModelSummary>('/models', { method: 'POST', body })
+    const body = new FormData();
+    body.append("file", file, extras.filename ?? file.name);
+    if (extras.meta) body.append("meta", extras.meta);
+    if (extras.thumbnail) body.append("thumbnail", extras.thumbnail);
+    if (extras.readme) body.append("readme", extras.readme);
+    return command<ModelSummary>("/models", { method: "POST", body });
   },
 
   /** Multipart with a `file` part, like the output thumbnail PUT. */
   setThumbnail: (slug: string, png: Blob) => {
-    const body = new FormData()
-    body.append('file', png, 'thumbnail.png')
-    return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+    const body = new FormData();
+    body.append("file", png, "thumbnail.png");
+    return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, {
+      method: "PUT",
+      body,
+    });
   },
 
   /**
@@ -699,59 +788,70 @@ export const api = {
    * a generated model falls back to its first output's plate image.
    */
   removeThumbnail: (slug: string) =>
-    command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, {
+      method: "DELETE",
+    }),
 
   /** The README's Markdown, or null when the model has none. */
   getReadme: async (slug: string): Promise<string | null> => {
     try {
-      return await requestText(`/models/${seg(slug)}/readme`)
+      return await requestText(`/models/${seg(slug)}/readme`);
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 404) return null
-      throw caught
+      if (caught instanceof ApiError && caught.status === 404) return null;
+      throw caught;
     }
   },
 
   setReadme: (slug: string, content: string) =>
     command<ModelSummary>(`/models/${seg(slug)}/readme`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify({ content }),
     }),
 
   removeReadme: (slug: string) =>
-    command<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/readme`, { method: "DELETE" }),
 
   /** The template's shipped presets, then the ones saved on it. */
-  listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
+  listPresets: (slug: string) =>
+    request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
 
   createPreset: (slug: string, body: ParamPresetCreate) =>
     command<ParamPreset>(`/models/${seg(slug)}/presets`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
   updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
     command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
-      method: 'PATCH',
+      method: "PATCH",
       body: JSON.stringify(body),
     }),
 
   /** Copies any preset, shipped or saved, to a new saved one with the same values. */
   duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
     command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
   deletePreset: (slug: string, id: string) =>
-    request<void>(`/models/${seg(slug)}/presets/${seg(id)}`, { method: 'DELETE' }),
+    request<void>(`/models/${seg(slug)}/presets/${seg(id)}`, {
+      method: "DELETE",
+    }),
 
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
-    command<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>("/models", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /** #153 — fetched on the server, then created through the same path as a paste. */
   importModel: (body: UrlImport) =>
-    command<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>("/models/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
 
@@ -761,10 +861,21 @@ export const api = {
    * edit was made against, a model that has moved past it is a 409 whose `current`
    * names where it is now, and nothing is written (#1054).
    */
-  replaceSource: (slug: string, source: string, force = false, message?: string, base?: string) =>
+  replaceSource: (
+    slug: string,
+    source: string,
+    force = false,
+    message?: string,
+    base?: string,
+  ) =>
     command<ModelSummary>(`/models/${seg(slug)}/source`, {
-      method: 'PUT',
-      body: JSON.stringify({ source, force, message: message ?? null, base: base ?? null }),
+      method: "PUT",
+      body: JSON.stringify({
+        source,
+        force,
+        message: message ?? null,
+        base: base ?? null,
+      }),
     }),
 
   /**
@@ -778,68 +889,95 @@ export const api = {
    * check the user is waiting for needs.
    */
   checkSource: (source: string, slug?: string, signal?: AbortSignal) =>
-    request<SourceCheck>('/models/check', {
-      method: 'POST',
+    request<SourceCheck>("/models/check", {
+      method: "POST",
       body: JSON.stringify({ source, slug: slug ?? null }),
       signal,
     }),
 
   /** Metadata: name, description, tags. Libraries have their own routes below. */
   updateModel: (slug: string, patch: ModelPatch) =>
-    command<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    command<ModelSummary>(`/models/${seg(slug)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
 
   /** #156 — a new template of mine copied from `slug`, recording it as `upstream`. */
   duplicateModel: (slug: string, name: string) =>
     command<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
   /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
   deleteModel: (slug: string, force = false) =>
-    command<unknown>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }).then(() => undefined),
+    command<unknown>(`/models/${seg(slug)}${force ? "?force=true" : ""}`, {
+      method: "DELETE",
+    }).then(() => undefined),
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
-  getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
+  getUpstream: (slug: string) =>
+    request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
 
   /** A conflicted merge answers 409 with `merged` and `merge_base` and writes nothing. */
   mergeUpstream: (slug: string) =>
-    command<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
+    command<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, {
+      method: "POST",
+    }),
 
   dismissUpstream: (slug: string) =>
-    command<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, {
+      method: "POST",
+    }),
 
   detachUpstream: (slug: string) =>
-    command<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, {
+      method: "POST",
+    }),
 
   /**
    * Saves the resolution of a conflicted upstream merge: the same write as
    * `replaceSource`, which also advances the duplicate's `base` to `mergeBase`.
    */
-  resolveUpstreamMerge: (slug: string, source: string, mergeBase: string, force = false) =>
-    command<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
-      method: 'PUT',
-      body: JSON.stringify({ source, force, message: null }),
-    }),
+  resolveUpstreamMerge: (
+    slug: string,
+    source: string,
+    mergeBase: string,
+    force = false,
+  ) =>
+    command<ModelSummary>(
+      `/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ source, force, message: null }),
+      },
+    ),
 
   /** #1290 — the model's `.scad` files, `model.scad` first (`GET /models/{slug}/files`). */
-  listSourceFiles: (slug: string) => request<SourceFile[]>(`/models/${seg(slug)}/files`),
+  listSourceFiles: (slug: string) =>
+    request<SourceFile[]>(`/models/${seg(slug)}/files`),
 
   /**
    * #1290 — writes a `.scad` file beside `model.scad` as one revision. With `base`, a
    * 409 naming the `current` revision when the model has moved on since, writing
    * nothing. `model.scad` itself is written with `replaceSource`.
    */
-  writeSourceFile: (slug: string, name: string, content: string, base?: string) =>
+  writeSourceFile: (
+    slug: string,
+    name: string,
+    content: string,
+    base?: string,
+  ) =>
     command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify({ content, message: null, base: base ?? null }),
     }),
 
   /** #1290 — removes a `.scad` file beside `model.scad` as one revision. */
   deleteSourceFile: (slug: string, name: string) =>
-    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, { method: 'DELETE' }),
-
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, {
+      method: "DELETE",
+    }),
 
   /**
    * The `v` param is only there to change the URL when the image does: an `<img>`
@@ -857,18 +995,20 @@ export const api = {
       model.thumbnail_output_id,
       model.thumbnail_preview_id,
     ]
-      .map((part) => part ?? '')
-      .join('.')
-    return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '...' ? '' : `?v=${seg(key)}`}`
+      .map((part) => part ?? "")
+      .join(".");
+    return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === "..." ? "" : `?v=${seg(key)}`}`;
   },
 
   /** #274 — one image or video of a template. Its id never changes its contents. */
-  mediaUrl: (slug: string, item: Pick<MediaView, 'id'>) =>
+  mediaUrl: (slug: string, item: Pick<MediaView, "id">) =>
     `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}`,
 
   /** #274 — a video's poster image, or undefined when the item has none. */
-  mediaPosterUrl: (slug: string, item: Pick<MediaView, 'id' | 'poster'>) =>
-    item.poster ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster` : undefined,
+  mediaPosterUrl: (slug: string, item: Pick<MediaView, "id" | "poster">) =>
+    item.poster
+      ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster`
+      : undefined,
 
   /**
    * #624 — a small copy of an image or of a video's poster, for a strip of
@@ -876,10 +1016,14 @@ export const api = {
    * cached as `immutable`, so the URL carries the thumbnail version (#1424).
    * `card` asks for a larger copy, sized for a catalogue card's cover (#1034).
    */
-  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>, size?: 'card') =>
-    item.kind === 'video' && !item.poster
+  mediaThumbnailUrl: (
+    slug: string,
+    item: Pick<MediaView, "id" | "kind" | "poster">,
+    size?: "card",
+  ) =>
+    item.kind === "video" && !item.poster
       ? undefined
-      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}${size ? `&size=${size}` : ''}`,
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}${size ? `&size=${size}` : ""}`,
 
   /**
    * #274 — adds an image or video as the template's last item. XHR rather than
@@ -894,56 +1038,68 @@ export const api = {
   ): Promise<ModelSummary> => {
     // A command (#1054): one key for this upload, kept on a re-send after an answer
     // that never arrived, so the server adds the item once.
-    const key = newRequestId()
+    const key = newRequestId();
     const send = () =>
-      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>((resolve, reject) => {
-        const body = new FormData()
-        body.append('file', file)
-        if (options.caption) body.append('caption', options.caption)
-        if (options.poster) body.append('poster', options.poster)
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-        xhr.setRequestHeader('Accept', 'application/json')
-        xhr.setRequestHeader('Idempotency-Key', key)
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-        })
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | OperationAccepted })
-            return
-          }
-          reject(new ApiError(xhrProblem(xhr)))
-        }
-        // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-        // have landed, and `mayHaveRun` says so.
-        xhr.onerror = () =>
-          reject(
-            new ApiError({
-              type: UNANSWERED,
-              title: 'The upload failed',
-              status: 0,
-              detail: 'The upload failed',
-            }),
-          )
-        xhr.onabort = () =>
-          reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-        xhr.send(body)
-      })
+      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>(
+        (resolve, reject) => {
+          const body = new FormData();
+          body.append("file", file);
+          if (options.caption) body.append("caption", options.caption);
+          if (options.poster) body.append("poster", options.poster);
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", `${API_BASE}/models/${seg(slug)}/media`);
+          xhr.setRequestHeader("Accept", "application/json");
+          xhr.setRequestHeader("Idempotency-Key", key);
+          xhr.upload.addEventListener("progress", (event) => {
+            if (event.lengthComputable && event.total > 0)
+              onProgress?.(event.loaded / event.total);
+          });
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve({
+                status: xhr.status,
+                body: JSON.parse(xhr.responseText) as
+                  | ModelSummary
+                  | OperationAccepted,
+              });
+              return;
+            }
+            reject(new ApiError(xhrProblem(xhr)));
+          };
+          // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+          // have landed, and `mayHaveRun` says so.
+          xhr.onerror = () =>
+            reject(
+              new ApiError({
+                type: UNANSWERED,
+                title: "The upload failed",
+                status: 0,
+                detail: "The upload failed",
+              }),
+            );
+          xhr.onabort = () =>
+            reject(
+              new ApiError({ title: "The upload was cancelled", status: 0 }),
+            );
+          xhr.send(body);
+        },
+      );
     // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
-    return reattach(send, undefined, { bounded: true }).then((first) => followOperation<ModelSummary>(first))
+    return reattach(send, undefined, { bounded: true }).then((first) =>
+      followOperation<ModelSummary>(first),
+    );
   },
 
   patchMedia: (slug: string, id: string, caption: string) =>
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
-      method: 'PATCH',
+      method: "PATCH",
       body: JSON.stringify({ caption }),
     }),
 
   /** `ids` names every item once, in the new order; the first is the cover. */
   reorderMedia: (slug: string, ids: string[]) =>
     command<ModelSummary>(`/models/${seg(slug)}/media/order`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify({ ids }),
     }),
 
@@ -954,29 +1110,34 @@ export const api = {
    */
   setMediaCover: (slug: string, id: string | null) =>
     command<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify({ id }),
     }),
 
   deleteMedia: (slug: string, id: string) =>
-    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
+      method: "DELETE",
+    }),
 
   /**
    * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
    * SHA-256 of what the server kept) is the value the render takes.
    */
   uploadAsset: (slug: string, file: File) => {
-    const body = new FormData()
-    body.append('file', file)
-    return command<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
+    const body = new FormData();
+    body.append("file", file);
+    return command<Asset>(`/models/${seg(slug)}/assets`, {
+      method: "POST",
+      body,
+    });
   },
 
   getAsset: (slug: string, id: string) =>
     request<Asset>(`/models/${seg(slug)}/assets/${seg(id)}`),
 
   /** #296 — the upload store's size against its caps, for Settings. */
-  getAssetUsage: () => request<AssetUsage>('/assets/usage'),
-  getStoreUsage: () => request<StoreUsage>('/store/usage'),
+  getAssetUsage: () => request<AssetUsage>("/assets/usage"),
+  getStoreUsage: () => request<StoreUsage>("/store/usage"),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
@@ -986,7 +1147,7 @@ export const api = {
    * `samples`), at `version` when customizing an older revision.
    */
   sampleContentUrl: (slug: string, name: string, version?: string) =>
-    `${API_BASE}/models/${seg(slug)}/samples/${seg(name)}${version ? `?version=${seg(version)}` : ''}`,
+    `${API_BASE}/models/${seg(slug)}/samples/${seg(name)}${version ? `?version=${seg(version)}` : ""}`,
 
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>
@@ -997,31 +1158,42 @@ export const api = {
    * library it pins (`GET /models/{slug}/files/{path}`, `…/libraries/{name}/files/{path}`).
    */
   getDefinitionFile: (slug: string, file: DefinitionFile) => {
-    const path = file.path.split('/').map(seg).join('/')
-    const base = `/models/${seg(slug)}`
-    if (!file.library) return requestText(`${base}/files/${path}`)
-    const commit = file.commit ? `?commit=${seg(file.commit)}` : ''
-    return requestText(`${base}/libraries/${seg(file.library)}/files/${path}${commit}`)
+    const path = file.path.split("/").map(seg).join("/");
+    const base = `/models/${seg(slug)}`;
+    if (!file.library) return requestText(`${base}/files/${path}`);
+    const commit = file.commit ? `?commit=${seg(file.commit)}` : "";
+    return requestText(
+      `${base}/libraries/${seg(file.library)}/files/${path}${commit}`,
+    );
   },
 
   /** A `version` reads that revision's schema, and its `ui`, instead of the model's current one. */
-  getSchema: (slug: string, version?: string): Promise<CustomizerSchema | RevisionSchema> =>
+  getSchema: (
+    slug: string,
+    version?: string,
+  ): Promise<CustomizerSchema | RevisionSchema> =>
     version
-      ? request<RevisionSchema>(`/models/${seg(slug)}/versions/${seg(version)}/schema`)
+      ? request<RevisionSchema>(
+          `/models/${seg(slug)}/versions/${seg(version)}/schema`,
+        )
       : request<CustomizerSchema>(`/models/${seg(slug)}/schema`),
 
-  listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
+  listVersions: (slug: string) =>
+    request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
 
   /** `base` omitted diffs against the revision's parent. */
   getVersionDiff: (slug: string, version: string, base?: string) =>
     request<VersionDiff>(
-      `/models/${seg(slug)}/versions/${seg(version)}/diff${base ? `?base=${seg(base)}` : ''}`,
+      `/models/${seg(slug)}/versions/${seg(version)}/diff${base ? `?base=${seg(base)}` : ""}`,
     ),
 
   restoreVersion: (slug: string, version: string) =>
-    command<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
-      method: 'POST',
-    }),
+    command<ModelVersion>(
+      `/models/${seg(slug)}/versions/${seg(version)}/restore`,
+      {
+        method: "POST",
+      },
+    ),
 
   /**
    * `version` renders an old revision without restoring it ("Customize this version").
@@ -1045,11 +1217,11 @@ export const api = {
   ) => {
     // Sent again while the server is still accepting it (#1053), with one
     // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
-    const headers = { 'Idempotency-Key': requestId }
+    const headers = { "Idempotency-Key": requestId };
     return reattach(
       () =>
         request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-          method: 'POST',
+          method: "POST",
           headers,
           body: JSON.stringify({
             inputs,
@@ -1059,7 +1231,7 @@ export const api = {
         }),
       signal,
       { finish: true },
-    )
+    );
   },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
@@ -1070,51 +1242,81 @@ export const api = {
    * #1289 — the job drawn once per colour (`GET /jobs/{id}/colours.png`): the grid, and
    * its tiles' colours row by row with the grid's width, from the route's own headers.
    */
-  getJobColours: async (jobId: string, view: string, signal?: AbortSignal): Promise<ColourBreakdown> => {
-    const response = await send(`${API_BASE}/jobs/${seg(jobId)}/colours.png?view=${encodeURIComponent(view)}`, {
-      headers: { Accept: 'image/png' },
-      ...(signal ? { signal } : {}),
-    })
-    if (!response.ok) throw new ApiError(await readProblem(response))
-    const colours = (response.headers.get('X-ScadBuddy-Colours') ?? '').split(',').filter(Boolean)
-    const columns = Number(response.headers.get('X-ScadBuddy-Colour-Columns'))
+  getJobColours: async (
+    jobId: string,
+    view: string,
+    signal?: AbortSignal,
+  ): Promise<ColourBreakdown> => {
+    const response = await send(
+      `${API_BASE}/jobs/${seg(jobId)}/colours.png?view=${encodeURIComponent(view)}`,
+      {
+        headers: { Accept: "image/png" },
+        ...(signal ? { signal } : {}),
+      },
+    );
+    if (!response.ok) throw new ApiError(await readProblem(response));
+    const colours = (response.headers.get("X-ScadBuddy-Colours") ?? "")
+      .split(",")
+      .filter(Boolean);
+    const columns = Number(response.headers.get("X-ScadBuddy-Colour-Columns"));
     if (colours.length === 0 || !Number.isInteger(columns) || columns < 1) {
-      throw new ApiError({ title: 'The colour breakdown came without its legend', status: response.status })
+      throw new ApiError({
+        title: "The colour breakdown came without its legend",
+        status: response.status,
+      });
     }
-    return { image: await response.blob(), colours, columns }
+    return { image: await response.blob(), colours, columns };
   },
 
   /** A file under a template's `ui/` (spec 2026-09-27 §4.1): pinned by revision when there is one. */
   uiFileUrl: (slug: string, version: string | undefined, path: string) =>
-    `${API_BASE}/models/${seg(slug)}${version ? `/versions/${seg(version)}` : ''}/ui/${path
-      .split('/')
+    `${API_BASE}/models/${seg(slug)}${version ? `/versions/${seg(version)}` : ""}/ui/${path
+      .split("/")
       .map(seg)
-      .join('/')}`,
+      .join("/")}`,
 
   /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
   arrangeOutputs: (body: ArrangeRequest) =>
-    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+    request<Job>("/outputs/arrange", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
   backfillOutput: (outputId: string) =>
-    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
+    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: "POST" }),
 
-  /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
-    command<Output>(`/models/${seg(slug)}/outputs`, {
-      method: 'POST',
-      body: JSON.stringify({
-        job_id: jobId,
-        name: name ?? null,
-        ...(inputs ? { inputs } : {}),
-        ...(index !== undefined ? { index } : {}),
-      }),
-    }),
+  /**
+   * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
+   * default. `key` is a retried press's (`command`), so the retry saves one output.
+   */
+  createOutput: (
+    slug: string,
+    jobId: string,
+    name?: string,
+    inputs?: JsonObject,
+    index?: number,
+    key?: string,
+  ) =>
+    command<Output>(
+      `/models/${seg(slug)}/outputs`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          job_id: jobId,
+          name: name ?? null,
+          ...(inputs ? { inputs } : {}),
+          ...(index !== undefined ? { index } : {}),
+        }),
+      },
+      undefined,
+      key,
+    ),
 
   /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
   migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>
     request<MigrateResult>(`/models/${seg(slug)}/inputs/migrate`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify({ inputs, version: version ?? null }),
     }),
 
@@ -1122,18 +1324,23 @@ export const api = {
   outputFileUrl: (outputId: string, name: string) =>
     `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
-  listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
+  listOutputs: (slug: string) =>
+    request<Output[]>(`/models/${seg(slug)}/outputs`),
 
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
-  getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
+  getEditTarget: (id: string) =>
+    request<EditTarget>(`/outputs/${seg(id)}/edit`),
 
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
-    command<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
-      method: 'DELETE',
-    }),
+    command<void>(
+      `/outputs/${seg(id)}${deleteInboxCopies ? "?delete_inbox_copies=true" : ""}`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   downloadUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/model.3mf`,
 
@@ -1142,22 +1349,27 @@ export const api = {
    * asks the printer, so the page does it only when told to.
    */
   getPrint: (archiveId: number, { printerMedia = false } = {}) =>
-    request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
+    request<PrintDetail>(
+      `/prints/${archiveId}${printerMedia ? "?printer_media=1" : ""}`,
+    ),
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
-  reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+  reprint: (archiveId: number) =>
+    command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: "POST" }),
 
   /** #311 — attaches a timelapse still on the printer to the print. */
   pullTimelapse: (archiveId: number, filename: string) =>
     command<void>(`/prints/${archiveId}/timelapse/pull`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify({ filename }),
     }),
 
-  outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
+  outputThumbnailUrl: (id: string) =>
+    `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
   /** #83 — the 3MF's plates; ScadBuddy's own renders are always one. */
-  getOutputPlates: (id: string) => request<OutputPlate[]>(`/outputs/${seg(id)}/plates`),
+  getOutputPlates: (id: string) =>
+    request<OutputPlate[]>(`/outputs/${seg(id)}/plates`),
 
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
@@ -1165,29 +1377,35 @@ export const api = {
   /** #1723 — the output's preview mesh, every part in its colour. */
   /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
   outputPreviewGlbUrl: (id: string, plate?: number) =>
-    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? "" : `?plate=${plate}`}`,
 
   sendOutput: (id: string, body: SendRequest) =>
-    command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
+    command<SendResult>(`/outputs/${seg(id)}/send`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /** Multipart with a `file` part — not a raw PNG body, and no `.png` in the path. */
   putThumbnail: (outputId: string, png: Blob) => {
-    const body = new FormData()
-    body.append('file', png, 'thumbnail.png')
-    return command<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
+    const body = new FormData();
+    body.append("file", png, "thumbnail.png");
+    return command<void>(`/outputs/${seg(outputId)}/thumbnail`, {
+      method: "PUT",
+      body,
+    });
   },
 
   /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
   putModelChoices: (slug: string, body: ModelPrintChoices) =>
     request<ModelPrintChoices>(`/print/models/${seg(slug)}/choices`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify(body),
     }),
 
   /** #83 — the plate on this printer, which the picker opens on next; `null` forgets it. */
   putPrinterBedType: (printerId: number, bedType: string | null) =>
     request<PrinterBedType>(`/print/printers/${printerId}/bed-type`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify({ bed_type: bedType }),
     }),
 
@@ -1201,14 +1419,18 @@ export const api = {
     version: number = nextRackAlgorithmVersion(),
     signal?: AbortSignal,
   ) =>
-    request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
-      method: 'PUT',
-      body: JSON.stringify({ algorithm, version }),
-      signal,
-    }),
+    request<PrinterRackAlgorithm>(
+      `/print/printers/${printerId}/rack-algorithm`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ algorithm, version }),
+        signal,
+      },
+    ),
 
   /** #1298 — the recorded use of each hotend on this printer's rack, by position. */
-  getPrinterRackUsage: (printerId: number) => request<PrinterRackUsage>(`/print/printers/${printerId}/rack-usage`),
+  getPrinterRackUsage: (printerId: number) =>
+    request<PrinterRackUsage>(`/print/printers/${printerId}/rack-usage`),
 
   /**
    * #87 — one read per output, because the join is the server's job. The spool
@@ -1226,16 +1448,23 @@ export const api = {
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: {
+      printerId?: number | null;
+      plateId?: number;
+      allPlates?: boolean;
+    } = {},
   ) => {
-    const search = new URLSearchParams()
+    const search = new URLSearchParams();
     if (query.printerId !== null && query.printerId !== undefined) {
-      search.set('printer_id', String(query.printerId))
+      search.set("printer_id", String(query.printerId));
     }
-    if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
-    if (query.allPlates) search.set('all_plates', 'true')
-    const suffix = search.size > 0 ? `?${search}` : ''
-    return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
+    if (query.plateId !== undefined)
+      search.set("plate_id", String(query.plateId));
+    if (query.allPlates) search.set("all_plates", "true");
+    const suffix = search.size > 0 ? `?${search}` : "";
+    return request<FilamentOptions>(
+      `/print/outputs/${seg(outputId)}/filaments${suffix}`,
+    );
   },
 
   /**
@@ -1245,10 +1474,13 @@ export const api = {
    * (mounted nozzles, last plate) the same way `getFilaments`'s does.
    */
   getChoices: (outputId: string, printerId?: number | null) => {
-    const search = new URLSearchParams()
-    if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
-    const suffix = search.size > 0 ? `?${search}` : ''
-    return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
+    const search = new URLSearchParams();
+    if (printerId !== null && printerId !== undefined)
+      search.set("printer_id", String(printerId));
+    const suffix = search.size > 0 ? `?${search}` : "";
+    return request<ChoicesView>(
+      `/print/outputs/${seg(outputId)}/choices${suffix}`,
+    );
   },
 
   /**
@@ -1256,7 +1488,12 @@ export const api = {
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+  runPrint: (
+    outputId: string,
+    body: PrintRunRequest,
+    signal?: AbortSignal,
+    within?: Within,
+  ) =>
     followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal, within),
 
   /**
@@ -1265,7 +1502,7 @@ export const api = {
    */
   checkPrint: (outputId: string, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
@@ -1275,13 +1512,15 @@ export const api = {
    */
   previewSlice: (outputId: string, body: PrintRunRequest) =>
     command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
   /** #2169 — how an output's background slice stands, and what it came to once finished. */
   getPreviewSlice: (outputId: string, jobId: number) =>
-    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+    request<SlicePreview>(
+      `/print/outputs/${seg(outputId)}/preview-slices/${jobId}`,
+    ),
 
   /** #2169 — as `getPreviewSlice`, for a library file's. */
   getLibraryPreviewSlice: (fileId: number, jobId: number) =>
@@ -1291,18 +1530,29 @@ export const api = {
    * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
    * on the person's own "yes".
    */
-  assignTraySpool: (printerId: number, amsId: number, trayId: number, spoolId: number) =>
-    command<TrayAssigned>(`/print/printers/${printerId}/trays/${amsId}/${trayId}/spool`, {
-      method: 'POST',
-      body: JSON.stringify({ spool_id: spoolId }),
-    }),
+  assignTraySpool: (
+    printerId: number,
+    amsId: number,
+    trayId: number,
+    spoolId: number,
+  ) =>
+    command<TrayAssigned>(
+      `/print/printers/${printerId}/trays/${amsId}/${trayId}/spool`,
+      {
+        method: "POST",
+        body: JSON.stringify({ spool_id: spoolId }),
+      },
+    ),
 
   /**
    * #284 — judge an output against the request the print dialog would send. Reads only:
    * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
    */
   runAnalyzers: (body: AnalysisRun) =>
-    request<AnalysisReport>('/analyzers/run', { method: 'POST', body: JSON.stringify(body) }),
+    request<AnalysisReport>("/analyzers/run", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /**
    * #284 — ignore or suppress a finding at a scope; a suppression needs a reason. It
@@ -1310,14 +1560,14 @@ export const api = {
    * (`post_decision`, backend/scadbuddy/api/analyzers.py).
    */
   createDecision: (body: DecisionCreate) =>
-    request<AnalyzerDecision>('/analyzers/decisions', {
-      method: 'POST',
+    request<AnalyzerDecision>("/analyzers/decisions", {
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
   /** #284 — remove a decision, so its finding is open again (`delete_decision`). */
   deleteDecision: (id: string) =>
-    request<void>(`/analyzers/decisions/${seg(id)}`, { method: 'DELETE' }),
+    request<void>(`/analyzers/decisions/${seg(id)}`, { method: "DELETE" }),
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
@@ -1325,7 +1575,7 @@ export const api = {
    * models no relationship between a model and a project: which prints belong to a
    * project is on the project's own page.
    */
-  getProjects: () => request<ProjectChoices>('/print/projects'),
+  getProjects: () => request<ProjectChoices>("/print/projects"),
 
   /**
    * `project_id` links an existing project; otherwise `name` creates one. Either way the
@@ -1333,12 +1583,15 @@ export const api = {
    * row — that makes Bambuddy's project page list the files.
    */
   createProject: (body: ProjectRequest) =>
-    command<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+    command<ProjectView>("/print/projects", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /** #317 — the project both pickers open on; `null` is "No project". */
   rememberProject: (projectId: number | null) =>
-    request<LastProject>('/print/projects/last', {
-      method: 'PUT',
+    request<LastProject>("/print/projects/last", {
+      method: "PUT",
       body: JSON.stringify({ project_id: projectId } satisfies LastProject),
     }),
 
@@ -1348,7 +1601,7 @@ export const api = {
    */
   fileIntoProject: (outputId: string, projectId: number) =>
     command<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify({ project_id: projectId }),
     }),
 
@@ -1357,7 +1610,7 @@ export const api = {
    * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
     command<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
@@ -1371,43 +1624,53 @@ export const api = {
 
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */
-  listPrints: (filters: PrintFilters, page: { cursor?: string | null; limit?: number } = {}) => {
-    const search = new URLSearchParams()
+  listPrints: (
+    filters: PrintFilters,
+    page: { cursor?: string | null; limit?: number } = {},
+  ) => {
+    const search = new URLSearchParams();
     for (const [key, value] of Object.entries(filters)) {
-      if (value !== undefined && value !== '') search.set(key, String(value))
+      if (value !== undefined && value !== "") search.set(key, String(value));
     }
-    if (page.limit !== undefined) search.set('limit', String(page.limit))
-    if (page.cursor) search.set('cursor', page.cursor)
-    const suffix = search.size > 0 ? `?${search.toString()}` : ''
-    return request<PrintPage>(`/prints${suffix}`)
+    if (page.limit !== undefined) search.set("limit", String(page.limit));
+    if (page.cursor) search.set("cursor", page.cursor);
+    const suffix = search.size > 0 ? `?${search.toString()}` : "";
+    return request<PrintPage>(`/prints${suffix}`);
   },
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
   /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
-  listLibrary: (query: { folderId: number | null; all: boolean; fileId?: number }) => {
-    const search = new URLSearchParams()
-    if (query.folderId !== null) search.set('folder_id', String(query.folderId))
-    else if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
-    if (query.all) search.set('all', 'true')
-    const suffix = search.size > 0 ? `?${search}` : ''
-    return request<LibraryListing>(`/print/library${suffix}`)
+  listLibrary: (query: {
+    folderId: number | null;
+    all: boolean;
+    fileId?: number;
+  }) => {
+    const search = new URLSearchParams();
+    if (query.folderId !== null)
+      search.set("folder_id", String(query.folderId));
+    else if (query.fileId !== undefined)
+      search.set("file_id", String(query.fileId));
+    if (query.all) search.set("all", "true");
+    const suffix = search.size > 0 ? `?${search}` : "";
+    return request<LibraryListing>(`/print/library${suffix}`);
   },
 
   /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */
   deleteLibraryFiles: (fileIds: number[]) =>
-    command<LibraryDeleteResult>('/print/library/delete', {
-      method: 'POST',
+    command<LibraryDeleteResult>("/print/library/delete", {
+      method: "POST",
       body: JSON.stringify({ file_ids: fileIds }),
     }),
 
   /** #2167 — a delete's Undo: the files back from Bambuddy's trash. */
   restoreLibraryFiles: (fileIds: number[]) =>
-    command<LibraryRestoreResult>('/print/library/restore', {
-      method: 'POST',
+    command<LibraryRestoreResult>("/print/library/restore", {
+      method: "POST",
       body: JSON.stringify({ file_ids: fileIds }),
     }),
 
-  libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+  libraryThumbnailUrl: (fileId: number) =>
+    `${API_BASE}/print/library/${fileId}/thumbnail`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
@@ -1416,35 +1679,49 @@ export const api = {
   libraryPreviewGlbUrl: (fileId: number, plate: number) =>
     `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
-  getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
+  getLibraryPlates: (fileId: number) =>
+    request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
   /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
-  getLibraryObjects: (fileId: number) => request<LibraryFileObjects>(`/print/library/${fileId}/objects`),
+  getLibraryObjects: (fileId: number) =>
+    request<LibraryFileObjects>(`/print/library/${fileId}/objects`),
 
   getLibraryChoices: (fileId: number, printerId?: number | null) => {
-    const search = new URLSearchParams()
-    if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
-    const suffix = search.size > 0 ? `?${search}` : ''
-    return request<ChoicesView>(`/print/library/${fileId}/choices${suffix}`)
+    const search = new URLSearchParams();
+    if (printerId !== null && printerId !== undefined)
+      search.set("printer_id", String(printerId));
+    const suffix = search.size > 0 ? `?${search}` : "";
+    return request<ChoicesView>(`/print/library/${fileId}/choices${suffix}`);
   },
 
   getLibraryFilaments: (
     fileId: number,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: {
+      printerId?: number | null;
+      plateId?: number;
+      allPlates?: boolean;
+    } = {},
   ) => {
-    const search = new URLSearchParams()
+    const search = new URLSearchParams();
     if (query.printerId !== null && query.printerId !== undefined) {
-      search.set('printer_id', String(query.printerId))
+      search.set("printer_id", String(query.printerId));
     }
-    if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
-    if (query.allPlates) search.set('all_plates', 'true')
-    const suffix = search.size > 0 ? `?${search}` : ''
-    return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
+    if (query.plateId !== undefined)
+      search.set("plate_id", String(query.plateId));
+    if (query.allPlates) search.set("all_plates", "true");
+    const suffix = search.size > 0 ? `?${search}` : "";
+    return request<FilamentOptions>(
+      `/print/library/${fileId}/filaments${suffix}`,
+    );
   },
 
   /** #742 — followed to its end like an output's run (`runPrint`). */
-  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
-    followPrintRun(`/print/library/${fileId}/run`, body, signal, within),
+  runLibraryPrint: (
+    fileId: number,
+    body: PrintRunRequest,
+    signal?: AbortSignal,
+    within?: Within,
+  ) => followPrintRun(`/print/library/${fileId}/run`, body, signal, within),
 
   /** #1751 — the file's newest print, as `getPrintProgress` is an output's; `null` when
    * ScadBuddy never queued it. */
@@ -1454,72 +1731,76 @@ export const api = {
   /** #1751 — as `attachToProject`; without ids, the file's newest run is filed. */
   attachLibraryToProject: (fileId: number, body: ProjectAttach) =>
     command<AttachResult>(`/print/library/${fileId}/project`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
   /** #2169 — slice the dialog's choices for a library file in the background. */
   previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
     command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
     }),
 
   putLibraryChoices: (fileId: number, body: ModelPrintChoices) =>
     request<ModelPrintChoices>(`/print/library/${fileId}/choices`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify(body),
     }),
 
-  listFonts: () => request<FontFamily[]>('/fonts'),
+  listFonts: () => request<FontFamily[]>("/fonts"),
 
   /** The Google Fonts catalogue, fetched and cached server-side — no API key in the browser. */
-  listFontCatalogue: (query: { q?: string; category?: string; limit?: number } = {}) => {
-    const search = new URLSearchParams()
-    if (query.q) search.set('q', query.q)
-    if (query.category) search.set('category', query.category)
-    if (query.limit !== undefined) search.set('limit', String(query.limit))
-    const suffix = search.size > 0 ? `?${search}` : ''
-    return request<FontCatalogue>(`/fonts/catalogue${suffix}`)
+  listFontCatalogue: (
+    query: { q?: string; category?: string; limit?: number } = {},
+  ) => {
+    const search = new URLSearchParams();
+    if (query.q) search.set("q", query.q);
+    if (query.category) search.set("category", query.category);
+    if (query.limit !== undefined) search.set("limit", String(query.limit));
+    const suffix = search.size > 0 ? `?${search}` : "";
+    return request<FontCatalogue>(`/fonts/catalogue${suffix}`);
   },
 
   /** Downloads the family onto the data volume so the renderer can resolve it. */
   installFont: (family: string) =>
-    command<InstalledFamily>('/fonts/install', {
-      method: 'POST',
+    command<InstalledFamily>("/fonts/install", {
+      method: "POST",
       body: JSON.stringify({ family }),
     }),
 
   /** #81 — an absent or unknown model answers with the configured default plate. */
   getPlate: (model: string | null) =>
-    request<Plate>(model ? `/plate?${new URLSearchParams({ model })}` : '/plate'),
+    request<Plate>(
+      model ? `/plate?${new URLSearchParams({ model })}` : "/plate",
+    ),
 
   /**
    * #81 — whether a model of `size` can be sent to `model`'s printer, judged by the same
    * placement the send runs. `colours` above one needs a prime tower, as it does there.
    */
   getPlateFit: (model: string | null, size: number[], colours: number) => {
-    const [x = 0, y = 0, z = 0] = size
+    const [x = 0, y = 0, z = 0] = size;
     const search = new URLSearchParams({
       x: String(x),
       y: String(y),
       z: String(z),
       colours: String(Math.max(colours, 1)),
-    })
-    if (model) search.set('model', model)
-    return request<PlateFit>(`/plate/fit?${search}`)
+    });
+    if (model) search.set("model", model);
+    return request<PlateFit>(`/plate/fit?${search}`);
   },
 
-  listPlates: () => request<PlateCatalogue>('/plates'),
+  listPlates: () => request<PlateCatalogue>("/plates"),
 
   /** #93 — the curated catalogue: libraries the server knows, each with a suggested ref. */
-  listLibraries: () => request<CatalogueLibrary[]>('/libraries'),
+  listLibraries: () => request<CatalogueLibrary[]>("/libraries"),
 
   /**
    * Clones the library at `ref` server-side and pins the resolved commit into this
@@ -1528,24 +1809,31 @@ export const api = {
    */
   pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
     command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
-      method: 'PUT',
+      method: "PUT",
       body: JSON.stringify(body),
     }),
 
   /** #169 — library checkouts on the volume, with the models whose live pins read each. */
-  listInstalledLibraries: () => request<InstalledLibrary[]>('/libraries/installed'),
+  listInstalledLibraries: () =>
+    request<InstalledLibrary[]>("/libraries/installed"),
 
   /** #169 — every model whose live model.json pins `name`; nulls for an unreadable entry. */
-  listLibraryUsers: (name: string) => request<LibraryUser[]>(`/libraries/${seg(name)}/users`),
+  listLibraryUsers: (name: string) =>
+    request<LibraryUser[]>(`/libraries/${seg(name)}/users`),
 
   /**
    * #169 — a dry run of re-pinning: clones `name` at `ref` from the model's own pin URL
    * and parse-checks the model against it. Nothing is recorded. It holds the server's
    * checkout gate for the whole check, so callers run one at a time, on request.
    */
-  checkModelLibrary: (slug: string, name: string, body: LibraryCheckRequest, signal?: AbortSignal) =>
+  checkModelLibrary: (
+    slug: string,
+    name: string,
+    body: LibraryCheckRequest,
+    signal?: AbortSignal,
+  ) =>
     request<LibraryCheck>(`/models/${seg(slug)}/libraries/${seg(name)}/check`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify(body),
       signal,
     }),
@@ -1553,7 +1841,7 @@ export const api = {
   /** #169 — re-pins from the URL the model already pins, at `ref`; one commit per model. */
   repinModelLibrary: (slug: string, name: string, body: LibraryRepinRequest) =>
     command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
-      method: 'PATCH',
+      method: "PATCH",
       body: JSON.stringify(body),
     }),
 
@@ -1563,13 +1851,15 @@ export const api = {
    * Read-only; nothing is cloned.
    */
   checkDependencies: (slug: string) =>
-    request<DependencyReport>(`/models/${seg(slug)}/dependencies`, { method: 'POST' }),
+    request<DependencyReport>(`/models/${seg(slug)}/dependencies`, {
+      method: "POST",
+    }),
 
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
     command<ModelSummary>(
-      `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
-      { method: 'DELETE' },
+      `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? "" : `?index=${index}`}`,
+      { method: "DELETE" },
     ),
 
   /**
@@ -1580,63 +1870,73 @@ export const api = {
    * `SETTINGS_SHARE_MS` (#1856). Each caller gets its own copy.
    */
   getSettings: (): Promise<Settings> => {
-    const now = Date.now()
-    if (!settingsInFlight || now - settingsInFlight.started >= SETTINGS_SHARE_MS) {
+    const now = Date.now();
+    if (
+      !settingsInFlight ||
+      now - settingsInFlight.started >= SETTINGS_SHARE_MS
+    ) {
       const shared = {
-        read: request<Settings>('/settings').finally(() => {
-          if (settingsInFlight === shared) settingsInFlight = undefined
+        read: request<Settings>("/settings").finally(() => {
+          if (settingsInFlight === shared) settingsInFlight = undefined;
         }),
         started: now,
-      }
-      settingsInFlight = shared
+      };
+      settingsInFlight = shared;
     }
-    return settingsInFlight.read.then((settings) => structuredClone(settings))
+    return settingsInFlight.read.then((settings) => structuredClone(settings));
   },
 
   putSettings: (body: SettingsUpdate) => {
-    settingsInFlight = undefined
-    return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
+    settingsInFlight = undefined;
+    return request<Settings>("/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
   },
 
-  getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
+  getPrintOptions: () => request<PrintOptionsState>("/settings/print-options"),
 
   /** Replaces one scope wholesale; an all-unset `options` clears it. */
   putPrintOptions: (body: PrintOptionsUpdate) =>
-    request<PrintOptionsView>('/settings/print-options', {
-      method: 'PUT',
+    request<PrintOptionsView>("/settings/print-options", {
+      method: "PUT",
       body: JSON.stringify(body),
     }),
 
   /** Tests what is *stored*, so the key never travels back out of the server. */
-  testSettings: () => request<ConnectionTest>('/settings/test', { method: 'POST' }),
+  testSettings: () =>
+    request<ConnectionTest>("/settings/test", { method: "POST" }),
 
-  getBambuddyTargets: () => request<BambuddyTargets>('/settings/targets'),
+  getBambuddyTargets: () => request<BambuddyTargets>("/settings/targets"),
 
   /** #322 — Bambuddy's version and whether it captures a finish photo; read-only. */
-  getBambuddyStatus: () => request<BambuddyStatus>('/settings/bambuddy'),
+  getBambuddyStatus: () => request<BambuddyStatus>("/settings/bambuddy"),
 
   /** #322 — what the print dialog remembers. Each entry is forgotten by its own route. */
-  getRemembered: () => request<RememberedChoices>('/settings/remembered'),
+  getRemembered: () => request<RememberedChoices>("/settings/remembered"),
 
-  forgetAllRemembered: () => request<RememberedChoices>('/settings/remembered', { method: 'DELETE' }),
+  forgetAllRemembered: () =>
+    request<RememberedChoices>("/settings/remembered", { method: "DELETE" }),
 
   /** #599 — forgets the printer and nozzle one Bambuddy project last printed on. */
   forgetRememberedProject: (projectId: number | string) =>
-    request<RememberedChoices>(`/settings/remembered/projects/${projectId}`, { method: 'DELETE' }),
+    request<RememberedChoices>(`/settings/remembered/projects/${projectId}`, {
+      method: "DELETE",
+    }),
 
   registerSidebar: () =>
-    command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
+    command<SidebarLink>("/settings/register-sidebar", { method: "POST" }),
 
   /**
    * The AI agent's headless browser (#349), served by the agent service under
    * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
    */
   getHeadlessBrowserSetting: () =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
+    request<HeadlessBrowserSetting>("/ai/settings/headless-browser"),
 
   putHeadlessBrowserSetting: (enabled: boolean) =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
-      method: 'PUT',
+    request<HeadlessBrowserSetting>("/ai/settings/headless-browser", {
+      method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
 
@@ -1644,37 +1944,48 @@ export const api = {
    * The assistant's `http_request` tool (#827), served by the agent service. On by
    * default. Fails (404 or 503) when there is no agent or no AI database.
    */
-  getHttpRequestSetting: () => request<HttpRequestSetting>('/ai/settings/http-request'),
+  getHttpRequestSetting: () =>
+    request<HttpRequestSetting>("/ai/settings/http-request"),
 
   putHttpRequestSetting: (enabled: boolean) =>
-    request<HttpRequestSetting>('/ai/settings/http-request', {
-      method: 'PUT',
+    request<HttpRequestSetting>("/ai/settings/http-request", {
+      method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
 
   /** #1941 — uploads an image the user attached in the assistant panel; its message then sends the id. */
-  uploadAttachment: (image: { mediaType: string; data: string; preview: { mediaType: string; data: string } }) =>
-    request<AttachmentView>('/ai/attachments', { method: 'POST', body: JSON.stringify(image) }),
+  uploadAttachment: (image: {
+    mediaType: string;
+    data: string;
+    preview: { mediaType: string; data: string };
+  }) =>
+    request<AttachmentView>("/ai/attachments", {
+      method: "POST",
+      body: JSON.stringify(image),
+    }),
 
   /** #1941 — deletes an upload the user removed from the composer before sending it. */
   deleteAttachment: (id: string) =>
-    request<void>(`/ai/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    request<void>(`/ai/attachments/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 
   /** The long edge the assistant panel scales attached images to, served by the agent service. */
-  getImageSettings: () => request<ImageSettings>('/ai/settings/images'),
+  getImageSettings: () => request<ImageSettings>("/ai/settings/images"),
 
   putImageSettings: (longEdge: number) =>
-    request<ImageSettings>('/ai/settings/images', {
-      method: 'PUT',
+    request<ImageSettings>("/ai/settings/images", {
+      method: "PUT",
       body: JSON.stringify({ long_edge: longEdge }),
     }),
 
   /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
-  getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),
+  getSessionMode: () =>
+    request<SessionModeSetting>("/ai/settings/session-mode"),
 
-  putSessionMode: (mode: SessionModeSetting['mode']) =>
-    request<SessionModeSetting>('/ai/settings/session-mode', {
-      method: 'PUT',
+  putSessionMode: (mode: SessionModeSetting["mode"]) =>
+    request<SessionModeSetting>("/ai/settings/session-mode", {
+      method: "PUT",
       body: JSON.stringify({ mode }),
     }),
 
@@ -1682,32 +1993,33 @@ export const api = {
    * #1911 — the switch for the assistant's `get_printer_camera` tool, served by the agent
    * service. On by default. Fails (404 or 503) when there is no agent or no AI database.
    */
-  getPrinterCameraSetting: () => request<PrinterCameraSetting>('/ai/settings/printer-camera'),
+  getPrinterCameraSetting: () =>
+    request<PrinterCameraSetting>("/ai/settings/printer-camera"),
 
   putPrinterCameraSetting: (enabled: boolean) =>
-    request<PrinterCameraSetting>('/ai/settings/printer-camera', {
-      method: 'PUT',
+    request<PrinterCameraSetting>("/ai/settings/printer-camera", {
+      method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
 
   /** #1917 — the Claude model the assistant uses (`null`: Claude Code's default), served by the agent service. */
-  getModelSetting: () => request<ModelSetting>('/ai/settings/model'),
+  getModelSetting: () => request<ModelSetting>("/ai/settings/model"),
 
   putModelSetting: (model: string | null) =>
-    request<ModelSetting>('/ai/settings/model', {
-      method: 'PUT',
+    request<ModelSetting>("/ai/settings/model", {
+      method: "PUT",
       body: JSON.stringify({ model }),
     }),
 
   /** #1291 — New model's "Start from blank template", served by the agent service. */
-  getBlankTemplate: () => request<BlankTemplate>('/ai/templates/blank'),
+  getBlankTemplate: () => request<BlankTemplate>("/ai/templates/blank"),
 
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
-  getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),
+  getSessionLimits: () => request<SessionLimits>("/ai/settings/session-limits"),
 
   putSessionLimits: (limits: SessionLimits) =>
-    request<SessionLimits>('/ai/settings/session-limits', {
-      method: 'PUT',
+    request<SessionLimits>("/ai/settings/session-limits", {
+      method: "PUT",
       body: JSON.stringify(limits),
     }),
 
@@ -1717,41 +2029,60 @@ export const api = {
    * keeps the conversation only through that reply.
    */
   forkAiSession: (id: string, options: { upTo?: string } = {}) =>
-    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/fork`, {
-      method: 'POST',
-      ...(options.upTo === undefined ? {} : { body: JSON.stringify({ up_to: options.upTo }) }),
-    }),
+    request<{ session: AiSessionView }>(
+      `/ai/sessions/${encodeURIComponent(id)}/fork`,
+      {
+        method: "POST",
+        ...(options.upTo === undefined
+          ? {}
+          : { body: JSON.stringify({ up_to: options.upTo }) }),
+      },
+    ),
 
   /** #795, #1885 — renames a session, marks it done, or archives or unarchives it; only the session's owner can. */
   updateAiSession: (id: string, edit: AiSessionEdit) =>
-    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(edit),
-    }),
+    request<{ session: AiSessionView }>(
+      `/ai/sessions/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(edit),
+      },
+    ),
 
   /** #1885 — the archived sessions, newest first: the switcher's Archived view. */
   listArchivedAiSessions: (limit: number) =>
-    request<{ sessions: AiSessionView[] }>(`/ai/sessions?archived=true&limit=${limit}`),
+    request<{ sessions: AiSessionView[] }>(
+      `/ai/sessions?archived=true&limit=${limit}`,
+    ),
 
   /** #790 — adds to one session's budget; only the user can (it spends money). */
   raiseAiSessionBudget: (id: string, addUsd: number) =>
-    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/budget`, {
-      method: 'POST',
-      body: JSON.stringify({ add_usd: addUsd }),
-    }),
+    request<{ session: AiSessionView }>(
+      `/ai/sessions/${encodeURIComponent(id)}/budget`,
+      {
+        method: "POST",
+        body: JSON.stringify({ add_usd: addUsd }),
+      },
+    ),
 
   /** #1284 — withdraws the session's live handoff offer; `cancelled` is false when there was none. */
   cancelAiSessionOffer: (id: string) =>
-    request<{ cancelled: boolean; session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/handoff`, {
-      method: 'DELETE',
-    }),
+    request<{ cancelled: boolean; session: AiSessionView }>(
+      `/ai/sessions/${encodeURIComponent(id)}/handoff`,
+      {
+        method: "DELETE",
+      },
+    ),
 
   /** #1288 — one session, as the browser user sees it; 404 when it is gone or not theirs to show. */
-  getAiSession: (id: string) => request<AiSessionView>(`/ai/sessions/${encodeURIComponent(id)}`),
+  getAiSession: (id: string) =>
+    request<AiSessionView>(`/ai/sessions/${encodeURIComponent(id)}`),
 
   /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
   listAiSessionResources: (id: string) =>
-    request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
+    request<{ resources: SessionResource[] }>(
+      `/ai/sessions/${encodeURIComponent(id)}/resources`,
+    ),
 
   /** #931 — the sessions whose tool calls touched a resource, newest first. */
   listAiResourceSessions: (resource: ResourceRef, limit: number) =>
@@ -1760,20 +2091,26 @@ export const api = {
     ),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */
-  listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),
+  listMcpTokens: () => request<McpTokenList>("/ai/mcp-tokens"),
 
   /** The plaintext token is in this response and nowhere else. */
   createMcpToken: (body: McpTokenCreate) =>
-    request<MintedMcpToken>('/ai/mcp-tokens', { method: 'POST', body: JSON.stringify(body) }),
+    request<MintedMcpToken>("/ai/mcp-tokens", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   revokeMcpToken: (id: string) =>
-    request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: 'DELETE' }),
+    request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: "DELETE" }),
 
   /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
-  getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),
+  getMcpAuth: () => request<McpAuthSetting>("/ai/mcp/auth"),
 
   setMcpAuth: (body: McpAuthUpdate) =>
-    request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
+    request<McpAuthSetting>("/ai/mcp/auth", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 
   /**
    * #1000, #1093 — the agent's Claude credentials in priority order: kind, base URL, last
@@ -1782,38 +2119,57 @@ export const api = {
    * JSON answer that does not parse is a real failure and rejects as it would anywhere.
    */
   listAiCredentials: async (): Promise<AiCredentialList> => {
-    const response = await send(`${API_BASE}/ai/credentials/entries`, { headers: { Accept: 'application/json' } })
-    if (!response.ok) throw new ApiError(await readProblem(response))
-    if (!(response.headers.get('content-type') ?? '').includes('application/json')) {
+    const response = await send(`${API_BASE}/ai/credentials/entries`, {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new ApiError(await readProblem(response));
+    if (
+      !(response.headers.get("content-type") ?? "").includes("application/json")
+    ) {
       throw new ApiError({
         type: AI_NOT_ROUTED,
-        title: 'Not routed',
+        title: "Not routed",
         status: response.status,
-        detail: 'The agent service did not answer at /api/v1/ai.',
-      })
+        detail: "The agent service did not answer at /api/v1/ai.",
+      });
     }
-    return (await response.json()) as AiCredentialList
+    return (await response.json()) as AiCredentialList;
   },
 
   /** Added last, so it is tried after every existing one. */
   createAiCredential: (body: AiCredentialCreate) =>
-    request<AiCredentialEntry>('/ai/credentials/entries', { method: 'POST', body: JSON.stringify(body) }),
+    request<AiCredentialEntry>("/ai/credentials/entries", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /** Every id exactly once, first tried first; a stale list answers 409. */
   reorderAiCredentials: (ids: string[]) =>
-    request<AiCredentialList>('/ai/credentials/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+    request<AiCredentialList>("/ai/credentials/order", {
+      method: "PUT",
+      body: JSON.stringify({ ids }),
+    }),
 
   saveAiCredential: (id: string, body: AiCredentialSave) =>
-    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 
   deleteAiCredential: (id: string) =>
-    request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, { method: 'DELETE' }),
+    request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, {
+      method: "DELETE",
+    }),
 
   /** Back to `active`, for one disabled or cooling down. */
   resetAiCredential: (id: string) =>
-    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, { method: 'POST' }),
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, {
+      method: "POST",
+    }),
 
   /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
   testAiCredential: (id: string) =>
-    request<AiConnectionTest>(`/ai/credentials/entries/${seg(id)}/test`, { method: 'POST' }),
-}
+    request<AiConnectionTest>(`/ai/credentials/entries/${seg(id)}/test`, {
+      method: "POST",
+    }),
+};

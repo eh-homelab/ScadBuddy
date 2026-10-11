@@ -84,18 +84,19 @@ MAY_HAVE_STARTED = "may_have_started"
 
 #: ``TemporalUnreachableError``, ``TemporalUnavailableError``, ``TemporalBusyError``
 #: and ``TemporalRefusedError`` for an operation; the print-run routes word their own.
+#: Each is read by a person, so none names Temporal or a header: the problem's type and
+#: ``may_have_started`` carry that for a client (:func:`temporal_problems`), and a retry
+#: from the UI keeps its key, so it follows a start rather than doing it twice.
 OPERATION_UNREACHABLE_DETAIL = (
-    "ScadBuddy cannot reach Temporal, where operations run. Nothing was done; try again shortly."
+    "ScadBuddy's background service is not answering. Nothing was done; try again shortly."
 )
-_FOLLOW = (
-    " Send the same request again shortly: with the same Idempotency-Key it follows the"
-    " operation if it started."
+RETRY_FOLLOWS = (
+    " Try again: a retry picks this request up if it did start, rather than doing it twice."
 )
-OPERATION_DOWN_DETAIL = "ScadBuddy cannot reach Temporal, where operations run." + _FOLLOW
-OPERATION_BUSY_DETAIL = "Temporal could not start this right now." + _FOLLOW
+OPERATION_DOWN_DETAIL = "ScadBuddy's background service did not answer." + RETRY_FOLLOWS
+OPERATION_BUSY_DETAIL = "ScadBuddy's background service is busy right now." + RETRY_FOLLOWS
 OPERATION_REFUSED_DETAIL = (
-    "Temporal refused to start this; see ScadBuddy's logs. Send the same request again,"
-    " with the same Idempotency-Key, to follow it if it started."
+    "ScadBuddy could not start this; its server log says why." + RETRY_FOLLOWS
 )
 OPERATION_STILL_CHECKING_DETAIL = (
     "ScadBuddy is still checking this request. Send it again to follow it."

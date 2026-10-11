@@ -463,6 +463,42 @@ describe('ArrangeDialog', () => {
     expect(onArranged).not.toHaveBeenCalled()
   })
 
+  it('offers Try again after a failed save, which keeps the save key so one output is saved', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(new Error('ScadBuddy could not start this; its server log says why.'))
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('its server log says why')
+    expect(screen.queryByText(/Temporal/)).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    const keys = save.mock.calls.map((call) => call[5])
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeTruthy()
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('saves a changed arrange under a new key', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(new Error('could not save'))
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.type(screen.getByLabelText(/name/i), 'renamed')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    expect(save.mock.calls[1]![5]).not.toBe(save.mock.calls[0]![5])
+  })
+
   it('acts on nothing when it is closed while the output is being saved', async () => {
     let saved!: (output: Output) => void
     vi.spyOn(api, 'createOutput').mockImplementation(

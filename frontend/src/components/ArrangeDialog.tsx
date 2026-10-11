@@ -1,6 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
-import { api, ApiError } from '../api/client'
-import type { ArrangeRequest, LibraryEntry, LibraryFileObjects, ModelSummary, Output } from '../api/types'
+import { useEffect, useRef, useState } from "react";
+import { api, ApiError, newRequestId } from "../api/client";
+import type {
+  ArrangeRequest,
+  LibraryEntry,
+  LibraryFileObjects,
+  ModelSummary,
+  Output,
+} from "../api/types";
 import {
   backfillFailures,
   backfillIds,
@@ -15,43 +21,51 @@ import {
   type ArrangeGoal,
   type ArrangeSource,
   type Arranged,
-} from '../lib/arrange'
-import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
-import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
+} from "../lib/arrange";
+import { AddFiles, AddFromModel } from "./ArrangeSourcePicker";
+import { BackfillProgress, BackfillPrompt } from "./BackfillPrompt";
+import { Button } from "./ui/Button";
+import { Dialog } from "./ui/Dialog";
 
 type Props = {
-  open: boolean
+  open: boolean;
   /** #1864 — outputs of any template and library files, in any mix. */
-  sources: ArrangeSource[]
-  onClose: () => void
-  onArranged: (arranged: Arranged) => void
-}
+  sources: ArrangeSource[];
+  onClose: () => void;
+  onArranged: (arranged: Arranged) => void;
+};
 
 /** Each object of each output that has them, as a row with its key. */
 function rowsOf(outputs: Output[]) {
   return outputs.flatMap((output) =>
-    (output.manifest ?? []).map((object) => ({ output, object, key: `${output.id}:${object.part}` })),
-  )
+    (output.manifest ?? []).map((object) => ({
+      output,
+      object,
+      key: `${output.id}:${object.part}`,
+    })),
+  );
 }
 
 /** "A", "A and B", "A, B and C". */
 function listed(names: string[]): string {
-  if (names.length <= 1) return names[0] ?? ''
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 /** #1863 — each object read from a library file ScadBuddy did not make, as a row. */
 function fileRowsOf(files: { file: LibraryEntry; read: LibraryFileObjects }[]) {
   return files.flatMap(({ file, read }) =>
-    read.objects.map((object) => ({ file, object, key: `library:${file.id}:${object.part}` })),
-  )
+    read.objects.map((object) => ({
+      file,
+      object,
+      key: `library:${file.id}:${object.part}`,
+    })),
+  );
 }
 
 /** The templates of `outputs`, first seen first: what the result can be filed under. */
 function templatesOf(outputs: Output[]): string[] {
-  return [...new Set(outputs.map((output) => output.slug))]
+  return [...new Set(outputs.map((output) => output.slug))];
 }
 
 /**
@@ -64,199 +78,270 @@ function templatesOf(outputs: Output[]): string[] {
  * why. Add files and Add from a model add more before the run. An output saved before
  * Arrange has no objects: Arrange asks to re-render it first, then arranges with it (#902).
  */
-export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Props) {
+export function ArrangeDialog({
+  open,
+  sources: given,
+  onClose,
+  onArranged,
+}: Props) {
   /** Sources added inside the dialog, after the ones it was opened with. */
-  const [added, setAdded] = useState<ArrangeSource[]>([])
-  const [adding, setAdding] = useState<'files' | 'model' | null>(null)
+  const [added, setAdded] = useState<ArrangeSource[]>([]);
+  const [adding, setAdding] = useState<"files" | "model" | null>(null);
   /** The output behind each library file, read by id, or why it could not be read. */
-  const [read, setRead] = useState<Record<string, Output | { error: string }>>({})
+  const [read, setRead] = useState<Record<string, Output | { error: string }>>(
+    {},
+  );
   /** #1863 — the objects of each library file ScadBuddy did not make, or why not. */
-  const [objects, setObjects] = useState<Record<number, LibraryFileObjects | { error: string }>>({})
+  const [objects, setObjects] = useState<
+    Record<number, LibraryFileObjects | { error: string }>
+  >({});
   /** Every template, for a result of library files alone to be filed under. */
-  const [models, setModels] = useState<ModelSummary[] | null>(null)
+  const [models, setModels] = useState<ModelSummary[] | null>(null);
   /** Outputs re-rendered here, read back with their objects. */
-  const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
+  const [refreshed, setRefreshed] = useState<Record<string, Output>>({});
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
-  const [flagged, setFlagged] = useState<string[]>([])
-  const [filing, setFiling] = useState<string | null>(null)
+  const [flagged, setFlagged] = useState<string[]>([]);
+  const [filing, setFiling] = useState<string | null>(null);
 
-  const keys = new Set<string>()
+  const keys = new Set<string>();
   const sources = [...given, ...added].filter((source) => {
-    const key = sourceKey(source)
-    if (keys.has(key)) return false
-    keys.add(key)
-    return true
-  })
-  const named = new Map(sources.flatMap((s) => (s.kind === 'output' ? [[s.output.id, s.output] as const] : [])))
-  const plain: { file: LibraryEntry; read: LibraryFileObjects }[] = []
-  const reading: LibraryEntry[] = []
+    const key = sourceKey(source);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  const named = new Map(
+    sources.flatMap((s) =>
+      s.kind === "output" ? [[s.output.id, s.output] as const] : [],
+    ),
+  );
+  const plain: { file: LibraryEntry; read: LibraryFileObjects }[] = [];
+  const reading: LibraryEntry[] = [];
   /** Files ScadBuddy made whose output could not be read, each with why. */
-  const unread: string[] = []
+  const unread: string[] = [];
   /** #1863 — files whose objects could not be read from the 3MF, each with why. */
-  const unreadable: string[] = []
-  const behind: Output[] = []
+  const unreadable: string[] = [];
+  const behind: Output[] = [];
   for (const source of sources) {
-    if (source.kind === 'output') {
-      behind.push(source.output)
-      continue
+    if (source.kind === "output") {
+      behind.push(source.output);
+      continue;
     }
-    const id = source.file.output_id
+    const id = source.file.output_id;
     if (!id) {
-      const found = objects[source.file.id]
-      if (found === undefined) reading.push(source.file)
-      else if ('error' in found) unreadable.push(found.error)
-      else plain.push({ file: source.file, read: found })
-      continue
+      const found = objects[source.file.id];
+      if (found === undefined) reading.push(source.file);
+      else if ("error" in found) unreadable.push(found.error);
+      else plain.push({ file: source.file, read: found });
+      continue;
     }
-    const output = named.get(id) ?? read[id]
-    if (output === undefined) reading.push(source.file)
-    else if ('error' in output) unread.push(`${source.file.filename}: ${output.error}`)
-    else behind.push(output)
+    const output = named.get(id) ?? read[id];
+    if (output === undefined) reading.push(source.file);
+    else if ("error" in output)
+      unread.push(`${source.file.filename}: ${output.error}`);
+    else behind.push(output);
   }
   // An output reached as itself and through its library file is arranged once.
-  const outputs = [...new Map(behind.map((o) => [o.id, refreshed[o.id] ?? o])).values()]
-  const unusable = outputs.filter((output) => needsBackfill(output) || flagged.includes(output.id))
-  const rows = rowsOf(outputs.filter((output) => !unusable.includes(output)))
-  const fileRows = fileRowsOf(plain)
-  const ownTemplates = templatesOf(outputs.filter((output) => !unusable.includes(output)))
+  const outputs = [
+    ...new Map(behind.map((o) => [o.id, refreshed[o.id] ?? o])).values(),
+  ];
+  const unusable = outputs.filter(
+    (output) => needsBackfill(output) || flagged.includes(output.id),
+  );
+  const rows = rowsOf(outputs.filter((output) => !unusable.includes(output)));
+  const fileRows = fileRowsOf(plain);
+  const ownTemplates = templatesOf(
+    outputs.filter((output) => !unusable.includes(output)),
+  );
   // Library files alone: filed under any template the user picks.
-  const anyTemplate = ownTemplates.length === 0 && outputs.length === 0 && fileRows.length > 0
-  const templates = anyTemplate ? (models ?? []).map((model) => model.slug) : ownTemplates
-  const [counts, setCounts] = useState<Record<string, number>>({})
-  const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
-  const [name, setName] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [progress, setProgress] = useState<string | null>(null)
-  const [asking, setAsking] = useState(false)
-  const [backfill, setBackfill] = useState<Record<string, string>>({})
-  const [failures, setFailures] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const anyTemplate =
+    ownTemplates.length === 0 && outputs.length === 0 && fileRows.length > 0;
+  const templates = anyTemplate
+    ? (models ?? []).map((model) => model.slug)
+    : ownTemplates;
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [goal, setGoal] = useState<ArrangeGoal>("fewest_plates");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [backfill, setBackfill] = useState<Record<string, string>>({});
+  const [failures, setFailures] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  /**
+   * The last arrange's save key and what it arranged. "Try again" on the same arrange
+   * keeps the key, so a save that did start is followed rather than made twice; any
+   * change to the arrange is a new press with a new key.
+   */
+  const attempt = useRef<{ key: string; body: string } | null>(null);
 
-  const countOf = (key: string, fallback: number) => counts[key] ?? fallback
+  const countOf = (key: string, fallback: number) => counts[key] ?? fallback;
 
   // Read the output behind each library file once, whoever added it.
   const toRead = [
     ...new Set(
       sources.flatMap((s) =>
-        s.kind === 'library' && s.file.output_id && !named.has(s.file.output_id) && !(s.file.output_id in read)
+        s.kind === "library" &&
+        s.file.output_id &&
+        !named.has(s.file.output_id) &&
+        !(s.file.output_id in read)
           ? [s.file.output_id]
           : [],
       ),
     ),
-  ].join(',')
+  ].join(",");
   // #1863 — read the objects of each file ScadBuddy did not make once, whoever added it.
   const toList = [
     ...new Set(
-      sources.flatMap((s) => (s.kind === 'library' && !s.file.output_id && !(s.file.id in objects) ? [s.file.id] : [])),
+      sources.flatMap((s) =>
+        s.kind === "library" && !s.file.output_id && !(s.file.id in objects)
+          ? [s.file.id]
+          : [],
+      ),
     ),
-  ].join(',')
+  ].join(",");
   useEffect(() => {
-    if (!open || !toList) return
-    let live = true
-    for (const id of toList.split(',').map(Number)) {
+    if (!open || !toList) return;
+    let live = true;
+    for (const id of toList.split(",").map(Number)) {
       api
         .getLibraryObjects(id)
-        .then((found) => live && setObjects((known) => ({ ...known, [id]: found })))
+        .then(
+          (found) => live && setObjects((known) => ({ ...known, [id]: found })),
+        )
         .catch((cause: unknown) => {
-          const error = cause instanceof ApiError ? cause.detail : 'its objects could not be read'
-          if (live) setObjects((known) => ({ ...known, [id]: { error } }))
-        })
+          const error =
+            cause instanceof ApiError
+              ? cause.detail
+              : "its objects could not be read";
+          if (live) setObjects((known) => ({ ...known, [id]: { error } }));
+        });
     }
     return () => {
-      live = false
-    }
-  }, [open, toList])
+      live = false;
+    };
+  }, [open, toList]);
   useEffect(() => {
-    if (!open || !anyTemplate || models !== null) return
-    let live = true
+    if (!open || !anyTemplate || models !== null) return;
+    let live = true;
     api
       .listModels()
       .then((found) => live && setModels(found))
-      .catch(() => live && setModels([]))
+      .catch(() => live && setModels([]));
     return () => {
-      live = false
-    }
-  }, [open, anyTemplate, models])
+      live = false;
+    };
+  }, [open, anyTemplate, models]);
 
   useEffect(() => {
-    if (!open || !toRead) return
-    let live = true
-    for (const id of toRead.split(',')) {
+    if (!open || !toRead) return;
+    let live = true;
+    for (const id of toRead.split(",")) {
       api
         .getOutput(id)
-        .then((output) => live && setRead((known) => ({ ...known, [id]: output })))
+        .then(
+          (output) => live && setRead((known) => ({ ...known, [id]: output })),
+        )
         .catch((cause: unknown) => {
-          const error = cause instanceof ApiError ? cause.detail : 'its output could not be read'
-          if (live) setRead((known) => ({ ...known, [id]: { error } }))
-        })
+          const error =
+            cause instanceof ApiError
+              ? cause.detail
+              : "its output could not be read";
+          if (live) setRead((known) => ({ ...known, [id]: { error } }));
+        });
     }
     return () => {
-      live = false
-    }
-  }, [open, toRead])
+      live = false;
+    };
+  }, [open, toRead]);
 
   /** The arrange in flight: closing the dialog (or leaving the page) stops its wait. */
-  const running = useRef<AbortController | null>(null)
+  const running = useRef<AbortController | null>(null);
   useEffect(() => {
     if (open) {
       // Opened again (History keeps it mounted): nothing from the last time shows.
-      setAsking(false)
-      setFailures(null)
-      setError(null)
-      setAdded([])
-      setAdding(null)
-      setFiling(null)
+      setAsking(false);
+      setFailures(null);
+      setError(null);
+      setAdded([]);
+      setAdding(null);
+      setFiling(null);
       // A read that failed (a network error, say) is tried again.
-      setRead((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
-      setObjects((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
-      return
+      readAgain();
+      return;
     }
-    running.current?.abort()
-    running.current = null
-  }, [open])
-  useEffect(() => () => running.current?.abort(), [])
+    running.current?.abort();
+    running.current = null;
+  }, [open]);
+  useEffect(() => () => running.current?.abort(), []);
+
+  /** Read again every file or output whose read failed, as opening the dialog again does. */
+  function readAgain() {
+    setRead((known) =>
+      Object.fromEntries(
+        Object.entries(known).filter(([, value]) => !("error" in value)),
+      ),
+    );
+    setObjects((known) =>
+      Object.fromEntries(
+        Object.entries(known).filter(([, value]) => !("error" in value)),
+      ),
+    );
+  }
 
   /** Arrange: first re-render `stale` (confirmed by the user), then arrange every output that can be. */
   async function submit(stale: Output[]) {
-    setBusy(true)
-    setAsking(false)
-    setError(null)
-    setFailures(null)
-    const controller = new AbortController()
-    running.current = controller
+    setBusy(true);
+    setAsking(false);
+    setError(null);
+    setFailures(null);
+    const controller = new AbortController();
+    running.current = controller;
     try {
-      let usable = outputs.filter((output) => !unusable.includes(output))
-      let skipped: string | undefined
+      let usable = outputs.filter((output) => !unusable.includes(output));
+      let skipped: string | undefined;
       if (stale.length > 0) {
         const { ready, failed } = await backfillOutputs(stale, {
           signal: controller.signal,
-          onProgress: (output, message) => setBackfill((shown) => ({ ...shown, [output.id]: message })),
-        })
-        setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
-        setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
-        const why = backfillFailures(failed)
+          onProgress: (output, message) =>
+            setBackfill((shown) => ({ ...shown, [output.id]: message })),
+        });
+        setRefreshed((known) => ({
+          ...known,
+          ...Object.fromEntries(ready.map((o) => [o.id, o])),
+        }));
+        setFlagged((ids) =>
+          ids.filter((id) => !ready.some((o) => o.id === id)),
+        );
+        const why = backfillFailures(failed);
         // Every output that can be arranged is, the ones that never needed a re-render too.
-        if (ready.length === 0 && usable.length === 0 && fileRows.length === 0) {
-          setFailures(`${why} Nothing was arranged.`)
-          return
+        if (
+          ready.length === 0 &&
+          usable.length === 0 &&
+          fileRows.length === 0
+        ) {
+          setFailures(`${why} Nothing was arranged.`);
+          return;
         }
         // Said wherever this lands, History too: the arrange went ahead without them (#1007).
         if (failed.length > 0) {
-          skipped = `${why} ${failed.length === 1 ? 'It was' : 'They were'} left out of the arrange.`
+          skipped = `${why} ${failed.length === 1 ? "It was" : "They were"} left out of the arrange.`;
         }
-        if (skipped) setFailures(skipped)
+        if (skipped) setFailures(skipped);
         // In the dialog's order, each re-rendered output in its old one's place.
-        const before = usable
+        const before = usable;
         usable = outputs.flatMap((output) =>
-          before.includes(output) ? [output] : ready.filter((o) => o.id === output.id),
-        )
+          before.includes(output)
+            ? [output]
+            : ready.filter((o) => o.id === output.id),
+        );
       }
       // The chosen template, unless every output of it was left out: then the first one's.
       // Library files alone go under the template picked from every one (#1863).
-      const kept = templatesOf(usable)
-      const choices = kept.length > 0 ? kept : templates
-      const slug = filing && choices.includes(filing) ? filing : choices[0]
-      if (!slug) throw new Error('Nothing to arrange.')
+      const kept = templatesOf(usable);
+      const choices = kept.length > 0 ? kept : templates;
+      const slug = filing && choices.includes(filing) ? filing : choices[0];
+      if (!slug) throw new Error("Nothing to arrange.");
       const body: ArrangeRequest = {
         objects: [
           ...rowsOf(usable).map(({ output, object, key }) => ({
@@ -273,26 +358,36 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         goal,
         name: name.trim() || null,
         slug,
-      }
-      const arranged = await runArrange(slug, body, { onProgress: setProgress, signal: controller.signal })
+      };
+      const signature = JSON.stringify(body);
+      if (attempt.current?.body !== signature)
+        attempt.current = { key: newRequestId(), body: signature };
+      const arranged = await runArrange(slug, body, {
+        onProgress: setProgress,
+        signal: controller.signal,
+        saveKey: attempt.current.key,
+      });
+      attempt.current = null;
       // Closed while the output was being saved: it is saved, a normal output in
       // History, but this dialog no longer acts on it.
-      if (controller.signal.aborted) return
-      onArranged(skipped ? { ...arranged, skipped } : arranged)
+      if (controller.signal.aborted) return;
+      onArranged(skipped ? { ...arranged, skipped } : arranged);
     } catch (cause) {
-      if (controller.signal.aborted) return
-      const ids = backfillIds(cause)
+      if (controller.signal.aborted) return;
+      const ids = backfillIds(cause);
       if (ids) {
-        setFlagged((known) => [...new Set([...known, ...ids])])
-        setAsking(true)
-        return
+        setFlagged((known) => [...new Set([...known, ...ids])]);
+        setAsking(true);
+        return;
       }
-      setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      setError(
+        cause instanceof ApiError ? cause.detail : (cause as Error).message,
+      );
     } finally {
-      if (running.current === controller) running.current = null
-      setBusy(false)
-      setProgress(null)
-      setBackfill({})
+      if (running.current === controller) running.current = null;
+      setBusy(false);
+      setProgress(null);
+      setBackfill({});
     }
   }
 
@@ -306,13 +401,23 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         )}
         {unreadable.length > 0 && (
           <p role="status" className="text-[12px] text-warn">
-            {`Left out: ${unreadable.join('; ')}.`}
+            {`Left out: ${unreadable.join("; ")}.`}
           </p>
         )}
         {unread.length > 0 && (
           <p role="status" className="text-[12px] text-warn">
-            {`Left out, as ScadBuddy could not read what it made them from: ${unread.join('; ')}.`}
+            {`Left out, as ScadBuddy could not read what it made them from: ${unread.join("; ")}.`}
           </p>
+        )}
+        {(unreadable.length > 0 || unread.length > 0) && (
+          <Button
+            size="sm"
+            className="self-start"
+            onClick={readAgain}
+            disabled={busy}
+          >
+            Read them again
+          </Button>
         )}
         {reading.length > 0 && (
           <p className="text-[12px] text-faint">{`Reading ${listed(reading.map((f) => f.filename))}…`}</p>
@@ -330,7 +435,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
               count: object.count,
             })),
           ].map(({ key, label, count }) => (
-            <li key={key} className="flex items-center justify-between gap-2 text-[13px]">
+            <li
+              key={key}
+              className="flex items-center justify-between gap-2 text-[13px]"
+            >
               <span>{label}</span>
               <input
                 type="number"
@@ -338,7 +446,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 max={500}
                 aria-label={`Copies of ${label}`}
                 value={countOf(key, count)}
-                onChange={(event) => setCounts({ ...counts, [key]: Math.max(0, Number(event.target.value) || 0) })}
+                onChange={(event) =>
+                  setCounts({
+                    ...counts,
+                    [key]: Math.max(0, Number(event.target.value) || 0),
+                  })
+                }
                 className="sb-field sb-num w-20"
               />
             </li>
@@ -346,30 +459,38 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         </ul>
         {adding === null && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => setAdding('files')} disabled={busy}>
+            <Button
+              size="sm"
+              onClick={() => setAdding("files")}
+              disabled={busy}
+            >
               Add files
             </Button>
-            <Button size="sm" onClick={() => setAdding('model')} disabled={busy}>
+            <Button
+              size="sm"
+              onClick={() => setAdding("model")}
+              disabled={busy}
+            >
               Add from a model
             </Button>
           </div>
         )}
-        {adding === 'files' && (
+        {adding === "files" && (
           <AddFiles
             chosen={(file) => keys.has(`library:${file.id}`)}
             onAdd={(files) => {
-              setAdded((now) => [...now, ...fromFiles(files)])
-              setAdding(null)
+              setAdded((now) => [...now, ...fromFiles(files)]);
+              setAdding(null);
             }}
             onCancel={() => setAdding(null)}
           />
         )}
-        {adding === 'model' && (
+        {adding === "model" && (
           <AddFromModel
             chosen={(output) => outputs.some((o) => o.id === output.id)}
             onAdd={(picked) => {
-              setAdded((now) => [...now, ...fromOutputs(picked)])
-              setAdding(null)
+              setAdded((now) => [...now, ...fromOutputs(picked)]);
+              setAdding(null);
             }}
             onCancel={() => setAdding(null)}
           />
@@ -381,7 +502,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             </label>
             <select
               id="arrange-filing"
-              value={filing && templates.includes(filing) ? filing : templates[0]}
+              value={
+                filing && templates.includes(filing) ? filing : templates[0]
+              }
               onChange={(event) => setFiling(event.target.value)}
               className="sb-field"
             >
@@ -423,20 +546,39 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         </p>
         {(failures || error) && (
           <p role="alert" className="text-[13px] text-warn">
-            {[failures, error].filter(Boolean).join(' ')}
+            {[failures, error].filter(Boolean).join(" ")}
           </p>
         )}
+        {error && !busy && (
+          <Button
+            size="sm"
+            className="self-start"
+            onClick={() =>
+              unusable.length > 0 ? setAsking(true) : void submit([])
+            }
+          >
+            Try again
+          </Button>
+        )}
         {asking && (
-          <BackfillPrompt outputs={unusable} onConfirm={() => void submit(unusable)} onCancel={() => setAsking(false)} />
+          <BackfillPrompt
+            outputs={unusable}
+            onConfirm={() => void submit(unusable)}
+            onCancel={() => setAsking(false)}
+          />
         )}
         <Button
-          onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}
+          onClick={() =>
+            unusable.length > 0 ? setAsking(true) : void submit([])
+          }
           disabled={
             busy ||
             asking ||
             reading.length > 0 ||
             (anyTemplate && templates.length === 0) ||
-            (rows.length === 0 && fileRows.length === 0 && unusable.length === 0)
+            (rows.length === 0 &&
+              fileRows.length === 0 &&
+              unusable.length === 0)
           }
           aria-busy={busy}
         >
@@ -444,5 +586,5 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         </Button>
       </div>
     </Dialog>
-  )
+  );
 }

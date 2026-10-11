@@ -95,6 +95,21 @@ class UnreadableObjectsError(ValueError):
     """The file's objects cannot be read faithfully; the message says why."""
 
 
+class OverBudgetError(UnreadableObjectsError):
+    """A read refused past one of its budgets: the message names the budget, and
+    :func:`_opened` adds how large the file is, so what limits it can be told apart
+    from how big it is."""
+
+
+def _megabytes(size: int) -> str:
+    """``size`` as a person reads a file's size: bytes under a megabyte, else MB."""
+    return f"{size:,} bytes" if size < 1_000_000 else f"{size / 1_000_000:,.1f} MB"
+
+
+def _model_names(names: set[str]) -> list[str]:
+    return sorted(name for name in names if name.lower().endswith(".model"))
+
+
 #: One mesh as read: its colour, vertices, faces, and its painting when painted.
 type _Piece = tuple[str, np.ndarray, np.ndarray, Paint | None]
 
@@ -159,18 +174,18 @@ class _Archive:
             except ET.ParseError:
                 raise UnreadableObjectsError(f"{name} is not readable XML") from None
             except TooManyTrianglesError:
-                raise UnreadableObjectsError(
+                raise OverBudgetError(
                     self.budget.refusal(
                         "max_triangles",
                         f"stores more than {self.budget.max_triangles:,} triangles",
                     )
                 ) from None
             except ArchiveTooLargeError:
-                raise UnreadableObjectsError(
+                raise OverBudgetError(
                     self.budget.refusal(
                         "max_triangles",
-                        f"has model files that inflate past {allowed:,} bytes, more than"
-                        " that many triangles could take",
+                        f"has model files that inflate past {_megabytes(allowed)}, more"
+                        " than that many triangles could take",
                     )
                 ) from None
             # zipfile stops an entry at its declared size (a longer one fails its CRC).
@@ -320,11 +335,11 @@ class _Reader:
         self.triangles += triangles
         self.paint_digits += paint_digits
         if self.visits > self.budget.max_visits:
-            raise UnreadableObjectsError(self.budget.refusal("max_visits"))
+            raise OverBudgetError(self.budget.refusal("max_visits"))
         if self.triangles > self.budget.max_triangles:
-            raise UnreadableObjectsError(self.budget.refusal("max_triangles"))
+            raise OverBudgetError(self.budget.refusal("max_triangles"))
         if self.paint_digits > self.budget.max_paint_digits:
-            raise UnreadableObjectsError(self.budget.refusal("max_paint_digits"))
+            raise OverBudgetError(self.budget.refusal("max_paint_digits"))
 
     def colour_of(self, extruder: int) -> str:
         return self.filaments[extruder - 1] if extruder <= len(self.filaments) else STL_COLOUR
@@ -634,7 +649,24 @@ def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_A
             archive = _Archive(zipped, budget)
             if any(_GCODE.fullmatch(name) for name in archive.names):
                 raise UnreadableObjectsError("the file is sliced already; print it from Bambuddy")
-            return read(archive)
+            models = sum(zipped.getinfo(name).file_size for name in _model_names(archive.names))
+            try:
+                if models > budget.model_bytes():
+                    # Said before anything is inflated: the headers declare it.
+                    raise OverBudgetError(
+                        budget.refusal(
+                            "max_triangles",
+                            f"has model files that inflate to {_megabytes(models)}, past the"
+                            f" {_megabytes(budget.model_bytes())} that many triangles could take",
+                        )
+                    )
+                return read(archive)
+            except OverBudgetError as error:
+                size = len(payload) if isinstance(payload, bytes) else payload.seek(0, io.SEEK_END)
+                raise OverBudgetError(
+                    f"{error} (the file is {_megabytes(size)}; its model files"
+                    f" {_megabytes(models)} once inflated)"
+                ) from None
     except zipfile.BadZipFile:
         raise UnreadableObjectsError("the file is not a 3MF archive") from None
     except (KeyError, ValueError) as error:
@@ -674,7 +706,7 @@ def _read(archive: _Archive, budget: ReadBudget) -> list[ReadObject]:
             groups[key] = (groups[key][0], groups[key][1] + 1)
             continue
         if len(groups) == budget.max_objects:
-            raise UnreadableObjectsError(budget.refusal("max_objects"))
+            raise OverBudgetError(budget.refusal("max_objects"))
         groups[key] = (matrix, 1)
     objects: list[ReadObject] = []
     for (path, object_id, _), (matrix, count) in groups.items():

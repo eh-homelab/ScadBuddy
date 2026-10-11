@@ -1,54 +1,63 @@
-import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
-import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
-import { followUntil, JobStillRunning, waitForJob } from './waitForJob'
+import { api, ApiError, NEEDS_BACKFILL } from "../api/client";
+import type {
+  ArrangeRequest,
+  LibraryEntry,
+  NeedsBackfillProblem,
+  Output,
+} from "../api/types";
+import { followUntil, JobStillRunning, waitForJob } from "./waitForJob";
 
-export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
+export type ArrangeGoal = NonNullable<ArrangeRequest["goal"]>;
 
 /**
  * #1864 — what one arrange is built from, in any mix: a saved output of any template, or
  * a Bambuddy library file. A file ScadBuddy uploaded arranges through its `output_id`;
  * any other is not arrangeable until #1863 reads objects from the 3MF itself.
  */
-export type ArrangeSource = { kind: 'output'; output: Output } | { kind: 'library'; file: LibraryEntry }
+export type ArrangeSource =
+  | { kind: "output"; output: Output }
+  | { kind: "library"; file: LibraryEntry };
 
 export function fromOutputs(outputs: Output[]): ArrangeSource[] {
-  return outputs.map((output) => ({ kind: 'output', output }))
+  return outputs.map((output) => ({ kind: "output", output }));
 }
 
 export function fromFiles(files: LibraryEntry[]): ArrangeSource[] {
-  return files.map((file) => ({ kind: 'library', file }))
+  return files.map((file) => ({ kind: "library", file }));
 }
 
 /** One key per source, so the same output or file added twice is listed once. */
 export function sourceKey(source: ArrangeSource): string {
-  return source.kind === 'output' ? `output:${source.output.id}` : `library:${source.file.id}`
+  return source.kind === "output"
+    ? `output:${source.output.id}`
+    : `library:${source.file.id}`;
 }
 
 export const GOAL_LABELS: Record<ArrangeGoal, string> = {
-  fewest_plates: 'Fewest plates',
-  fewest_swaps: 'Fewest filament swaps',
-  by_colour: 'One colour per plate (no prime tower)',
-  keep_together: 'Keep groups together',
-}
+  fewest_plates: "Fewest plates",
+  fewest_swaps: "Fewest filament swaps",
+  by_colour: "One colour per plate (no prime tower)",
+  keep_together: "Keep groups together",
+};
 
 /** A saved arrange, and how many plates its file has. */
 export interface Arranged {
-  output: Output
-  plates: number
+  output: Output;
+  plates: number;
   /** #902 — which outputs could not be re-rendered first, and why: left out of the arrange. */
-  skipped?: string
+  skipped?: string;
 }
 
-const ARRANGED = ' (arranged)'
+const ARRANGED = " (arranged)";
 
 /** A re-arranged output's name: one "(arranged)", however often it is arranged again. */
 export function arrangedName(name: string | null | undefined): string | null {
-  if (!name) return null
-  return name.endsWith(ARRANGED) ? name : `${name}${ARRANGED}`
+  if (!name) return null;
+  return name.endsWith(ARRANGED) ? name : `${name}${ARRANGED}`;
 }
 
 export function arrangedNote(plates: number): string {
-  return `Arranged onto ${plates} ${plates === 1 ? 'plate' : 'plates'}.`
+  return `Arranged onto ${plates} ${plates === 1 ? "plate" : "plates"}.`;
 }
 
 /**
@@ -63,93 +72,118 @@ export function arrangedNote(plates: number): string {
 export async function runArrange(
   slug: string,
   body: ArrangeRequest,
-  opts: { pollMs?: number; onProgress?: (message: string) => void; signal?: AbortSignal } = {},
+  opts: {
+    pollMs?: number;
+    onProgress?: (message: string) => void;
+    signal?: AbortSignal;
+    /** The save's key: a "Try again" passes the failed attempt's, so it saves one output. */
+    saveKey?: string;
+  } = {},
 ): Promise<Arranged> {
-  const { signal } = opts
-  const started = await api.arrangeOutputs(body)
-  signal?.throwIfAborted()
+  const { signal } = opts;
+  const started = await api.arrangeOutputs(body);
+  signal?.throwIfAborted();
   const job = await waitForJob(started.id, {
     pollMs: opts.pollMs ?? 1000,
     signal,
-    onJob: (read) => opts.onProgress?.(read.status === 'running' ? 'Arranging…' : 'Waiting for a worker…'),
-  })
-  if (job.status === 'failed' || job.status === 'cancelled') {
-    throw new Error(job.error ?? `The arrange was ${job.status}.`)
+    onJob: (read) =>
+      opts.onProgress?.(
+        read.status === "running" ? "Arranging…" : "Waiting for a worker…",
+      ),
+  });
+  if (job.status === "failed" || job.status === "cancelled") {
+    throw new Error(job.error ?? `The arrange was ${job.status}.`);
   }
-  const output = await api.createOutput(slug, job.id, body.name ?? undefined)
-  return { output, plates: Math.max(1, (job.plates ?? []).length) }
+  const output = await api.createOutput(
+    slug,
+    job.id,
+    body.name ?? undefined,
+    undefined,
+    undefined,
+    opts.saveKey,
+  );
+  return { output, plates: Math.max(1, (job.plates ?? []).length) };
 }
 
 /** An output as a caller may know it: its id, and its name when it has one. */
-export type OutputRef = Pick<Output, 'id'> & Partial<Pick<Output, 'name'>>
+export type OutputRef = Pick<Output, "id"> & Partial<Pick<Output, "name">>;
 
 /** Has no recorded objects, so Arrange refuses it until it is re-rendered (#902). */
-export function needsBackfill(output: Partial<Pick<Output, 'manifest'>>): boolean {
-  return (output.manifest ?? []).length === 0
+export function needsBackfill(
+  output: Partial<Pick<Output, "manifest">>,
+): boolean {
+  return (output.manifest ?? []).length === 0;
 }
 
 /** The outputs Arrange's `needs_backfill` refusal names, or null for any other failure. */
 export function backfillIds(cause: unknown): string[] | null {
-  if (!(cause instanceof ApiError)) return null
-  const problem = cause.problem as Partial<NeedsBackfillProblem>
-  if (problem.code !== NEEDS_BACKFILL) return null
-  const ids = Array.isArray(problem.output_ids) ? problem.output_ids.map(String) : []
+  if (!(cause instanceof ApiError)) return null;
+  const problem = cause.problem as Partial<NeedsBackfillProblem>;
+  if (problem.code !== NEEDS_BACKFILL) return null;
+  const ids = Array.isArray(problem.output_ids)
+    ? problem.output_ids.map(String)
+    : [];
   // A refusal naming no output has nothing to offer a re-render of: show its detail.
-  return ids.length > 0 ? ids : null
+  return ids.length > 0 ? ids : null;
 }
 
 /** "A", "A and B", "A, B and C". */
 export function listNames(outputs: OutputRef[]): string {
-  const names = outputs.map((o) => o.name ?? o.id)
-  if (names.length <= 1) return names[0] ?? ''
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  const names = outputs.map((o) => o.name ?? o.id);
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 /** Why Arrange cannot use them yet, in one sentence. */
 export function backfillNote(outputs: OutputRef[]): string {
-  const one = outputs.length === 1
-  return `${listNames(outputs)} ${one ? 'was' : 'were'} saved before Arrange existed; re-render to get ${one ? 'its' : 'their'} layout.`
+  const one = outputs.length === 1;
+  return `${listNames(outputs)} ${one ? "was" : "were"} saved before Arrange existed; re-render to get ${one ? "its" : "their"} layout.`;
 }
 
 export interface Backfilled {
   /** Re-rendered, read back with their objects. */
-  ready: Output[]
+  ready: Output[];
   /** Not re-rendered, each with why. */
   /** Not re-rendered, each with why; `running` when it was still going at the wait's limit. */
-  failed: { output: OutputRef; error: string; running?: boolean }[]
+  failed: { output: OutputRef; error: string; running?: boolean }[];
 }
 
 /** The most of a server's reason a failure sentence quotes; the rest is cut (#1007). */
-export const MAX_REASON_CHARS = 200
+export const MAX_REASON_CHARS = 200;
 
 function shortReason(error: string): string {
-  const reason = error.trim().replace(/\.$/, '')
-  return reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…` : reason
+  const reason = error.trim().replace(/\.$/, "");
+  return reason.length > MAX_REASON_CHARS
+    ? `${reason.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…`
+    : reason;
 }
 
 /**
  * "A could not be re-rendered: why." for each failure, one sentence each. `retry` is the
  * button that tries again where this is shown: Arrange in its dialog, Re-arrange in Print.
  */
-export function backfillFailures(failed: Backfilled['failed'], retry = 'Arrange'): string {
+export function backfillFailures(
+  failed: Backfilled["failed"],
+  retry = "Arrange",
+): string {
   return failed
     .map(({ output, error, running }) =>
       running
         ? `${output.name ?? output.id} is still re-rendering; try ${retry} again later.`
         : `${output.name ?? output.id} could not be re-rendered: ${shortReason(error)}.`,
     )
-    .join(' ')
+    .join(" ");
 }
 
 /** POST /outputs/{id}/backfill's 409 code: the output records its objects already. */
-const ALREADY_BACKFILLED = 'already_backfilled'
+const ALREADY_BACKFILLED = "already_backfilled";
 
-const BACKFILL_POLL_MS = 500
+const BACKFILL_POLL_MS = 500;
 /**
  * How long one call waits for all its re-renders together, not for each: they run at
  * once, under one deadline. The server keeps going after it gives up.
  */
-export const BACKFILL_WAIT_MS = 5 * 60_000
+export const BACKFILL_WAIT_MS = 5 * 60_000;
 
 /**
  * #902 — re-render each output saved before Arrange, all at once: queue it, follow its
@@ -160,69 +194,88 @@ export const BACKFILL_WAIT_MS = 5 * 60_000
 export async function backfillOutputs(
   outputs: OutputRef[],
   opts: {
-    pollMs?: number
-    waitMs?: number
-    onProgress?: (output: OutputRef, message: string) => void
-    signal?: AbortSignal
+    pollMs?: number;
+    waitMs?: number;
+    onProgress?: (output: OutputRef, message: string) => void;
+    signal?: AbortSignal;
   } = {},
 ): Promise<Backfilled> {
-  const { signal } = opts
-  const pollMs = opts.pollMs ?? BACKFILL_POLL_MS
-  const deadline = Date.now() + (opts.waitMs ?? BACKFILL_WAIT_MS)
+  const { signal } = opts;
+  const pollMs = opts.pollMs ?? BACKFILL_POLL_MS;
+  const deadline = Date.now() + (opts.waitMs ?? BACKFILL_WAIT_MS);
   const one = async (output: OutputRef): Promise<Output> => {
-    const say = (message: string) => opts.onProgress?.(output, message)
-    say('Queuing a re-render…')
-    let job
+    const say = (message: string) => opts.onProgress?.(output, message);
+    say("Queuing a re-render…");
+    let job;
     try {
-      job = await api.backfillOutput(output.id)
+      job = await api.backfillOutput(output.id);
     } catch (cause) {
       // Re-rendered since the list was read (a closed dialog's backfill finished). By its
       // code, not the status alone: another 409 is no sign the objects are there (#1007).
-      if (cause instanceof ApiError && cause.status === 409 && cause.problem['code'] === ALREADY_BACKFILLED) {
-        return await api.getOutput(output.id)
+      if (
+        cause instanceof ApiError &&
+        cause.status === 409 &&
+        cause.problem["code"] === ALREADY_BACKFILLED
+      ) {
+        return await api.getOutput(output.id);
       }
-      throw cause
+      throw cause;
     }
-    signal?.throwIfAborted()
-    if (job.status !== 'done' && job.status !== 'failed' && job.status !== 'cancelled') {
-      say(job.status === 'running' ? 'Re-rendering…' : 'Waiting for a worker…')
+    signal?.throwIfAborted();
+    if (
+      job.status !== "done" &&
+      job.status !== "failed" &&
+      job.status !== "cancelled"
+    ) {
+      say(job.status === "running" ? "Re-rendering…" : "Waiting for a worker…");
       // #1909 — over the socket; `pollMs` only while it is unavailable.
       job = await waitForJob(job.id, {
         pollMs,
         waitMs: Math.max(0, deadline - Date.now()),
         signal,
-        onJob: (read) => say(read.status === 'running' ? 'Re-rendering…' : 'Waiting for a worker…'),
-      })
+        onJob: (read) =>
+          say(
+            read.status === "running"
+              ? "Re-rendering…"
+              : "Waiting for a worker…",
+          ),
+      });
     }
-    if (job.status === 'failed' || job.status === 'cancelled') {
-      throw new Error(job.error ?? `the re-render was ${job.status}`)
+    if (job.status === "failed" || job.status === "cancelled") {
+      throw new Error(job.error ?? `the re-render was ${job.status}`);
     }
-    say('Recording its layout…')
+    say("Recording its layout…");
     // #1970 — the server announces the attach (or why not) as `output.updated`.
-    const read = await followUntil('outputs', {
+    const read = await followUntil("outputs", {
       read: () => api.getOutput(output.id),
       done: (o) => !o.backfill || !!o.backfill.error,
-      relevant: (event) => event.data['output_id'] === output.id,
+      relevant: (event) => event.data["output_id"] === output.id,
       stillRunning: () => new JobStillRunning(job.id),
       pollMs,
       waitMs: Math.max(0, deadline - Date.now()),
       signal,
-    })
-    if (read.backfill?.error) throw new Error(read.backfill.error)
-    if (needsBackfill(read)) throw new Error('the re-render recorded no objects')
-    return read
-  }
-  const settled = await Promise.allSettled(outputs.map(one))
-  signal?.throwIfAborted()
-  const result: Backfilled = { ready: [], failed: [] }
+    });
+    if (read.backfill?.error) throw new Error(read.backfill.error);
+    if (needsBackfill(read))
+      throw new Error("the re-render recorded no objects");
+    return read;
+  };
+  const settled = await Promise.allSettled(outputs.map(one));
+  signal?.throwIfAborted();
+  const result: Backfilled = { ready: [], failed: [] };
   settled.forEach((outcome, index) => {
-    const output = outputs[index]!
-    if (outcome.status === 'fulfilled') result.ready.push(outcome.value)
+    const output = outputs[index]!;
+    if (outcome.status === "fulfilled") result.ready.push(outcome.value);
     else {
-      const cause = outcome.reason as unknown
-      const error = cause instanceof ApiError ? cause.detail : (cause as Error).message
-      result.failed.push(cause instanceof JobStillRunning ? { output, error, running: true } : { output, error })
+      const cause = outcome.reason as unknown;
+      const error =
+        cause instanceof ApiError ? cause.detail : (cause as Error).message;
+      result.failed.push(
+        cause instanceof JobStillRunning
+          ? { output, error, running: true }
+          : { output, error },
+      );
     }
-  })
-  return result
+  });
+  return result;
 }
