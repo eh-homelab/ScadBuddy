@@ -32,6 +32,9 @@ image sent another way (MCP, the attachment store), and an oversized request rea
 Claude, failed, and was sent again on every retry. One over a bound ends the turn with a
 readable error and no retry.
 
+Settings → Model is the segment's model, and the own plugin's skills load only while
+Settings → Plugins has it on, read per segment as a classic turn reads them per turn.
+
 The tools Settings → Plugins disabled (the workflow's ``segment_context``) are left out
 of the segment's declared tools (#2088), so Claude is never offered them.
 """
@@ -39,7 +42,6 @@ of the segment's declared tools (#2088), so Claude is never offered them.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import re
@@ -108,6 +110,10 @@ IMAGES_BYTES_MAX = 8 * 1024 * 1024 * 3 // 4
 LONG_EDGE_KEY = "image_long_edge"
 DEFAULT_LONG_EDGE = 1568
 MIN_LONG_EDGE, MAX_LONG_EDGE = 200, 2576
+# agent/src/sessions/manager.ts SETTING_MODEL; plugins/packages/builtins.ts, the own
+# plugin's switch (on unless stored false).
+MODEL_KEY = "model"
+OWN_PLUGIN_KEY = "scadbuddy_plugin_enabled"
 IMAGE_TOO_LARGE = "input too large: "
 
 
@@ -229,6 +235,13 @@ MakeRunner = Callable[..., SegmentRunner]
 
 
 @dataclass(frozen=True)
+class TurnSettings:
+    long_edge: int
+    model: str | None
+    own_plugin: bool
+
+
+@dataclass(frozen=True)
 class Image:
     name: str
     media_type: str
@@ -279,16 +292,24 @@ class ScadBuddyRunner:
     def __repr__(self) -> str:
         return f"ScadBuddyRunner(kek={self._kek.id})"
 
-    async def _long_edge(self) -> int:
+    async def _settings(self) -> TurnSettings:
+        """What Settings says about this segment, read as it starts, as a classic turn reads it."""
         async with self._connect() as conn:
             cur = await conn.execute(
-                "SELECT value FROM ai_settings WHERE key = %s", (LONG_EDGE_KEY,)
+                "SELECT key, value FROM ai_settings WHERE key = ANY(%s)",
+                ([LONG_EDGE_KEY, MODEL_KEY, OWN_PLUGIN_KEY],),
             )
-            row = await cur.fetchone()
-        value = None if row is None else json.loads(row[0]) if isinstance(row[0], str) else row[0]
-        if isinstance(value, bool) or not isinstance(value, int):
-            return DEFAULT_LONG_EDGE
-        return min(max(value, MIN_LONG_EDGE), MAX_LONG_EDGE)
+            # psycopg hands jsonb back decoded: a stored string is already a str.
+            values = dict(await cur.fetchall())
+        edge = values.get(LONG_EDGE_KEY)
+        if isinstance(edge, bool) or not isinstance(edge, int):
+            edge = DEFAULT_LONG_EDGE
+        model = values.get(MODEL_KEY)
+        return TurnSettings(
+            long_edge=min(max(edge, MIN_LONG_EDGE), MAX_LONG_EDGE),
+            model=model if isinstance(model, str) and model else None,
+            own_plugin=values.get(OWN_PLUGIN_KEY) is not False,
+        )
 
     async def _images(self, session: str, context: SegmentContext) -> list[Image]:
         names = [r.name for r in context.images]
@@ -337,20 +358,22 @@ class ScadBuddyRunner:
             # Settings → Plugins turned them off (#2088): Claude is not offered them.
             off = set(context.disabled_tools)
             inp = replace(inp, tools=[t for t in inp.tools if t.name not in off])
+        settings = await self._settings()
         images = await self._images(session, context)
-        problem = image_problem(images, await self._long_edge()) if images else None
+        problem = image_problem(images, settings.long_edge) if images else None
         if problem is not None:
             return SegmentOutput(session_id=inp.session_id, is_error=True, error=problem)
         if images:
             extra["mcp_servers"] = {IMAGES_SERVER: images_server(images)}
             extra["allowed_tools"] = [VIEW_IMAGES_TOOL]
-        if self._plugin_dir:
+        if self._plugin_dir and settings.own_plugin:
             extra["plugins"] = [{"type": "local", "path": self._plugin_dir}]
         runner = self._make(
             cwd=self._cwd,
             env={**worker_env_blanked(), **ENGINE_ENV, **credential_env(credentials[0])},
             max_budget_usd=budget - spent,
             extra_options=extra,
+            **({"model": settings.model} if settings.model else {}),
         )
         try:
             out = await runner.run(inp, attempt)

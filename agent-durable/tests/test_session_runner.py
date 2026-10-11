@@ -456,3 +456,63 @@ async def test_an_image_over_the_long_edge_ends_the_turn_before_any_model_call(
     [event] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
     assert "input too large" in event["message"]
     assert "1200x800" in event["message"] and "1000 px" in event["message"]
+
+
+async def _segment_options(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    *,
+    plugin_dir: str | None = None,
+) -> dict[str, Any]:
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    recording = Recording()
+    runner = ScadBuddyRunner(
+        connect, KEK, cwd=str(tmp_path), plugin_dir=plugin_dir, make_runner=recording
+    )
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    [made] = recording.made
+    return made
+
+
+async def _setting(conn: Conn, key: str, value: str) -> None:
+    await conn.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (%s, %s::jsonb)"
+        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (key, value),
+    )
+
+
+async def test_a_segment_runs_on_the_model_chosen_in_settings(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await _setting(agent_db, "model", '"claude-sonnet-test"')
+    made = await _segment_options(temporal_env, agent_db, connect, tmp_path)
+    assert made["model"] == "claude-sonnet-test"
+
+
+async def test_no_model_setting_leaves_the_engine_default(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await _setting(agent_db, "model", '""')
+    made = await _segment_options(temporal_env, agent_db, connect, tmp_path)
+    assert "model" not in made
+
+
+async def test_the_own_plugin_loads_unless_settings_switched_it_off(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    on = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")
+    assert on["extra_options"]["plugins"] == [{"type": "local", "path": "/skills"}]
+    await _setting(agent_db, "scadbuddy_plugin_enabled", "false")
+    await agent_db.execute("DELETE FROM ai_credentials")
+    off = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")
+    assert "plugins" not in off["extra_options"]
