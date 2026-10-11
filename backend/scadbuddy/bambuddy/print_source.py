@@ -54,6 +54,8 @@ from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
+from scadbuddy.render.objects3mf import check_stl
+from scadbuddy.render.read_budget import ReadBudget
 
 logger = logging.getLogger(__name__)
 
@@ -610,16 +612,23 @@ class LibrarySource(PrintPipeline):
             )
             return None
 
-    async def write_3mf(self, client: BambuddyClient, out: BinaryIO) -> bool:
+    async def write_3mf(self, client: BambuddyClient, out: BinaryIO, budget: ReadBudget) -> bool:
         """Write the 3MF :meth:`fetch_3mf` would answer into ``out``, whatever its size:
-        what Arrange and a library file's preview read, which spend a read budget rather
-        than refuse a file for being large, so only a chunk at a time is held here.
-        ``False`` for an STL that holds no mesh."""
+        what Arrange and a library file's preview read, which spend ``budget`` rather
+        than refuse a file for being large, so only a chunk at a time is held here. An
+        STL is wrapped only within ``budget`` (:func:`check_stl`, raising
+        :class:`OverBudgetError`), since wrapping loads it whole. ``False`` for an STL
+        that holds no mesh."""
         async with aclosing(client.download_library_file(self.file_id)) as chunks:
             async for chunk in chunks:
                 await asyncio.to_thread(out.write, chunk)
+        logger.info(
+            "spooled a library file",
+            extra={"library_file_id": self.file_id, "bytes": await asyncio.to_thread(out.tell)},
+        )
         if self.file_type != "stl":
             return True
+        await asyncio.to_thread(check_stl, out, budget)
         try:
             await asyncio.to_thread(self._wrap_stl, out)
         except Exception as exc:

@@ -22,6 +22,7 @@ from scadbuddy.render.jobs import LAYOUT_NAME, PlateLayout
 from scadbuddy.render.objects3mf import (
     OverBudgetError,
     UnreadableObjectsError,
+    check_stl,
     read_objects,
     read_plate_parts,
     write_piece,
@@ -649,3 +650,34 @@ def test_model_files_past_what_the_triangle_budget_allows_are_refused(
     assert "max_triangles read budget" in message and "SCADBUDDY_READ_MAX_TRIANGLES" in message
     assert f"(the file is {len(padded):,} bytes; its model files 9," in message
     assert read_objects(padded, budget=ReadBudget(max_triangles=100, max_paint_digits=1))
+
+
+def test_a_text_stl_past_what_its_triangles_could_take_is_refused() -> None:
+    text = io.BytesIO(b"solid big\n" + b" " * 2000 + b"\nendsolid big\n")
+    check_stl(text, ReadBudget(max_triangles=10))  # 5,120 bytes allowed
+    with pytest.raises(OverBudgetError, match="is a text STL of 2,"):
+        check_stl(text, ReadBudget(max_triangles=3))
+    assert text.tell() == 0
+
+
+def test_vertices_are_budgeted_over_the_whole_file() -> None:
+    # Nine vertices and one triangle: within three vertices for each allowed triangle
+    # at a budget of 3, past it at 2, and said as vertices, not triangles.
+    vertices = "".join(f'<vertex x="{i}" y="0" z="{i % 2}"/>' for i in range(9))
+    payload = _one_triangle_model(vertices)
+    assert read_objects(payload, budget=ReadBudget(max_triangles=3))
+    with pytest.raises(OverBudgetError, match="stores more than 6 vertices"):
+        read_objects(payload, budget=ReadBudget(max_triangles=2))
+
+
+def _one_triangle_model(vertices: str) -> bytes:
+    return _zip(
+        {
+            "3D/3dmodel.model": (
+                f'<model unit="millimeter" xmlns="{CORE}"><resources><object id="1"'
+                f' type="model"><mesh><vertices>{vertices}</vertices><triangles>'
+                '<triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources>'
+                '<build><item objectid="1"/></build></model>'
+            )
+        }
+    )

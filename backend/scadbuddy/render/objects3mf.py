@@ -106,6 +106,42 @@ def _megabytes(size: int) -> str:
     return f"{size:,} bytes" if size < 1_000_000 else f"{size / 1_000_000:,.1f} MB"
 
 
+#: A binary STL: an 80-byte header, a triangle count, then 50 bytes per triangle.
+_STL_HEADER = 84
+_STL_TRIANGLE = 50
+#: What one triangle of an ASCII STL may take, generously: a facet's seven lines are
+#: some 250 bytes with six-digit exponents.
+_STL_ASCII_TRIANGLE = 512
+
+
+def check_stl(stl: BinaryIO, budget: ReadBudget) -> None:
+    """Refuse an STL past ``budget``'s triangles before anything loads it whole
+    (:class:`OverBudgetError`): a binary one by the count its header states (which its
+    size must match), an ASCII one by its size against what that many facets could
+    take. Leaves ``stl`` at its start."""
+    size = stl.seek(0, io.SEEK_END)
+    stl.seek(0)
+    head = stl.read(_STL_HEADER)
+    stl.seek(0)
+    count = int.from_bytes(head[80:84], "little") if len(head) == _STL_HEADER else -1
+    if count >= 0 and size == _STL_HEADER + _STL_TRIANGLE * count:
+        if count > budget.max_triangles:
+            raise OverBudgetError(
+                f"{budget.refusal('max_triangles', f'is an STL of {count:,} triangles')}"
+                f" (the file is {_megabytes(size)})"
+            )
+        return
+    allowed = _STL_ASCII_TRIANGLE * budget.max_triangles
+    if size > allowed:
+        raise OverBudgetError(
+            budget.refusal(
+                "max_triangles",
+                f"is a text STL of {_megabytes(size)}, past the {_megabytes(allowed)}"
+                " that many triangles could take",
+            )
+        )
+
+
 def _model_names(names: set[str]) -> list[str]:
     return sorted(name for name in names if name.lower().endswith(".model"))
 
@@ -152,9 +188,11 @@ class _Archive:
         self.archive = archive
         self.budget = budget
         self.names = set(archive.namelist())
-        #: What the model files parsed so far inflated to, and the triangles they store.
+        #: What the model files parsed so far inflated to, and the triangles and vertices
+        #: they store.
         self.inflated = 0
         self.stored = 0
+        self.vertices = 0
         self.models: dict[str, tuple[ET.Element, dict[str, ET.Element], float]] = {}
         #: Every parsed model's meshes, by ``<mesh>`` element.
         self.meshes: dict[ET.Element, MeshArrays] = {}
@@ -170,16 +208,21 @@ class _Archive:
                     name,
                     cap=allowed - self.inflated,
                     max_triangles=self.budget.max_triangles - self.stored,
+                    # Against the whole budget: a file may keep its vertices in one model
+                    # and its triangles in another.
+                    max_vertices=3 * self.budget.max_triangles - self.vertices,
                 )
             except ET.ParseError:
                 raise UnreadableObjectsError(f"{name} is not readable XML") from None
-            except TooManyTrianglesError:
-                raise OverBudgetError(
-                    self.budget.refusal(
-                        "max_triangles",
-                        f"stores more than {self.budget.max_triangles:,} triangles",
-                    )
-                ) from None
+            except TooManyTrianglesError as error:
+                # Said over the whole file, not the remainder this model was allowed.
+                past = (
+                    f"stores more than {3 * self.budget.max_triangles:,} vertices, three for"
+                    " every triangle allowed"
+                    if "vertices" in str(error)
+                    else f"stores more than {self.budget.max_triangles:,} triangles"
+                )
+                raise OverBudgetError(self.budget.refusal("max_triangles", past)) from None
             except ArchiveTooLargeError:
                 raise OverBudgetError(
                     self.budget.refusal(
@@ -191,6 +234,7 @@ class _Archive:
             # zipfile stops an entry at its declared size (a longer one fails its CRC).
             self.inflated += self.archive.getinfo(name).file_size
             self.stored += sum(len(arrays.faces) for arrays in parsed.meshes.values())
+            self.vertices += sum(len(arrays.vertices) for arrays in parsed.meshes.values())
             root = parsed.root
             self.meshes.update(parsed.meshes)
             resources = root.find(f"{_CORE}resources")

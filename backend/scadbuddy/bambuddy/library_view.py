@@ -63,15 +63,17 @@ SPOOL_DIRNAME = "library-spool"
 
 @contextlib.asynccontextmanager
 async def spooled_3mf(
-    client: BambuddyClient, source: LibrarySource, cache: Path
+    client: BambuddyClient, source: LibrarySource, cache: Path, budget: ReadBudget
 ) -> AsyncIterator[BinaryIO | None]:
     """``source``'s 3MF downloaded whole into an unnamed file under ``cache``, open at
     its start; ``None`` for an STL that holds no mesh. A library file of any size can be
-    read this way: what the read may cost is its budget's to say, not the file's size."""
+    read this way: what the read may cost is ``budget``'s to say, not the file's size
+    (an STL past it is :class:`~scadbuddy.render.objects3mf.OverBudgetError` before it
+    is wrapped)."""
     spool = cache / SPOOL_DIRNAME
     await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)
     with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
-        if not await source.write_3mf(client, out):
+        if not await source.write_3mf(client, out, budget):
             yield None
             return
         await asyncio.to_thread(out.seek, 0)
@@ -96,13 +98,13 @@ async def _read(
     source = LibrarySource(
         file_id=file.id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
-    async with spooled_3mf(client, source, cache) as payload:
-        if payload is None:
-            raise NotViewableError(file, "it holds no mesh ScadBuddy can read")
-        try:
+    try:
+        async with spooled_3mf(client, source, cache, budget or ReadBudget()) as payload:
+            if payload is None:
+                raise NotViewableError(file, "it holds no mesh ScadBuddy can read")
             return await asyncio.to_thread(read_plate_parts, payload, plate, budget)
-        except UnreadableObjectsError as error:
-            raise NotViewableError(file, str(error)) from None
+    except UnreadableObjectsError as error:
+        raise NotViewableError(file, str(error)) from None
 
 
 def _cached(cache: Path, file: LibraryFile, name: str) -> Path | None:

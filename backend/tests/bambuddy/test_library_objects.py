@@ -6,6 +6,7 @@ arrange that follows downloads and parses nothing."""
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -66,7 +67,7 @@ def parses(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     calls: list[int] = []
 
     def counted(payload: BinaryIO, budget: ReadBudget | None = None) -> Any:
-        calls.append(len(payload.read()))
+        calls.append(payload.seek(0, io.SEEK_END))
         payload.seek(0)
         return read_objects(payload, budget)
 
@@ -221,3 +222,42 @@ async def test_a_file_past_the_print_paths_download_cap_is_still_arranged(
     assert obj.part == f"lib2-{hashlib.sha256(payload).hexdigest()[:48]}-0"
     # The spool is gone once the file is read.
     assert not any((cache / "library-spool").iterdir())
+
+
+@respx.mock
+async def test_a_library_stl_past_the_triangle_budget_is_refused_before_it_is_loaded(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wrapping an STL loads it whole, so its size is checked against the budget first:
+    a binary STL by the triangle count its header states."""
+    buffer = io.BytesIO()
+    trimesh.creation.box(extents=(10, 10, 10)).export(buffer, file_type="stl")
+    stl = buffer.getvalue()
+
+    def never(*_: object, **__: object) -> bytes:
+        raise AssertionError("an STL past its budget was loaded")
+
+    monkeypatch.setattr(print_source, "stl_3mf", never)
+    respx.get(f"{API}/library/files/91").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 91,
+                "filename": "cube.stl",
+                "file_type": "stl",
+                "file_size": len(stl),
+                "file_hash": hashlib.sha256(stl).hexdigest(),
+            },
+        )
+    )
+    respx.get(f"{API}/library/files/91/download").mock(
+        return_value=httpx.Response(200, content=stl)
+    )
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    with pytest.raises(NotArrangeableError) as refused:
+        await read_library_objects(
+            bambuddy, 91, blobs=blobs, cache=cache, budget=ReadBudget(max_triangles=11)
+        )
+    assert "is an STL of 12 triangles" in refused.value.reason
+    assert "max_triangles read budget" in refused.value.reason
+    assert f"(the file is {len(stl):,} bytes)" in refused.value.reason

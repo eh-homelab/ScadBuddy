@@ -177,19 +177,20 @@ async def read_library_objects(
     source = LibrarySource(
         file_id=file_id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
-    async with spooled_3mf(client, source, cache) as payload:
-        if payload is None:
-            reason = "it holds no mesh ScadBuddy can read"
-            # No budget decides this one, so no larger budget would read it: kept as the
-            # ceilings', which cover every budget.
-            await _keep(path, _Kept(refused=reason, budget=ReadBudget(**CEILINGS)))
-            raise NotArrangeableError(file_id, file.filename, reason)
-        digest = await asyncio.to_thread(_digest, payload)
-        try:
+    try:
+        async with spooled_3mf(client, source, cache, spend) as payload:
+            if payload is None:
+                reason = "it holds no mesh ScadBuddy can read"
+                # No budget decides this one, so no larger budget would read it: kept as
+                # the ceilings', which cover every budget.
+                await _keep(path, _Kept(refused=reason, budget=ReadBudget(**CEILINGS)))
+                raise NotArrangeableError(file_id, file.filename, reason)
+            digest = await asyncio.to_thread(_digest, payload)
             read = await asyncio.to_thread(read_objects, payload, spend)
-        except UnreadableObjectsError as error:
-            await _keep(path, _Kept(refused=str(error), budget=spend))
-            raise NotArrangeableError(file_id, file.filename, str(error)) from None
+    except UnreadableObjectsError as error:
+        # A budget refusal of an STL, or a 3MF that cannot be read.
+        await _keep(path, _Kept(refused=str(error), budget=spend))
+        raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):
         box = bounding_box(obj.parts)

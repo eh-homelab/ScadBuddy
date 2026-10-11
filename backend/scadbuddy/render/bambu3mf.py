@@ -993,14 +993,15 @@ class _MeshTarget:
     entry at the archive's cap would otherwise take gigabytes (#1949). Arrays cost
     about what the XML does.
 
-    With ``max_triangles``, the parse stops at the triangle past it, every mesh counted
-    together, and at the vertex past three for each of them: what bounds the arrays'
-    memory, whatever the entry's size."""
+    With ``max_triangles`` and ``max_vertices``, the parse stops at the triangle or the
+    vertex past them, every mesh counted together: what bounds the arrays' memory,
+    whatever the entry's size."""
 
-    def __init__(self, max_triangles: int | None = None) -> None:
+    def __init__(self, max_triangles: int | None = None, max_vertices: int | None = None) -> None:
         self.builder = ET.TreeBuilder()
         self.meshes: dict[ET.Element, MeshArrays] = {}
         self._max_triangles = max_triangles
+        self._max_vertices = max_vertices
         self._triangles = 0
         self._vertices = 0
         self._open: list[ET.Element] = []
@@ -1028,9 +1029,10 @@ class _MeshTarget:
         elif tag == _VERTEX and self._within(_VERTICES):
             self._skipping = 1
             self._vertices += 1
-            if self._max_triangles is not None and self._vertices > 3 * self._max_triangles:
+            if self._max_vertices is not None and self._vertices > self._max_vertices:
                 raise TooManyTrianglesError(
-                    f"more than {3 * self._max_triangles} vertices, three per allowed triangle"
+                    f"stores more than {self._max_vertices:,} vertices, three for every"
+                    " triangle allowed"
                 )
             self._points.extend(
                 (float(attrs.get("x", 0)), float(attrs.get("y", 0)), float(attrs.get("z", 0)))
@@ -1039,7 +1041,7 @@ class _MeshTarget:
             self._skipping = 1
             self._triangles += 1
             if self._max_triangles is not None and self._triangles > self._max_triangles:
-                raise TooManyTrianglesError(f"more than {self._max_triangles} triangles")
+                raise TooManyTrianglesError(f"stores more than {self._max_triangles:,} triangles")
             self._faces.extend(
                 (int(attrs.get("v1", 0)), int(attrs.get("v2", 0)), int(attrs.get("v3", 0)))
             )
@@ -1105,12 +1107,13 @@ def parse_model(
     cap: int = MAX_UNCOMPRESSED_BYTES,
     *,
     max_triangles: int | None = None,
+    max_vertices: int | None = None,
 ) -> ParsedModel:
     """Model file ``name``, inflated in chunks and refused past ``cap``, parsed as it
     inflates, its meshes read into arrays (`_MeshTarget`), refused past ``max_triangles``
-    (:class:`TooManyTrianglesError`) when given. ``ET.ParseError`` when it is not XML,
-    ``ValueError`` when a vertex or triangle is not numbers."""
-    target = _MeshTarget(max_triangles)
+    or ``max_vertices`` (:class:`TooManyTrianglesError`) when given. ``ET.ParseError``
+    when it is not XML, ``ValueError`` when a vertex or triangle is not numbers."""
+    target = _MeshTarget(max_triangles, max_vertices)
     parser = ET.XMLParser(target=target)
     read = 0
     with archive.open(name) as entry:
