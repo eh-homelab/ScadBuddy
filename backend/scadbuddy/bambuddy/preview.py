@@ -9,7 +9,10 @@ and the same plate is sliced. Nothing is queued. Each slice is recorded
 than slicing again (:func:`reusable_slice`), so the slice shown is the one printed.
 
 A slice of the same copy and presets that already finished is answered again rather
-than sliced twice, so going back to an earlier choice costs nothing.
+than sliced twice, so going back to an earlier choice costs nothing. Bambuddy's job ids
+are not durable (they restart from 1 with Bambuddy), so a recorded job is reused or read
+only while Bambuddy still says it slices the recorded file, was created when it was,
+and made a sliced file that is still there under the name it made it with.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import ReuseSlice, slice_request
+from scadbuddy.bambuddy.models import SliceJob
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.print_run import (
     PreparedPlates,
@@ -82,67 +86,120 @@ async def start_preview(
     settings: StoredSettings,
     uploads: BambuddyUploadStore,
     request: PrintRunRequest,
+    *,
+    subject: str,
 ) -> PreviewStarted:
     """Lay out, upload and slice what ``request`` would print, as the run does, and
-    record the slice; the first plate when every plate prints."""
+    record the slice for ``subject``; the first plate when every plate prints."""
     prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
     planned = await plan_run(client, source, settings, request, PreparedPlates.of(prepared))
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
     plate = planned.plates[0]
     key = slice_request(plate.plan, plate.plate_id).preset_key
-    reused = await reusable_slice(client, uploads)(planned.library_file_id, key)
-    if reused is None:
+    job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
+    if job_id is None:
         accepted = await client.slice(
             planned.library_file_id, slice_request(plate.plan, plate.plate_id)
         )
-        reused = accepted.job_id
+        job_id = accepted.job_id
+        # What Bambuddy says of the job now, so a job of the same id after a restart of
+        # Bambuddy's is never taken for this one.
+        job = await client.slice_job(job_id)
         await uploads.record_preview(
             PreviewSlice(
-                job_id=reused,
+                job_id=job_id,
+                subject=subject,
                 library_file_id=planned.library_file_id,
                 preset_key=key,
                 plate_id=plate.plate_id,
+                job_created=job.created_at,
             )
         )
-    return PreviewStarted(job_id=reused, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan)
+    return PreviewStarted(job_id=job_id, plate_id=plate.plate_id, nozzle_plan=planned.nozzle_plan)
+
+
+def _same_job(job: SliceJob, row: PreviewSlice) -> bool:
+    """Whether Bambuddy's job is still the slice ``row`` recorded. Bambuddy keeps its
+    jobs in memory and numbers them from 1 again after a restart
+    (``backend/app/api/routes/slice_jobs.py``: "the in-memory slice-job dispatcher"),
+    so the id alone does not say: the file it slices and the time Bambuddy created it
+    must be the ones recorded."""
+    return (
+        row.job_created is not None
+        and job.created_at == row.job_created
+        and job.source_id == row.library_file_id
+    )
+
+
+async def _still_sliced(
+    client: BambuddyClient, uploads: BambuddyUploadStore, row: PreviewSlice
+) -> SliceJob | None:
+    """Bambuddy's job for ``row`` while it is still that slice, and once completed, its
+    sliced file still the one it made; else ``None``, and a row that no longer
+    describes its job is dropped."""
+    try:
+        job = await client.slice_job(row.job_id)
+    except ApiError:
+        # Expired or gone with a restart: nothing to reuse or read.
+        await uploads.drop_preview(row.id or 0)
+        return None
+    if not _same_job(job, row):
+        await uploads.drop_preview(row.id or 0)
+        return None
+    if job.status != "completed":
+        return job
+    sliced = job.result.library_file_id if job.result else None
+    if sliced is None or (row.sliced_file_id is not None and sliced != row.sliced_file_id):
+        await uploads.drop_preview(row.id or 0)
+        return None
+    try:
+        made = await client.library_file(sliced)
+    except ApiError:
+        # The sliced file was deleted.
+        await uploads.drop_preview(row.id or 0)
+        return None
+    name = job.result.name if job.result else None
+    if name is not None and made.filename != name:
+        # Another file under the id of the one the job made.
+        await uploads.drop_preview(row.id or 0)
+        return None
+    if row.sliced_file_id is None and row.id is not None:
+        await uploads.preview_sliced(row.id, sliced, name)
+    return job
 
 
 def reusable_slice(client: BambuddyClient, uploads: BambuddyUploadStore) -> ReuseSlice:
-    """A finished background slice of this copy with these presets whose sliced file
-    Bambuddy still has, newest first; ``None`` when there is none (#2169)."""
+    """A finished background slice of this copy with these presets that Bambuddy's
+    job still describes and whose sliced file it still has, newest first; ``None``
+    when there is none (#2169), and the run slices again."""
 
     async def find(library_file_id: int, preset_key: str) -> int | None:
-        for job_id in await uploads.previews_for(library_file_id, preset_key):
-            try:
-                job = await client.slice_job(job_id)
-                sliced = job.result.library_file_id if job.result else None
-                if job.status != "completed" or sliced is None:
-                    continue
-                await client.library_file(sliced)
-            except ApiError:
-                continue
-            return job_id
+        for row in await uploads.previews_for(library_file_id, preset_key):
+            job = await _still_sliced(client, uploads, row)
+            if job is not None and job.status == "completed":
+                return row.job_id
         return None
 
     return find
 
 
 async def read_preview(
-    client: BambuddyClient, uploads: BambuddyUploadStore, job_id: int
+    client: BambuddyClient, uploads: BambuddyUploadStore, job_id: int, subject: str
 ) -> SlicePreview:
-    """How background slice ``job_id`` stands, and once finished, what it came to."""
-    preview = await uploads.preview(job_id)
-    if preview is None:
+    """How background slice ``job_id`` for ``subject`` stands, and once finished,
+    what it came to."""
+    row = await uploads.preview(job_id, subject)
+    job = await _still_sliced(client, uploads, row) if row is not None else None
+    if row is None or job is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no background slice {job_id}")
-    job = await client.slice_job(job_id)
     answer = SlicePreview(job_id=job_id, status=str(job.status), failure=job.failure)
     sliced = job.result.library_file_id if job.result else None
     if job.status != "completed" or job.result is None or sliced is None:
         return answer
     answer.print_time_seconds = job.result.print_time_seconds
     answer.filament_used_g = job.result.filament_used_g
-    requirements = await client.filament_requirements(sliced, plate_id=preview.plate_id)
+    requirements = await client.filament_requirements(sliced, plate_id=row.plate_id)
     answer.slots = [
         PreviewSlot(
             slot_id=need.slot_id,
@@ -152,7 +209,7 @@ async def read_preview(
         for need in requirements.filaments
         if need.used_in_plate
     ]
-    answer.filament_changes = await _filament_changes(client, sliced, preview.plate_id)
+    answer.filament_changes = await _filament_changes(client, sliced, row.plate_id)
     return answer
 
 

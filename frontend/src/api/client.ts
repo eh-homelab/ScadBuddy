@@ -1228,9 +1228,13 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #2169 — how a background slice stands, and what it came to once finished. */
-  getPreviewSlice: (jobId: number, signal?: AbortSignal) =>
-    request<SlicePreview>(`/print/preview-slices/${jobId}`, signal ? { signal } : {}),
+  /** #2169 — how an output's background slice stands, and what it came to once finished. */
+  getPreviewSlice: (outputId: string, jobId: number) =>
+    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+
+  /** #2169 — as `getPreviewSlice`, for a library file's. */
+  getLibraryPreviewSlice: (fileId: number, jobId: number) =>
+    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
 
   /**
    * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only

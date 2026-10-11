@@ -301,12 +301,15 @@ def bambuddy_kinds_over(
         body = PrintRunRequest.model_validate(request["request"])
         async with client_for(settings) as client:
             source: PrintSource
+            subject: str
             if request.get("library_file_id") is not None:
+                subject = PrintSubject.library(request["library_file_id"]).run_subject
                 source = await LibrarySource.load(
                     client, request["library_file_id"], uploads=uploads, settings=settings
                 )
             else:
                 meta = await require(outputs, request["output_id"])
+                subject = PrintSubject.output(meta.id).run_subject
                 naming = await outputs.naming(meta)
                 source = OutputSource(
                     store=outputs,
@@ -317,7 +320,9 @@ def bambuddy_kinds_over(
                     stem=naming.stem if chosen_project(body, settings) is not None else None,
                     print_settings=naming.print_settings,
                 )
-            return _json(await start_preview(client, source, settings, uploads, body))
+            return _json(
+                await start_preview(client, source, settings, uploads, body, subject=subject)
+            )
 
     async def sidebar_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         settings = await asyncio.to_thread(settings_store.load)

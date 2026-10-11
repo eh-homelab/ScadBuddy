@@ -703,17 +703,23 @@ async def post_preview_slice(
 
 
 @router.get(
-    "/preview-slices/{job_id}",
+    "/outputs/{output_id}/preview-slices/{job_id}",
     response_model=SlicePreview,
     summary="How a background slice stands, and what it came to",
 )
 async def get_preview_slice(
-    job_id: int, store: SettingsStoreDep, uploads: UploadsDep
+    output_id: OutputIdPath,
+    job_id: int,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
 ) -> SlicePreview:
     """#2169: grams per slot, print time, the side each filament went to and how many
-    filament changes the slice makes, once it has finished."""
+    filament changes the slice makes, once it has finished. Only a slice started for
+    this output, while Bambuddy's job is still that slice; else 404."""
+    meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
-        return await read_preview(client, uploads, job_id)
+        return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
 
 
 @router.get(

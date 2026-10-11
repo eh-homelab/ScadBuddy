@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, api } from '../api/client'
+import { ApiError } from '../api/client'
 import type { NozzlePlan, PrintRunRequest, SlicePreview } from '../api/types'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { useDebounced } from './useDebounced'
@@ -56,7 +56,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     setSlicing(true)
     setError(null)
     const follow = async (jobId: number, plan: NozzlePlan | null) => {
-      const read = await api.getPreviewSlice(jobId)
+      const read = await sourceApi(current).readPreview(jobId)
       if (!live()) return
       if (!FINISHED.has(read.status)) {
         timer = setTimeout(() => void follow(jobId, plan).catch(fail), RESLICE_POLL_MS)

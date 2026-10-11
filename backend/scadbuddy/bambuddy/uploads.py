@@ -65,12 +65,22 @@ class LibraryCopy(BaseModel):
 
 class PreviewSlice(BaseModel):
     """One of the print dialog's background slices (#2169), table
-    ``print_preview_slices``: the copy it sliced and with what, and the plate."""
+    ``print_preview_slices``: the copy it sliced and with what, and the plate, and what
+    Bambuddy said of the job, since its job ids restart from 1 with it."""
 
+    #: The row's own id; ``None`` before it is recorded.
+    id: int | None = None
     job_id: int
+    #: The run subject it was sliced for: an output id, or ``library:<file id>``.
+    subject: str
     library_file_id: int
     preset_key: str
     plate_id: int
+    #: The job's ``created_at`` as Bambuddy reported it when it started.
+    job_created: str | None = None
+    #: The sliced file, once the job was seen completed.
+    sliced_file_id: int | None = None
+    sliced_name: str | None = None
 
 
 class ProjectTarget(BaseModel):
@@ -164,40 +174,75 @@ class BambuddyUploadStore:
         """Record one of the print dialog's background slices (#2169)."""
         await asyncio.to_thread(self._record_preview, preview)
 
-    async def preview(self, job_id: int) -> PreviewSlice | None:
-        """The background slice ``job_id``, when the dialog started it (#2169)."""
-        return await asyncio.to_thread(self._preview, job_id)
+    async def preview(self, job_id: int, subject: str) -> PreviewSlice | None:
+        """The newest background slice the dialog started for ``subject`` as Bambuddy
+        job ``job_id`` (#2169). Whether the job is still that slice is the caller's to
+        check: Bambuddy numbers its jobs from 1 again when it restarts."""
+        return await asyncio.to_thread(self._preview, job_id, subject)
 
-    async def previews_for(self, library_file_id: int, preset_key: str) -> list[int]:
+    async def previews_for(self, library_file_id: int, preset_key: str) -> list[PreviewSlice]:
         """The background slices of this copy with these presets, newest first: what a
         run may queue instead of slicing again (#2169)."""
         return await asyncio.to_thread(self._previews_for, library_file_id, preset_key)
 
+    async def preview_sliced(self, row_id: int, sliced_file_id: int, name: str | None) -> None:
+        """What a background slice sliced to, once seen completed."""
+        await asyncio.to_thread(self._preview_sliced, row_id, sliced_file_id, name)
+
+    async def drop_preview(self, row_id: int) -> None:
+        """Forget a background slice whose job no longer says what it did."""
+        await asyncio.to_thread(self._drop_preview, row_id)
+
+    _PREVIEW_COLUMNS = (
+        "id, job_id, subject, library_file_id, preset_key, plate_id, job_created,"
+        " sliced_file_id, sliced_name"
+    )
+
     def _record_preview(self, preview: PreviewSlice) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "INSERT INTO print_preview_slices (job_id, library_file_id, preset_key, plate_id)"
-                " VALUES (%s, %s, %s, %s) ON CONFLICT (job_id) DO NOTHING",
-                (preview.job_id, preview.library_file_id, preview.preset_key, preview.plate_id),
+                "INSERT INTO print_preview_slices (job_id, subject, library_file_id,"
+                " preset_key, plate_id, job_created) VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    preview.job_id,
+                    preview.subject,
+                    preview.library_file_id,
+                    preview.preset_key,
+                    preview.plate_id,
+                    preview.job_created,
+                ),
             )
 
-    def _preview(self, job_id: int) -> PreviewSlice | None:
+    def _preview(self, job_id: int, subject: str) -> PreviewSlice | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT job_id, library_file_id, preset_key, plate_id"
-                " FROM print_preview_slices WHERE job_id = %s",
-                (job_id,),
+                f"SELECT {self._PREVIEW_COLUMNS} FROM print_preview_slices"
+                " WHERE job_id = %s AND subject = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                (job_id, subject),
             ).fetchone()
         return PreviewSlice.model_validate(row) if row else None
 
-    def _previews_for(self, library_file_id: int, preset_key: str) -> list[int]:
+    def _previews_for(self, library_file_id: int, preset_key: str) -> list[PreviewSlice]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT job_id FROM print_preview_slices"
-                " WHERE library_file_id = %s AND preset_key = %s ORDER BY created_at DESC",
+                f"SELECT {self._PREVIEW_COLUMNS} FROM print_preview_slices"
+                " WHERE library_file_id = %s AND preset_key = %s"
+                " ORDER BY created_at DESC, id DESC",
                 (library_file_id, preset_key),
             ).fetchall()
-        return [int(row["job_id"]) for row in rows]
+        return [PreviewSlice.model_validate(row) for row in rows]
+
+    def _preview_sliced(self, row_id: int, sliced_file_id: int, name: str | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE print_preview_slices SET sliced_file_id = %s, sliced_name = %s"
+                " WHERE id = %s",
+                (sliced_file_id, name, row_id),
+            )
+
+    def _drop_preview(self, row_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM print_preview_slices WHERE id = %s", (row_id,))
 
     async def record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         """Keep the hash Bambuddy reports for one of the output's sliced files (#306)."""

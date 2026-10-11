@@ -184,7 +184,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'POST /api/v1/print/outputs/{output_id}/preview-slice',
       'POST /api/v1/print/library/{file_id}/preview-slice',
-      'GET /api/v1/print/preview-slices/{job_id}',
+      'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}',
+      'GET /api/v1/print/library/{file_id}/preview-slices/{job_id}',
     ] as const
   ).map((operation) => ({
     operation,

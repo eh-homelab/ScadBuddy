@@ -28,7 +28,7 @@ export const handlers = [
     HttpResponse.json(start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE)),
   ),
 
-  http.get(`${base}/print/preview-slices/:job`, ({ params }) => {
+  http.get(`${base}/print/:kind/:id/preview-slices/:job`, ({ params }) => {
     const jobId = Number(params['job'])
     const job = jobs.get(jobId)
     if (!job) return HttpResponse.json({ detail: `there is no background slice ${jobId}` }, { status: 404 })

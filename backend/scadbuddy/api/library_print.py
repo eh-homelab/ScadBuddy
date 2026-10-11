@@ -39,7 +39,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
 from scadbuddy.bambuddy.library_view import NotViewableError, library_preview
-from scadbuddy.bambuddy.preview import PreviewStarted
+from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -421,6 +421,21 @@ async def post_library_preview_slice(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, PreviewStarted)
+
+
+@router.get(
+    "/{file_id}/preview-slices/{job_id}",
+    response_model=SlicePreview,
+    summary="How a background slice stands, and what it came to",
+)
+async def get_library_preview_slice(
+    file_id: FileIdPath, job_id: int, store: SettingsStoreDep, uploads: UploadsDep
+) -> SlicePreview:
+    """As ``/print/outputs/{id}/preview-slices/{job}``, for a file in Bambuddy's library."""
+    async with client_for(store.load()) as client:
+        return await read_preview(
+            client, uploads, job_id, PrintSubject.library(file_id).run_subject
+        )
 
 
 @router.post(

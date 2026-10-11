@@ -10,6 +10,7 @@ import type {
   OutputPlate,
   PrintCheck,
   PreviewStarted,
+  SlicePreview,
   PrintProgress,
   PrintRunRequest,
   PrintRunResult,
@@ -47,6 +48,8 @@ export interface SourceApi {
   check: (body: PrintRunRequest) => Promise<PrintCheck>
   /** #2169 — slice `body` in the background through the run's own path; nothing queued. */
   preview: (body: PrintRunRequest) => Promise<PreviewStarted>
+  /** #2169 — how one of this source's background slices stands. */
+  readPreview: (jobId: number) => Promise<SlicePreview>
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
 }
@@ -122,6 +125,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
       check: (body) => api.checkPrint(id, body),
       preview: (body) => api.previewSlice(id, body),
+      readPreview: (jobId) => api.getPreviewSlice(id, jobId),
       remember: (choices) => api.putModelChoices(slug, choices),
     }
   }
@@ -135,6 +139,7 @@ export function sourceApi(source: PrintSource): SourceApi {
     run: (body, signal, within) => api.runLibraryPrint(id, body, signal, within),
     check: (body) => api.checkLibraryPrint(id, body),
     preview: (body) => api.previewLibrarySlice(id, body),
+    readPreview: (jobId) => api.getLibraryPreviewSlice(id, jobId),
     remember: (choices) => api.putLibraryChoices(id, choices),
   }
 }

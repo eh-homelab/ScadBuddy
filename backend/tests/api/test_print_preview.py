@@ -16,7 +16,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print_filaments import prepared, queue_route, slice_routes
+from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes
 from tests.api.test_send import BASE, configure, upload_route
 from tests.bambuddy.conftest import recording
@@ -26,14 +26,49 @@ pytestmark = pytest.mark.requires_postgres
 
 API = f"{BASE}/api/v1"
 SLICED = 77
+#: The copy the run uploads (``upload_route``), which the slice job slices.
+COPY = 41
+CREATED = "2026-10-10T23:40:00.123456"
+
+
+class Job:
+    """Bambuddy's slice job 9 as ``GET /slice-jobs/9`` answers it, changeable mid-test
+    the way a Bambuddy restart or a deleted file changes it."""
+
+    def __init__(self) -> None:
+        self.body: dict[str, object] = {
+            "job_id": 9,
+            "status": "completed",
+            "kind": "library_file",
+            "source_id": COPY,
+            "created_at": CREATED,
+            "result": {
+                "library_file_id": SLICED,
+                "name": "demo.gcode.3mf",
+                "filament_used_g": 12.0,
+            },
+        }
+
+    def routes(self) -> respx.Route:
+        posted = respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
+            return_value=httpx.Response(200, json={"job_id": 9, "status": "pending"})
+        )
+        respx.get(f"{API}/slice-jobs/9").mock(
+            side_effect=lambda _: httpx.Response(200, json=self.body)
+        )
+        return posted
+
+
+def sliced_file_route(status: int = 200, filename: str = "demo.gcode.3mf") -> None:
+    respx.get(f"{API}/library/files/{SLICED}").mock(
+        return_value=httpx.Response(status, json={"id": SLICED, "filename": filename})
+    )
 
 
 def sliced_routes() -> None:
     """The sliced file: still in the library, and its G-code loading two filaments, then
     the first again."""
-    respx.get(f"{API}/library/files/{SLICED}").mock(
-        return_value=httpx.Response(200, json={"id": SLICED, "filename": "demo.gcode.3mf"})
-    )
+    sliced_file_route()
     gcode = b"G28\nM620 S0A\nG1 X1\nM620 S1A\nG1 X2\nM620 S255A\nM620 S0A\n"
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as zipped:
@@ -50,7 +85,7 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
     output_id = prepared(client, model)
     upload_route()
     run_routes()
-    sliced = slice_routes(sliced_id=SLICED, job_id=9)
+    sliced = Job().routes()
     sliced_routes()
     queued = queue_route()
 
@@ -63,7 +98,7 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
     assert sliced.call_count == 1
     assert not queued.called
 
-    preview = client.get("/api/v1/print/preview-slices/9")
+    preview = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
     assert preview.status_code == 200, preview.text
     answer = preview.json()
     assert answer["status"] == "completed"
@@ -80,9 +115,57 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
 
 
 @respx.mock
-def test_an_unknown_background_slice_is_a_404(client: TestClient) -> None:
-    configure(client)
-    assert client.get("/api/v1/print/preview-slices/12345").status_code == 404
+def test_an_unknown_background_slice_is_a_404(client: TestClient, model: str) -> None:
+    output_id = prepared(client, model)
+    assert client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/12345").status_code == 404
+    # Nor is one read through another source.
+    assert client.get("/api/v1/print/library/5/preview-slices/12345").status_code == 404
+
+
+def _preview_then_change(
+    client: TestClient, model: str, change: str
+) -> tuple[str, respx.Route]:
+    """A background slice, then Bambuddy's job 9 or its file changed by ``change``."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    job = Job()
+    sliced = job.routes()
+    sliced_routes()
+    queue_route()
+    started = client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
+    )
+    assert started.status_code == 200, started.text
+    if change == "another-file":
+        job.body = {**job.body, "source_id": 999}
+    elif change == "restart":
+        # Bambuddy restarted: job 9 is a new job, of the same copy, created since.
+        job.body = {**job.body, "created_at": "2026-10-11T08:00:00.000001"}
+    elif change == "deleted":
+        sliced_file_route(status=404)
+    elif change == "replaced":
+        sliced_file_route(filename="someone-else.gcode.3mf")
+    return output_id, sliced
+
+
+@respx.mock
+@pytest.mark.parametrize("change", ["another-file", "restart", "deleted", "replaced"])
+def test_a_job_that_no_longer_is_the_background_slice_is_sliced_again(
+    client: TestClient, model: str, change: str
+) -> None:
+    """Bambuddy's slice jobs live in its memory and their ids restart from 1, and a
+    sliced file can be deleted: a recorded job is queued only while it is still the
+    slice shown."""
+    output_id, sliced = _preview_then_change(client, model, change)
+
+    run_print(client, output_id, json=body())
+
+    # Sliced again rather than queueing the recorded job.
+    assert sliced.call_count == 2
+    # Nor is it read back as this output's slice: the stale row is gone.
+    read = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
+    assert read.status_code == 404, read.text
 
 
 @respx.mock
