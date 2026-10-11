@@ -21,7 +21,6 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
-    from scadbuddy.flows.manifest import tier_of
     from scadbuddy.workflows.flow_entries import run_callback, run_gated
     from scadbuddy.workflows.flow_models import ProjectionWrite
     from scadbuddy.workflows.flow_routes import (
@@ -383,7 +382,8 @@ async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWork
     """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
     started this run; returns its text. An outward tool (one that changes something
     outside ScadBuddy) waits for a person to approve it first."""
-    tier = tier_of(name)
+    owner: StepOwner = workflow.instance()
+    tier = owner.tool_tier(name)
     if tier is None:
         raise ValueError(f"there is no tool {name!r}")
     call_id = str(workflow.uuid4())

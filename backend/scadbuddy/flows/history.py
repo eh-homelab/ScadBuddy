@@ -13,14 +13,14 @@ landed after the person looked.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
 from temporalio.client import Client
 
-from scadbuddy.flows.manifest import tier_of
+from scadbuddy.flows.models import Run
 from scadbuddy.workflows.flow_tools import OUTWARD_PREFIX, TOOL_PREFIX, TURN_PREFIX
 
 
@@ -43,11 +43,16 @@ class ResetPreview(BaseModel):
 
 
 def preview_of(
-    events: Iterable[HistoryEvent], event_id: int, turns: Mapping[int, int] | None = None
+    events: Iterable[HistoryEvent],
+    event_id: int,
+    outward_tools: Collection[str] = (),
+    turns: Mapping[int, int] | None = None,
 ) -> ResetPreview:
-    """The preview over one execution's events. `turns` maps an `agent`/`ask_session`
-    turn's wait (scheduled event id) to the outward calls the turn made, once it
-    answered; a turn not in it has not, so it may have made one, and is listed."""
+    """The preview over one execution's events. `outward_tools` are the call ids of the
+    run's outward `tool(...)` steps: their activity id alone does not say. `turns` maps
+    an `agent`/`ask_session` turn's wait (scheduled event id) to the outward calls the
+    turn made, once it answered; a turn not in it has not, so it may have made one, and
+    is listed."""
     turns = turns or {}
     last = 0
     valid = False
@@ -69,11 +74,8 @@ def preview_of(
         activity_id = scheduled.activity_id
         if activity_id.startswith(OUTWARD_PREFIX):
             fn, _, call_id = activity_id.removeprefix(OUTWARD_PREFIX).partition("-")
-        elif (
-            activity_id.startswith(TOOL_PREFIX)
-            and tier_of(scheduled.activity_type.name) == "outward"
-        ):
-            # An outward agent tool (`tool(...)`), by its tier in the manifest.
+        elif activity_id.removeprefix(TOOL_PREFIX) in outward_tools:
+            # An outward agent tool (`tool(...)`), by the run's own step for it.
             fn, call_id = f"tool:{scheduled.activity_type.name}", activity_id[len(TOOL_PREFIX) :]
         elif activity_id.startswith(TURN_PREFIX) and turns.get(event.event_id, 1) > 0:
             # An agent session's turn that made an outward call (§7.4).
@@ -90,11 +92,12 @@ def preview_of(
 
 
 async def outward_since(
-    client: Client, workflow_id: str, event_id: int, *, run_id: str | None = None
+    client: Client, run: Run, event_id: int, *, run_id: str | None = None
 ) -> ResetPreview:
-    """The preview of the workflow's execution `run_id`, else its current one."""
-    history = await client.get_workflow_handle(workflow_id, run_id=run_id).fetch_history()
-    return preview_of(history.events, event_id, await _turns(client, history.events))
+    """The preview of the run's execution `run_id`, else its current one."""
+    history = await client.get_workflow_handle(run.workflow_id, run_id=run_id).fetch_history()
+    tools = {s.call_id for s in run.steps if s.outward and s.fn.startswith("tool:")}
+    return preview_of(history.events, event_id, tools, await _turns(client, history.events))
 
 
 async def _turns(client: Client, events: Sequence[HistoryEvent]) -> dict[int, int]:

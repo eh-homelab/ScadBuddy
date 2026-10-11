@@ -211,7 +211,7 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
                 raise ApiError(status.HTTP_404_NOT_FOUND, "The run's history is gone.") from None
             raise
         event_id = int(request["event_id"])
-        preview = await outward_since(client, run.workflow_id, event_id, run_id=described.run_id)
+        preview = await outward_since(client, run, event_id, run_id=described.run_id)
         if not preview.valid:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,

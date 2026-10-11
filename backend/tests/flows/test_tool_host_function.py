@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
+from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -91,7 +92,7 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
     assert parked is not None
     assert [(w.fn, w.kind) for w in parked.waiting_on] == [("tool:send_to_bambuddy", "approval")]
     assert served.calls == []
-    preview = await outward_since(outward.client, parked.workflow_id, 1)
+    preview = await outward_since(outward.client, parked, 1)
     assert preview.calls == []
     decide = next(k for k in flow_kinds(outward.store) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
@@ -112,7 +113,7 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
         for e in history.events
         if e.HasField("workflow_task_completed_event_attributes") and e.event_id < sent
     )
-    again = await outward_since(outward.client, run.workflow_id, point)
+    again = await outward_since(outward.client, run, point)
     assert [(c.fn, c.call_id) for c in again.calls] == [("tool:send_to_bambuddy", call_id)]
 
 
@@ -146,3 +147,26 @@ async def test_a_tools_own_error_reaches_the_script_once(
     assert [(s.fn, s.status, s.error) for s in run.steps] == [
         ("tool:broken", "failed", "ToolFailedError")
     ]
+
+
+async def test_the_tiers_are_the_runs_own_from_its_start(
+    outward: Outward, tools: tuple[Tools, str]
+) -> None:
+    """A worker on another image, whose manifest differs, runs the call as the run
+    started it: the tiers are in the run's history, not the worker's state."""
+    served, queue = tools
+    run_id = await outward.run(
+        script(
+            "await wait_for_human('Go?', 600)",
+            "return await tool('send_to_bambuddy', {'output_id': 'o1'})",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.row(run_id, lambda r: r.status == "waiting")
+    use_manifest({"send_to_bambuddy": "read"})
+    await AgentClient(outward.client, run.workflow_id).provide_callback_result(
+        run.waiting_on[0].call_id, result={"answer": "yes"}
+    )
+    parked = await outward.row(run_id, lambda r: any(w.kind == "approval" for w in r.waiting_on))
+    assert [w.fn for w in parked.waiting_on] == ["tool:send_to_bambuddy"]
+    assert served.calls == []

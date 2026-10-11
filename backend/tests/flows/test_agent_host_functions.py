@@ -238,6 +238,6 @@ async def test_a_reset_preview_counts_a_turn_that_made_an_outward_call(
         for e in history.events
         if e.HasField("workflow_task_completed_event_attributes") and e.event_id < started
     )
-    preview = await outward_since(outward.client, run.workflow_id, point)
+    preview = await outward_since(outward.client, run, point)
     expected = [("agent", step.call_id)] if outward_calls else []
     assert [(c.fn, c.call_id) for c in preview.calls] == expected

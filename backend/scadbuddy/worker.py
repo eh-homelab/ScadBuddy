@@ -51,7 +51,6 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.flows.keys import payload_keys
-from scadbuddy.flows.manifest import load_manifest
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
@@ -867,8 +866,6 @@ async def run_projects_worker(
     a run in flight resumes on the next worker from its history."""
     stop = stop or asyncio.Event()
     keys = payload_keys(settings)
-    if settings.flow_tools_json is not None:
-        load_manifest(settings.flow_tools_json)
     if keys is None:
         raise ProjectsKeyMissingError(
             "SCADBUDDY_SECRET_KEY_FILE is required for --queue projects: a flow's payloads"

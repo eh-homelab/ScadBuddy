@@ -70,7 +70,7 @@ async def point_after(flows: Outward, run: Run, history_length: int) -> int:
 
 
 async def reset(flows: Outward, run: Run, point: int) -> dict[str, Any]:
-    preview = await outward_since(flows.client, run.workflow_id, point)
+    preview = await outward_since(flows.client, run, point)
     return await operate(
         flows,
         FLOW_RESET,
@@ -122,7 +122,7 @@ async def test_a_reset_past_a_stale_preview_is_refused_with_the_new_one(
     )
     run = await outward.row(run_id, lambda r: r.status == "waiting")
     point = await point_before(outward, run, run.steps[-1].history_length)
-    stale = await outward_since(outward.client, run.workflow_id, point)
+    stale = await outward_since(outward.client, run, point)
     assert stale.calls == []
     client = AgentClient(outward.client, run.workflow_id)
     await client.provide_callback_result(run.waiting_on[0].call_id, result={"answer": "y"})
@@ -133,7 +133,7 @@ async def test_a_reset_past_a_stale_preview_is_refused_with_the_new_one(
         await operate(outward, FLOW_RESET, request)
     assert (err.value.status, err.value.type) == (409, RESET_CHANGED)
     assert [c["fn"] for c in err.value.extensions["preview"]["calls"]] == ["queue_print"]
-    fresh = await outward_since(outward.client, run.workflow_id, point)
+    fresh = await outward_since(outward.client, run, point)
     await operate(outward, FLOW_RESET, {**request, "as_of_event_id": fresh.as_of_event_id})
     # The point is before 'Print?' was asked: the new execution asks it again.
     after = await outward.row(
