@@ -52,7 +52,7 @@ import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } fr
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
-import { PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
+import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
@@ -397,7 +397,9 @@ const payloadKeys =
   temporal && kek.ok
     ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
     : undefined
-const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
+// A session's large payloads are files on the data share, by reference (#2243).
+const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
+const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys, payloadStore)] } : undefined
 if (temporal && !payloadKeys) {
   console.warn('agent-tools worker: no secret key, so durable payloads cannot be sealed; no durable session is started')
 }

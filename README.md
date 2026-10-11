@@ -1011,6 +1011,15 @@ ScadBuddy pod, `ghcr.io/eh-homelab/scadbuddy-agent-durable` (the Dockerfile's
 - It runs as uid 10001 and writes only under `/srv/agent` (`HOME`, Claude
   Code's config and its working directory) and `/tmp`, so mount an `emptyDir`
   at each and keep the root filesystem read-only.
+- Set `SCADBUDDY_PAYLOAD_DIR` on it **and** on the `agent` container to one
+  directory on the data share, mounted at the same path in both (e.g. the
+  backend's NAS volume, `/data/payloads`). A session's Temporal payloads of
+  128 KiB or more (the conversation, the tool manifest, a large tool result)
+  are kept there as files, `<subject>/<sha256>`, ciphertext under the
+  session's own key, and history holds only a reference (#2243). Set it on
+  both or on neither: a reference one container writes, the other must read.
+  forgetSubject removes a session's directory after deleting its key. Unset,
+  payloads stay in history, and a turn whose conversation outgrows 2 MB fails.
 - Several replicas are safe: a session is one workflow, and any worker
   continues it, because the conversation lives in the workflow (5c Ruling 1).
 - `deploy.reusable.yml` pins its line in `applications/scadbuddy/scadbuddy.yaml`
