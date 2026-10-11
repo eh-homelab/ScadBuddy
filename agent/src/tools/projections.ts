@@ -6,7 +6,7 @@ import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
 import { toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
-import { errorResult, parsedOrRaw, type Progress, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
+import { errorResult, parsedOrRaw, type Progress, type Risk, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
 // The two projections of the registry (spec §5.1, D3). Both hand every call to
 // `runTool`, with the same names, descriptions, input shapes and annotations;
@@ -87,6 +87,8 @@ export function createHarnessServer(
   session?: string,
   /** The turn's open segment (telemetry/turn.ts TurnTrace.context): where a call with no bound span is traced. */
   turnContext?: () => Context,
+  /** The tier the turn's permission seam applies to each tool (registry.ts ToolContext.seamTier); its own by default. */
+  seamTierOf: (tool: Tool) => Risk = (tool) => tool.risk,
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -121,6 +123,7 @@ export function createHarnessServer(
               signal: signalFrom(extra),
               lookup,
               gate: 'harness',
+              seamTier: seamTierOf(t),
             }),
           ),
         { annotations: t.annotations },
