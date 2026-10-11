@@ -1,0 +1,316 @@
+{
+  "uid": "scadbuddy-agent",
+  "title": "ScadBuddy / Agent",
+  "description": "The assistant's turns (cost, tokens, tool calls), its tool calls, backend calls and approvals, from the agent's traces. The agent exposes no Prometheus metrics.",
+  "tags": ["scadbuddy"],
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 42,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "1m",
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "ScadBuddy",
+      "tags": ["scadbuddy"],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false,
+      "icon": "external link",
+      "tooltip": "",
+      "url": ""
+    }
+  ],
+  "annotations": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "options": []
+      },
+      {
+        "name": "DS_TEMPO",
+        "label": "Tempo",
+        "description": "Trace panels need a Tempo datasource (clusters#1596 Phase 4); until one exists they show no data and the metric panels are unaffected.",
+        "type": "datasource",
+        "query": "tempo",
+        "current": { "text": "Tempo", "value": "tempo" },
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "options": []
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(scadbuddy_build_info, namespace)",
+        "query": {
+          "query": "label_values(scadbuddy_build_info, namespace)",
+          "refId": "namespace"
+        },
+        "current": { "text": "bambuddy", "value": "bambuddy" },
+        "includeAll": false,
+        "hide": 0,
+        "refresh": 2,
+        "regex": "",
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Turns",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Turns with cost and tokens",
+      "description": "agent.turn spans (one per segment between parks) with what each cost: scadbuddy.cost_usd, tokens and tool calls. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 1, "w": 16, "h": 10 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn\"} | select(span.scadbuddy.outcome, span.scadbuddy.cost_usd, span.scadbuddy.input_tokens, span.scadbuddy.output_tokens, span.scadbuddy.tool_calls)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Agent spans per second",
+      "description": "Spans Tempo holds per second, one series per service, so a service that stops reporting shows as a gap. Known gaps, not health: parentless browser fetches are never sampled (#2291), so page loads after the first and every render or arrange they start have no trace; Arrange, backfill and save are not traceAction'd (#2292); render and print workers both report as scadbuddy-worker (#2292). A TraceQL metrics query: it needs Tempo's metrics-generator local-blocks processor (clusters#1596, spec 2026-10-01 §7). Without it this panel is empty, which means not configured, not zero traces.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 16, "y": 1, "w": 8, "h": 10 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\"} | rate()",
+          "legendFormat": "scadbuddy-agent",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Turns over $0.25",
+      "description": "Turn segments that cost more than 0.25 USD. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 11, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn\" && span.scadbuddy.cost_usd > 0.25} | select(span.scadbuddy.cost_usd, span.scadbuddy.tool_calls, span.scadbuddy.session_id)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Resumed turns",
+      "description": "agent.turn.resume: a turn picking up after a human decided a parked call. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 8, "y": 11, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn.resume\"} | select(span.scadbuddy.outcome)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Turns that errored or parked",
+      "description": "Turn segments with status error, or ended parked on an approval. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 16, "y": 11, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn\" && (status=error || span.scadbuddy.outcome=\"parked\")} | select(span.scadbuddy.outcome, span.scadbuddy.failure_class, span.scadbuddy.approval_id)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Tool calls",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Slowest tool calls",
+      "description": "Tool calls inside turns (agent.tool/<name>, marked by scadbuddy.tool_use_id), with the tool, its tier and outcome. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 10 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && span.scadbuddy.tool_use_id != nil} | select(span.scadbuddy.tool, span.scadbuddy.tier, span.scadbuddy.outcome)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Tool calls that failed",
+      "description": "Tool calls with status error. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 10 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && span.scadbuddy.tool != nil && status=error} | select(span.scadbuddy.tool, span.scadbuddy.tier, span.scadbuddy.failure_class)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Calls to the backend that failed",
+      "description": "The agent's openapi-fetch calls to the ScadBuddy API answered 4xx/5xx. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 30, "w": 12, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && kind=client && span.http.response.status_code >= 400} | select(span.http.response.status_code, span.scadbuddy.failure_class)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "MCP requests",
+      "description": "Requests to the agent's /mcp endpoint, by JSON-RPC method. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 12, "y": 30, "w": 12, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.mcp\"} | select(span.rpc.method, span.http.response.status_code)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Approvals",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Approvals and how long they waited",
+      "description": "agent.approval: each outward call a human decided, with the decision and seconds it waited parked. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 39, "w": 16, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.approval\"} | select(span.scadbuddy.tool, span.scadbuddy.tier, span.scadbuddy.outcome, span.scadbuddy.wait_seconds, span.scadbuddy.decided_by_kind)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Approvals waiting over 5 minutes",
+      "description": "Approvals decided after more than 300 s parked. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 16, "y": 39, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.approval\" && span.scadbuddy.wait_seconds > 300} | select(span.scadbuddy.tool, span.scadbuddy.outcome, span.scadbuddy.wait_seconds)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    }
+  ]
+}

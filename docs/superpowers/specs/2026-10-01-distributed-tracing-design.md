@@ -637,7 +637,21 @@ hard-coded uids.
 - *Browser:* recent `scadbuddy-web` traces by action.
 
 Panels that need Tempo's metrics-generator (TraceQL metrics, service graph)
-are left out until clusters#1596 decides on it.
+are left out until clusters#1596 decides on it, with one exception: the "trace
+coverage" panels (`{resource.service.name="…"} | rate()`, one series per service),
+which stay empty, meaning not configured, until it does.
+
+**Per-area dashboards** (#2289), beside the overview and through the same
+generator, one ConfigMap `<uid>-dashboard` each: `scadbuddy-api` (latency,
+throughput and errors per route, the slowest routes, the slow list endpoints and
+Tempo searches per route), `scadbuddy-web` (page loads, fetches, user actions),
+`scadbuddy-renders` (queue, Arrange/backfill/save, Temporal activities),
+`scadbuddy-printing` (print routes, Bambuddy calls by scope, blob store, cache,
+uploads) and `scadbuddy-agent` (turns with cost, tool calls, approvals). Spans
+whose names are built at run time (FastAPI server spans, `bambuddy.<operation>`,
+`agent.tool/<name>`, Temporal's interceptor spans) are matched by attribute
+(`span.http.route`, `span.scadbuddy.bambuddy.scope`, `span.scadbuddy.tool_use_id`,
+`span.temporalActivityID`), which the lint does not check.
 
 **Pinned at the deployed revision.** Clusters' `clusters/prod/scadbuddy`
 overlay references it as a remote kustomize resource:
