@@ -1,0 +1,160 @@
+import { cp, mkdir, rename, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { declaredConfigs } from '../harness/plugins.js'
+import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
+import type { LoadedPackage } from '../plugins/packages/install.js'
+import { harnessToolName } from '../plugins/registry.js'
+import { connectHttp, type TurnPackage, type TurnServer } from './turnTools.js'
+
+// Plugin packages in a durable session (#2320). A classic turn hands Claude Code each
+// enabled package's directory (sessions/manager.ts `packagePlugins`), materialised from
+// its pin and re-hashed for the turn (plugins/packages/install.ts `loadPackagesForRun`).
+// A durable turn's Claude Code runs in the agent-durable container, so:
+//
+//   - each loaded package is copied to `<payload dir>/plugins/<content hash>/`, on the
+//     volume both sidecars mount, once per content hash (it never changes under that
+//     name), and the turn's listing names it (`TurnPackage`); the segment runner hashes
+//     the copy again before it loads it, as the agent re-hashes its own cache;
+//   - the package's MCP servers run here, as turn tools, as a remote plugin's do: the
+//     durable engine starts no MCP server of a plugin (the Temporal plugin sets
+//     `strict_mcp_config`), and here each call goes through the gate. They carry the
+//     names Claude Code gives them (`plugin_<package>_<server>`), so their tiers are
+//     the classic turn's: no package tool is ScadBuddy's, so every one is outward.
+//     An http server is reached at its declared URL with its declared headers (vet.ts
+//     refuses `$` in both, and install.ts checks the URL's egress at every load); a
+//     local (stdio) server only for a package approved with `allow_refused`, started
+//     in the package's folder with only PATH, HOME and its own declared `env`.
+
+/** A durable turn's packages are shared under this folder of the payload volume. */
+export const SHARED_PACKAGES = 'plugins'
+
+/** The shared folder's name for a pin's content hash (`sha256:<hex>` → `<hex>`). */
+export function sharedName(contentHash: string): string {
+  const hex = contentHash.replace(/^sha256:/, '')
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(`not a package content hash: ${contentHash}`)
+  return hex
+}
+
+/**
+ * Copies a loaded package to `root/<hash>` unless a copy that hashes to the pin is
+ * already there, and returns its name under `root`. A copy that does not match is
+ * replaced: the volume is shared, so it is checked, never trusted.
+ */
+export async function sharePackage(pkg: LoadedPackage, root: string): Promise<TurnPackage> {
+  const name = sharedName(pkg.contentHash)
+  const target = path.join(root, name)
+  if (!(await matches(target, pkg.contentHash))) {
+    await mkdir(root, { recursive: true })
+    const tmp = path.join(root, `.tmp-${randomUUID()}`)
+    try {
+      await cp(pkg.dir, tmp, { recursive: true, preserveTimestamps: true })
+      if (!(await matches(tmp, pkg.contentHash))) throw new Error(`the copy of ${pkg.name} does not hash to its pin`)
+      await rm(target, { recursive: true, force: true })
+      try {
+        await rename(tmp, target)
+      } catch (err) {
+        // Another replica placed it first: fine when it matches.
+        const code = (err as NodeJS.ErrnoException).code
+        if ((code !== 'ENOTEMPTY' && code !== 'EEXIST') || !(await matches(target, pkg.contentHash))) throw err
+      }
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  }
+  return { name: pkg.name, dir: name, content_hash: pkg.contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
+}
+
+async function matches(dir: string, contentHash: string): Promise<boolean> {
+  if (!existsSync(dir)) return false
+  try {
+    return (await hashTree(dir)).hash === contentHash
+  } catch (err) {
+    if (err instanceof PackageContentError || (err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw err
+  }
+}
+
+type McpConfig = Record<string, unknown>
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function entries(map: unknown): [string, McpConfig][] {
+  const servers = isRecord(map) && isRecord(map.mcpServers) ? map.mcpServers : map
+  return isRecord(servers) ? Object.entries(servers).filter((e): e is [string, McpConfig] => isRecord(e[1])) : []
+}
+
+function strings(value: unknown): Record<string, string> {
+  return isRecord(value) ? Object.fromEntries(Object.entries(value).filter((e): e is [string, string] => typeof e[1] === 'string')) : {}
+}
+
+/** `${CLAUDE_PLUGIN_ROOT}` as Claude Code expands it in a plugin's server command. */
+function expandRoot(text: string, root: string): string {
+  return text.split('${CLAUDE_PLUGIN_ROOT}').join(root)
+}
+
+/** A client on a package's local MCP server, started for one listing or one call. */
+async function connectStdio(config: McpConfig, root: string): Promise<Client> {
+  const client = new Client({ name: 'scadbuddy-durable-turn', version: '1' })
+  const env: Record<string, string> = {
+    ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+    ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+    ...Object.fromEntries(Object.entries(strings(config.env)).map(([k, v]) => [k, expandRoot(v, root)])),
+  }
+  await client.connect(
+    new StdioClientTransport({
+      command: expandRoot(String(config.command), root),
+      args: (Array.isArray(config.args) ? config.args : []).map((a) => expandRoot(String(a), root)),
+      env,
+      cwd: root,
+      stderr: 'ignore',
+    }),
+  )
+  return client
+}
+
+/** Each loaded package's MCP servers as turn servers; what cannot be offered goes in `problems`. */
+export function packageServers(loaded: readonly LoadedPackage[], problems: string[]): TurnServer[] {
+  const servers: TurnServer[] = []
+  for (const pkg of loaded) {
+    for (const { map } of declaredConfigs(pkg.dir).mcp) {
+      for (const [server, config] of entries(map)) {
+        const name = `plugin_${harnessToolName(pkg.name)}_${harnessToolName(server)}`
+        if (name.includes('__')) {
+          problems.push(`plugin package ${pkg.name}: MCP server "${server}" has a name a durable session cannot offer`)
+          continue
+        }
+        const outward = () => 'outward' as const
+        if (typeof config.url === 'string' && config.command === undefined) {
+          const url = config.url
+          const headers = strings(config.headers)
+          servers.push({ name, connect: () => connectHttp(url, Object.keys(headers).length ? headers : undefined), tierOf: outward })
+        } else if (pkg.allowed && typeof config.command === 'string') {
+          servers.push({ name, connect: () => connectStdio(config, pkg.dir), tierOf: outward })
+        }
+        // Anything else was refused at load (harness/plugins.ts, vet.ts).
+      }
+    }
+  }
+  return servers
+}
+
+/** Built-ins a durable session runs in its segment and cannot ask a human about first. */
+const PARKABLE_BUILTINS = new Set(['Bash', 'PowerShell'])
+
+/**
+ * An allowed package's built-ins that a durable session cannot offer: every call of one
+ * is outward (run.ts `builtinTools`), and only Bash and PowerShell run as their own
+ * activities, which can wait for a human (the Temporal plugin's `tool_activities`).
+ */
+export function unparkableBuiltins(pkg: TurnPackage): string[] {
+  return pkg.builtin_tools.filter((t) => !PARKABLE_BUILTINS.has(t) && !OFFERED.has(t))
+}
+
+/** What every durable turn's Claude Code has already (the Skill and Agent tools, read). */
+const OFFERED = new Set(['Skill', 'Agent'])

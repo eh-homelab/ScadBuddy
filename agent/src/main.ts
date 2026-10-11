@@ -55,6 +55,7 @@ import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { BrowserHost, type HeadlessBrowserDeps, turnBrowserServers } from './temporal/turnBrowser.js'
+import { SHARED_PACKAGES } from './temporal/turnPackages.js'
 import { turnServers } from './temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
@@ -439,6 +440,15 @@ const turnToolDeps = temporal
         },
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, 'durable-turns'), audit },
+        // Shared with agent-durable on the payload volume, which its runner loads them from.
+        ...(pluginPackages
+          ? {
+              packages: {
+                load: () => loadPackagesForRun(pluginPackages, packageInstaller),
+                root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
+              },
+            }
+          : {}),
         ...(database
           ? {
               extra: turnBrowserServers({

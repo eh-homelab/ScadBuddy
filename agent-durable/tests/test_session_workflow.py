@@ -99,6 +99,7 @@ def policy(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
         ("render it", ("render_preview", {"model": "m"})),
         ("get it", ("notes__post", {"method": "GET", "body": "y"})),
         ("post it", ("notes__post", {"method": "POST", "body": "x"})),
+        ("run it", ("Bash", {"command": "make notes"})),
     ):
         if prompt.startswith(name):
             return ToolCall(*args)
@@ -870,3 +871,34 @@ async def test_an_outward_turn_tool_call_parks_and_runs_once_approved(
     assert await settled(connect, sid) == "idle"
     assert harness.stand_in.ran == [("turn:notes__post", {"method": "POST", "body": "x"})]
     await _replays(harness, handle)
+
+
+NOTES_PACKAGE = {
+    "name": "notes",
+    "dir": "a" * 64,
+    "content_hash": "sha256:" + "a" * 64,
+    "allowed": True,
+    "builtin_tools": ["Bash"],
+}
+
+
+async def test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: an allowed package's Bash, outward in a classic turn, runs here as its own
+    activity once a human approved the call; the segment runner is told the package."""
+    harness.stand_in.turn_packages = [NOTES_PACKAGE]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "run it")
+    [entry] = await _parked(handle)
+    assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert [(p.name, p.dir, p.allowed) for p in context.packages] == [("notes", "a" * 64, True)]
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert len(texts) == 1 and texts[0].startswith("Bash: ok"), texts
+    await _replays(harness, handle)
+

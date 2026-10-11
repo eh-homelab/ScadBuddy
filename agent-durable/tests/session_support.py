@@ -112,6 +112,7 @@ class StandInTools:
         self.describe_refuses = False
         # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
         self.turn_offered: list[dict[str, Any]] = []
+        self.turn_packages: list[dict[str, Any]] = []
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -183,7 +184,7 @@ class StandInTools:
 
         @activity.defn(name="turn_tools")
         async def turn_tools() -> dict[str, Any]:
-            return {"tools": self.turn_offered}
+            return {"tools": self.turn_offered, "packages": self.turn_packages}
 
         # As turnTools.ts tiers http_request: a GET is read, anything else outward.
         def tier(args: dict[str, Any]) -> str:

@@ -165,6 +165,11 @@ describe('buildHarnessOptions', () => {
     ).toThrow(PluginRefusedError)
   })
 
+  it("lets a vetted package's http MCP servers start (#2320)", () => {
+    expect(buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy'] }).strictMcpConfig).toBe(false)
+    expect(buildHarnessOptions({ ...base, ownPlugin: OWN_PLUGIN_DIR }).strictMcpConfig).toBe(true)
+  })
+
   it('loads a plugin package an admin allowed as it is, and lets its MCP servers start', () => {
     const allowed = path.resolve('test/fixtures/plugins/command-hook')
     const options = buildHarnessOptions({ ...base, allowedPluginPaths: [allowed] })

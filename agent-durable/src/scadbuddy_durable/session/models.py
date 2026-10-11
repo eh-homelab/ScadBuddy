@@ -85,11 +85,27 @@ class Message:
 
 
 @dataclass
+class TurnPackage:
+    """A plugin package a durable turn's Claude Code loads (agent/src/temporal/turnTools.ts
+    ``TurnPackage``, #2320): copied by the agent to ``<payload dir>/plugins/<dir>``."""
+
+    name: str
+    dir: str
+    content_hash: str
+    # Approved with allow_refused: loaded as it is, with the built-ins it names.
+    allowed: bool = False
+    builtin_tools: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SegmentContext:
     images: list[ImageRef] = field(default_factory=list)
     system_append: str | None = None
     # The tools Settings → Plugins disabled: the segment runner leaves them undeclared.
     disabled_tools: list[str] = field(default_factory=list)
+    # The turn's plugin packages (#2320), which the segment runner loads once each hashes
+    # to its pin.
+    packages: list[TurnPackage] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +133,8 @@ class TurnTool:
 @dataclass
 class TurnTools:
     tools: list[TurnTool] = field(default_factory=list)
+    # Defaulted: a listing an older agent made named no packages.
+    packages: list[TurnPackage] = field(default_factory=list)
 
 
 @dataclass

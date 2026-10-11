@@ -36,6 +36,8 @@ readable error and no retry.
 
 Settings → Model is the segment's model, and the own plugin's skills load only while
 Settings → Plugins has it on, read per segment as a classic turn reads them per turn.
+The turn's plugin packages (#2320) load from the payload volume, each only once it
+hashes to its pin (``package_hash.py``).
 
 The tools Settings → Plugins disabled (the workflow's ``segment_context``) are left out
 of the segment's declared tools (#2088), so Claude is never offered them.
@@ -66,6 +68,7 @@ from scadbuddy_durable.session.models import (
     SEGMENT_CONTEXT_QUERY,
     SegmentContext,
 )
+from scadbuddy_durable.session.package_hash import PackageContentError, hash_tree
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 logger = logging.getLogger(__name__)
@@ -118,6 +121,8 @@ MIN_LONG_EDGE, MAX_LONG_EDGE = 200, 2576
 MODEL_KEY = "model"
 OWN_PLUGIN_KEY = "scadbuddy_plugin_enabled"
 IMAGE_TOO_LARGE = "input too large: "
+# agent/src/temporal/turnPackages.ts sharedName: a package's folder on the shared volume.
+_SHARED_NAME = re.compile(r"[0-9a-f]{64}")
 
 
 def image_size(data: bytes) -> tuple[int, int] | None:
@@ -284,12 +289,14 @@ class ScadBuddyRunner:
         *,
         cwd: str,
         plugin_dir: str | None = None,
+        package_root: str | None = None,
         make_runner: MakeRunner = ClaudeAgentSdkRunner,
     ) -> None:
         self._connect = connect
         self._kek = kek
         self._cwd = cwd
         self._plugin_dir = plugin_dir
+        self._package_root = package_root
         self._make = make_runner
 
     def __repr__(self) -> str:
@@ -313,6 +320,28 @@ class ScadBuddyRunner:
             model=model if isinstance(model, str) and model else None,
             own_plugin=values.get(OWN_PLUGIN_KEY) is not False,
         )
+
+    def _packages(self, workflow_id: str, context: SegmentContext) -> list[str]:
+        """The turn's plugin packages (#2320) that hash to their pins on the shared volume,
+        as a classic turn loads only a cached copy that does (plugins/packages/install.ts).
+        One that does not is left out, as the agent leaves out one it cannot load."""
+        dirs: list[str] = []
+        for package in context.packages:
+            if self._package_root is None or not _SHARED_NAME.fullmatch(package.dir):
+                logger.warning("segment of %s: package %s not loaded", workflow_id, package.name)
+                continue
+            path = os.path.join(self._package_root, package.dir)
+            try:
+                matches = hash_tree(path) == package.content_hash
+            except (OSError, PackageContentError):
+                matches = False
+            if not matches:
+                logger.warning(
+                    "segment of %s: package %s does not hash to its pin", workflow_id, package.name
+                )
+                continue
+            dirs.append(path)
+        return dirs
 
     async def _images(self, session: str, context: SegmentContext) -> list[Image]:
         names = [r.name for r in context.images]
@@ -434,8 +463,14 @@ class ScadBuddyRunner:
         if images:
             extra["mcp_servers"] = {IMAGES_SERVER: images_server(images)}
             extra["allowed_tools"] = [VIEW_IMAGES_TOOL]
-        if self._plugin_dir and settings.own_plugin:
-            extra["plugins"] = [{"type": "local", "path": self._plugin_dir}]
+        plugins = (
+            [{"type": "local", "path": self._plugin_dir}]
+            if (self._plugin_dir and settings.own_plugin)
+            else []
+        )
+        plugins += [{"type": "local", "path": d} for d in self._packages(workflow_id, context)]
+        if plugins:
+            extra["plugins"] = plugins
         out = await self._on_credentials(
             session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings
         )
