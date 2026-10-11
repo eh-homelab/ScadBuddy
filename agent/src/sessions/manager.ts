@@ -82,6 +82,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
+import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
@@ -648,6 +649,12 @@ export type SessionManagerDeps = {
     /** Tests only: smaller caps. */
     limits?: Partial<HttpLimits>
   }
+  /**
+   * The assistant's workspace (#2329, workspace/store.ts): where http_request's
+   * `save_to_workspace` writes, and what a fork copies. One over `sql` (caps from
+   * `settings`) when omitted.
+   */
+  workspace?: SessionFiles
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -887,12 +894,14 @@ export class SessionManager {
   private readonly touched: SessionResources
   /** The images tool results carried (#782), read by `blob`. */
   private readonly blobs: SessionBlobs
+  private readonly files: SessionFiles
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
     this.touched = new SessionResources(deps.sql)
     this.blobs = new SessionBlobs(deps.sql)
+    this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -1612,6 +1621,8 @@ export class SessionManager {
           this.deps.httpRequest && httpRequestEnabled(httpSetting)
             ? httpRequestServer({
                 saveDir: path.join(cwd, 'http'),
+                // save_to_workspace (#2329): the body becomes one of the session's files.
+                workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
                 secrets: () => secrets,
                 audit: this.deps.audit,
                 actor: session.owner,
@@ -2359,6 +2370,8 @@ export class SessionManager {
     }
     // The images those results name (#782), before the events that name them.
     await this.blobs.copy(id, childId)
+    // Its workspace files (#2329), so the fork carries on with what the parent had.
+    await this.files.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',
