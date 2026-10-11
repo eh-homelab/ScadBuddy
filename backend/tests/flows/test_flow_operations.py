@@ -1,7 +1,7 @@
 """A person's answer and approval as `projects` operations (#1057, plan
 2026-10-09-durable-phase-6-flows.md Task C1): the decision is recorded, then the
-harness is told; a decision the harness refuses, or whose Update fails any other way,
-is deleted again."""
+harness is told. A decision the harness refuses, or whose Update Temporal never had, is
+deleted again; one whose Update landed stands, even when its reply was lost (#2247)."""
 
 import asyncio
 import uuid
@@ -114,7 +114,7 @@ async def test_a_call_not_waiting_is_refused_by_the_check(flows: Flows) -> None:
 
 async def _gated(flows: Flows) -> tuple[Run, str]:
     """A probe run parked on its gated `outward` tool, with a row naming the approval
-    (ProjectWorkflow's own gated host functions come with `print` and `arrange`)."""
+    (ProjectWorkflow's own gated host functions are `queue_print` and `arrange`)."""
     queue = f"probe-{uuid.uuid4().hex[:8]}"
     worker = Worker(
         flows.client,
@@ -261,3 +261,97 @@ async def test_a_row_left_unsent_lets_the_same_decision_resend_and_refuses_anoth
     same = {"run_id": run.id, "call_id": call_id, "approved": True}
     assert (await operate(flows, decide, same))["outcome"] == "approved"
     assert (await AgentClient(flows.client, run.workflow_id).get_status()).pending_approvals == []
+
+
+async def two_questions(flows: Flows) -> tuple[Run, str]:
+    """A run asking twice: answering the first leaves it waiting, on the second."""
+    run_id = await flows.start(
+        script(
+            "a = await wait_for_human('Swap to pink?', 600)",
+            "b = await wait_for_human('And the base?', 600)",
+            "return a['answer'] + b['answer']",
+        )
+    )
+    run = await flows.row(run_id, lambda r: r.status == "waiting" and len(r.waiting_on) == 1)
+    return run, run.waiting_on[0].call_id
+
+
+def _lands_then_fails(
+    monkeypatch: pytest.MonkeyPatch, method: str, error: BaseException
+) -> list[int]:
+    """`AgentClient.<method>` delivers its first Update, then raises `error` as if the
+    reply were lost (a deadline, the activity cancelled); later calls work."""
+    original = getattr(AgentClient, method)
+    calls: list[int] = []
+
+    async def lossy(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        result = await original(self, *args, **kwargs)
+        if len(calls) == 1:
+            raise error
+        return result
+
+    monkeypatch.setattr(AgentClient, method, lossy)
+    return calls
+
+
+async def _moved_on(flows: Flows, run: Run, call_id: str) -> Run:
+    return await flows.row(run.id, lambda r: all(w.call_id != call_id for w in r.waiting_on))
+
+
+async def test_an_answer_that_landed_but_whose_reply_was_lost_stands_and_resends(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await two_questions(flows)
+    answer = kinds(flows)[FLOW_ANSWER]
+    request = {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+    lost = RPCError("update deadline exceeded", RPCStatusCode.DEADLINE_EXCEEDED, b"")
+    calls = _lands_then_fails(monkeypatch, "provide_callback_result", lost)
+    # Temporal has the Update: the operation succeeds and the row stays.
+    assert (await operate(flows, answer, request))["outcome"] == "answered"
+    assert await flows.store.get_decision(request_id(run, call_id)) is not None
+    await _moved_on(flows, run, call_id)
+    # A retry of the same answer, once the call is no longer waiting, gets Temporal's
+    # answer for the same Update id, not a 409.
+    assert (await operate(flows, answer, request))["outcome"] == "answered"
+    assert len(calls) == 2
+    decision = await flows.store.get_decision(request_id(run, call_id))
+    assert decision is not None and decision.response == {"answer": "ok"}
+
+
+async def test_an_answer_cancelled_after_it_landed_keeps_its_row_and_resends(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await two_questions(flows)
+    answer = kinds(flows)[FLOW_ANSWER]
+    request = {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+    _lands_then_fails(monkeypatch, "provide_callback_result", asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        await operate(flows, answer, request)
+    # Nothing is asked while cancelling: the row stays for the next attempt.
+    assert await flows.store.get_decision(request_id(run, call_id)) is not None
+    await _moved_on(flows, run, call_id)
+    assert (await operate(flows, answer, request))["outcome"] == "answered"
+
+
+async def test_another_answer_after_one_landed_is_refused(flows: Flows) -> None:
+    run, call_id = await two_questions(flows)
+    answer = kinds(flows)[FLOW_ANSWER]
+    await operate(flows, answer, {"run_id": run.id, "call_id": call_id, "answer": "ok"})
+    await _moved_on(flows, run, call_id)
+    with pytest.raises(ApiError) as err:
+        await operate(flows, answer, {"run_id": run.id, "call_id": call_id, "answer": "no"})
+    assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
+
+
+async def test_an_approval_that_landed_but_whose_reply_was_lost_stands(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await _gated(flows)
+    decide = kinds(flows)[FLOW_DECIDE]
+    lost = RPCError("update deadline exceeded", RPCStatusCode.DEADLINE_EXCEEDED, b"")
+    _lands_then_fails(monkeypatch, "approve_tool", lost)
+    request = {"run_id": run.id, "call_id": call_id, "approved": True}
+    assert (await operate(flows, decide, request))["outcome"] == "approved"
+    decision = await flows.store.get_decision(request_id(run, call_id))
+    assert decision is not None and decision.outcome == "approved"

@@ -3,20 +3,36 @@
 
 Each records the decision in `workflow_run_decisions` first, then tells the harness with
 its own public Update (`provide_callback_result`, `tool_approval`) under the request id
-as the Update id, so a retried run resends the same Update. The row lives only as long
-as the Update can still land. A decision the harness refuses is deleted again, and so is
-one whose Update failed any other way (an RPC error, a deadline, the activity timing
-out): the operation's next attempt records it again and resends under the same Update
-id, which Temporal answers once. No row says `approved` for a call that never ran, and
-no row left by a failed send blocks the answer that would resolve the call.
+as the Update id, so a retried run resends the same Update and Temporal answers it once.
 
-A row whose send never got to fail (the worker died in between) is the same decision a
-retry brings, so `check` lets that decision through to resend; any other decision for
-the call is refused as answered.
+The row lives as long as the Update may have landed (#2247):
+
+- The harness refusing the Update is definite: the row is deleted.
+- Any other failure (an RPC error, a deadline, the reply lost) is settled by asking
+  Temporal for the Update by its id. Completed means it landed: the row stays and the
+  operation succeeds. No such Update means it never landed: the row is deleted, so a
+  failed send never blocks the answer that would resolve the call. When Temporal
+  cannot say, the row stays and the error is raised; the next attempt resends.
+- Cancelled (the activity's deadline, a worker stopping): the row stays and the
+  cancellation is raised. Nothing is asked while cancelling; the next attempt resends.
+
+A retry, or a new request with the same decision, is let through by `check` on a
+matching row before `waiting_on` is looked at: a call the landed Update resolved is no
+longer waiting, and the resend then gets Temporal's answer for it instead of a 409. Any
+other decision for the call is refused as answered.
+
+Residual window: a row kept because the Update's fate was unknown (or because the
+operation was cancelled) says `approved`, `denied` or `answered` before the harness has
+it. If no attempt ever resends it and the call is later resolved another way (the
+approval timer, a Reset), the row disagrees with the run. The window is the time until
+the next attempt; it stays open only once every attempt has been exhausted without
+Temporal ever answering.
 """
 
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
@@ -26,6 +42,7 @@ from temporal_agent_harness.harness.agent_client import (
     ToolApprovalError,
 )
 from temporalio import activity
+from temporalio.client import WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
@@ -41,6 +58,8 @@ FLOW_DECIDE = "flow_decide"
 STALE_ENTRY = "https://scadbuddy.dev/problems/stale-entry"
 ALREADY_RESOLVED = "https://scadbuddy.dev/problems/already-resolved"
 RUN_CLOSED = "https://scadbuddy.dev/problems/flow-run-closed"
+#: How long asking Temporal whether a decision's Update landed may take.
+LANDED_PROBE = timedelta(seconds=10)
 
 
 def request_id(run: Run, call_id: str) -> str:
@@ -88,8 +107,6 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         if run.status in TERMINAL:
             raise ApiError(status.HTTP_409_CONFLICT, "The run has ended.", type_=RUN_CLOSED)
         call_id = str(request["call_id"])
-        if not any(w.call_id == call_id and w.kind == kind for w in run.waiting_on):
-            raise _stale()
         try:
             described = await activity.client().get_workflow_handle(run.workflow_id).describe()
         except RPCError as err:
@@ -99,9 +116,14 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         if described.run_id != run.workflow_run_id:
             raise _stale()
         rid = request_id(run, call_id)
+        # Before `waiting_on`: a call whose Update landed is no longer waiting, and its
+        # resend must reach Temporal's answer, not a 409 (#2247).
         existing = await store.get_decision(rid)
-        if existing is not None and not _same(existing, kind, request):
-            raise _resolved()
+        if existing is not None:
+            if not _same(existing, kind, request):
+                raise _resolved()
+        elif not any(w.call_id == call_id and w.kind == kind for w in run.waiting_on):
+            raise _stale()
         return {
             "request_id": rid,
             "workflow_id": run.workflow_id,
@@ -118,6 +140,34 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
             await store.delete_decision(rid)
         except Exception:
             activity.logger.exception("could not delete the unsent flow decision %s", rid)
+
+    async def landed(checked: dict[str, Any], rid: str) -> bool | None:
+        """Whether the Update `rid` completed on the run: True, False (Temporal has no
+        such Update), or None (it could not say, or the Update failed in its handler)."""
+        run_id = str(checked["workflow_run_id"])
+        workflow = activity.client().get_workflow_handle(str(checked["workflow_id"]), run_id=run_id)
+        handle = workflow.get_update_handle(rid, workflow_run_id=run_id)
+        try:
+            await handle.result(rpc_timeout=LANDED_PROBE)
+        except RPCError as err:
+            if err.status == RPCStatusCode.NOT_FOUND:
+                return False
+            activity.logger.warning("could not tell whether flow decision %s landed: %s", rid, err)
+            return None
+        except WorkflowUpdateFailedError:
+            return None
+        return True
+
+    async def settle(checked: dict[str, Any], rid: str, err: BaseException) -> bool:
+        """After a send that failed other than by a refusal: True when the Update landed
+        anyway (the decision stands); otherwise False, having deleted the row only when
+        Temporal says the Update never existed."""
+        if isinstance(err, asyncio.CancelledError):
+            return False
+        verdict = await landed(checked, rid)
+        if verdict is False:
+            await forget(rid)
+        return verdict is True
 
     def _decision(request: dict[str, Any], checked: dict[str, Any], **fields: Any) -> Decision:
         return Decision(
@@ -150,9 +200,9 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
             if err.error_type == "CallbackAlreadyResolved":
                 raise _resolved() from None
             raise _stale() from None
-        except BaseException:
-            await forget(decision.request_id)
-            raise
+        except BaseException as err:
+            if not await settle(checked, decision.request_id, err):
+                raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:
@@ -177,9 +227,9 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
             if err.error_type == "ToolApprovalAlreadyResolved":
                 raise _resolved() from None
             raise _stale() from None
-        except BaseException:
-            await forget(decision.request_id)
-            raise
+        except BaseException as err:
+            if not await settle(checked, decision.request_id, err):
+                raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": decision.outcome}
 
     # A transport failure is retried: the same Update id makes the resend safe, and a
