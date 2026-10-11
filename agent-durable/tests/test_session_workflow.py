@@ -49,6 +49,7 @@ from scadbuddy_durable.gate.names import (
     RESPOND_UPDATE,
 )
 from scadbuddy_durable.gate.store import ResolveInput
+from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
@@ -127,7 +128,7 @@ async def harness(temporal_env: WorkflowEnvironment, connect: Connect) -> AsyncI
     client = await Client.connect(
         temporal_env.client.service_client.config.target_host,
         namespace=temporal_env.client.namespace,
-        data_converter=data_converter(keys),
+        data_converter=data_converter(keys, external_storage(connect)),
     )
     stand_in = StandInTools(connect)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
@@ -212,6 +213,31 @@ async def test_history_holds_no_plaintext(
     raw = b"".join(e.SerializeToString() for e in history.events)
     assert b"red bracket" not in raw
     assert b"binary/scadbuddy-subject" in raw
+
+
+async def test_a_large_turn_crosses_history_as_references(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2243: the message, the segment's input and its answer, the stream and the turn's
+    events all carry the text, and none of history's events does."""
+    sid, handle = await harness.session(agent_db)
+    text = "a long brief " + "z" * (OFFLOAD_BYTES * 4)
+    await send(handle, text)
+    assert await settled(connect, sid) == "idle"
+    deltas = [
+        e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"
+    ]
+    [delta] = deltas  # the panel's delta is cut to 32 KiB; the answer was whole
+    assert delta.startswith("you said: a long brief zzzz")
+    history = await handle.fetch_history()
+    # Nothing at the threshold or over it is inline: the message alone is four times it.
+    assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
+    assert b"zzzz" not in b"".join(e.SerializeToString() for e in history.events)
+    cur = await agent_db.execute(
+        "SELECT count(*) FROM ai_payload_blobs WHERE subject = %s", (f"session-{sid}",)
+    )
+    row = await cur.fetchone()
+    assert row is not None and row[0] > 0
 
 
 async def test_an_approved_call_runs_once_and_is_reported(

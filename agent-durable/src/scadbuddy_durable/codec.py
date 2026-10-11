@@ -10,12 +10,19 @@ SDK calls with the workflow every payload belongs to) and from the payload's own
 metadata on decode, so a payload decodes with or without context. This is
 agent/src/temporal/payloadCodec.ts in Python; agent/test/fixtures/payload-vectors.json
 pins the two together.
+
+A payload of ``DEDUP_BYTES`` or more is sealed with a synthetic IV, a keyed digest of
+its own bytes (``dedup_iv``), so the same payload seals to the same bytes: such a payload
+leaves history for ``ai_payload_blobs`` (``payload_store``, #2243), and one sealed twice
+(the tool manifest every segment declares) is one row there.
 """
 
 from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -31,6 +38,7 @@ from temporalio.converter import (
     ActivitySerializationContext,
     DataConverter,
     DefaultFailureConverterWithEncodedAttributes,
+    ExternalStorage,
     PayloadCodec,
     SerializationContext,
     WithSerializationContext,
@@ -41,6 +49,8 @@ from scadbuddy_durable.secrets import KEK_BYTES, Kek, SealError, open_bytes, sea
 
 SUBJECT_ENCODING = b"binary/scadbuddy-subject"
 SUBJECT_METADATA = "scadbuddy-subject"
+# Original bytes from which a payload is sealed with a synthetic IV (dedup_iv).
+DEDUP_BYTES = 16 * 1024
 _SUBJECT = re.compile(
     r"^(session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
@@ -85,6 +95,13 @@ def _payload_from(data: bytes) -> Payload:
         metadata={k: base64.b64decode(v) for k, v in parsed["m"].items()},
         data=base64.b64decode(parsed["d"]),
     )
+
+
+def dedup_iv(dek: bytes, subject: str, plain: bytes) -> bytes:
+    """The IV a large payload is sealed with: HMAC-SHA256 of its bytes under a key derived
+    from the subject's, cut to 12 bytes. One IV is only ever used for one plaintext."""
+    iv_key = hmac.new(dek, f"payload-iv:{subject}".encode(), hashlib.sha256).digest()
+    return hmac.new(iv_key, plain, hashlib.sha256).digest()[:12]
 
 
 def seal_payload(dek: bytes, subject: str, payload: Payload, iv: bytes | None = None) -> Payload:
@@ -206,10 +223,15 @@ class SubjectPayloadCodec(PayloadCodec, WithSerializationContext):
         if self._subject is None:
             return list(payloads)
         key = await self._keys.key_for(self._subject, True)
-        return [
-            p if sealed_subject(p) is not None else seal_payload(key, self._subject, p)
-            for p in payloads
-        ]
+        out: list[Payload] = []
+        for p in payloads:
+            if sealed_subject(p) is not None:
+                out.append(p)
+                continue
+            plain = payload_bytes(p)
+            iv = dedup_iv(key, self._subject, plain) if len(plain) >= DEDUP_BYTES else None
+            out.append(seal_payload(key, self._subject, p, iv))
+        return out
 
     async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
         out: list[Payload] = []
@@ -224,14 +246,19 @@ class SubjectPayloadCodec(PayloadCodec, WithSerializationContext):
         return out
 
 
-def data_converter(keys: PayloadKeys) -> DataConverter:
+def data_converter(
+    keys: PayloadKeys, external_storage: ExternalStorage | None = None
+) -> DataConverter:
     """The converter of every client and worker that touches a durable subject.
 
     Failure messages and stack traces are moved into an encoded payload, so the codec
     seals them too: a tool's error text is a session's content as much as its result.
+    With ``external_storage`` (payload_store.external_storage), a session's large sealed
+    payloads are kept in Postgres and history holds a reference.
     """
     return dataclasses.replace(
         DataConverter.default,
         payload_codec=SubjectPayloadCodec(keys),
         failure_converter_class=DefaultFailureConverterWithEncodedAttributes,
+        external_storage=external_storage,
     )

@@ -13,7 +13,8 @@ container's (spec 2026-10-01 §6.3a):
 - ``SCADBUDDY_DURABLE_SCRIPTED=1``: tests only. The segment runner is a scripted model
   (``session/scripted.py``) instead of Claude, for the agent service's end-to-end test.
 
-The client and the worker seal every payload of a durable subject (``codec``).
+The client and the worker seal every payload of a durable subject (``codec``), and keep a
+session's large payloads in Postgres, history holding a reference (``payload_store``).
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxR
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
+from scadbuddy_durable.payload_store import external_storage
 from scadbuddy_durable.secrets import Kek, load_kek
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
@@ -145,7 +147,9 @@ def segment_runner(cfg: Config, connect: Connect, kek: Kek) -> SegmentRunner:
 async def connect_client(cfg: Config, connect: Connect, kek: Kek, previous: Kek | None) -> Client:
     keys = PgPayloadKeys(connect, kek, previous=previous)
     return await Client.connect(
-        cfg.temporal_address, namespace=cfg.namespace, data_converter=data_converter(keys)
+        cfg.temporal_address,
+        namespace=cfg.namespace,
+        data_converter=data_converter(keys, external_storage(connect)),
     )
 
 

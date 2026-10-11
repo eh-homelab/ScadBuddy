@@ -60,6 +60,8 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
         MAX_SEGMENTS,
+        MESSAGE_MAX,
+        SEGMENT_ATTEMPTS,
         SEGMENT_CONTEXT_QUERY,
         SEND_MESSAGE_UPDATE,
         TOOLS_QUEUE,
@@ -160,6 +162,9 @@ class DurableSession:
             auto_continue_as_new=True,
             continue_as_new_args=self._next_run,
             live_output=True,
+            segment_retry_policy=RetryPolicy(
+                maximum_interval=timedelta(seconds=100), maximum_attempts=SEGMENT_ATTEMPTS
+            ),
         )
 
     def _next_run(self, state: AgentState) -> list[Any]:
@@ -226,7 +231,7 @@ class DurableSession:
             elif BUDGET_EXHAUSTED in text or "max_budget_usd" in text:
                 outcome = "budget_exhausted"
             else:
-                outcome, message = "failed", text
+                outcome, message = "failed", text[:MESSAGE_MAX]
         finally:
             self._task = None
         watcher.cancel()
