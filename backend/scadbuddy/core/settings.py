@@ -246,6 +246,13 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS: where flow runs run (#1057, spec 2026-10-01
     # §4.3), served by `python -m scadbuddy.worker --queue projects`.
     temporal_task_queue_projects: str = "projects"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS: where the agent service serves its tools
+    # as activities (#1055); a flow's `tool(...)` calls them there (#1057).
+    temporal_task_queue_agent_tools: str = "agent-tools"
+    # SCADBUDDY_FLOW_TOOLS_JSON: the agent's tool manifest (its `pnpm build` writes
+    # dist/tools.json; the image carries the same build's), which a flow's `tool(...)`
+    # reads names and tiers from. Unset, `tool(...)` refuses every name.
+    flow_tools_json: Path | None = None
     # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
     # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
     # an unregistered attribute fails the workflow task.
@@ -302,6 +309,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_bambuddy",
         "temporal_task_queue_library",
         "temporal_task_queue_projects",
+        "temporal_task_queue_agent_tools",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -504,6 +512,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Paired with the Temporal address: the API starts flow runs on it, and the"
             " worker that serves it must name the same queue."
         ),
+        "temporal_task_queue_agent_tools": (
+            "Paired with the agent service's worker, which serves its tools on that queue."
+        ),
+        "flow_tools_json": ("A file the image carries, from the same build as the agent's tools."),
         "temporal_projects_worker_inprocess": (
             "A deployment choice: a one-process dev run serves flows itself."
         ),

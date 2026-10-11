@@ -280,6 +280,7 @@ async def start_flow_run(
                     name=definition.name,
                     started_by=_started_by(),
                     approval_timeout_s=timeout,
+                    tools_queue=flows.settings.temporal_task_queue_agent_tools,
                     search_attributes=flows.search_attributes,
                 ),
                 update_id=key,

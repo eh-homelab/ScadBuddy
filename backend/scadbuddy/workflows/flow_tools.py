@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
+    from scadbuddy.flows.manifest import tier_of
     from scadbuddy.workflows.flow_entries import run_callback, run_gated
     from scadbuddy.workflows.flow_models import ProjectionWrite
     from scadbuddy.workflows.flow_routes import (
@@ -103,6 +104,16 @@ class RouteRefusedError(Exception):
     """ScadBuddy refused the call; the message is the problem's `detail`."""
 
 
+class ToolFailedError(Exception):
+    """An agent tool failed; the message is the tool's own text."""
+
+
+#: The agent's activity refusals (`agent/src/temporal/toolActivities.ts`) and a tool's
+#: own error: final, the call is never sent again.
+_TOOL_REFUSALS = ["ToolError", "NotApproved", "UnknownFlow", "NotForFlows"]
+_TOOL_TIMEOUT = timedelta(seconds=120)
+
+
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
 #: accept (three 60 s checks, `agent/src/tools/command.ts` `ACCEPTING_MS`).
 _SEND = timedelta(seconds=300)
@@ -112,6 +123,8 @@ _HEARTBEAT = timedelta(seconds=30)
 _JOB_SETTLED = ["done", "failed", "cancelled"]
 _RUN_SETTLED = ["succeeded", "failed"]
 OUTWARD_PREFIX = "outward-"
+#: An agent tool's activity id prefix, which the agent strips to find the call id.
+TOOL_PREFIX = "tool-"
 
 
 def _refusal(err: ActivityError) -> BaseException:
@@ -332,6 +345,54 @@ async def arrange(
     return result
 
 
+async def _call_tool(call_id: str, name: str, args: dict[str, Any], *, attempts: int) -> str:
+    """The agent tool `name` as an activity on the agent's `agent-tools` queue, under the
+    activity id `tool-<call id>` the agent reads the call (and its approval) from."""
+    owner: StepOwner = workflow.instance()
+    try:
+        text: str = await workflow.execute_activity(
+            name,
+            args,
+            activity_id=f"{TOOL_PREFIX}{call_id}",
+            task_queue=owner.tools_queue,
+            result_type=str,
+            start_to_close_timeout=_TOOL_TIMEOUT,
+            retry_policy=RetryPolicy(
+                maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
+            ),
+        )
+    except ActivityError as err:
+        if isinstance(err.cause, ApplicationError):
+            raise ToolFailedError(err.cause.message) from None
+        raise
+    return text
+
+
+@agent.tool_defn()
+async def approved_tool(call: str, name: str, args: dict[str, Any]) -> str:
+    """An outward agent tool, run once a person approved it, and at most once."""
+    await _approved(call)
+    return await _call_tool(call, name, args, attempts=1)
+
+
+@agent.tool_defn(inherently_safe=True)
+async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]) -> str:
+    """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
+    started this run; returns its text. An outward tool (one that changes something
+    outside ScadBuddy) waits for a person to approve it first."""
+    tier = tier_of(name)
+    if tier is None:
+        raise ValueError(f"there is no tool {name!r}")
+    call_id = str(workflow.uuid4())
+    if tier == "outward":
+        text: str = await _gated(
+            f"tool:{name}", runner, approved_tool, call_id, call=call_id, name=name, args=args
+        )
+        return text
+    async with step(f"tool:{name}", call_id, outward=False):
+        return await _call_tool(call_id, name, args, attempts=3)
+
+
 #: Registered with the harness plugin. `human_answer` is the callback behind
 #: `wait_for_human`, and the `approved_*` gated bodies, are never offered to a script.
 FLOW_TOOLS: list[Any] = [
@@ -344,8 +405,10 @@ FLOW_TOOLS: list[Any] = [
     arrange,
     approved_print,
     approved_arrange,
+    tool,
+    approved_tool,
 ]
-_INNER = (human_answer, approved_print, approved_arrange)
+_INNER = (human_answer, approved_print, approved_arrange, approved_tool)
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]
 
 

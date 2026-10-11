@@ -589,6 +589,12 @@ CMD ["uv", "run", "--frozen", "pytest"]
 # ── runtime: what ships ───────────────────────────────────────────────────────
 FROM app AS runtime
 
+# The agent's tool manifest from this same build (agent `pnpm build` writes
+# dist/tools.json), which a flow's `tool(...)` reads names and tiers from on the
+# `projects` worker (#1057), as agent-durable reads its copy.
+COPY --from=agent-build /src/agent/dist/tools.json /app/flows/tools.json
+ENV SCADBUDDY_FLOW_TOOLS_JSON=/app/flows/tools.json
+
 # Build provenance, passed by build-image.yml. /healthz reports both; the
 # deploy pipeline (see README.md, "Deploying") proves a rollout by reading
 # `revision` back from the running pod, so it has to be the exact commit.
