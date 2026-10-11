@@ -7,15 +7,24 @@ are sealed; the preview reads only event types and activity ids.
 """
 
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio.api.enums.v1 import EventType
-from temporalio.api.history.v1 import HistoryEvent
-from temporalio.client import WorkflowHistory
+from temporalio.api.history.v1 import History, HistoryEvent
+from temporalio.api.workflowservice.v1 import (
+    GetWorkflowExecutionHistoryReverseRequest,
+    GetWorkflowExecutionHistoryReverseResponse,
+)
+from temporalio.client import Client, WorkflowHistory
 
+from scadbuddy.flows import history
 from scadbuddy.flows.history import outward_since, preview_of
+from scadbuddy.flows.models import Run
 from tests.flows.fake_api import PLAN, Outward
 from tests.flows.flows_support import script
 
@@ -83,6 +92,93 @@ def test_only_a_completed_workflow_task_before_the_end_is_valid() -> None:
     assert not preview_of(events, started).valid
     assert not preview_of(events, events[-1].event_id).valid
     assert not preview_of(events, events[-1].event_id + 10).valid
+
+
+def test_only_the_execute_update_starts_the_script() -> None:
+    """#2303: an Update other than `execute` (`send_agent_message`) accepted before the
+    point does not make it valid."""
+    events = _events()
+    first, _ = _sends(events)
+    point = _task_before(events, first.event_id)
+    assert preview_of(events, point).valid
+    renamed = []
+    for event in events:
+        copy = HistoryEvent()
+        copy.CopyFrom(event)
+        if copy.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED:
+            copy.workflow_execution_update_accepted_event_attributes.accepted_request.input.name = (
+                "provide_callback_result"
+            )
+        renamed.append(copy)
+    assert not preview_of(renamed, point).valid
+
+
+class _Served:
+    """A client over the fixture's history that counts the events it hands out."""
+
+    def __init__(self, events: list[HistoryEvent]) -> None:
+        self.events = events
+        self.served = 0
+        self.namespace = "default"
+        self.workflow_service = self
+        self.data_converter = None
+
+    def get_workflow_handle(self, workflow_id: str, *, run_id: str | None = None) -> Any:
+        served = self
+
+        async def fetch_history_events(page_size: int | None = None) -> AsyncIterator[HistoryEvent]:
+            for event in served.events:
+                served.served += 1
+                yield event
+
+        async def fetch_history() -> WorkflowHistory:
+            served.served += len(served.events)
+            return WorkflowHistory(workflow_id, served.events)
+
+        return SimpleNamespace(
+            fetch_history_events=fetch_history_events, fetch_history=fetch_history
+        )
+
+    async def get_workflow_execution_history_reverse(
+        self, request: GetWorkflowExecutionHistoryReverseRequest
+    ) -> GetWorkflowExecutionHistoryReverseResponse:
+        newest = self.events[::-1]
+        start = int(request.next_page_token or b"0")
+        page = newest[start : start + request.maximum_page_size]
+        self.served += len(page)
+        end = start + len(page)
+        return GetWorkflowExecutionHistoryReverseResponse(
+            history=History(events=page),
+            next_page_token=str(end).encode() if end < len(newest) else b"",
+        )
+
+
+async def test_a_recent_point_reads_only_the_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2268: the preview reads the history back to the point and forward only to
+    `execute`, not whole, and says what reading it whole says."""
+    monkeypatch.setattr(history, "PAGE_SIZE", 5)
+    events = _events()
+    _, second = _sends(events)
+    point = _task_before(events, second.event_id)
+    served = _Served(events)
+    run = cast(Run, SimpleNamespace(workflow_id="flow-two-prints", steps=[]))
+    preview = await outward_since(cast(Client, served), run, point, run_id="r1")
+    whole = preview_of(events, point)
+    assert (preview.valid, preview.calls, preview.as_of_event_id) == (
+        whole.valid,
+        whole.calls,
+        whole.as_of_event_id,
+    )
+    assert served.served < len(events) // 2
+
+
+async def test_a_point_past_the_end_is_pinned_to_the_last_event() -> None:
+    events = _events()
+    run = cast(Run, SimpleNamespace(workflow_id="flow-two-prints", steps=[]))
+    preview = await outward_since(
+        cast(Client, _Served(events)), run, events[-1].event_id + 10, run_id="r1"
+    )
+    assert (preview.valid, preview.as_of_event_id) == (False, events[-1].event_id)
 
 
 @pytest.mark.requires_temporal

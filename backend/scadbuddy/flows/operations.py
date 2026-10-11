@@ -63,7 +63,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Run
-from scadbuddy.flows.store import FlowStore, ResetSupersededError
+from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
 from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
 
@@ -121,6 +121,15 @@ def _stale() -> ApiError:
 
 def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
+
+
+def _before_floor(floor: int) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        f"This run keeps the questions and approvals it can park again only for points"
+        f" after event {floor + 1}; reset it to a later point.",
+        type_=RESET_POINT,
+    )
 
 
 def _wanted(
@@ -304,6 +313,10 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
                 " so it cannot be reset safely. Answer the call, or start a new run.",
                 type_=RESET_UNRECORDED,
             )
+        event_id = int(request["event_id"])
+        floor = await store.reset_floor(run.id)
+        if floor is not None and event_id - 1 <= floor:
+            raise _before_floor(floor)
         client = activity.client()
         try:
             described = await client.get_workflow_handle(run.workflow_id).describe()
@@ -311,7 +324,6 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
             if err.status == RPCStatusCode.NOT_FOUND:
                 raise ApiError(status.HTTP_404_NOT_FOUND, "The run's history is gone.") from None
             raise
-        event_id = int(request["event_id"])
         preview = await outward_since(client, run, event_id, run_id=described.run_id)
         if described.run_id != str(request["workflow_run_id"]):
             # Another Reset replaced the execution the preview read: past its point, the
@@ -372,6 +384,8 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
                 request_id=str(activity.info().workflow_id),
                 reset=reset,
             )
+        except ResetBeforeFloorError as err:
+            raise _before_floor(err.floor) from None
         except ResetSupersededError:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
