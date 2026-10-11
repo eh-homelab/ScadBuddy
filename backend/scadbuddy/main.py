@@ -80,6 +80,7 @@ from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
+    GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
@@ -412,6 +413,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_preview_slices() -> None:
         await _heartbeating(_sweep_preview_slices_logged(state))
 
+    @activity.defn(name=GIT_SWEEP)
+    async def maintain_models_git() -> None:
+        await _heartbeating(_maintain_models_git_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -422,6 +427,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         reap_output_holds,
         sweep_flow_runs,
         sweep_preview_slices,
+        maintain_models_git,
     ]
 
 
@@ -471,6 +477,16 @@ async def _sweep_preview_slices_logged(state: AppState) -> None:
         raise
     if removed:
         logger.info("removed unprinted background slices", extra={"count": removed})
+
+
+async def _maintain_models_git_logged(state: AppState) -> None:
+    try:
+        packed = await asyncio.to_thread(state.history.maintain)
+    except Exception:
+        logger.exception("could not pack the models repository")
+        raise
+    if packed:
+        logger.info("packed the models repository")
 
 
 async def _reap_output_holds_logged(state: AppState) -> None:

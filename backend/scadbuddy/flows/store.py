@@ -34,7 +34,8 @@ from scadbuddy.flows.models import (
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
 
 _DECISION = (
-    "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder, created_at"
+    "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
+    " input_hash, created_at"
 )
 _DEFINITION = "id, name, version, script, approval_timeout_s, created_by, created_at"
 _SUMMARY = "id, name, version, approval_timeout_s, created_by, created_at"
@@ -45,8 +46,14 @@ _RUN = (
 )
 
 
-#: How long the row stays locked waiting for Temporal's Reset to answer.
+#: How long the row stays locked waiting for Temporal's Reset to answer. The operation
+#: around it (`operation_activities._heartbeating`) heartbeats every 5 s while this
+#: thread waits, so a slow RPC never trips the run's 30 s `RUN_HEARTBEAT` (#2303); the
+#: wait is bounded by this, not by the heartbeat.
 RESET_CALL_S = 30.0
+#: The resolved entries a row keeps for a later Reset (#2268). Past this the oldest go,
+#: and a Reset to before the last of them is refused (`reset_floor`).
+DONE_KEPT = 200
 
 
 class ResetSupersededError(Exception):
@@ -55,6 +62,30 @@ class ResetSupersededError(Exception):
     def __init__(self, run: Run) -> None:
         super().__init__(f"run {run.id} was reset by another Reset first")
         self.run = run
+
+
+class ResetBeforeFloorError(Exception):
+    """A Reset to a point whose parked entries the row no longer keeps (#2268)."""
+
+    def __init__(self, floor: int) -> None:
+        super().__init__(f"a Reset must be to a point after event {floor + 1}")
+        self.floor = floor
+
+
+def _trimmed(done: list[FlowWaiting], floor: int | None) -> tuple[list[FlowWaiting], int | None]:
+    """`done` cut to `DONE_KEPT`, the earliest resolved going first, and the floor that
+    leaves: the latest history length a dropped entry was resolved at. An entry with no
+    resolved length (written before 6e) is never dropped."""
+    excess = len(done) - DONE_KEPT
+    if excess <= 0:
+        return done, floor
+    dated = sorted((w for w in done if w.resolved_at is not None), key=lambda w: w.resolved_at or 0)
+    dropped = dated[:excess]
+    if not dropped:
+        return done, floor
+    gone = {id(w) for w in dropped}
+    latest = max(w.resolved_at or 0 for w in dropped)
+    return [w for w in done if id(w) not in gone], max(latest, floor or 0)
 
 
 def _done(row: DictRow) -> list[FlowWaiting]:
@@ -98,6 +129,10 @@ class FlowStore:
 
     async def get_run(self, run_id: str) -> Run | None:
         return await asyncio.to_thread(self._get_run, run_id)
+
+    async def reset_floor(self, run_id: str) -> int | None:
+        """The history length a Reset's point must be past (#2268); None for any."""
+        return await asyncio.to_thread(self._reset_floor, run_id)
 
     async def list_runs(
         self, *, definition_id: str | None = None, session: str | None = None, limit: int = 50
@@ -202,8 +237,8 @@ class FlowStore:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
-                " call_id, kind, outcome, response, responder)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " call_id, kind, outcome, response, responder, input_hash)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
                 (
                     decision.request_id,
@@ -214,6 +249,7 @@ class FlowStore:
                     decision.outcome,
                     Jsonb(decision.response),
                     decision.responder,
+                    decision.input_hash,
                 ),
             ).fetchone()
             if row is not None:
@@ -288,6 +324,13 @@ class FlowStore:
             ).fetchone()
         return Run.model_validate(row) if row else None
 
+    def _reset_floor(self, run_id: str) -> int | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT reset_floor FROM workflow_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        return None if row is None else row["reset_floor"]
+
     def _list_runs(self, definition_id: str | None, session: str | None, limit: int) -> list[Run]:
         with self._pool.connection() as conn:
             rows = conn.execute(
@@ -330,7 +373,8 @@ class FlowStore:
     def _project(self, write: ProjectionWrite) -> Run | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                f"SELECT {_RUN}, waiting_done, %s = ANY(superseded_run_ids) AS superseded"
+                f"SELECT {_RUN}, waiting_done, reset_floor,"
+                " %s = ANY(superseded_run_ids) AS superseded"
                 " FROM workflow_runs WHERE id = %s FOR UPDATE",
                 (write.workflow_run_id, write.run_id),
             ).fetchone()
@@ -355,6 +399,7 @@ class FlowStore:
                 for w in run.waiting_on
                 if w.call_id == write.waiting_remove
             ]
+            done, floor = _trimmed(done, row["reset_floor"])
             if write.waiting_add is not None and all(
                 w.call_id != write.waiting_add.call_id for w in waiting
             ):
@@ -370,12 +415,13 @@ class FlowStore:
                 result, truncated = write.result[:RESULT_MAX], len(write.result) > RESULT_MAX
             updated = conn.execute(
                 "UPDATE workflow_runs SET status = %s, waiting_on = %s, waiting_done = %s,"
-                " steps = %s, result = %s, result_truncated = %s, workflow_run_id = %s,"
-                f" updated_at = now() WHERE id = %s RETURNING {_RUN}",
+                " reset_floor = %s, steps = %s, result = %s, result_truncated = %s,"
+                f" workflow_run_id = %s, updated_at = now() WHERE id = %s RETURNING {_RUN}",
                 (
                     status,
                     Jsonb([w.model_dump(mode="json") for w in waiting]),
                     Jsonb([w.model_dump(mode="json") for w in done]),
+                    floor,
                     Jsonb([s.model_dump(mode="json") for s in sorted(steps.values(), key=_seq)]),
                     result,
                     truncated,
@@ -393,8 +439,8 @@ class FlowStore:
     ) -> Run | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                f"SELECT {_RUN}, waiting_done, superseded_run_ids, reset_request_ids"
-                " FROM workflow_runs WHERE id = %s FOR UPDATE",
+                f"SELECT {_RUN}, waiting_done, reset_floor, superseded_run_ids,"
+                " reset_request_ids FROM workflow_runs WHERE id = %s FOR UPDATE",
                 (run_id,),
             ).fetchone()
             if row is None:
@@ -405,6 +451,11 @@ class FlowStore:
                 if by.get(replaced) == request_id:
                     return run
                 raise ResetSupersededError(run)
+            floor = row["reset_floor"]
+            if floor is not None and point - 1 <= floor:
+                # An entry parked before the point and resolved after it may be one the
+                # row dropped: the Reset could not park it again.
+                raise ResetBeforeFloorError(floor)
             current = reset()
 
             def own(record: FlowStep | FlowWaiting) -> bool:

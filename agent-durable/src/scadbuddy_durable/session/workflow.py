@@ -5,6 +5,10 @@
 ``send_message``, and continues as new between turns when the server suggests it
 (and, the plugin's ``auto_continue_as_new``, between the steps of a long turn).
 
+A tool parks by its effective tier (#2088): ``gate_settings`` reads Settings → Plugins
+as each turn starts, a tool raised to ``outward`` parks like any outward tool, and a
+disabled one is left out of what the segment runner declares (``segment_context``).
+
 The gate (§6.6, 5b): when the plugin's ``pending_approvals()`` gains a call, the call
 is described (an approval's summary and hash come from the agent, ``gate.describe_call``;
 an answer's card is built and checked here, ``gate.entry``), opened (``open_input``),
@@ -141,7 +145,11 @@ class DurableSession:
     def __init__(self, start: SessionStart) -> None:
         self._start = start
         entries = manifest.manifest()
+        self._entries = entries
         self._kinds = {e.name: e.hitl for e in entries}
+        # The plugin keeps these objects and reads needs_approval as each call comes:
+        # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
+        self._tools = {t.name: t for t in manifest.durable_tools(entries)}
         self._turn: TurnStart | None = start.turn
         self._message: Message | None = None
         self._parked: dict[str, Parked] = {}
@@ -156,7 +164,7 @@ class DurableSession:
         self._ended = False
         self._settings = GateSettings(approval_expiry_s=600, question_expiry_s=3600)
         self._agent = DurableClaudeAgent(
-            tools=manifest.durable_tools(entries),
+            tools=list(self._tools.values()),
             max_turns=start.max_turns,
             builtin_tools=["Skill"],
             tool_activities=(),
@@ -205,6 +213,14 @@ class DurableSession:
         turn_id = self._turn.turn_id if self._turn else ""
         self._settings = await workflow.execute_activity(
             "gate_settings", start_to_close_timeout=SHORT, result_type=GateSettings
+        )
+        # From the activity's result, so a replay sets the same gates: a turn an older
+        # worker started read no overrides, and parks by the manifest as it did then.
+        manifest.apply_overrides(
+            self._tools,
+            self._entries,
+            self._settings.tool_tiers,
+            set(self._settings.disabled_tools),
         )
         follow = workflow.start_activity(
             "follow_session",
@@ -537,6 +553,7 @@ class DurableSession:
         return SegmentContext(
             images=list(self._turn.images) if self._turn else [],
             system_append=self._start.system_append,
+            disabled_tools=list(self._settings.disabled_tools),
         )
 
     @workflow.query(name=TURN_QUERY)

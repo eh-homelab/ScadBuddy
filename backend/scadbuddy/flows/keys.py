@@ -12,6 +12,7 @@ import psycopg
 
 from scadbuddy.core.secrets import SecretKeyError, load_kek
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.approval_hash import approval_hash_key
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys
 
 logger = logging.getLogger(__name__)
@@ -35,3 +36,14 @@ def payload_keys(settings: Settings) -> tuple[PgPayloadKeys, Connect] | None:
             yield conn
 
     return PgPayloadKeys(connect, kek), connect
+
+
+def approval_key(settings: Settings) -> bytes | None:
+    """The key a flow approval's input hash is made with (#2318), from the KEK; None
+    without a usable one (flows are unavailable then)."""
+    if settings.secret_key_file is None:
+        return None
+    try:
+        return approval_hash_key(load_kek(settings.secret_key_file))
+    except SecretKeyError:
+        return None

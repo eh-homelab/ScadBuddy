@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import cast
 
 import psycopg
 import pytest
-from session_support import Conn, events, insert_session
+from session_support import MANIFEST, Conn, events, insert_session
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy_durable.session import events as events_module
+from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.events import (
     INPUT_MAX,
@@ -102,6 +104,31 @@ async def test_gate_settings_are_read_and_clamped(agent_db: Conn, connect: objec
     )
     clamped = await acts.gate_settings()
     assert (clamped.approval_expiry_s, clamped.question_expiry_s) == (10, 86_400)
+
+
+@pytest.mark.requires_postgres
+async def test_gate_settings_read_the_tools_overrides_sanitised(
+    agent_db: Conn, connect: object
+) -> None:
+    tools.use_manifest(MANIFEST)
+    acts = SessionActivities(connect)  # type: ignore[arg-type]
+    none = await acts.gate_settings()
+    assert (none.tool_tiers, none.disabled_tools) == ({}, [])
+    await agent_db.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)",
+        (
+            tools.OVERRIDES_SETTING,
+            json.dumps(
+                {
+                    "tool_tiers": {"render_preview": "outward", "print_output": "read"},
+                    "disabled_tools": ["print_output", "gone"],
+                }
+            ),
+        ),
+    )
+    read = await acts.gate_settings()
+    assert read.tool_tiers == {"render_preview": "outward"}
+    assert read.disabled_tools == ["print_output"]
 
 
 def test_the_worker_names_what_it_misses_and_never_shows_the_database_url() -> None:
