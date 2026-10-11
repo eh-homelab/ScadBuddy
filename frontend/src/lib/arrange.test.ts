@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type { ArrangeRequest, Output } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
@@ -243,6 +243,39 @@ describe('followUntil reads once before its limit (#2038)', () => {
         waitMs: 0,
       }),
     ).rejects.toThrow('still running')
+  })
+})
+
+describe('followUntil survives a failed read (#2125)', () => {
+  it('tries a failed read again and resolves when the next one answers', async () => {
+    fakeRealtime({ confirm: true })
+    const read = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new ApiError(502, 'Bad Gateway'))
+      .mockResolvedValue('ready')
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: (value) => value === 'ready',
+        stillRunning: () => new Error('still running'),
+        pollMs: 10_000,
+      }),
+    ).resolves.toBe('ready')
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects at once on a 404: the job is gone', async () => {
+    fakeRealtime({ confirm: true })
+    const read = vi.fn(() => Promise.reject(new ApiError(404, 'no such job')))
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: () => false,
+        stillRunning: () => new Error('still running'),
+        pollMs: 10_000,
+      }),
+    ).rejects.toThrow('no such job')
+    expect(read).toHaveBeenCalledTimes(1)
   })
 })
 

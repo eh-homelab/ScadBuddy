@@ -20,6 +20,7 @@ import { sessionTools } from './sessions.js'
 import { settingsTools } from './settings.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { templateTools } from './templates.js'
+import { workspaceTools } from './workspace.js'
 
 // Every ScadBuddy tool, in one list both projections read (spec §5.1, D3).
 // Not here yet: the tools in coverage.ts `PENDING_ROUTES`. The browser_*
@@ -35,6 +36,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...historyTools,
   ...sourceFileTools,
   ...fileTools,
+  ...workspaceTools,
   ...templateTools,
   ...authoringTools,
   ...inspectTools,

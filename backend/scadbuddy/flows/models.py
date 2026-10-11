@@ -19,6 +19,7 @@ HOST_FN = {
     "approved_print": "queue_print",
     "approved_arrange": "arrange",
     "approved_tool": "tool",
+    "approved_turn_tool": "tool",
 }
 
 
@@ -76,4 +77,7 @@ class Decision(BaseModel):
     outcome: Literal["approved", "denied", "answered"]
     response: dict[str, Any] = {}
     responder: str
+    #: An approval's binding to the parked call's tool and input (#2318), which the
+    #: agent checks before it runs the call; None for anything else.
+    input_hash: str | None = None
     created_at: datetime | None = None

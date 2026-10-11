@@ -216,6 +216,7 @@ async def test_a_failing_sweep_fails_its_activity(
         components=SimpleNamespace(get=lambda key: SimpleNamespace(client=object(), store=None)),
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
+        history=SimpleNamespace(maintain=_broken(OSError("the volume is gone"))),
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (

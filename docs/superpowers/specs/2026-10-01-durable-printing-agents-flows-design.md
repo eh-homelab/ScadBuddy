@@ -1271,7 +1271,7 @@ happens, and there is no separate request system.
 | `render(slug, inputs)` | child `TemplatePipeline` via `RenderService` | the render pipeline |
 | `print(source, choices)` | child `PrintRun` (§5) | the print worker |
 | `arrange(...)` | child `Arrange` (template spec phase 5, when it lands) | the render worker |
-| `tool(name, args)` | activity on `agent-tools` (§6.3) | the tool registry |
+| `tool(name, args)` | activity on `agent-tools` (§6.3) | the tool registry; a `<server>__<tool>` name, a remote plugin's tool or `http_request`, through the agent's turn tools (#2320) |
 | `agent(prompt, skills=…, result_schema=…)` | child `DurableSession` | a new durable session |
 | `ask_session(session_id, message)` | `send_message` to that session; waits for the turn's answer | an existing durable session |
 | `wait_for_human(question, timeout=…)` | parks at the run's gate as an `answer` entry (§6.6) | a person |

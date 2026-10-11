@@ -48,7 +48,7 @@ from scadbuddy.flows.models import (
     Run,
     RunStatus,
 )
-from scadbuddy.flows.operations import FLOW_ANSWER, FLOW_DECIDE, FLOW_RESET
+from scadbuddy.flows.operations import FLOW_ANSWER, FLOW_DECIDE, FLOW_RESET, seal_answer
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
@@ -472,15 +472,26 @@ async def answer_flow_run(
     body: AnswerBody,
     response: Response,
     ops: OperationsDep,
+    flows: FlowsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
     _browser_only()
+    if flows.keys is None:
+        raise _unavailable()
+    try:
+        # Sealed under the run's key: the text never reaches the operation's history or
+        # its record in the clear (#2221).
+        sealed = await seal_answer(flows.keys, run_id, body.answer)
+    except SubjectForgottenError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.") from None
+    except psycopg.errors.UndefinedTable:
+        raise _unavailable() from None
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds[FLOW_ANSWER],
         subject=f"flow:{run_id}",
-        request={"run_id": run_id, **body.model_dump()},
+        request={"run_id": run_id, "call_id": body.call_id, "answer_sealed": sealed},
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, Decided)

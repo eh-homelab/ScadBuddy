@@ -45,12 +45,16 @@ from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.models import ImageRef
 from scadbuddy_durable.session.runner import (
     IMAGE_TOO_LARGE,
+    IMAGES_SERVER,
     NO_CREDENTIAL,
     VIEW_IMAGES_TOOL,
+    VIEW_TOOL_IMAGES_TOOL,
     Image,
     ScadBuddyRunner,
     image_problem,
     image_size,
+    tool_images_loader,
+    view_tool_images_tool,
 )
 from scadbuddy_durable.worker import build_worker
 
@@ -146,9 +150,13 @@ async def test_a_segment_runs_with_the_credential_and_what_is_left_of_the_budget
     assert made["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert made["max_budget_usd"] == pytest.approx(0.6)
     assert made["env"]["SCADBUDDY_TEST_DATABASE_URL"] == ""  # the worker's settings, emptied
-    # No images, no skills: Claude Code's prompt with the session's append.
-    assert made["extra_options"] == {
-        "system_prompt": {"type": "preset", "preset": "claude_code", "append": "Be careful."}
+    # No images, no skills: Claude Code's prompt with the session's append, and the
+    # images server offering view_tool_images only (#2320).
+    extra = dict(made["extra_options"])
+    assert set(extra.pop("mcp_servers")) == {IMAGES_SERVER}
+    assert extra == {
+        "system_prompt": {"type": "preset", "preset": "claude_code", "append": "Be careful."},
+        "allowed_tools": [VIEW_TOOL_IMAGES_TOOL],
     }
     cost, turns = await _row(agent_db, sid)
     assert cost == pytest.approx(0.65)
@@ -626,3 +634,37 @@ async def test_a_fallback_never_runs_past_the_budget_a_refused_attempt_spent(
     assert event["code"] == "error_max_budget_usd"
     cost, _ = await _row(agent_db, sid)
     assert cost == pytest.approx(1.0)
+
+
+async def test_view_tool_images_returns_this_sessions_blobs_as_images(
+    agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: an image a durable tool returned is kept by the agent and named in the
+    result; view_tool_images hands it to the model as an image block, as a classic tool
+    result is, and never another session's."""
+    sid = await insert_session(agent_db)
+    other = await insert_session(agent_db)
+    name = hashlib.sha256(PNG).hexdigest() + ".png"
+    await agent_db.execute(
+        "INSERT INTO ai_session_blobs (session_id, name, media_type, data)"
+        " VALUES (%s, %s, 'image/png', %s)",
+        (other, name, PNG),
+    )
+    view = view_tool_images_tool(tool_images_loader(connect, sid))
+    missing = await view.handler({"names": [name]})
+    assert missing.get("is_error") is True
+    assert name in missing["content"][0]["text"]
+    await agent_db.execute(
+        "INSERT INTO ai_session_blobs (session_id, name, media_type, data)"
+        " VALUES (%s, %s, 'image/png', %s)",
+        (sid, name, PNG),
+    )
+    shown = await view.handler({"names": [name]})
+    assert shown["content"] == [
+        {"type": "image", "data": base64.b64encode(PNG).decode(), "mimeType": "image/png"}
+    ]
+    # A name that is not a blob's is never looked up; more than four is refused.
+    bad = await view.handler({"names": ["../etc/passwd"]})
+    assert bad.get("is_error") is True
+    many = await view.handler({"names": [name] * 5})
+    assert many.get("is_error") is True

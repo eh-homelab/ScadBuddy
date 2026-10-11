@@ -6,20 +6,23 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { AuditLog } from '../audit/log.js'
 import type { Tier } from '../auth/principal.js'
-import { durableRequestId } from '../gate/ids.js'
+import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import type { RiskTier } from '../harness/permissions.js'
 import { harnessToolName } from '../plugins/registry.js'
 import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { turnPrincipal } from '../tools/harness.js'
+import { type FlowRuns, flowOf } from './flowRuns.js'
 import {
   type ApprovalRecords,
   durableSession,
   NOT_APPROVED,
+  type ResultBlobs,
   resultText,
   type SessionOwners,
   TOOL_ERROR,
   turnTiers,
+  UNKNOWN_FLOW,
 } from './toolActivities.js'
 
 // The rest of a turn's tools in a durable session (#2320). A classic turn hands Claude
@@ -40,6 +43,12 @@ import {
 // Every decision is made from the servers as they are when the call runs, never from
 // what was listed: a plugin disabled or removed since the list is refused, and a tool
 // raised to outward since needs an approval it does not have.
+//
+// A flow run (`flow-<run id>`, #1057) reaches the same tools through `tool(name, args)`
+// (backend/scadbuddy/workflows/flow_tools.py): `turn_tool_tier`, then the call, as the
+// run's starter (flowRuns.ts), an outward one only with the backend's
+// `workflow_run_decisions` approval, as a flow's ScadBuddy tools are. A flow has no
+// session, so no headless browser (TurnContext.flow), and it lists nothing.
 
 export const TURN_TOOLS_ACTIVITY = 'turn_tools'
 export const TURN_TOOL_TIER_ACTIVITY = 'turn_tool_tier'
@@ -55,6 +64,13 @@ export type TurnServer = {
   connect(): Promise<Client>
   /** The tier of a call by its harness name (`mcp__<server>__<tool>`) and input, as the permission seam resolves it. */
   tierOf(harnessName: string, input: unknown): RiskTier
+  /**
+   * Whether some call of the tool could be outward, whatever its input. Listed as
+   * `may_park`: only a tool listed so is ever asked about, so a tool whose tier depends
+   * on its input (http_request's method, the headless browser's origin) must say yes.
+   * Absent: every tool may (fail toward asking).
+   */
+  mayPark?(harnessName: string): boolean
   /**
    * Whether its calls must run on the replica that listed it (`TurnToolsDeps.hostQueue`):
    * a server whose state lives in this process or on this pod's disk (http_request's
@@ -85,7 +101,10 @@ export type TurnServers = {
 }
 
 export type TurnContext = {
+  /** The session, or `flow-<run id>` for a flow run's call (then `flow` is set). */
   session: string
+  /** The flow run a call comes from: it has no session, so no session-bound server (the browser). */
+  flow?: string
   owner: Owner
   signal: AbortSignal
   /** The call being made, for a server built for it (the browser's grant names its approval). */
@@ -94,6 +113,8 @@ export type TurnContext = {
 
 export type TurnToolsDeps = {
   sessions: SessionOwners
+  /** A flow run's starter and its calls' approvals; without it a flow's call is refused. */
+  flows?: FlowRuns | undefined
   /** The turn's servers, built as a classic turn builds them, for one listing or one call. */
   servers(context: TurnContext): Promise<TurnServers>
   approvals?: ApprovalRecords | undefined
@@ -103,6 +124,8 @@ export type TurnToolsDeps = {
   report?: ((session: string, problems: readonly string[]) => Promise<void>) | undefined
   /** This replica's own queue (`agent-tools.<host>`), where a pinned server's calls run. */
   hostQueue?: string | undefined
+  /** Where a call's result images are kept for `view_tool_images` (toolActivities.ts `resultText`). */
+  blobs?: ResultBlobs | undefined
 }
 
 /** What DurableSession declares for one turn tool. */
@@ -153,11 +176,18 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
   }
 }
 
-/** The server's tools as {original name, harness name}, as Claude Code would list them. */
+/**
+ * The server's tools as {original name, harness name}, as Claude Code would list them.
+ * Tools whose harness names collide are left out, as a classic turn hides them
+ * (plugins/forwarder.ts), so a name never stands for two tools.
+ */
 async function listed(server: TurnServer, signal: AbortSignal) {
   return withClient(server, async (client) => {
     const { tools } = await client.listTools(undefined, { signal })
-    return tools.filter((tool) => server.offers?.(tool.name) ?? true).map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+    const named = tools.filter((tool) => server.offers?.(tool.name) ?? true).map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+    const seen = new Map<string, number>()
+    for (const { name } of named) seen.set(name, (seen.get(name) ?? 0) + 1)
+    return named.filter(({ name }) => seen.get(name) === 1)
   })
 }
 
@@ -180,6 +210,49 @@ async function resolve(set: TurnServers, name: string, signal: AbortSignal) {
   const found = (await listed(server, signal)).find((t) => t.name === parts.tool)
   if (!found) throw ApplicationFailure.nonRetryable(`${name} is not offered any more by ${server.name}`, TOOL_ERROR)
   return { server, tool: found.tool, harnessName: `mcp__${server.name}__${parts.tool}` }
+}
+
+/** Who a call runs as, with which tiers and under which approval: a durable session's turn, or a flow run's starter. */
+type TurnCaller = {
+  context: Omit<TurnContext, 'signal' | 'call'>
+  owner: Owner
+  /** The audit row's session; none for a flow. */
+  sessionId: string | null
+  requestId: string
+  tiers: readonly Tier[] | undefined
+  approved(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
+}
+
+async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string): Promise<TurnCaller> {
+  const { workflowExecution } = Context.current().info
+  const runId = workflowExecution?.runId ?? ''
+  const flow = flowOf(workflowExecution?.workflowId)
+  if (flow !== undefined) {
+    const flows = deps.flows
+    // A lookup that throws (the database is away) is left to the activity's retries.
+    const owner = flows ? await flows.startedBy(flow) : undefined
+    if (!flows || owner === undefined) {
+      throw ApplicationFailure.nonRetryable(`${name}: no flow run ${flow} is recorded`, UNKNOWN_FLOW)
+    }
+    return {
+      context: { session: `flow-${flow}`, flow, owner },
+      owner,
+      sessionId: null,
+      requestId: flowRequestId(flow, runId, toolUseId),
+      // A token starter's run acts with what its token holds now, as toolActivities' flowCaller.
+      tiers: owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner),
+      approved: (requestId) => flows.approved(requestId),
+    }
+  }
+  const { session, owner, turnTiers: sent } = await durableSession(name, deps.sessions)
+  return {
+    context: { session, owner },
+    owner,
+    sessionId: session,
+    requestId: durableRequestId(session, runId, toolUseId),
+    tiers: await turnTiers(owner, sent, deps),
+    approved: async (requestId, binding) => (await deps.approvals?.approved(requestId, binding)) ?? false,
+  }
 }
 
 function inputObject(input: unknown): Record<string, unknown> {
@@ -209,7 +282,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
               name: turnToolName(server.name, tool.name),
               description: tool.description ?? '',
               input_schema: tool.inputSchema as Record<string, unknown>,
-              may_park: server.tierOf(`mcp__${server.name}__${name}`, undefined) === 'outward',
+              may_park: server.mayPark?.(`mcp__${server.name}__${name}`) ?? true,
               ...(server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}),
             })
           }
@@ -217,16 +290,18 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         return { tools }
       })
     },
-    [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier }> => {
-      const { session, owner } = await durableSession(TURN_TOOL_TIER_ACTIVITY, deps.sessions)
+    [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier; task_queue?: string }> => {
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
       if (typeof tool !== 'string') throw ApplicationFailure.nonRetryable('turn_tool_tier takes {tool: string, input}', TOOL_ERROR)
+      const caller = await turnCaller(deps, TURN_TOOL_TIER_ACTIVITY, '')
       const signal = Context.current().cancellationSignal
-      return withServers(deps, { session, owner, signal }, async (set) => {
+      return withServers(deps, { ...caller.context, signal }, async (set) => {
         const { server, harnessName } = await resolve(set, tool, signal)
+        // A flow takes its call's queue from here, since it lists nothing (turn_tools).
+        const queue = server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}
         // A call that will be refused is not parked: its activity says why.
-        if (server.refusal?.(harnessName, input) !== undefined) return { tier: 'read' as const }
-        return { tier: server.tierOf(harnessName, input) }
+        if (server.refusal?.(harnessName, input) !== undefined) return { tier: 'read' as const, ...queue }
+        return { tier: server.tierOf(harnessName, input), ...queue }
       })
     },
   }
@@ -239,19 +314,18 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
 export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promise<unknown> {
   return async (input: unknown) => {
     const context = Context.current()
-    const { activityType, activityId, workflowExecution } = context.info
+    const { activityType, activityId } = context.info
     if (!activityType.startsWith(TURN_TOOL_PREFIX)) {
       throw ApplicationFailure.nonRetryable(`no activity ${activityType} is served on this queue`, TOOL_ERROR)
     }
     const name = activityType.slice(TURN_TOOL_PREFIX.length)
-    const { session, owner, turnTiers: sent } = await durableSession(name, deps.sessions)
     const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
-    const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
-    const tiers = await turnTiers(owner, sent, deps)
-    const principal = turnPrincipal(owner, tiers ? { tiers: [...tiers] } : undefined)
+    const caller = await turnCaller(deps, name, toolUseId)
+    const { owner, requestId, sessionId: session } = caller
+    const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
     const fields = inputObject(input)
     const signal = context.cancellationSignal
-    return withServers(deps, { session, owner, signal, call: { requestId, toolUseId } }, async (set) => {
+    return withServers(deps, { ...caller.context, signal, call: { requestId, toolUseId } }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
       const { server, tool, harnessName } = await resolve(set, name, signal)
       const tier = server.tierOf(harnessName, input)
@@ -280,12 +354,13 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       const refused = server.refusal?.(harnessName, input)
       if (refused !== undefined) await refuse(refused, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
-        await refuse(`${name} needs the "${tier}" tier, which this session's turn does not hold`, TOOL_ERROR)
+        const who = caller.context.flow ? "this flow run's starter" : "this session's turn"
+        await refuse(`${name} needs the "${tier}" tier, which ${who} does not hold`, TOOL_ERROR)
       }
       // As runAsActivity: the approval is checked as the call runs, bound to this call's input.
       const binding = deps.audit ? { inputHash: deps.audit.hash(name, fields) } : undefined
       if (tier === 'outward') {
-        if (!(await deps.approvals?.approved(requestId, binding))) {
+        if (!(await caller.approved(requestId, binding))) {
           await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
         }
         await server.approved?.(harnessName, input, requestId)
@@ -301,7 +376,14 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       } finally {
         clearInterval(heartbeat)
       }
-      const text = scrub(resultText((result.content ?? []) as { type: string; text?: string }[]))
+      // The images go to the session's blobs, never into the payload; their names and
+      // the text go through the same scrub.
+      const text = scrub(
+        await resultText(
+          (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
+          deps.blobs && session ? { session, blobs: deps.blobs } : undefined,
+        ),
+      )
       await record(result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)
       return text

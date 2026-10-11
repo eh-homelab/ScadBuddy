@@ -97,6 +97,10 @@ describe('the headless browser in a durable turn', () => {
     )
     expect(tools.find((t) => t.name === NAV)?.task_queue).toBeUndefined() // no host queue in this harness
     expect(tools.find((t) => t.name === 'scadbuddy_browser__authorize_request')?.may_park).toBe(true)
+    // A navigation is outward by the origin it opens, so it is listed as one that may park
+    // (review of #2324); a snapshot is read whatever its input.
+    expect(tools.find((t) => t.name === NAV)?.may_park).toBe(true)
+    expect(tools.find((t) => t.name === `${BROWSER_SERVER}__browser_snapshot`)?.may_park).toBe(false)
   })
 
   it('offers nothing, and starts no browser, while Settings has it off', async () => {

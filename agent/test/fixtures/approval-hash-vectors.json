@@ -1,0 +1,42 @@
+{
+  "kek_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "hash_key_hex": "23a5cda4e5c6ef50f1b2d43e9060e2a36c0e361dad4f0e1ede9e2a5568180615",
+  "cases": [
+    {
+      "tool": "render",
+      "input_json": "{\"model\":\"box\",\"params\":{\"width\":20,\"depth\":1.0,\"label\":\"Lid\"}}",
+      "canonical": "{\"input\":{\"model\":\"box\",\"params\":{\"depth\":1,\"label\":\"Lid\",\"width\":20}},\"tool\":\"render\"}",
+      "hash": "ca4554432c29da23a57fcee2f09ba8468a7e84ea9e8148b05d4aefc11d6d358a"
+    },
+    {
+      "tool": "render",
+      "input_json": "{\"params\":{\"tiny\":1e-7,\"small\":0.0000123,\"big\":1.5e22,\"edge\":1e21,\"under\":1e20,\"neg\":-0.0}}",
+      "canonical": "{\"input\":{\"params\":{\"big\":1.5e+22,\"edge\":1e+21,\"neg\":0,\"small\":0.0000123,\"tiny\":1e-7,\"under\":100000000000000000000}},\"tool\":\"render\"}",
+      "hash": "6c84c0e371a9fb79e675e9e424bae548c538204d88adccb143c210d08070626e"
+    },
+    {
+      "tool": "write",
+      "input_json": "{\"text\":\"pink \\u2028 line\\u0001 \\\"q\\\" \\\\ tab\\t\",\"emoji\":\"\\ud83d\\ude00\",\"lone\":\"\\ud800x\"}",
+      "canonical": "{\"input\":{\"emoji\":\"😀\",\"lone\":\"\\ud800x\",\"text\":\"pink   line\\u0001 \\\"q\\\" \\\\ tab\\t\"},\"tool\":\"write\"}",
+      "hash": "392e384b2a5675d0914ea1cf6eba63269c0b7625191ee3d347f0f7c8434ce498"
+    },
+    {
+      "tool": "write",
+      "input_json": "{\"\\ue000\":1,\"\\ud83d\\ude00\":2,\"b\":[1,2,{\"z\":null,\"a\":true}],\"a\":false}",
+      "canonical": "{\"input\":{\"a\":false,\"b\":[1,2,{\"a\":true,\"z\":null}],\"😀\":2,\"\":1},\"tool\":\"write\"}",
+      "hash": "a4a7f45aefb2d6ab7bceec10301c8a03afcd76790f92ddcbfd9bb6f9b6e378f8"
+    },
+    {
+      "tool": "count",
+      "input_json": "{\"n\":9007199254740993,\"m\":1152921504606846976,\"f\":3.14,\"z\":0}",
+      "canonical": "{\"input\":{\"f\":3.14,\"m\":1152921504606847000,\"n\":9007199254740992,\"z\":0},\"tool\":\"count\"}",
+      "hash": "6cbac8087807b75b3779a2e3699779870a4b087f217d4c5acd98bb853135a6c3"
+    },
+    {
+      "tool": "empty",
+      "input_json": "{}",
+      "canonical": "{\"input\":{},\"tool\":\"empty\"}",
+      "hash": "2d70b96428cc575752fbedd79bcc3d0772cc1e34d260fec0babcf2621d5600d9"
+    }
+  ]
+}

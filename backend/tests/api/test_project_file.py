@@ -17,7 +17,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy import project_file
+from scadbuddy.bambuddy import commits, project_file
 from scadbuddy.bambuddy.project_file import STEM_MAX_UTF16_UNITS, project_stem
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import META_NAME
@@ -142,6 +142,48 @@ def test_generate_with_a_project_uploads_once_into_its_folder(
     # The name is the one the existence read returned, not the one uploaded.
     assert again["filename"] == "renamed-in-bambuddy.3mf"
     assert uploaded.call_count == 1
+
+
+@respx.mock
+def test_a_folder_made_for_the_project_moments_ago_is_waited_for_not_failed(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2263: a project with no folder gets one on its first file, and Bambuddy answers
+    that create before committing it, so the upload straight after is refused "Folder
+    not found". The folder is read back until it is visible and the upload sent again,
+    rather than the Generate failing."""
+    monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
+    configure(client)
+    output_id = make_output(client, model)
+    respx.get(f"{API}/library/folders/by-project/{PROJECT}").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get(f"{API}/projects/{PROJECT}").mock(
+        return_value=httpx.Response(200, json={"id": PROJECT, "name": "Fidget", "status": "active"})
+    )
+    made = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(
+            200, json={"id": FOLDER, "name": "Fidget", "project_id": PROJECT}
+        )
+    )
+    gone = httpx.Response(404, json={"detail": "Folder not found"})
+    respx.get(f"{API}/library/files", params={"folder_id": str(FOLDER)}).mock(return_value=gone)
+    read = respx.get(f"{API}/library/folders/{FOLDER}").mock(
+        side_effect=[gone, httpx.Response(200, json={"id": FOLDER, "name": "Fidget"})]
+    )
+    respx.get(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(200, json={"id": 41, "filename": "f.3mf", "notes": None})
+    )
+    uploaded = respx.post(f"{API}/library/files").mock(
+        side_effect=[gone, httpx.Response(200, json={"id": 41, "filename": "f.3mf"})]
+    )
+
+    response = file_into_project(client, output_id)
+    assert response.status_code == 200, response.text
+    assert (response.json()["folder_id"], response.json()["library_file_id"]) == (FOLDER, 41)
+    assert made.call_count == 1
+    assert [c.request.url.params["folder_id"] for c in uploaded.calls] == [str(FOLDER)] * 2
+    assert read.call_count == 2
 
 
 @respx.mock

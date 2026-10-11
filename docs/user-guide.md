@@ -549,6 +549,17 @@ code works once, for 5 minutes. The pairing lasts until you press **Disconnect**
 hours pass, or the tab reloads
 ([browser-bridge.md](ai/browser-bridge.md#pairing-spec-85)).
 
+### The assistant's workspace
+
+The assistant has a workspace of its own for files: a session's files stay with it
+(and are deleted with it), and a fork starts with a copy. It can save a ScadBuddy file
+there (an output's 3MF, a model's file or picture, a print's photo or timelapse, a
+Bambuddy library file), download one from the web into it, and read, write, edit and
+delete its files, so a file it fetched does not have to pass through the conversation.
+A file holds at most 25 MB and a session's workspace 200 MB. An MCP client working
+outside any session gets a workspace of its own whose files are deleted a day after
+they were last written ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
+
 ### The headless browser
 
 A session with no tab of yours (one started over MCP, say) can still look at
