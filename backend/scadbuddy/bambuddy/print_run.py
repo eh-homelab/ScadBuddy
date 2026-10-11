@@ -87,7 +87,13 @@ from scadbuddy.rack.rank import (
     rack_warnings,
     rank_rack,
 )
-from scadbuddy.rack.usage import PickedHotend, RackUsage, record_seen, save_picks
+from scadbuddy.rack.usage import (
+    PickedHotend,
+    RackUsage,
+    group_spools,
+    record_seen,
+    save_picks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -437,7 +443,12 @@ def rack_chooser(
                 RackChoice(
                     nozzle_rack_choice={str(group_id): pick.position for group_id, pick in ordered},
                     picks=[
-                        PickedHotend(group_id=group_id, position=pick.position, serial=pick.serial)
+                        PickedHotend(
+                            group_id=group_id,
+                            position=pick.position,
+                            serial=pick.serial,
+                            spools=group_spools(requirements.filaments, spools, group_id),
+                        )
                         for group_id, pick in ordered
                     ],
                 )

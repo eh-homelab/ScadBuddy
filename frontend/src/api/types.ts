@@ -165,6 +165,7 @@ export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
 /** #1298 — what each hotend on a printer's rack has printed; never a serial. */
 export type PrinterRackUsage = Schemas['PrinterRackUsage']
 export type RackHotendUsage = Schemas['RackHotendUsage']
+export type RackSpoolUse = Schemas['RackSpoolUse']
 /** #907, #1862 — Bambu's print sequence, a per-print process override. */
 export type PrintSequence = NonNullable<Schemas['PrintRunRequest']['print_sequence']>
 export type OutputPlate = Schemas['OutputPlate']

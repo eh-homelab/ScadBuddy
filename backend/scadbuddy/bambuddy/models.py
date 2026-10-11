@@ -268,10 +268,16 @@ class NozzleRackSlot(NozzleInfo):
     stat: int | None = None
     filament_type: str = ""
     filament_colour: str = Field(default="", alias="filament_color")
+    #: The Bambu filament id it last ran (``GFA00``), ``""`` when none (#2170);
+    #: ``bambuddy.filament_ids`` names it.
+    filament_id: str = ""
+    max_temp: int | None = None
     #: The hotend's own serial (#836). It goes into the ``rack_nozzle_*`` tables and
     #: nowhere else (spec 2026-10-01 §7), so it is kept out of ``repr``. A firmware
     #: ``null`` reads as ``""`` and any other non-string is coerced to text, so it can
-    #: never fail the whole status parse or leak through a ValidationError's input.
+    #: never fail the whole status parse or leak through a ValidationError's input. The
+    #: firmware's ``N/A`` (an empty mount) reads as ``""`` too (#2170), so every empty
+    #: hotend does not share one history.
     serial_number: str = Field(default="", repr=False)
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
@@ -279,6 +285,12 @@ class NozzleRackSlot(NozzleInfo):
     @field_validator("serial_number", mode="before")
     @classmethod
     def _serial_text(cls, value: Any) -> Any:
+        text = "" if value is None else str(value).strip()
+        return "" if text.upper() == "N/A" else text
+
+    @field_validator("filament_id", mode="before")
+    @classmethod
+    def _filament_id_text(cls, value: Any) -> Any:
         return "" if value is None else str(value)
 
 

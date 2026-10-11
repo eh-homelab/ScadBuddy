@@ -184,7 +184,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
-      "print time and open picks in the print check's rack options, for the hotends that job could use.",
+      "print time and open picks in the print check's rack options, for the hotends that job could use. " +
+      "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
   },
 ]
 

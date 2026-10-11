@@ -563,7 +563,7 @@ def _slot_warnings(
     options: FilamentOptions, slot: SlotNeed, option: SpoolOption, *, copies: int
 ) -> list[FilamentWarning]:
     found: list[FilamentWarning] = []
-    label = _label(option)
+    label = spool_label(option)
 
     if option.loaded is None:
         found.append(
@@ -609,7 +609,8 @@ def _slot_warnings(
     return found
 
 
-def _label(option: SpoolOption) -> str:
+def spool_label(option: SpoolOption) -> str:
+    """``Bambu Lab PLA Basic Black``: brand, material, subtype and colour name."""
     parts = [part for part in (option.brand, option.material, option.subtype) if part]
     name = " ".join(parts)
     return f"{name} {option.color_name}".strip() if option.color_name else name or "this spool"
