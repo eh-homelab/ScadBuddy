@@ -17,7 +17,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
-from scadbuddy.workflows.housekeeping import PRUNE_SWEEPS, SWEEPS
+from scadbuddy.workflows.housekeeping import GIT_SWEEP, PRUNE_SWEEPS, SWEEPS
 from tests.test_print_worker_task import StubWorker
 
 
@@ -225,6 +225,27 @@ async def test_a_failing_sweep_fails_its_activity(
     ):
         await ActivityEnvironment().run(activities[sweep])
     assert caplog.records, "the failure is logged too"
+
+
+@pytest.mark.parametrize("packed", [True, False])
+async def test_the_models_git_sweep_runs_maintain_and_logs_a_pack(
+    packed: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2344: the success path of `GIT_SWEEP`: the activity calls `history.maintain`,
+    completes, and logs only when it packed."""
+    calls: list[str] = []
+
+    def maintain() -> bool:
+        calls.append("maintain")
+        return packed
+
+    state = SimpleNamespace(history=SimpleNamespace(maintain=maintain))
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
+        await ActivityEnvironment().run(activities[GIT_SWEEP])
+    assert calls == ["maintain"]
+    logged = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.main"]
+    assert logged == (["packed the models repository"] if packed else [])
 
 
 async def test_a_long_sweep_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyPatch) -> None:
