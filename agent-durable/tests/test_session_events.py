@@ -234,3 +234,35 @@ async def test_a_turn_ends_on_its_own_end_not_the_last_turns(
         "assistant.text.delta",
         "assistant.text.done",
     ]
+
+
+@pytest.mark.requires_postgres
+async def test_a_carried_over_turn_ends_on_its_own_end_not_an_earlier_turns(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2123: a turn handed over by continue-as-new has no prompt in this run, so an
+    earlier turn's unread end is told apart by its time."""
+    sid = await insert_session(agent_db)
+    since = "2026-10-11T12:00:00+00:00"
+    stream = [
+        {"type": "cancelled", "at": "2026-10-11T11:59:58+00:00", "offset": 0},
+        {"type": "text", "text": "hello", "at": "2026-10-11T12:00:03+00:00", "offset": 1},
+        {"type": "done", "result": "hello", "at": "2026-10-11T12:00:04+00:00", "offset": 2},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    result = await env.run(
+        acts.follow_session,
+        FollowArgs(session_id=sid, workflow_id=f"session-{sid}", since=since),
+    )
+    assert result.ended == "done"
+    assert [e["type"] for e in await events(agent_db, sid)] == [
+        "assistant.text.delta",
+        "assistant.text.done",
+    ]

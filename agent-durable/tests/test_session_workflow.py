@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from session_support import (
     until,
 )
 from temporalio import activity
-from temporalio.claude_agent_sdk import ClaudeAgentPlugin
+from temporalio.claude_agent_sdk import ClaudeAgentPlugin, follow_agent
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import (
     Client,
@@ -64,7 +65,7 @@ from scadbuddy_durable.session.models import (
     GateSettings,
     SegmentContext,
 )
-from scadbuddy_durable.session.workflow import DurableSession
+from scadbuddy_durable.session.workflow import FOLLOW_DRAIN, DurableSession
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -662,11 +663,16 @@ async def test_an_interrupt_as_a_turn_starts_stops_it(
         await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
         await asyncio.sleep(1)
         held.release.set()
+        started = time.monotonic()
         assert await settled(connect, sid) == "idle"
+        # #2123: a run cancelled before its first step publishes nothing, so the turn
+        # must not wait out FOLLOW_DRAIN for an end that never comes.
+        assert time.monotonic() - started < FOLLOW_DRAIN.total_seconds() / 2
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
     assert not any(e["type"] == "approval.required" for e in log)
     assert harness.stand_in.ran == []
+    await _replays(harness, handle)
 
 
 class SlowCancel(GateActivities):
@@ -708,6 +714,95 @@ async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
         assert await settled(connect, sid) == "idle"
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+
+
+class Outage(GateActivities):
+    """Postgres out for one resolve outcome: every attempt fails until the test lets it go."""
+
+    def __init__(self, connect: Connect, outcome: str) -> None:
+        super().__init__(connect)
+        self.outcome = outcome
+        self.tried = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @activity.defn(name="resolve_input")
+    async def resolve_input(self, args: ResolveInput) -> bool:
+        if args.outcome == self.outcome and not self.release.is_set():
+            self.tried.set()
+            raise RuntimeError("database unreachable")
+        return await super().resolve_input(args)
+
+
+async def _open_rows(conn: Conn, sid: str) -> int:
+    cur = await conn.execute("SELECT count(*) FROM ai_pending_input WHERE session_id = %s", (sid,))
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def test_a_stop_stops_the_run_while_the_database_is_down(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2123: Stop waited for the parked call's cancel to be written before it cancelled
+    the run, so with Postgres down the agent kept running until it was back."""
+    outage = Outage(connect, "cancelled")
+    await harness.agent.shutdown()
+    harness.gate_activities = outage
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await _parked(handle)
+        await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+
+        async def stopped() -> None:
+            async for event in follow_agent(harness.client, handle.id):
+                if event["type"] == "cancelled":
+                    return
+
+        # The run stops while the cancel cannot be written; the turn's end then retries it.
+        await asyncio.wait_for(stopped(), 20)
+        await asyncio.wait_for(outage.tried.wait(), 30)
+        outage.release.set()
+        assert await settled(connect, sid, timeout=120) == "idle"
+    log = await events(agent_db, sid)
+    assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+    resolved = [e for e in log if e["type"] == "input.resolved"]
+    assert [(e["outcome"], e.get("reason")) for e in resolved] == [
+        ("cancelled", "the turn was interrupted")
+    ]
+    assert await _open_rows(agent_db, sid) == 0
+    assert harness.stand_in.ran == []
+    await _replays(harness, handle)
+
+
+async def test_an_expiry_in_flight_as_the_turn_ends_is_still_written(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2123: the turn's end skipped an entry whose timer had fired and then cancelled
+    its park, and with it the expiry's resolve_input, so the row stayed pending."""
+    outage = Outage(connect, "expired")
+    await _setting(agent_db, "approval_expiry_seconds", 10)
+    await harness.agent.shutdown()
+    harness.gate_activities = outage
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await _parked(handle)
+        await asyncio.wait_for(outage.tried.wait(), 60)
+        await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+        await asyncio.sleep(3)
+        outage.release.set()
+        assert await settled(connect, sid, timeout=120) == "idle"
+
+        async def closed() -> bool:
+            return await _open_rows(agent_db, sid) == 0
+
+        await until(closed, timeout=60)
+    log = await events(agent_db, sid)
+    resolved = [e for e in log if e["type"] == "input.resolved"]
+    assert [e["outcome"] for e in resolved] == ["expired"]
+    assert harness.stand_in.ran == []
+    await _replays(harness, handle)
 
 
 # ---- Settings → Plugins overrides (#2088) ----
