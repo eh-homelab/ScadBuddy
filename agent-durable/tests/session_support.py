@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
 from typing import Any
@@ -14,6 +14,7 @@ from typing import Any
 import psycopg
 from temporalio import activity
 from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
+from temporalio.common import RawValue
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
@@ -109,6 +110,8 @@ class StandInTools:
         self._connect = connect
         self.ran: list[tuple[str, dict[str, Any]]] = []
         self.describe_refuses = False
+        # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
+        self.turn_offered: list[dict[str, Any]] = []
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -178,7 +181,40 @@ class StandInTools:
                 raise ApplicationError("no such session", type="UnknownSession", non_retryable=True)
             return {"summary": f"{args['tool']} call", "input_hash": "a" * 64}
 
-        return [render_preview, print_output, ask_user, wait_for_user, describe_call]
+        @activity.defn(name="turn_tools")
+        async def turn_tools() -> dict[str, Any]:
+            return {"tools": self.turn_offered}
+
+        # As turnTools.ts tiers http_request: a GET is read, anything else outward.
+        def tier(args: dict[str, Any]) -> str:
+            return "read" if args.get("method") == "GET" else "outward"
+
+        @activity.defn(name="turn_tool_tier")
+        async def turn_tool_tier(args: dict[str, Any]) -> dict[str, str]:
+            return {"tier": tier(args["input"])}
+
+        @activity.defn(dynamic=True)
+        async def turn_tool(raw: Sequence[RawValue]) -> str:
+            name = activity.info().activity_type
+            assert name.startswith("turn:"), name
+            args = activity.payload_converter().from_payload(raw[0].payload, dict)
+            if tier(args) == "outward":
+                recorded = await self._response(name)
+                if recorded is None or recorded[0] != "approved":
+                    raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
+            self.ran.append((name, args))
+            return f"{name} did {args.get('method')}"
+
+        return [
+            render_preview,
+            print_output,
+            ask_user,
+            wait_for_user,
+            describe_call,
+            turn_tools,
+            turn_tool_tier,
+            turn_tool,
+        ]
 
 
 def tools_worker(client: Client, stand_in: StandInTools) -> Worker:

@@ -7,6 +7,7 @@ from session_support import MANIFEST
 from temporalio.claude_agent_sdk import DurableTool
 
 from scadbuddy_durable.session import tools
+from scadbuddy_durable.session.models import TurnTool
 
 
 def test_only_raises_of_known_tools_are_kept() -> None:
@@ -64,3 +65,30 @@ def test_a_disabled_tool_never_parks() -> None:
     assert by_name["print_output"].retry_policy.maximum_attempts == 1
     tools.apply_overrides(by_name, MANIFEST, {}, set())
     assert by_name["print_output"].needs_approval
+
+
+def _turn_tool(name: str, may_park: bool = True) -> TurnTool:
+    return TurnTool(name=name, description=name, input_schema={"type": "object"}, may_park=may_park)
+
+
+def test_each_turn_replaces_the_last_turns_tools_and_never_a_manifest_tool() -> None:
+    """#2320: what turn_tools listed is offered this turn, and nothing of last turn's."""
+    offered = _gates()
+    held = dict(offered)
+    first = tools.offer_turn_tools(
+        offered, held, set(), [_turn_tool("notes__post"), _turn_tool("hindsight__recall", False)]
+    )
+    assert first == {"notes__post", "hindsight__recall"}
+    assert offered["notes__post"].needs_approval
+    assert offered["notes__post"].retry_policy is not None
+    assert offered["notes__post"].retry_policy.maximum_attempts == 1
+    assert not offered["hindsight__recall"].needs_approval
+    # A plugin removed since: gone from both tables, and a name without "__" or one the
+    # manifest has is never taken.
+    second = tools.offer_turn_tools(
+        offered, held, first, [_turn_tool("render_preview"), _turn_tool("plain")]
+    )
+    assert second == set()
+    assert "notes__post" not in offered and "notes__post" not in held
+    assert offered["render_preview"] is held["render_preview"]
+    assert not offered["render_preview"].needs_approval

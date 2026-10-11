@@ -7,7 +7,7 @@ service sends the same shapes as JSON (agent/src/sessions/durable.ts).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from temporalio.claude_agent_sdk import AgentState
 
@@ -96,6 +96,24 @@ class SegmentContext:
 class SendAnswer:
     accepted: bool
     turn_id: str
+
+
+@dataclass
+class TurnTool:
+    """One of a turn's other tools (agent/src/temporal/turnTools.ts ``TurnToolEntry``):
+    a remote plugin's, ``http_request``, the headless browser's (#2320). Its calls run
+    as the activity ``turn:<name>`` on agent-tools."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    # Whether a call may be outward: it then asks turn_tool_tier before it parks.
+    may_park: bool
+
+
+@dataclass
+class TurnTools:
+    tools: list[TurnTool] = field(default_factory=list)
 
 
 @dataclass

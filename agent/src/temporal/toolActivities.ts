@@ -139,7 +139,7 @@ export const DURABLE_IMAGE_NOTE =
  * activity's result as `ToolOutcome(content=result)` and JSON-encodes anything but a
  * string, so content blocks would reach the model as JSON, an image as its base64.
  */
-function resultText(content: readonly { type: string; text?: string }[]): string {
+export function resultText(content: readonly { type: string; text?: string }[]): string {
   return content.map((block) => (block.type === 'text' ? (block.text ?? '') : DURABLE_IMAGE_NOTE)).join('\n')
 }
 
@@ -165,7 +165,7 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
 }
 
 /** The durable session the current activity's workflow is, and its owner; refused otherwise. */
-async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[] }> {
+export async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[] }> {
   const { workflowExecution } = Context.current().info
   const session = sessionOf(workflowExecution?.workflowId)
   // A lookup that throws (the database is away) is left to the activity's retries.
@@ -211,10 +211,10 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
  * (`turn_tiers`), cut to what the owner holds now, so a token revoked or lowered since
  * the turn was sent takes effect at once. None recorded: the owner's default.
  */
-async function turnTiers(
+export async function turnTiers(
   owner: Owner,
   sent: readonly Tier[] | undefined,
-  deps: ToolActivityDeps,
+  deps: Pick<ToolActivityDeps, 'currentTiers'>,
 ): Promise<readonly Tier[] | undefined> {
   if (!sent || owner.kind === 'browser') return undefined
   const now = await deps.currentTiers?.(owner)

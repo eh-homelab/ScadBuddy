@@ -81,9 +81,15 @@ with workflow.unsafe.imports_passed_through():
         SessionStart,
         TurnOutcome,
         TurnStart,
+        TurnTools,
     )
 
 DESCRIBE_CALL = "gate.describe_call"
+# agent/src/temporal/turnTools.ts (#2320).
+TURN_TOOLS = "turn_tools"
+TURN_TOOL_TIER = "turn_tool_tier"
+TURN_TOOLS_PATCH = "turn-tools-2320"
+TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
 FOLLOW_TIMEOUT = timedelta(days=30)
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_DRAIN = timedelta(seconds=30)
@@ -150,6 +156,9 @@ class DurableSession:
         # The plugin keeps these objects and reads needs_approval as each call comes:
         # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
         self._tools = {t.name: t for t in manifest.durable_tools(entries)}
+        # This turn's other tools (plugins, http_request, the headless browser; #2320):
+        # offered from what turn_tools listed, replaced every turn.
+        self._turn_tools: set[str] = set()
         self._turn: TurnStart | None = start.turn
         self._message: Message | None = None
         self._parked: dict[str, Parked] = {}
@@ -222,6 +231,22 @@ class DurableSession:
             self._settings.tool_tiers,
             set(self._settings.disabled_tools),
         )
+        if workflow.patched(TURN_TOOLS_PATCH):
+            # What a classic turn would hand Claude Code beside ScadBuddy's own tools,
+            # listed by the agent as it is now; from the result, so a replay offers the same.
+            offered = await workflow.execute_activity(
+                TURN_TOOLS,
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=TURN_TOOLS_TIMEOUT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=["UnknownSession"]
+                ),
+                result_type=TurnTools,
+            )
+            # The plugin's own table, which each segment declares its tools from.
+            self._turn_tools = manifest.offer_turn_tools(
+                self._agent._tools, self._tools, self._turn_tools, offered.tools
+            )
         follow = workflow.start_activity(
             "follow_session",
             FollowArgs(
@@ -305,6 +330,11 @@ class DurableSession:
             "answer" if self._kinds.get(name) == "answer" else "approval"
         )
         author = self._turn.author if self._turn else self._start.owner
+        if name in self._turn_tools and not await self._outward(name, call):
+            # A read or write call (an http GET, a plugin tool tiered read) goes straight
+            # through, as the permission seam lets it; its activity checks the tier again.
+            self._agent.decide(str(call["id"]), True, approver="scadbuddy")
+            return
         summary, input_hash = "", None
         if kind == "approval":
             described = await workflow.execute_activity(
@@ -387,6 +417,25 @@ class DurableSession:
                 await self._resolve(parked, "cancelled", SYSTEM, None, NOBODY_ANSWERED, timer=True)
             else:
                 await self._resolve(parked, "timed_out", SYSTEM, None, None, timer=True)
+
+    async def _outward(self, name: str, call: dict[str, Any]) -> bool:
+        """Whether a turn tool's call is outward, by its input (turn_tool_tier). One the
+        agent cannot tier (its plugin is gone) is let through: its activity refuses it,
+        saying why, and an outward one still needs the approval it does not have."""
+        try:
+            tiered = await workflow.execute_activity(
+                TURN_TOOL_TIER,
+                {"tool": name, "input": call["input"]},
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=["UnknownSession", "ToolError"]
+                ),
+                result_type=dict,
+            )
+        except FailureError:
+            return False
+        return bool(tiered.get("tier") == "outward")
 
     async def _resolve(
         self,

@@ -1,6 +1,8 @@
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
+import path from 'node:path'
+import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
@@ -50,6 +52,8 @@ import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { turnServers } from './temporal/turnServers.js'
+import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
@@ -408,8 +412,44 @@ if (temporal && !payloadKeys) {
 const workerDataConverter = dataConverter
   ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }
   : undefined
+// What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
+// classic turn would hand Claude Code, built again for every listing and call.
+const turnToolDeps = temporal
+  ? {
+      sessions: new PgSessionOwners(temporal.sql),
+      servers: turnServers({
+        ...(plugins
+          ? { remotePlugins: async () => forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder) }
+          : {}),
+        ...(settings ? { settings } : {}),
+        httpRequest: {
+          saveRoot: path.join(config.payloadDir ?? paths.stateDir, 'sessions'),
+          secrets: async () => {
+            if (!credentials) return []
+            const pool = new CredentialPool({ repo: credentials, kek, audit })
+            return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)
+          },
+          audit,
+        },
+      }),
+      approvals: new PgApprovalRecords(temporal.sql),
+      audit,
+      currentTiers: liveTokenTiers(tokens),
+      ...(sessions
+        ? {
+            report: async (session: string, problems: readonly string[]) => {
+              await sessions.events.append(
+                session,
+                problems.map((message) => event({ type: 'error', sessionId: session, code: 'plugin_unavailable', message })),
+              )
+            },
+          }
+        : {}),
+    }
+  : undefined
+
 const temporalWorker =
-  temporal && operationStore
+  temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
@@ -424,6 +464,10 @@ const temporalWorker =
             currentTiers: liveTokenTiers(tokens),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
+          // A durable turn's plugin and http_request tools (#2320): listed per turn, and
+          // each call the `default` activity `turn:<server>__<tool>`.
+          ...turnToolActivities(turnToolDeps),
+          default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),

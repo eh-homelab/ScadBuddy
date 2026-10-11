@@ -25,7 +25,7 @@ from temporalio import activity
 from temporalio.claude_agent_sdk import DurableTool, activity_as_tool
 from temporalio.common import RetryPolicy
 
-from scadbuddy_durable.session.models import TOOLS_QUEUE
+from scadbuddy_durable.session.models import TOOLS_QUEUE, TurnTool
 
 Hitl = Literal["approval", "answer"]
 
@@ -163,3 +163,49 @@ def apply_overrides(
         raised = tool_tiers.get(e.name) == "outward" and e.tier != "outward"
         tool.needs_approval = e.name not in disabled and (e.hitl is not None or raised)
         tool.retry_policy = _ONCE if e.hitl == "approval" or raised else _RETRY
+
+
+# agent/src/temporal/turnTools.ts: the activity a turn tool's call runs as.
+TURN_TOOL_PREFIX = "turn:"
+
+
+def turn_tools(entries: Sequence[TurnTool]) -> list[DurableTool]:
+    """A turn's other tools as durable tools on agent-tools (#2320): each call is the
+    activity ``turn:<name>``, which the agent serves with its ``default`` activity. One
+    that may be outward parks (the workflow asks ``turn_tool_tier`` first, so a call whose
+    input is read or write goes straight through) and runs at most once."""
+    return [
+        activity_as_tool(
+            _stub(f"{TURN_TOOL_PREFIX}{e.name}"),
+            name=e.name,
+            description=e.description,
+            input_schema=e.input_schema,
+            needs_approval=e.may_park,
+            task_queue=TOOLS_QUEUE,
+            start_to_close_timeout=timedelta(minutes=10),
+            heartbeat_timeout=timedelta(seconds=60),
+            retry_policy=_ONCE if e.may_park else _RETRY,
+        )
+        for e in entries
+    ]
+
+
+def offer_turn_tools(
+    offered: dict[str, DurableTool],
+    held: dict[str, DurableTool],
+    previous: Collection[str],
+    entries: Sequence[TurnTool],
+) -> set[str]:
+    """Replaces last turn's turn tools with this turn's in both the agent's tool table
+    (``offered``, the plugin's own, which each segment declares from) and the workflow's
+    (``held``). The manifest's own tools are never touched: a turn tool's name always
+    has ``__`` in it, a manifest tool's never. Returns the names now offered."""
+    for name in previous:
+        offered.pop(name, None)
+        held.pop(name, None)
+    names: set[str] = set()
+    for tool in turn_tools([e for e in entries if "__" in e.name and e.name not in offered]):
+        offered[tool.name] = tool
+        held[tool.name] = tool
+        names.add(tool.name)
+    return names
