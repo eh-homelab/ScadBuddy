@@ -51,6 +51,8 @@ export type TurnServerDeps = {
     | {
         load: () => Promise<PackagesForRun>
         root: string | undefined
+        /** Where a package's copy without its http MCP servers is made, on this pod (as a classic turn's). */
+        localRoot: string
         /** Their http MCP servers through the loopback forwarder (plugins/packages/mcp.ts). */
         forward: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
       }
@@ -127,7 +129,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root)
+            const turnPackage = await sharePackage(pkg, root, deps.packages!.localRoot)
             const dark = unparkableBuiltins(turnPackage)
             if (dark.length) {
               problems.push(

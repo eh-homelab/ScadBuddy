@@ -46,6 +46,7 @@ of the segment's declared tools (#2088), so Claude is never offered them.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import re
@@ -178,6 +179,52 @@ def image_problem(images: list[Image], long_edge: int) -> str | None:
     if total > IMAGES_BYTES_MAX:
         return f"{IMAGE_TOO_LARGE}the images are {total} bytes together, over 6 MB"
     return None
+
+
+def _remote_entry(config: Any) -> bool:
+    # plugins/packages/mcp.ts isRemoteEntry
+    return isinstance(config, dict) and (
+        config.get("command") is None
+        and (isinstance(config.get("url"), str) or config.get("type") in ("http", "sse"))
+    )
+
+
+def declares_remote_servers(root: str) -> bool:
+    """Whether a package declares an MCP server reached by URL, in its ``.mcp.json`` or
+    its manifest's ``mcpServers`` (inline, or the files it names), as
+    plugins/packages/mcp.ts ``declaresRemoteServers`` reads them. A config that cannot
+    be read counts as declaring one."""
+    maps: list[Any] = []
+
+    def read(rel: str, required: bool) -> Any:
+        full = os.path.join(root, rel)
+        if not required and not os.path.exists(full):
+            return None
+        with open(full, encoding="utf-8") as f:
+            return json.load(f)
+
+    try:
+        maps.append(read(".mcp.json", False))
+        manifest = read(os.path.join(".claude-plugin", "plugin.json"), False)
+        declared = manifest.get("mcpServers") if isinstance(manifest, dict) else None
+        for entry in declared if isinstance(declared, list) else [declared]:
+            if isinstance(entry, str):
+                if re.match(r"https?://", entry) or re.search(r"\.(mcpb|dxt)$", entry, re.I):
+                    continue
+                maps.append(read(entry, True))
+            else:
+                maps.append(entry)
+    except (OSError, ValueError):
+        return True
+    for m in maps:
+        servers = (
+            m.get("mcpServers")
+            if isinstance(m, dict) and isinstance(m.get("mcpServers"), dict)
+            else m
+        )
+        if isinstance(servers, dict) and any(_remote_entry(c) for c in servers.values()):
+            return True
+    return False
 
 
 def error_text(err: BaseException) -> str:
@@ -338,6 +385,15 @@ class ScadBuddyRunner:
             if not matches:
                 logger.warning(
                     "segment of %s: package %s does not hash to its pin", workflow_id, package.name
+                )
+                continue
+            if declares_remote_servers(path):
+                # Claude Code would reach it itself, past the forwarder's egress check
+                # (harness/run.ts refuses the same); the agent shares a copy without them.
+                logger.warning(
+                    "segment of %s: package %s declares an http MCP server",
+                    workflow_id,
+                    package.name,
                 )
                 continue
             dirs.append(path)

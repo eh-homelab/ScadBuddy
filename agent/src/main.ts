@@ -448,6 +448,7 @@ const turnToolDeps = temporal
               packages: {
                 load: () => loadPackagesForRun(pluginPackages, packageInstaller),
                 root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
+                localRoot: path.join(paths.stateDir, 'plugins-local'),
                 forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
               },
             }

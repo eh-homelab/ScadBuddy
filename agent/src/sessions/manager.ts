@@ -1544,13 +1544,17 @@ export class SessionManager {
             ? this.deps.ownPlugin
             : undefined
         packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
+        const packageNames = new Map<string, string>()
         if (packages) {
           // Loaded without their own http MCP servers, which come through the forwarder
           // below: a query with strictMcpConfig off would start them itself (run.ts).
           const loaded = packages
           const stripped = async (dir: string) => {
             const pkg = loaded.loaded.find((p) => p.dir === dir)
-            return pkg ? withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local')) : dir
+            const loadedDir = pkg ? await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local')) : dir
+            if (pkg) packageNames.set(loadedDir, pkg.name)
+            return loadedDir
           }
           packages = {
             ...loaded,
@@ -1600,7 +1604,7 @@ export class SessionManager {
           }
           for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
             if (!loaded.has(path.resolve(dir))) {
-              await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+              await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
             }
           }
           // #1255: Claude Code drops an in-process server it cannot connect, and every

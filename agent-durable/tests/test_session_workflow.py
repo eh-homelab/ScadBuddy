@@ -901,4 +901,3 @@ async def test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_t
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert len(texts) == 1 and texts[0].startswith("Bash: ok"), texts
     await _replays(harness, handle)
-
