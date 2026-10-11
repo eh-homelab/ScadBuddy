@@ -1038,13 +1038,17 @@ export class SessionManager {
     hb: NonNullable<SessionManagerDeps['headlessBrowser']>,
     livePublicUrl: string | undefined,
   ): Promise<UiReachMap | undefined> {
-    let ui: readonly string[]
+    let origins: ReturnType<typeof browserOrigins>
     try {
-      ui = browserOrigins({ backendUrl: hb.backendUrl, publicUrl: hb.publicUrl, livePublicUrl, uiOrigins: hb.uiOrigins }).ui
+      origins = browserOrigins({ backendUrl: hb.backendUrl, publicUrl: hb.publicUrl, livePublicUrl, uiOrigins: hb.uiOrigins })
     } catch {
       return undefined
     }
-    return hb.probe?.(ui).catch(() => undefined)
+    // With no UI origin configured the backend is the only one (dev, in-process
+    // runs): there is nowhere else to send the browser, so it is not asked, and
+    // one slow /healthz cannot refuse every navigation (#2155).
+    if (origins.ui.length === 1 && origins.ui[0] === origins.backend) return undefined
+    return hb.probe?.(origins.ui).catch(() => undefined)
   }
 
   // -- writes ------------------------------------------------------------------
