@@ -81,6 +81,10 @@ REAP_PATCH = "housekeeping-reap-output-holds"
 #: (`flows/sweep.py`). Behind its own patch, like `REAP_SWEEP`.
 FLOWS_SWEEP = "housekeeping_sweep_flow_runs"
 FLOWS_PATCH = "housekeeping-sweep-flow-runs"
+#: #2169: remove the print dialog's background slices no run queued
+#: (`bambuddy.preview.sweep_preview_slices`). Behind its own patch, like `REAP_SWEEP`.
+PREVIEWS_SWEEP = "housekeeping_sweep_preview_slices"
+PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -91,10 +95,12 @@ SWEEPS = (
     BACKFILL_SWEEP,
     REAP_SWEEP,
     FLOWS_SWEEP,
+    PREVIEWS_SWEEP,
 )
-#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
-#: which would otherwise pile up for good with the sweeps off (review 3c M1).
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4])
+#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, request claims and
+#: the dialog's background slices, which would otherwise pile up for good with the
+#: sweeps off (review 3c M1).
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], PREVIEWS_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -109,6 +115,8 @@ PRUNE_TIMEOUT = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND) +
 )
 #: The claims sweep is one delete.
 CLAIMS_TIMEOUT = timedelta(minutes=2)
+#: A few Bambuddy reads and deletes per background slice past its grace.
+PREVIEWS_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -119,6 +127,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PRUNE_TIMEOUT
     if sweep == PRUNE_SWEEPS[1]:
         return CLAIMS_TIMEOUT
+    if sweep == PREVIEWS_SWEEP:
+        return PREVIEWS_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -139,6 +149,8 @@ class Housekeeping:
             if sweep == REAP_SWEEP and not workflow.patched(REAP_PATCH):
                 continue
             if sweep == FLOWS_SWEEP and not workflow.patched(FLOWS_PATCH):
+                continue
+            if sweep == PREVIEWS_SWEEP and not workflow.patched(PREVIEWS_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

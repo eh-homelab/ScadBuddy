@@ -122,6 +122,31 @@ class SpoolOption(BaseModel):
     #: printer does not say. A label only: the run checks no spool against a nozzle (#768).
     extruder: int | None = None
     side: Literal["L", "R"] | None = None
+    #: The spool's label weight in grams, for "about half full" (#2164); None unknown.
+    label_weight_g: int | None = None
+    #: Not a spool: what is in a filled tray Bambuddy has no spool for (#2164,
+    #: ``trays.tray_option``), under a negative id, with no weight tracked.
+    tray_only: bool | None = None
+
+
+class UnknownTray(BaseModel):
+    """A filled tray with no spool assigned, and the spools it may hold."""
+
+    ams_id: int
+    tray_id: int
+    #: "AMS-D slot 4".
+    label: str
+    material: str
+    colour: str | None = None
+    #: "black", for "black PLA".
+    colour_word: str | None = None
+    #: What the tray is now, so a "no" is remembered only until it changes.
+    fingerprint: str
+    #: The :func:`tray_spool_id` it is offered under.
+    spool_id: int
+    #: Spools of the same material with a close colour that are not loaded anywhere,
+    #: most filament first and empty ones last.
+    candidates: list[int] = Field(default_factory=list)
 
 
 class SlotNeed(BaseModel):
@@ -185,6 +210,9 @@ class FilamentOptions(BaseModel):
     #: The chosen printer has the Filament Track Switch (#469): any AMS reaches either
     #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
     track_switch: bool = False
+    #: The chosen printer's filled trays with no spool assigned (#2164): the dialog
+    #: asks which spool each holds. Each is also offered in ``spools`` as itself.
+    trays: list[UnknownTray] = Field(default_factory=list)
 
 
 class QueueFilaments(BaseModel):
@@ -376,6 +404,7 @@ def build_options(
                 slicer_filament_name=spool.slicer_filament_name,
                 remaining_g=remaining,
                 storage_location=spool.storage_location,
+                label_weight_g=spool.label_weight or None,
                 loaded=(
                     LoadedAt(
                         printer_id=assignment.printer_id,
@@ -672,6 +701,16 @@ async def gather_options(
     return options
 
 
+#: The spools and where each is loaded, read together (#2166 reuses one read).
+Inventory = tuple[list[Spool], list[SpoolAssignment]]
+
+
+async def read_inventory(client: BambuddyClient) -> Inventory:
+    """The spools, then their assignments, in the order every reader reads them."""
+    spools = await client.spools()
+    return spools, await client.spool_assignments()
+
+
 async def gather_plate_options(
     client: BambuddyClient,
     *,
@@ -680,6 +719,7 @@ async def gather_plate_options(
     plate_ids: Sequence[int | None],
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
+    inventory: Inventory | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -687,9 +727,9 @@ async def gather_plate_options(
     once (#480); only each plate's slots are read per plate, concurrently. The reads
     keep the single-plate order, spools, assignments, the plates, then the printer and
     its inventory-remain, so the same failure surfaces either way: a plate's error beats
-    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
-    spools = await client.spools()
-    assignments = await client.spool_assignments()
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins.
+    ``inventory`` is the spools and assignments when the caller has read them already."""
+    spools, assignments = inventory if inventory is not None else await read_inventory(client)
 
     answers = await asyncio.gather(
         *(

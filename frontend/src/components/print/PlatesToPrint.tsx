@@ -6,13 +6,16 @@ type Props = {
   onChange: (next: number | 'all') => void
   /** #313 — the plate's image, from whichever source is being printed. */
   thumbnailUrl: (index: number) => string
+  /** #2169 — the plate the dialog's preview pane shows, and a click on a plate's image. */
+  previewed?: number
+  onPreview?: (index: number) => void
 }
 
 /**
  * #83 — which plate of a multi-plate 3MF to print, or all of them. #929: a plate is
  * labelled by what it holds; its number is secondary, and the label only when unnamed.
  */
-export function PlatesToPrint({ plates, value, onChange, thumbnailUrl }: Props) {
+export function PlatesToPrint({ plates, value, onChange, thumbnailUrl, previewed, onPreview }: Props) {
   return (
     <fieldset data-testid="plate-choice">
       <legend className="text-[13px]">Plates to print</legend>
@@ -35,13 +38,34 @@ export function PlatesToPrint({ plates, value, onChange, thumbnailUrl }: Props) 
                 onChange={() => onChange(entry.index)}
                 className="accent-[var(--sb-accent)]"
               />
-              {entry.has_thumbnail && (
-                <img
-                  src={thumbnailUrl(entry.index)}
-                  alt={entry.name ?? number}
-                  className="h-12 w-12 rounded-[4px] object-contain"
-                />
-              )}
+              {entry.has_thumbnail &&
+                (onPreview ? (
+                  // Previews the plate without choosing it to print: a click inside the
+                  // label would otherwise check its radio.
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      onPreview(entry.index)
+                    }}
+                    aria-label={`Preview ${entry.name ?? number}`}
+                    aria-pressed={previewed === entry.index}
+                    data-testid={`preview-plate-${entry.index}`}
+                    className={`rounded-[4px] ${previewed === entry.index ? 'ring-2 ring-accent' : 'hover:ring-1 hover:ring-line'}`}
+                  >
+                    <img
+                      src={thumbnailUrl(entry.index)}
+                      alt={entry.name ?? number}
+                      className="h-12 w-12 rounded-[4px] object-contain"
+                    />
+                  </button>
+                ) : (
+                  <img
+                    src={thumbnailUrl(entry.index)}
+                    alt={entry.name ?? number}
+                    className="h-12 w-12 rounded-[4px] object-contain"
+                  />
+                ))}
               {entry.name ? (
                 <span className="flex flex-col leading-tight">
                   {entry.name}

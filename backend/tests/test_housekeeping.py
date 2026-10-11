@@ -23,6 +23,8 @@ from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
 from scadbuddy.workflows.housekeeping import (
     CLAIMS_TIMEOUT,
     HEARTBEAT_TIMEOUT,
+    PREVIEWS_SWEEP,
+    PREVIEWS_TIMEOUT,
     PRUNE_INTERVAL,
     PRUNE_SWEEPS,
     PRUNE_TIMEOUT,
@@ -98,7 +100,11 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    expected = {PRUNE_SWEEPS[0]: PRUNE_TIMEOUT, PRUNE_SWEEPS[1]: CLAIMS_TIMEOUT}
+    expected = {
+        PRUNE_SWEEPS[0]: PRUNE_TIMEOUT,
+        PRUNE_SWEEPS[1]: CLAIMS_TIMEOUT,
+        PREVIEWS_SWEEP: PREVIEWS_TIMEOUT,
+    }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
 
@@ -221,7 +227,11 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
     action = described.schedule.action
     assert isinstance(action, ScheduleActionStartWorkflow)
     (sweeps,) = await client.data_converter.decode(action.args)
-    assert list(sweeps) == ["housekeeping_prune_jobs", "housekeeping_sweep_claims"]
+    assert list(sweeps) == [
+        "housekeeping_prune_jobs",
+        "housekeeping_sweep_claims",
+        "housekeeping_sweep_preview_slices",
+    ]
 
 
 async def _actions(client: Client, schedule_id: str, count: int) -> int:

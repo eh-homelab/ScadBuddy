@@ -63,6 +63,8 @@ class FilamentPresetOption(BaseModel):
 
     ref: PresetRef
     name: str
+    #: The preset's material ("PLA"), so a slot is offered only presets of its own (#2166).
+    filament_type: str | None = None
 
 
 class ChoicesView(BaseModel):
@@ -103,7 +105,7 @@ def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPr
             ):
                 best[row.name] = row
         out[size] = [
-            FilamentPresetOption(ref=row.ref, name=row.name)
+            FilamentPresetOption(ref=row.ref, name=row.name, filament_type=row.filament_type)
             for row in sorted(best.values(), key=lambda row: row.name.lower())
         ]
     return out

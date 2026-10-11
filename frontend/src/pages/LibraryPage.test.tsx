@@ -205,7 +205,7 @@ describe('LibraryPage, item context (#975)', () => {
     await user.click(bulk)
     expect(bulk).toHaveAttribute('aria-selected', 'true')
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'false')
-    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld, 1 file' })).toBeInTheDocument()
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld, 2 files' })).toBeInTheDocument()
   })
 
   it('opens and closes folders with the keyboard, others starting closed (#2165)', async () => {

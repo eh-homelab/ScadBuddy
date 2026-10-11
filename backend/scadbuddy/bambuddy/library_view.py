@@ -100,6 +100,13 @@ def _glb(read: PlateRead) -> bytes:
         return out.read_bytes()
 
 
+def plate_glb(payload: bytes, plate: int, budget: ReadBudget | None = None) -> bytes:
+    """Plate ``plate`` of a 3MF as a preview GLB, its parts in their colours (#2169: an
+    output's plate in the print dialog's pane, as a library file's is). A plate the file
+    lacks is :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
+    return _glb(read_plate_parts(payload, plate, budget))
+
+
 def _analysis(read: PlateRead, plate: int) -> GeometryAnalysis:
     analysis = analyze_geometry(read.parts, extruders=[part.material_index for part in read.parts])
     return analysis.model_copy(update={"plate": plate, "plates": read.plates})

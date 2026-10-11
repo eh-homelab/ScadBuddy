@@ -153,6 +153,7 @@ def high_flow_warnings(
     *,
     rack_picked: bool = False,
     laid_out: bool = True,
+    sides: frozenset[int] | None = None,
 ) -> list[FilamentWarning]:
     """A warning for each side the slice may use whose mounted nozzle is of the chosen
     size but not of the flow sliced there (#723, #797, #484), never a refusal.
@@ -176,16 +177,19 @@ def high_flow_warnings(
     every 3MF the run lays out does, an output's or a library file's alike
     (``PrintSource.states_nozzles``, #1752). A file nothing can be stated into (sliced
     already, another slicer's) prints as it is: the slicer may use either side, and it
-    slices as Standard (:func:`_sliced_flows`)."""
+    slices as Standard (:func:`_sliced_flows`).
+
+    ``sides``: the sides ScadBuddy's nozzle plan uses (#2166), which the file offers in
+    place of :func:`_offer`'s."""
     if not nozzles:
         return []
     size = nozzles[0].size
     flows = _sliced_flows(nozzles, laid_out=laid_out)
-    offered = _offered_side(status, nozzles) if laid_out else None
+    offered = (sides or _offered_sides(status, nozzles)) if laid_out else None
     return [
         high_flow_warning(extruder, flows[extruder])
         for extruder in (RIGHT, LEFT)
-        if offered in (None, extruder)
+        if (offered is None or extruder in offered)
         and fitted_size(status, extruder) == size
         and _fitted_flow(status, extruder) not in (None, flows[extruder])
         and not (rack_picked and extruder == RACK_SIDE)
@@ -391,3 +395,23 @@ def with_sides(options: FilamentOptions, status: PrinterStatus | None) -> Filame
         option.extruder = extruder_of(loaded.ams_id, loaded.tray_id, status)
         option.side = side_of(option.extruder)
     return options
+
+
+def _offered_sides(
+    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
+) -> frozenset[int] | None:
+    """:func:`_offer` as a set of sides, for the nozzle plan (#2166): ``None`` when it
+    leaves the slicer to choose."""
+    offer = _offer(status, nozzles)
+    if offer is None:
+        return None
+    return frozenset({LEFT, RIGHT}) if offer == BOTH else frozenset({offer})
+
+
+def nozzle_stats_for(sides: frozenset[int], nozzles: Sequence[NozzleChoice]) -> list[str]:
+    """``extruder_nozzle_stats`` offering ``sides``, each side named by the flow chosen
+    for it, in the slicer's order: the nozzle plan's sides (#2166)."""
+    chosen = _flows(nozzles)
+    return [
+        f"{VOLUME_TYPE[chosen[extruder]]}#{int(extruder in sides)}" for extruder in SLICER_ORDER
+    ]

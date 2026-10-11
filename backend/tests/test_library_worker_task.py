@@ -4,10 +4,11 @@ worker that fails while it runs is reported at once and started again."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -176,6 +177,11 @@ async def _broken_async(*args: Any, **kwargs: Any) -> None:
     raise RuntimeError("the projection is gone")
 
 
+@contextlib.asynccontextmanager
+async def _a_client(settings: object) -> AsyncIterator[object]:
+    yield object()
+
+
 @pytest.mark.parametrize("staging_error", [OSError("read-only"), ValueError("a bad name")])
 @pytest.mark.parametrize("sweep", SWEEPS)
 async def test_a_failing_sweep_fails_its_activity(
@@ -192,6 +198,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "attach_backfills", _broken(RuntimeError("the outputs are gone")))
     monkeypatch.setattr(main, "reap_orphan_holds", _broken(RuntimeError("the holds are gone")))
     monkeypatch.setattr(main, "sweep_flow_runs", _broken_async)
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -206,6 +214,8 @@ async def test_a_failing_sweep_fails_its_activity(
         paths=SimpleNamespace(claims=None),
         events=None,
         components=SimpleNamespace(get=lambda key: SimpleNamespace(client=object(), store=None)),
+        settings_store=SimpleNamespace(load=lambda: None),
+        uploads=None,
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (
@@ -245,8 +255,19 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     def slow_claims(*args: object) -> None:
         time.sleep(0.1)
 
+    async def slow_previews(*args: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
     monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
-    state = SimpleNamespace(render=SimpleNamespace(prune=slow_prune), paths=SimpleNamespace())
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", slow_previews)
+    state = SimpleNamespace(
+        render=SimpleNamespace(prune=slow_prune),
+        paths=SimpleNamespace(),
+        settings_store=SimpleNamespace(load=lambda: None),
+        uploads=None,
+    )
     state.paths.claims = None
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []

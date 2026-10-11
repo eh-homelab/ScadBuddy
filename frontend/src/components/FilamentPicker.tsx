@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed } from '../api/types'
-import { inkOn, normalizeHex } from '../lib/format'
+import { normalizeHex } from '../lib/format'
 import {
   NO_FILTERS,
   facets,
@@ -12,6 +12,7 @@ import {
   warningsFor,
   type SpoolFilters,
 } from '../lib/filaments'
+import { Swatch } from './print/Swatch'
 
 /**
  * Which spool prints each plate slot (#87).
@@ -64,49 +65,14 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'rack-manual-partial': 'text-muted',
 }
 
-function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; size?: 'sm' | 'md' }) {
-  const hex = normalizeHex(colour ?? '#000000')
-  return (
-    <span
-      aria-hidden="true"
-      title={hex}
-      style={{ background: hex, color: inkOn(hex) }}
-      className={`shrink-0 rounded-[3px] ring-1 ring-black/25 ring-inset ${
-        size === 'sm' ? 'size-4' : 'size-5'
-      }`}
-    />
-  )
-}
-
 /**
  * The side a spool feeds, lettered as the printer and Bambuddy letter it (#469): a label
- * only, since nothing is checked against the nozzle mounted there (#768). Without
- * the Filament Track Switch the AMS is wired to that side: a square green badge, like
- * Bambuddy's nozzle-side badge. With the switch the spool only rests there and can be
- * fed to either nozzle, so it reads "rests on L" in Bambuddy's blue inlet colors.
+ * only, since nothing is checked against the nozzle mounted there (#768). Shown only
+ * without the Filament Track Switch, where the AMS is wired to that side: a square green
+ * badge, like Bambuddy's nozzle-side badge.
  */
-function SideBadge({
-  side,
-  resting,
-  testId,
-}: {
-  side: 'L' | 'R'
-  resting: boolean
-  testId: string
-}) {
+function SideBadge({ side, testId }: { side: 'L' | 'R'; testId: string }) {
   const word = side === 'L' ? 'left' : 'right'
-  if (resting) {
-    return (
-      <span
-        className="shrink-0 rounded px-1 py-0.5 text-[10px] font-bold"
-        style={{ background: 'var(--sb-inlet-bg)', color: 'var(--sb-inlet-ink)' }}
-        title={`Rests on the ${word} inlet; the Filament Track Switch can feed it to either nozzle.`}
-        data-testid={testId}
-      >
-        rests on {side}
-      </span>
-    )
-  }
   return (
     <span
       className="inline-flex size-4 shrink-0 items-center justify-center rounded text-[10px] font-bold"
@@ -148,6 +114,11 @@ interface Props {
   plan: SlotChoice[]
   onChange: (plan: SlotChoice[]) => void
   copies: number
+  /**
+   * #2164 — the trays offered as themselves (by their negative spool id), after a "no"
+   * to which spool is in them. Any other tray-only row is held back until then.
+   */
+  offeredTrays?: ReadonlySet<number>
 }
 
 export function FilamentPicker({
@@ -155,6 +126,7 @@ export function FilamentPicker({
   plan,
   onChange,
   copies,
+  offeredTrays,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
   // Slots whose list is open although a spool is chosen. A slot with a spool shows only
@@ -168,7 +140,12 @@ export function FilamentPicker({
       return next
     })
 
-  const spools = options.spools ?? []
+  const spools = (options.spools ?? []).filter(
+    (spool) =>
+      !spool.tray_only ||
+      offeredTrays?.has(spool.spool_id) ||
+      plan.some((choice) => choice.spool_id === spool.spool_id),
+  )
   const slots = options.slots ?? []
   const suggested = options.suggested ?? []
   const choices = facets(spools)
@@ -190,7 +167,9 @@ export function FilamentPicker({
   // Recomputed from the plan on screen, not read off the server's answer for its own
   // opening selection — that one stops being true the moment a slot is changed.
   const warnings = checkPlan(options, plan, copies)
-  const resting = options.track_switch ?? false
+  // #2166 — with the Filament Track Switch any spool reaches either nozzle, so which
+  // inlet it rests on is not shown: ScadBuddy's nozzle plan says where each prints.
+  const showSides = !(options.track_switch ?? false)
   const isOpen = (slotId: number) => chosenFor(slotId) === null || opened.has(slotId)
   // The filters narrow the open lists; with every slot showing only its spool they
   // would filter nothing.
@@ -348,10 +327,9 @@ export function FilamentPicker({
                     <span aria-hidden="true">→</span>
                     <Swatch colour={chosenSpool.colour} size="sm" />
                     prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
-                    {chosenSpool.side && (
+                    {showSides && chosenSpool.side && (
                       <SideBadge
                         side={chosenSpool.side}
-                        resting={resting}
                         testId={`slot-side-${slot.slot_id}`}
                       />
                     )}
@@ -404,10 +382,9 @@ export function FilamentPicker({
                               {where}
                             </span>
                           )}
-                          {spool.side && (
+                          {showSides && spool.side && (
                             <SideBadge
                               side={spool.side}
-                              resting={resting}
                               testId={`side-${spool.spool_id}`}
                             />
                           )}

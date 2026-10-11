@@ -297,6 +297,19 @@ def test_a_nozzle_of_the_other_flow_still_beats_another_size(
     assert slicer_nozzle_stats(status, _size("0.2")) == expected
 
 
+def test_both_sides_with_the_size_are_both_offered() -> None:
+    """#2181, queue item 268: both sides carry the chosen nozzle. Leaving the file's own
+    stats let a library file made for one extruder offer the slicer only the left, so
+    every colour went there; both sides are offered outright instead."""
+    status = _nozzles(("HS00", "0.2"), ("HS00", "0.2"))
+    assert slicer_nozzle_stats(status, _size("0.2")) == ["Standard#1", "Standard#1"]
+    high_flow = _nozzles(("HH01", "0.4"), ("HH01", "0.4"))
+    assert slicer_nozzle_stats(high_flow, _choose("0.4", "high_flow")) == [
+        "High Flow#1",
+        "High Flow#1",
+    ]
+
+
 @pytest.mark.parametrize(
     ("mounted", "nozzles", "expected"),
     [

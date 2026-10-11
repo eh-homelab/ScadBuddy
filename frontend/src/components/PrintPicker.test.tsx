@@ -960,7 +960,9 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     expect(toggle).toHaveAccessibleDescription(/nozzle, process/i)
   })
 
-  it('leaving Advanced resets both flows, the process and the slot presets', async () => {
+  // #2166 — Simple shows one flow for both sides, so leaving Advanced keeps the first
+  // side's, on screen; the process and slot presets it cannot show are reset.
+  it('leaving Advanced keeps one flow, shown in Simple, and resets the process and slot presets', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
     await loaded()
@@ -971,14 +973,15 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await user.selectOptions(screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
     await user.selectOptions(screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    expect(screen.getByTestId('flow-high_flow')).toHaveAttribute('aria-checked', 'true')
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).toMatchObject({
       choices: {
         nozzles: [
-          { size: '0.4', flow: 'standard' },
-          { size: '0.4', flow: 'standard' },
+          { size: '0.4', flow: 'high_flow' },
+          { size: '0.4', flow: 'high_flow' },
         ],
         tier: 'standard',
         process_name: null,
@@ -2179,6 +2182,38 @@ describe('PrintPicker · Superseded reads', () => {
 })
 
 describe('PrintPicker · Plates of a 3MF', () => {
+  // #2169 — a plate clicked loads into the docked preview pane; one chosen to print too.
+  it('shows the plate clicked, or the one chosen to print, in the preview pane', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Lid' },
+          { index: 2, has_thumbnail: true, name: 'Base' },
+        ]),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const plates = await screen.findByTestId('plate-choice')
+    // The pane is remounted for each plate, so it is found afresh each time.
+    const label = () => within(screen.getByTestId('preview-pane')).getByTestId('preview-label')
+    expect(label()).toHaveTextContent('Showing Lid')
+
+    await user.click(within(plates).getByTestId('preview-plate-2'))
+    expect(label()).toHaveTextContent('Showing Base')
+    expect(within(screen.getByTestId('preview-pane')).getByRole('img', { name: 'The plate' })).toHaveAttribute(
+      'src',
+      expect.stringContaining('/plates/2/'),
+    )
+    // Looking at a plate does not choose it to print.
+    expect(within(plates).getByRole('radio', { name: /Lid/ })).toBeChecked()
+
+    await user.click(within(plates).getByRole('radio', { name: 'All plates' }))
+    expect(label()).toHaveTextContent('Showing Lid')
+    await user.click(within(plates).getByRole('radio', { name: /Base/ }))
+    expect(label()).toHaveTextContent('Showing Base')
+  })
+
   it('does not ask which plate of a one-plate output to print', async () => {
     renderPicker()
     await loaded()
@@ -2627,7 +2662,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await loaded()
     await showAdvanced()
     fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'newest_first' } })
-    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(screen.getByTestId('rack-position-2'))
     await waitFor(() =>
       expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2, rack_algorithm: 'newest_first' }),
     )
@@ -2644,10 +2679,10 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
-    expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('2')
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    expect(screen.getByTestId('rack-position-2')).toBeChecked()
     fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
-    await waitFor(() => expect(screen.getByLabelText('Rack nozzle position')).toHaveValue(''))
+    await waitFor(() => expect(screen.getByTestId('rack-position-auto')).toBeChecked())
   })
 
   it('keeps the rack step on screen when the hand pick is refused, and holds Print', async () => {
@@ -2664,12 +2699,12 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     expect(await screen.findByText(/Rack position 2 holds/)).toBeInTheDocument()
     expect(screen.getByLabelText('Rack nozzle position')).toBeInTheDocument()
     expect(screen.getByTestId('run-print')).toBeDisabled()
 
-    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '' } })
+    fireEvent.click(screen.getByTestId('rack-position-auto'))
     await waitFor(() => expect(screen.queryByText(/Rack position 2 holds/)).toBeNull())
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
@@ -2688,7 +2723,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
@@ -2705,13 +2740,13 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
     options = rack.options.filter((option) => option.position !== 2)
     fireEvent.change(screen.getByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
-    expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('')
+    expect(screen.getByTestId('rack-position-auto')).toBeChecked()
   })
 
   it('says when the algorithm could not be remembered, and still prints with it', async () => {
@@ -3111,7 +3146,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
     fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))

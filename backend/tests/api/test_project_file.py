@@ -382,9 +382,10 @@ def test_generate_lays_the_file_out_for_the_projects_last_print(
     in_spool_nines_colour(paths, model, fresh)
     assert file_into_project(client, fresh).json()["library_file_id"] == 42
     detail = client.get(f"/api/v1/outputs/{fresh}").json()
-    # The recorded printer has its 0.2 on the right only, which the file states (#834).
+    # The recorded printer has its 0.2 on the right only, which the file states (#834),
+    # and the last print's nozzle plan put the filament there (#2166).
     assert [copy["target_key"] for copy in detail["library_files"]] == [
-        "Bambu Lab H2C@0.2^Standard#0,Standard#1"
+        "Bambu Lab H2C@0.2^Standard#0,Standard#1>2:0"
     ]
 
     again = run_print(client, fresh, json=run_request(project_id=PROJECT))

@@ -22,8 +22,10 @@ from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
 from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
+from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.print_run import chosen_project
+from scadbuddy.bambuddy.print_run import PrintRunRequest, chosen_project
+from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
     AttachResult,
@@ -273,6 +275,55 @@ def bambuddy_kinds_over(
                 await delete_inbox_copies(client, uploads, meta, settings)
         return {}
 
+    async def assign_tray_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """#2164: the person confirmed which spool is in a filled tray Bambuddy had no
+        spool for. Bambuddy upserts by tray, so a rerun records the same answer."""
+        settings = await asyncio.to_thread(settings_store.load)
+        async with client_for(settings) as client:
+            assigned = await client.assign_spool(
+                spool_id=request["spool_id"],
+                printer_id=request["printer_id"],
+                ams_id=request["ams_id"],
+                tray_id=request["tray_id"],
+            )
+        return {
+            "spool_id": assigned.spool_id,
+            "printer_id": assigned.printer_id,
+            "ams_id": assigned.ams_id,
+            "tray_id": assigned.tray_id,
+        }
+
+    async def preview_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """#2169: the dialog's background slice, through the run's own path. The upload
+        is reused and a finished slice of the same is answered again, so a rerun slices
+        nothing twice."""
+        settings = await asyncio.to_thread(settings_store.load)
+        body = PrintRunRequest.model_validate(request["request"])
+        async with client_for(settings) as client:
+            source: PrintSource
+            subject: str
+            if request.get("library_file_id") is not None:
+                subject = PrintSubject.library(request["library_file_id"]).run_subject
+                source = await LibrarySource.load(
+                    client, request["library_file_id"], uploads=uploads, settings=settings
+                )
+            else:
+                meta = await require(outputs, request["output_id"])
+                subject = PrintSubject.output(meta.id).run_subject
+                naming = await outputs.naming(meta)
+                source = OutputSource(
+                    store=outputs,
+                    meta=meta,
+                    uploads=uploads,
+                    settings=settings,
+                    # The preview's copy goes to the inbox, never a project's folder.
+                    stem=None,
+                    print_settings=naming.print_settings,
+                )
+            return _json(
+                await start_preview(client, source, settings, uploads, body, subject=subject)
+            )
+
     async def sidebar_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         settings = await asyncio.to_thread(settings_store.load)
         async with client_for(settings) as client:
@@ -286,6 +337,8 @@ def bambuddy_kinds_over(
         OperationKind("reprint", reprint_check, reprint_run),
         OperationKind("timelapse_pull", timelapse_check, timelapse_run),
         OperationKind("register_sidebar", no_check, sidebar_run, run_attempts=3),
+        OperationKind("assign_tray_spool", no_check, assign_tray_run),
+        OperationKind("preview_slice", no_check, preview_run),
         # Only ever a prelude (`output_delete`); a copy already gone counts as deleted,
         # so a retry deletes nothing twice.
         OperationKind(

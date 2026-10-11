@@ -35,6 +35,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
+    FilamentMap,
     layout_of,
     replate_3mf,
     state_nozzles,
@@ -163,6 +164,9 @@ class Target:
     #: Each extruder's flow, in the slicer's order (#484). ``None`` — the send bar,
     #: which chooses none — states none, and the slicer slices Standard.
     nozzle_volume_type: tuple[str, ...] | None = None
+    #: ScadBuddy's filament→extruder map (#2166), written in Manual mode. ``None`` leaves
+    #: the file's own.
+    filament_map: FilamentMap | None = None
 
     @property
     def key(self) -> str:
@@ -185,6 +189,10 @@ class Target:
             # All Standard is what the slicer assumes without the key, so it keeps the key
             # it had, and a file recorded before #484 is still reused.
             key = f"{key}%{','.join(self.nozzle_volume_type)}"
+        if self.filament_map is not None:
+            # A file mapped to other sides must not be reused for this map.
+            extruders = ",".join(self.filament_map.extruders)
+            key = f"{key}>{extruders}:{','.join(self.filament_map.volumes)}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -203,6 +211,7 @@ class Target:
             self.nozzle_diameter,
             nozzle_stats=self.nozzle_stats,
             nozzle_volume_type=self.nozzle_volume_type,
+            filament_map=self.filament_map,
         ).key
 
 
@@ -215,6 +224,7 @@ async def target_for(
     colours: Sequence[str] | None = None,
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
+    filament_map: FilamentMap | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -233,10 +243,10 @@ async def target_for(
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
-        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows)
+        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows, filament_map)
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
-    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows)
+    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -271,6 +281,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
                 nozzle_stats=target.nozzle_stats,
                 nozzle_volume_type=target.nozzle_volume_type,
                 filament_colour=colours,
+                filament_map=target.filament_map,
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
@@ -284,6 +295,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             nozzle_diameter=target.nozzle_diameter,
             nozzle_stats=target.nozzle_stats,
             nozzle_volume_type=target.nozzle_volume_type,
+            filament_map=target.filament_map,
         )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error

@@ -9,6 +9,8 @@ import type {
   Output,
   OutputPlate,
   PrintCheck,
+  PreviewStarted,
+  SlicePreview,
   PrintProgress,
   PrintRunRequest,
   PrintRunResult,
@@ -35,8 +37,11 @@ export interface SourceApi {
   getFilaments: (query: FilamentQuery) => Promise<FilamentOptions>
   getPlates: () => Promise<OutputPlate[]>
   plateThumbnailUrl: (index: number) => string
-  /** #1723 — the mesh the 3D preview shows: an output's whole, a library file's plate. */
-  previewUrl: (plate: number) => string
+  /**
+   * #1723 — the mesh the 3D preview shows: a library file's plate; an output's whole, or
+   * with `onePlate` (#2169) just that plate of its 3MF.
+   */
+  previewUrl: (plate: number, onePlate?: boolean) => string
   /**
    * `signal` stops waiting on the run (the dialog went away); the run itself goes on.
    * `within` keeps the POST, retries included, in a traced action.
@@ -44,6 +49,10 @@ export interface SourceApi {
   run: (body: PrintRunRequest, signal?: AbortSignal, within?: Within) => Promise<PrintRunResult>
   /** #755, #760 — what the run would refuse for `body`, with nothing uploaded or queued. */
   check: (body: PrintRunRequest) => Promise<PrintCheck>
+  /** #2169 — slice `body` in the background through the run's own path; nothing queued. */
+  preview: (body: PrintRunRequest) => Promise<PreviewStarted>
+  /** #2169 — how one of this source's background slices stands. */
+  readPreview: (jobId: number) => Promise<SlicePreview>
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
 }
@@ -115,9 +124,11 @@ export function sourceApi(source: PrintSource): SourceApi {
       getFilaments: (query) => api.getFilaments(id, query),
       getPlates: () => api.getOutputPlates(id),
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
-      previewUrl: () => api.outputPreviewGlbUrl(id),
+      previewUrl: (plate, onePlate) => (onePlate ? api.outputPreviewGlbUrl(id, plate) : api.outputPreviewGlbUrl(id)),
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
       check: (body) => api.checkPrint(id, body),
+      preview: (body) => api.previewSlice(id, body),
+      readPreview: (jobId) => api.getPreviewSlice(id, jobId),
       remember: (choices) => api.putModelChoices(slug, choices),
     }
   }
@@ -130,6 +141,8 @@ export function sourceApi(source: PrintSource): SourceApi {
     previewUrl: (plate) => api.libraryPreviewGlbUrl(id, plate),
     run: (body, signal, within) => api.runLibraryPrint(id, body, signal, within),
     check: (body) => api.checkLibraryPrint(id, body),
+    preview: (body) => api.previewLibrarySlice(id, body),
+    readPreview: (jobId) => api.getLibraryPreviewSlice(id, jobId),
     remember: (choices) => api.putLibraryChoices(id, choices),
   }
 }
