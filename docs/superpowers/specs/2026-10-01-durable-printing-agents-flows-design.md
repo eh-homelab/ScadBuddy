@@ -143,7 +143,9 @@ Non-goals
       - In ScadBuddy this reaches only `Skill`. The plugin enables built-in tools only
         when `builtin_tools` is passed, and a durable session passes exactly
         `["Skill"]` (§6.3b). Running `Skill` again reads the same instructions again,
-        which is harmless.
+        which is harmless. Since #2320 a durable session also gets `Agent`, and a
+        package's named built-ins as a classic turn does. A package's built-ins are
+        outward, so they park before they run.
       - Every tool with an effect is a durable tool (§6.3).
       - Phase 5 asserts in a test that a durable session's engine is started with no
         built-in tool but `Skill`.
@@ -734,26 +736,35 @@ A classic query loads ScadBuddy's own plugin (`agent/src/harness/ownPlugin.ts`: 
 `ai_plugins` and `ai_plugin_packages` are approved, vetted by `harness/plugins.ts`, which
 refuses anything that starts a process because it would inherit the credential env.
 
-A durable session in phase 5 gets:
+**A durable session gets what a classic turn gets** (#2320). The rule: whatever is
+configured for the assistant works in every mode and surface, or the user is told where
+it was configured. Phase 5 shipped durable sessions with only ScadBuddy's own tools and
+skills. That broke this rule silently once durable became the default (2026-10-10): new
+chats lost Playwright, remote plugins, plugin packages, `http_request`, Hindsight,
+subagents, the model setting, credential fallback and MCP sender tiers. The parity plan
+`docs/superpowers/plans/2026-10-11-durable-capability-parity.md` replaced that list:
 
-- **No filesystem settings.** The runner's `extra_options` carries
-  `setting_sources=[]`, as `options.ts` does. Nothing in `/srv/agent` or the image is
-  read as Claude Code configuration.
-- **ScadBuddy's own skills only.** The image copies `plugins/scadbuddy/skills` into the
-  `agent-durable` stage, as the `agent-build` stage does for the classic harness. They
-  are loaded through the runner, with `builtin_tools=["Skill"]`.
-  - Skills are instructions: no hooks, no MCP servers, no LSP, no processes.
-  - The plugin's `.mcp.json` is for installs outside ScadBuddy and is not copied, as
-    in the classic harness.
-- **No subagents.** The plugin cannot pause a durable tool call made from a subagent and
-  fails closed (§3.2). So `Agent` is not enabled, and `plugins/scadbuddy/agents` is not
-  loaded. A durable session that needs a subagent's role asks for a new session with
-  `agent(...)` in a flow (§7).
-- **No `ai_plugins` and no `ai_plugin_packages`.** Giving them to durable sessions needs
-  a Python equivalent of `harness/plugins.ts` and `plugins/packages/vet.ts`, with the
-  same process-spawning refusal and the forwarder for remote MCP. That is its own later
-  issue. Until then the durable mode's description in the mode picker says that
-  plugins are not available in it.
+- **No filesystem settings**, as before: `setting_sources=[]`.
+- **The model setting, credential fallback and the own-plugin switch** are read by the
+  runner per segment, as `runHarness` reads them (`session/runner.py`,
+  `session/fallback.py`).
+- **The turn's tiers** for a sender with fewer than the owner's (an MCP token) are stored
+  with the turn (`ai_sessions.turn_tiers`) and applied by the tool activities only while
+  that sender owns the session.
+- **Every other tool a classic turn hands Claude Code is a turn tool** (`agent/src/temporal/turnTools.ts`):
+  remote plugins through the forwarder, `http_request`, the headless browser with its
+  grant tool, and package MCP servers. The TS agent builds them the way a classic turn
+  does, lists them per turn (`turn_tools`), tiers each call from its input
+  (`turn_tool_tier`) before it may park, and runs each call as the `default` activity
+  `turn:<server>__<tool>`. That activity checks tier, principal, the deny list and the
+  approval bound to the input, so `harness/plugins.ts` and `plugins/packages/vet.ts`
+  stay the one vetting, in TypeScript. A server whose state lives on a pod (the browser,
+  `http_request`'s saved bodies) is pinned to that replica's `agent-tools.<hostname>` queue.
+- **Plugin packages' skills and agents, subagents, Hindsight recall and retain, and
+  tool-result images**: see the plan's phases 4–7.
+
+The only real difference left between the modes is forking: a durable session cannot be
+forked.
 
 ### 6.4 Human-in-the-loop
 
@@ -1221,7 +1232,7 @@ happens, and there is no separate request system.
   for a responder who is not allowed. A handoff to another principal mid-wait cancels
   the entry (`cancel_input`). A shared vector covers it.
 - `AskUserQuestion` is Claude Code's built-in in a classic session (PR #998). A durable
-  session has no built-in tools but `Skill` (§6.3b), so there it is a ScadBuddy tool,
+  session's built-ins are only those §6.3b lists, so there it is a ScadBuddy tool,
   `ask_user`, with the same input and the same answer.
 
 #### The two waits that are not tool calls
