@@ -31,6 +31,8 @@ dependencies = [
     # SHAs, and must pass tests/flows/test_harness_facts.py and the replay fixtures.
     "temporal-agent-harness[code-mode] @ git+https://github.com/temporal-community/temporal-agent-harness@04a49d1b037de46da2cba31676d2aa2f4c59118f",
     "jsonschema>=4.23",
+    # Imported directly for the error an unresolvable `$ref` raises (flow_tools `_answer`).
+    "referencing>=0.28",
 ]
 
 [build-system]
