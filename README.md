@@ -328,8 +328,9 @@ of the two is set. The agent reads the same variable for its own origin check
 ScadBuddy runs on the homelab cluster from
 [eh-homelab/clusters](https://github.com/eh-homelab/clusters)
 (`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD, the render
-worker's `applications/scadbuddy/scadbuddy-render.yaml`, and the print worker's
-`applications/scadbuddy/scadbuddy-print.yaml`). Those manifests pin the
+worker's `applications/scadbuddy/scadbuddy-render.yaml`, the print worker's
+`applications/scadbuddy/scadbuddy-print.yaml`, and the flow runs' worker's
+`applications/scadbuddy/scadbuddy-projects.yaml`). Those manifests pin the
 image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
@@ -380,8 +381,8 @@ Both call `deploy.reusable.yml`, which:
    another repo and whose PRs would not run clusters' own CI;
 2. rewrites the image line and the three `scadbuddy.eh-homelab.io/*`
    annotations (`version`, `revision`, `source`) in `scadbuddy.yaml`, and in
-   `scadbuddy-render.yaml` and `scadbuddy-print.yaml` (#547, #1060). All three
-   exist in clusters; the workflow still tolerates a missing worker manifest, noting
+   `scadbuddy-render.yaml`, `scadbuddy-print.yaml` and `scadbuddy-projects.yaml`
+   (#547, #1060, #1057). The workflow tolerates a missing worker manifest, noting
    its absence and pinning the rest, from before clusters added them. Each
    file must have exactly one such image line and one of each annotation, before
    and after the rewrite, or the deploy stops. In the same PR it moves the
@@ -577,6 +578,29 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   "Versioning" above); a release that adds a workflow or activity type to the queue says
   so here, and where the API still serves the queue itself (unversioned) needs the same
   `Recreate` rollout.
+
+### Flow runs on the `projects` queue (#1057)
+
+Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
+(`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), served by
+`python -m scadbuddy.worker --queue projects`, the Deployment `scadbuddy-projects` in
+`applications/scadbuddy/scadbuddy-projects.yaml`, same image.
+
+- **What it needs:** `SCADBUDDY_DATABASE_URL`, the KEK (`SCADBUDDY_SECRET_KEY_FILE`: a
+  flow's payloads are sealed per run, and the worker refuses to start without it),
+  `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and `SCADBUDDY_API_INTERNAL_URL`: a flow's
+  `render`, `queue_print` and `arrange` call the API's own routes there. No data volume
+  and no Bambuddy key: nothing outward runs in it. Health and metrics on 9090.
+- **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
+  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
+- **Memory:** `pydantic-monty` keeps a process-wide pool; about 180 MiB steady, so a
+  256 Mi request and a 1 Gi limit.
+- **Unversioned** (a flow may run for weeks): every change to `ProjectWorkflow`, its host
+  functions or the harness pin must replay `backend/tests/fixtures/project_workflow_histories/`,
+  or go behind `workflow.patched`. It stops without a drain; a run in flight resumes on
+  the next worker from its history.
+- **Without the Deployment**, `SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS=true` serves
+  the queue from the API; with neither, flow runs wait on the queue.
 
 ### Blob store and render workers (#426)
 
@@ -1060,7 +1084,8 @@ deploy PR link into the release notes. There is no human step after
 - **What is pinned:** the annotations on the Deployments in
   `applications/scadbuddy/scadbuddy.yaml` and
   `applications/scadbuddy/scadbuddy-render.yaml` and
-  `applications/scadbuddy/scadbuddy-print.yaml`; one deploy pins all three to the
+  `applications/scadbuddy/scadbuddy-print.yaml` and
+  `applications/scadbuddy/scadbuddy-projects.yaml`; one deploy pins them all to the
   same digest.
 - **Which dashboard is live:** the `?ref=` on the `deploy/grafana` line of
   clusters' `clusters/prod/scadbuddy/kustomization.yaml`, which should equal the
