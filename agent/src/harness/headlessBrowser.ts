@@ -202,6 +202,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Only `name.ext`-like names: no directory part, no leading dot, no `..`. */
 const PLAIN_FILE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/
 
+/** The tools whose `url` the guard classifies: their tier depends on the origin it opens. */
+const ORIGIN_TOOLS: ReadonlySet<string> = new Set(['browser_navigate', 'browser_tabs'])
+
+/** Whether `browserInputGuard` can make a call of this tool outward, by its input. */
+export function browserTierDependsOnInput(toolName: string): boolean {
+  return toolName.startsWith(TOOL_PREFIX) && ORIGIN_TOOLS.has(toolName.slice(TOOL_PREFIX.length))
+}
+
 /**
  * What the permission seam should do with a headless-browser tool call, or
  * undefined when it has nothing to add. Checked in the PreToolUse hook and
@@ -222,7 +230,7 @@ export function browserInputGuard(
   if (filename !== undefined && (typeof filename !== 'string' || !PLAIN_FILE_NAME.test(filename) || filename.includes('..'))) {
     return { deny: `${bare}: filename must be a plain file name such as "preview.png", with no directory part.` }
   }
-  const url = bare === 'browser_navigate' || bare === 'browser_tabs' ? args.url : undefined
+  const url = ORIGIN_TOOLS.has(bare) ? args.url : undefined
   if (url === undefined) return undefined
   const target = classifyNavigation(url, origins, approved)
   switch (target.kind) {

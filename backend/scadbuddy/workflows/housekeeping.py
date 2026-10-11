@@ -85,6 +85,10 @@ FLOWS_PATCH = "housekeeping-sweep-flow-runs"
 #: (`bambuddy.preview.sweep_preview_slices`). Behind its own patch, like `REAP_SWEEP`.
 PREVIEWS_SWEEP = "housekeeping_sweep_preview_slices"
 PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
+#: #2289: pack the models repository (`ModelHistory.maintain`) once loose objects pile
+#: up, which git's own `gc --auto` lets reach thousands. Behind its own patch.
+GIT_SWEEP = "housekeeping_maintain_models_git"
+GIT_PATCH = "housekeeping-maintain-models-git"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -96,6 +100,7 @@ SWEEPS = (
     REAP_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
+    GIT_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, request claims and
 #: the dialog's background slices, which would otherwise pile up for good with the
@@ -151,6 +156,8 @@ class Housekeeping:
             if sweep == FLOWS_SWEEP and not workflow.patched(FLOWS_PATCH):
                 continue
             if sweep == PREVIEWS_SWEEP and not workflow.patched(PREVIEWS_PATCH):
+                continue
+            if sweep == GIT_SWEEP and not workflow.patched(GIT_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

@@ -205,6 +205,8 @@ export interface PackageFileContent {
   binary: boolean
   media_type: string
   truncated: boolean
+  /** Too large to send whole (#2151): only the preview, so no "Show all". */
+  too_large: boolean
   content: string | null
 }
 

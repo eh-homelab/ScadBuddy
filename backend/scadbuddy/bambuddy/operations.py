@@ -117,7 +117,11 @@ def bambuddy_kinds_over(
         request: dict[str, Any], checked: dict[str, Any]
     ) -> dict[str, Any]:
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
-            return _json(await ensure_project(client, ProjectRequest.model_validate(request)))
+            return _json(
+                await ensure_project(
+                    client, ProjectRequest.model_validate(request), folderless=uploads
+                )
+            )
 
     async def attach_check(request: dict[str, Any]) -> dict[str, Any]:
         # An output's request names it; a library file's (#1751) names the file instead.

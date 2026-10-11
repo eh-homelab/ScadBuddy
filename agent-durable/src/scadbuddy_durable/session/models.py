@@ -138,6 +138,20 @@ class TurnTools:
 
 
 @dataclass
+class MemoryTurn:
+    """memory_recall's and memory_retain's argument (agent temporal/memoryActivities.ts)."""
+
+    turn_id: str
+
+
+@dataclass
+class MemoryRecalled:
+    """The ``<hindsight_memories>`` block a classic turn's recall hook adds; None: none."""
+
+    context: str | None = None
+
+
+@dataclass
 class GateSettings:
     """The timers of the session's entries (ai_settings), read when a turn starts, and
     the tools' Settings → Plugins overrides (#2088), sanitised against the manifest

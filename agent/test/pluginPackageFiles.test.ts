@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { builtInFiles, readBuiltInFile } from '../src/plugins/packages/builtins.js'
-import { fileContent, PREVIEW_CHARS } from '../src/plugins/packages/files.js'
+import { FULL_MAX_BYTES, fileContent, PREVIEW_CHARS } from '../src/plugins/packages/files.js'
 import { PackageInstaller } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
@@ -23,6 +23,7 @@ describe('a file for review', () => {
       binary: false,
       media_type: 'text/markdown',
       truncated: false,
+      too_large: false,
       content: '# hi\n',
     })
 
@@ -33,6 +34,17 @@ describe('a file for review', () => {
     expect(fileContent('notes.txt', big, true)).toMatchObject({ truncated: false, content: 'x'.repeat(PREVIEW_CHARS + 10) })
   })
 
+  it('is only ever the preview past FULL_MAX_BYTES, even asked for all (#2151)', () => {
+    const atCap = Buffer.from('x'.repeat(FULL_MAX_BYTES))
+    expect(fileContent('notes.txt', atCap, true)).toMatchObject({ truncated: false, too_large: false, size: FULL_MAX_BYTES })
+    expect(fileContent('notes.txt', atCap, true).content).toHaveLength(FULL_MAX_BYTES)
+
+    const over = Buffer.from('x'.repeat(FULL_MAX_BYTES + 1))
+    const capped = fileContent('notes.txt', over, true)
+    expect(capped).toMatchObject({ truncated: true, too_large: true, size: FULL_MAX_BYTES + 1 })
+    expect(capped.content).toHaveLength(PREVIEW_CHARS)
+  })
+
   it('is a placeholder with its size and type when the bytes are not UTF-8 text', () => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff])
     expect(fileContent('icon.png', png, true)).toEqual({
@@ -41,6 +53,7 @@ describe('a file for review', () => {
       binary: true,
       media_type: 'image/png',
       truncated: false,
+      too_large: false,
       content: null,
     })
     // A NUL byte is binary even when it decodes.

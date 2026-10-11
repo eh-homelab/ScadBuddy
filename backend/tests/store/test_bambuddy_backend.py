@@ -19,6 +19,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
@@ -45,6 +46,16 @@ SCOPE = BlobScope(slug="dollhouse-kit", title="Dollhouse Kit")
 #: How `store_folders` keys the configured Bambuddy (#1437 item 5): rows are recorded
 #: under the normalised URL, never the raw one.
 HERE = instance_key(BASE_URL)
+
+
+@pytest.fixture(autouse=True)
+def no_commit_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
+
+
+FOLDER_GONE = httpx.Response(404, json={"detail": "Folder not found"})
+#: `GET /library/folders/{id}`, the read-back of a folder an upload was refused into.
+ONE_FOLDER = rf"{API}/library/folders/\d+$"
 
 
 def target(key: str = "narrow") -> Callable[[], Awaitable[BambuddyTarget]]:
@@ -474,6 +485,8 @@ async def test_a_missing_download_is_blob_missing(pool: Pool) -> None:
 @respx.mock
 async def test_a_work_folder_deleted_in_bambuddy_is_made_again(pool: Pool) -> None:
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    # Really gone: the read-back never finds it, so it is made again.
+    respx.get(url__regex=ONE_FOLDER).mock(return_value=FOLDER_GONE)
     created = respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
     upload = respx.post(f"{API}/library/files").mock(
         side_effect=[
@@ -486,6 +499,62 @@ async def test_a_work_folder_deleted_in_bambuddy_is_made_again(pool: Pool) -> No
     await backend.upload("piece", b"a", name="a.zip", scope=SCOPE)
     assert await backend.upload("piece", b"b", name="b.zip", scope=SCOPE) == "2"
     assert created.call_count == 4 and upload.call_count == 3
+    await backend.aclose()
+
+
+@respx.mock
+async def test_an_upload_into_a_work_folder_not_yet_committed_waits_for_it(pool: Pool) -> None:
+    """#2263: Bambuddy answers a folder's create before committing it, so the first
+    upload into it is refused "Folder not found". That folder is waited for, not
+    forgotten and made a second time."""
+    respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    read = respx.get(url__regex=ONE_FOLDER).mock(
+        side_effect=[
+            FOLDER_GONE,
+            httpx.Response(200, json=folder_row(id=11, name="Work", parent_id=10)),
+        ]
+    )
+    created = respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
+    upload = respx.post(f"{API}/library/files").mock(
+        side_effect=[httpx.Response(404, json={"detail": "Folder not found"}), uploaded(7)]
+    )
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.upload("piece", b"a", name="a.zip", scope=SCOPE) == "7"
+    assert created.call_count == 2  # one template folder and one Work, no duplicate
+    assert [c.request.url.params["folder_id"] for c in upload.calls] == ["11", "11"]
+    assert read.call_count == 2
+    await backend.aclose()
+
+
+@respx.mock
+async def test_work_made_under_a_template_folder_not_yet_committed_waits_for_it(
+    pool: Pool,
+) -> None:
+    """#2263: `Work/` is created at once under the template folder this find just made,
+    which Bambuddy may not have committed: "Parent folder not found" waits for the
+    parent rather than failing the upload into a forget that makes a second pair."""
+    respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    respx.get(f"{API}/library/folders/10").mock(
+        side_effect=[
+            FOLDER_GONE,
+            httpx.Response(200, json=folder_row(id=10, name="Dollhouse Kit", parent_id=INBOX)),
+        ]
+    )
+    parent_gone = httpx.Response(404, json={"detail": "Parent folder not found"})
+    attempts: list[dict[str, Any]] = []
+
+    async def create(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        attempts.append(body)
+        if body["name"] == "Work" and len(attempts) == 2:
+            return parent_gone
+        return await create_folder(request)
+
+    respx.post(f"{API}/library/folders/").mock(side_effect=create)
+    respx.post(f"{API}/library/files").mock(return_value=uploaded(8))
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.upload("piece", b"a", name="a.zip", scope=SCOPE) == "8"
+    assert [a["name"] for a in attempts] == ["Dollhouse Kit", "Work", "Work"]
     await backend.aclose()
 
 
@@ -621,6 +690,7 @@ async def test_a_work_folder_that_keeps_vanishing_is_made_again_once_not_looped(
     pool: Pool,
 ) -> None:
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    respx.get(url__regex=ONE_FOLDER).mock(return_value=FOLDER_GONE)
     created = respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
     gone = httpx.Response(404, json={"detail": "Folder not found"})
     upload = respx.post(f"{API}/library/files").mock(side_effect=[uploaded(1), gone, gone])
