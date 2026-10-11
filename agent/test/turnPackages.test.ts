@@ -5,7 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { PluginForwarder } from '../src/plugins/forwarder.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/install.js'
-import { forwardPackageServers, type PackageServers } from '../src/plugins/packages/mcp.js'
+import { declaresRemoteServers, forwardPackageServers, type PackageServers, withoutRemoteServers } from '../src/plugins/packages/mcp.js'
+import { buildHarnessOptions } from '../src/harness/run.js'
+import { PluginRefusedError } from '../src/harness/plugins.js'
 import { localPackageServers, sharePackage, sharedName } from '../src/temporal/turnPackages.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { connectHttp } from '../src/temporal/turnTools.js'
@@ -148,5 +150,61 @@ describe('plugin packages in a durable turn', () => {
     const unshared = await turnServers({ packages: { load, root: undefined, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
     expect(unshared.packages).toEqual([])
     expect(unshared.problems.join('\n')).toContain('SCADBUDDY_PAYLOAD_DIR is not set')
+  })
+
+  it("refuses a package header or URL a remote plugin's registration would refuse", async () => {
+    const bad: [string, Record<string, unknown>][] = [
+      ['crlf value', { type: 'http', url: 'https://notes.example/mcp', headers: { Authorization: 'Bearer a\r\nX-Evil: 1' } }],
+      ['host', { type: 'http', url: 'https://notes.example/mcp', headers: { Host: 'other.example' } }],
+      ['cookie', { type: 'http', url: 'https://notes.example/mcp', headers: { Cookie: 'a=b' } }],
+      ['forwarded', { type: 'http', url: 'https://notes.example/mcp', headers: { 'X-Forwarded-For': '10.0.0.1' } }],
+      ['proxy', { type: 'http', url: 'https://notes.example/mcp', headers: { 'Proxy-Authorization': 'x' } }],
+      ['bad name', { type: 'http', url: 'https://notes.example/mcp', headers: { 'Bad Name': 'x' } }],
+      ['two headers', { type: 'http', url: 'https://notes.example/mcp', headers: { A: '1', B: '2' } }],
+      ['credentials in url', { type: 'http', url: 'https://u:p@notes.example/mcp' }],
+      ['query', { type: 'http', url: 'https://notes.example/mcp?token=x' }],
+    ]
+    for (const [what, config] of bad) {
+      const servers = await forwardPackageServers([await fakePackage({ mcpServers: { api: config } })], forwarder, async () => ['203.0.113.7'])
+      expect(servers.plugins, what).toEqual([])
+      expect(servers.problems, what).toHaveLength(1)
+    }
+  })
+
+  it("strips a package's own http servers from the copy Claude Code loads, keeping its local ones", async () => {
+    const pkg = await fakePackage({
+      mcpServers: { api: { type: 'http', url: 'http://169.254.169.254/' }, local: { command: 'node', args: ['s.mjs'] } },
+    })
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-strip-'))
+    const copy = await withoutRemoteServers(pkg.dir, pkg.contentHash, root)
+    expect(copy).not.toBe(pkg.dir)
+    expect(declaresRemoteServers(copy)).toBe(false)
+    expect(JSON.parse(await readFile(path.join(copy, '.mcp.json'), 'utf8'))).toEqual({ mcpServers: { local: { command: 'node', args: ['s.mjs'] } } })
+    // The original, the verified cache, is untouched.
+    expect(declaresRemoteServers(pkg.dir)).toBe(true)
+    // One with none is loaded as it is.
+    const plain = await fakePackage(undefined)
+    expect(await withoutRemoteServers(plain.dir, plain.contentHash, root)).toBe(plain.dir)
+  })
+
+  it('never lets a classic query start a plugin http server itself, and hands Claude Code forwarder URLs only', async () => {
+    const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url: 'http://169.254.169.254/' } } })
+    const paths = { stateDir: await mkdtemp(path.join(os.tmpdir(), 'turn-run-')) }
+    const base = { paths, credential: { kind: 'anthropic_api_key' as const, secret: 'sk-ant-test-0000' }, prompt: 'hi' }
+    // strictMcpConfig is off with an allowed package: the original would be started by Claude Code.
+    expect(() => buildHarnessOptions({ ...base, allowedPluginPaths: [pkg.dir] })).toThrow(PluginRefusedError)
+    const copy = await withoutRemoteServers(pkg.dir, pkg.contentHash, path.join(paths.stateDir, 'plugins-local'))
+    const servers = await forwardPackageServers([pkg], forwarder, async () => ['203.0.113.7'])
+    expect(servers.problems.join('\n')).toMatch(/metadata|link-local/)
+    const ok = await forwardPackageServers(
+      [await fakePackage({ mcpServers: { api: { type: 'http', url: 'https://notes.example/mcp' } } })],
+      forwarder,
+      async () => ['203.0.113.7'],
+    )
+    const options = buildHarnessOptions({ ...base, allowedPluginPaths: [copy], remotePlugins: ok.plugins })
+    const urls = JSON.stringify(options).match(/https?:\/\/[^"\\]+/g) ?? []
+    expect(urls.length).toBeGreaterThan(0)
+    for (const url of urls) expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\//)
+    ok.release()
   })
 })

@@ -50,7 +50,7 @@ import {
   hindsightTarget,
 } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import type { PackageServers } from '../plugins/packages/mcp.js'
+import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import {
   ensureSessionDir,
   isUuid,
@@ -1544,12 +1544,25 @@ export class SessionManager {
             ? this.deps.ownPlugin
             : undefined
         packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
-        // A vetted package's http MCP servers, through the forwarder like a remote
-        // plugin's (#2320). Claude Code starts no MCP server of a vetted package
-        // (`strictMcpConfig`); an allowed package's start as declared (run.ts).
+        if (packages) {
+          // Loaded without their own http MCP servers, which come through the forwarder
+          // below: a query with strictMcpConfig off would start them itself (run.ts).
+          const loaded = packages
+          const stripped = async (dir: string) => {
+            const pkg = loaded.loaded.find((p) => p.dir === dir)
+            return pkg ? withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local')) : dir
+          }
+          packages = {
+            ...loaded,
+            paths: await Promise.all(loaded.paths.map(stripped)),
+            allowedPaths: await Promise.all(loaded.allowedPaths.map(stripped)),
+          }
+        }
+        // Every package's http MCP servers, through the forwarder like a remote
+        // plugin's (#2320); Claude Code loads the packages without them (above).
         packageServers =
           packages && this.deps.packageServers
-            ? await this.deps.packageServers(packages.loaded.filter((p) => !p.allowed))
+            ? await this.deps.packageServers(packages.loaded)
             : undefined
         remotePlugins.push(...(packageServers?.plugins ?? []))
         secrets.push(...(packageServers?.secrets ?? []))

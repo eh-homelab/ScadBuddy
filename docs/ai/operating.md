@@ -787,9 +787,15 @@ loopback forwarder
 `plugin_<package>_<server>`, the name Claude Code gives a plugin's server. The forwarder
 connects to the address the egress check passed, follows no redirect, starts no OAuth
 discovery, adds the declared header itself (one at most) and marks results untrusted.
-Before #2320, Claude Code started none of them, because `strictMcpConfig` was on. A
-package approved with `allow_refused` still has its servers started by Claude Code as
-declared.
+Before #2320, Claude Code started none of them, because `strictMcpConfig` was on. Their
+URL and their one header (at most one) are checked as a remote plugin's registration is
+(`normalisePluginUrl`, `validateHeaderName`, `validateSecret`), and `X-Forwarded-*` and
+`Proxy-*` are refused. Claude Code loads every package without its own http entries: a
+copy under `<state dir>/plugins-local/<hash>/` whose `.mcp.json` and manifest keep only
+local servers (`withoutRemoteServers`). A query that reads plugins' MCP configs (with
+`strictMcpConfig` off, for the headless browser or an allowed package) refuses any
+loaded plugin that still declares an http server (`harness/run.ts`). An allowed
+package's local servers still start as declared.
 
 **Durable sessions (#2320).** A durable turn's Claude Code runs in the `agent-durable`
 container, so the agent copies each loaded package to the payload volume both sidecars
