@@ -78,15 +78,20 @@ def _unit(vector: Sequence[float] | np.ndarray) -> np.ndarray:
 
 
 def _basis(
-    forward: Sequence[float], vertical_up: Sequence[float] = (0.0, 1.0, 0.0)
+    forward: Sequence[float], vertical_up: Sequence[float] | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Right, up and forward for a camera looking along `forward`.
 
     World up is Z, except for a view straight down or up it, which would make the
-    cross product degenerate; that one takes `vertical_up` as up: +Y for the named
-    top and bottom views, which puts the model's +Y at the top of the image.
+    cross product degenerate; that one takes `vertical_up` as up. Left out, it is the
+    limit of a front view tilted over the model: +Y looking down (the named top view,
+    the model's back at the top of the image), -Y looking up (the named bottom view,
+    its front at the top), so a view just short of straight down or up frames the
+    same way (#2153).
     """
     ahead = _unit(forward)
+    if vertical_up is None:
+        vertical_up = (0.0, 1.0 if ahead[2] <= 0 else -1.0, 0.0)
     world_up = (
         np.asarray(vertical_up, dtype=np.float64)
         if abs(ahead[2]) > 0.999
@@ -424,7 +429,8 @@ class Camera:
 
 @dataclass(frozen=True)
 class _Look:
-    vertical_up: tuple[float, float, float]
+    #: Up for a view straight down or up; None for the named view's own (`_basis`).
+    vertical_up: tuple[float, float, float] | None
     zoom: float
     target: tuple[float | None, float | None, float | None]
 
@@ -443,19 +449,22 @@ def _aim(view: ViewName, camera: Camera | None) -> tuple[tuple[float, float, flo
         return VIEW_DIRECTIONS[view], None
     camera.check()
     if camera.azimuth is None and camera.elevation is None:
-        return VIEW_DIRECTIONS[view], _Look((0.0, 1.0, 0.0), camera.zoom, camera.target)
+        return VIEW_DIRECTIONS[view], _Look(None, camera.zoom, camera.target)
     named_azimuth, named_elevation = VIEW_ANGLES[view]
     azimuth = math.radians(named_azimuth if camera.azimuth is None else camera.azimuth)
     elevation = math.radians(named_elevation if camera.elevation is None else camera.elevation)
-    # It stands at `position` from the target and looks back along it; looking
-    # straight down or up, the image's up is away from where it stands.
+    # It stands at `position` from the target and looks back along it. Looking
+    # straight down, the image's up is away from where it stands; straight up, toward
+    # it: each the limit of the Z-up framing as the view tilts that far, so a camera
+    # just past `_basis`'s threshold frames as one just short of it (#2153).
     position = (
         math.sin(azimuth) * math.cos(elevation),
         -math.cos(azimuth) * math.cos(elevation),
         math.sin(elevation),
     )
     forward = (_snap(-position[0]), _snap(-position[1]), _snap(-position[2]))
-    vertical_up = (_snap(-math.sin(azimuth)), _snap(math.cos(azimuth)), 0.0)
+    away = -1.0 if elevation < 0 else 1.0
+    vertical_up = (_snap(-away * math.sin(azimuth)), _snap(away * math.cos(azimuth)), 0.0)
     return forward, _Look(vertical_up, camera.zoom, camera.target)
 
 
