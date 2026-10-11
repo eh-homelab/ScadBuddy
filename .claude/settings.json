@@ -4,6 +4,19 @@
       "Skill(project-ops:find-work)"
     ]
   },
+  "enabledPlugins": {
+    "project-ops@wonderforgelabs-project-ops": true,
+    "gh-stack@wonderforgelabs-project-ops": true
+  },
+  "extraKnownMarketplaces": {
+    "wonderforgelabs-project-ops": {
+      "source": {
+        "source": "github",
+        "repo": "WonderForgeLabs/project-ops"
+      },
+      "autoUpdate": true
+    }
+  },
   "hooks": {
     "PostToolUse": [
       {
@@ -18,17 +31,4 @@
       }
     ]
   },
-  "enabledPlugins": {
-    "project-ops@wonderforgelabs-project-ops": true,
-    "gh-stack@wonderforgelabs-project-ops": true
-  },
-  "extraKnownMarketplaces": {
-    "wonderforgelabs-project-ops": {
-      "source": {
-        "source": "github",
-        "repo": "WonderForgeLabs/project-ops"
-      },
-      "autoUpdate": true
-    }
-  }
 }
