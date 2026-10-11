@@ -18,6 +18,7 @@ HOST_FN = {
     "human_answer": "wait_for_human",
     "approved_print": "queue_print",
     "approved_arrange": "arrange",
+    "approved_tool": "tool",
 }
 
 

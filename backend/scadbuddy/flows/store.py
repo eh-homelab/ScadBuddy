@@ -14,6 +14,7 @@ from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from typing import Any
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
@@ -21,6 +22,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
+from scadbuddy.flows.manifest import OVERRIDES_SETTING
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
@@ -179,7 +181,22 @@ class FlowStore:
         """Undo a decision the harness refused: no `approved` row for a call it never ran."""
         await asyncio.to_thread(self._delete_decision, request_id)
 
+    async def tool_overrides(self) -> Any:
+        """Settings' raised tool tiers (the agent's `ai_settings` row), or None."""
+        return await asyncio.to_thread(self._tool_overrides)
+
     # -- implementation -----------------------------------------------------------
+
+    def _tool_overrides(self) -> Any:
+        with self._pool.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM ai_settings WHERE key = %s", (OVERRIDES_SETTING,)
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                # No agent service has migrated this database: no overrides.
+                return None
+        return None if row is None else row["value"]
 
     def _record_decision(self, decision: Decision) -> bool:
         with self._pool.connection() as conn:

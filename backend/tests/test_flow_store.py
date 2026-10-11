@@ -11,6 +11,7 @@ import pytest
 from psycopg import Connection
 
 from scadbuddy.core.events import Event, FlowRunEvent
+from scadbuddy.flows.manifest import raise_tiers
 from scadbuddy.flows.models import RESULT_MAX
 from scadbuddy.flows.store import FlowStore, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
@@ -376,3 +377,29 @@ async def test_a_reset_keeps_a_step_that_ended_before_6e_recorded_where(store: F
     # Not reopened: nothing would ever end it, while a step that does run again records
     # its end again.
     assert [(s.call_id, s.status) for s in run.steps] == [("a", "succeeded")]
+
+
+async def test_tool_overrides_are_the_agents_stored_setting(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    assert await store.tool_overrides() is None  # no agent table: none
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "CREATE TABLE ai_settings (key text PRIMARY KEY, value jsonb NOT NULL,"
+            " updated_at timestamptz NOT NULL DEFAULT now())"
+        )
+        assert await store.tool_overrides() is None
+        conn.execute(
+            "INSERT INTO ai_settings (key, value) VALUES ('builtin_tools.scadbuddy',"
+            """ '{"tool_tiers": {"get_model": "outward"}, "disabled_tools": []}')"""
+        )
+    stored = await store.tool_overrides()
+    assert raise_tiers({"get_model": "read"}, stored) == {"get_model": "outward"}
+
+
+def test_an_override_only_raises_a_known_tool() -> None:
+    tiers = {"a": "read", "b": "write", "c": "outward"}
+    stored = {"tool_tiers": {"a": "write", "b": "read", "c": "read", "gone": "outward", "x": 1}}
+    assert raise_tiers(tiers, stored) == {"a": "write", "b": "write", "c": "outward"}
+    assert raise_tiers(tiers, None) == tiers
+    assert raise_tiers(tiers, {"tool_tiers": "nope"}) == tiers

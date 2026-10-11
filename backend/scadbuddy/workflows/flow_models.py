@@ -29,6 +29,8 @@ class FlowStep(BaseModel):
     workflow_run_id: str | None = None
     #: The exception's type name, never its message.
     error: str | None = None
+    #: The agent session an `agent` or `ask_session` call talks to, for the page's link.
+    session_id: str | None = None
 
 
 class FlowWaiting(BaseModel):

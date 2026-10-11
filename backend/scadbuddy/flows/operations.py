@@ -261,7 +261,7 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
                 raise ApiError(status.HTTP_404_NOT_FOUND, "The run's history is gone.") from None
             raise
         event_id = int(request["event_id"])
-        preview = await outward_since(client, run.workflow_id, event_id, run_id=described.run_id)
+        preview = await outward_since(client, run, event_id, run_id=described.run_id)
         if described.run_id != str(request["workflow_run_id"]):
             # Another Reset replaced the execution the preview read: past its point, the
             # same event ids name other events, so the point itself means something else.

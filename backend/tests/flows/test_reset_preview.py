@@ -111,7 +111,7 @@ async def test_two_prints(outward: Outward) -> None:
     history = await outward.client.get_workflow_handle(workflow_id).fetch_history()
     events = list(history.events)
     first, _ = _sends(events)
-    live = await outward_since(outward.client, workflow_id, _task_before(events, first.event_id))
+    live = await outward_since(outward.client, done, _task_before(events, first.event_id))
     assert [c.fn for c in live.calls] == ["queue_print", "queue_print"]
     if os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1":
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ from starlette.routing import Route
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 
+from scadbuddy.flows.manifest import tiers
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
@@ -119,7 +120,9 @@ class FakeApi:
 
 
 class Outward(Flows):
-    async def run(self, body: str, *, approval_timeout_s: int = 0) -> str:
+    async def run(
+        self, body: str, *, approval_timeout_s: int = 0, tools_queue: str = "agent-tools"
+    ) -> str:
         definition = await self.store.create_definition("t", body, {"kind": "browser"})
         run_id = str(uuid.uuid4())
         await AgentClient(self.client, f"flow-{run_id}").start_and_submit_message(
@@ -135,6 +138,8 @@ class Outward(Flows):
                 name="t",
                 started_by={"kind": "browser"},
                 approval_timeout_s=approval_timeout_s,
+                tools_queue=tools_queue,
+                tool_tiers=tiers(),
             ),
         )
         return run_id
