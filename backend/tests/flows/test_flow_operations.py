@@ -1,6 +1,7 @@
 """A person's answer and approval as `projects` operations (#1057, plan
 2026-10-09-durable-phase-6-flows.md Task C1): the decision is recorded, then the
-harness is told; a decision the harness refuses is deleted again."""
+harness is told; a decision the harness refuses, or whose Update fails any other way,
+is deleted again."""
 
 import asyncio
 import uuid
@@ -10,11 +11,12 @@ from typing import Any
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.flows.models import Run
+from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.operations import (
     ALREADY_RESOLVED,
     FLOW_ANSWER,
@@ -184,3 +186,78 @@ async def test_a_resolved_approval_deletes_the_decision(flows: Flows) -> None:
         await ActivityEnvironment(client=flows.client).run(decide.run, request, checked)
     assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
     assert await flows.store.get_decision(checked["request_id"]) is None
+
+
+def _fails_once(monkeypatch: pytest.MonkeyPatch, method: str) -> list[int]:
+    """`AgentClient.<method>` fails its first call as an Update past its deadline would,
+    then works; returns the call count."""
+    original = getattr(AgentClient, method)
+    calls: list[int] = []
+
+    async def flaky(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RPCError("update deadline exceeded", RPCStatusCode.DEADLINE_EXCEEDED, b"")
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentClient, method, flaky)
+    return calls
+
+
+async def test_a_decision_whose_update_failed_leaves_no_row_and_can_be_made_again(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await _gated(flows)
+    decide = kinds(flows)[FLOW_DECIDE]
+    request = {"run_id": run.id, "call_id": call_id, "approved": True}
+    calls = _fails_once(monkeypatch, "approve_tool")
+    with pytest.raises(RPCError):
+        await operate(flows, decide, request)
+    # Nothing says approved for a call the harness was never told about.
+    assert await flows.store.get_decision(request_id(run, call_id)) is None
+    # The next attempt (or a new request) records it again and the call runs.
+    assert (await operate(flows, decide, request))["outcome"] == "approved"
+    assert len(calls) == 2
+    assert (await AgentClient(flows.client, run.workflow_id).get_status()).pending_approvals == []
+    decision = await flows.store.get_decision(request_id(run, call_id))
+    assert decision is not None and decision.outcome == "approved"
+
+
+async def test_an_answer_whose_update_failed_leaves_no_row_and_can_be_given_again(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await parked(flows)
+    answer = kinds(flows)[FLOW_ANSWER]
+    request = {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+    _fails_once(monkeypatch, "provide_callback_result")
+    with pytest.raises(RPCError):
+        await operate(flows, answer, request)
+    assert await flows.store.get_decision(request_id(run, call_id)) is None
+    assert (await operate(flows, answer, request))["outcome"] == "answered"
+    assert (await flows.finished(run.id)).result == "result: 'ok'"
+
+
+async def test_a_row_left_unsent_lets_the_same_decision_resend_and_refuses_another(
+    flows: Flows,
+) -> None:
+    run, call_id = await _gated(flows)
+    decide = kinds(flows)[FLOW_DECIDE]
+    rid = request_id(run, call_id)
+    # A worker that died between recording the decision and sending its Update.
+    left = Decision(
+        request_id=rid,
+        run_id=run.id,
+        workflow_run_id=run.workflow_run_id,
+        call_id=call_id,
+        kind="approval",
+        outcome="approved",
+        responder="browser",
+    )
+    assert await flows.store.record_decision(left)
+    other = {"run_id": run.id, "call_id": call_id, "approved": False}
+    with pytest.raises(ApiError) as err:
+        await ActivityEnvironment(client=flows.client).run(decide.check, other)
+    assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
+    same = {"run_id": run.id, "call_id": call_id, "approved": True}
+    assert (await operate(flows, decide, same))["outcome"] == "approved"
+    assert (await AgentClient(flows.client, run.workflow_id).get_status()).pending_approvals == []
