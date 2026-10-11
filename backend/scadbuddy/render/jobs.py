@@ -721,6 +721,11 @@ def export_revision(history: ModelHistory, slug: str, version: str, directory: P
     reader that finds `model.scad` present while the other writer is still
     extracting `model.json` would render against half a revision. The staging name
     is random, not the pid and thread: every API pod is pid 1 on the shared volume.
+
+    No staging directory is cleaned up before the export: a staging directory left by
+    a pod killed mid-export is removed by `prune_revision_exports`'s TTL sweep, which
+    covers the slug's directory. An up-front cleanup here would race other pods' live
+    staging directories.
     """
     staging = directory.with_name(f"{directory.name}.{uuid.uuid4().hex}")
     try:
