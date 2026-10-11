@@ -108,7 +108,11 @@ MAX_FRAME_CHARS = 16_384
 #: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-COLLECTION_TOPICS = frozenset({"models", "outputs", "libraries", "fonts", "settings", "analyzers"})
+COLLECTION_TOPICS = frozenset(
+    {"models", "outputs", "libraries", "fonts", "settings", "analyzers", "workflow-runs"}
+)
+#: A flow run's id (#1057): a UUID, as ``api/flows.py`` makes them.
+FLOW_RUN_ID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 
 def _strip_anchors(pattern: str) -> str:
@@ -124,6 +128,7 @@ _TOPIC = re.compile(
             f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
             # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
             r"print:library:[1-9][0-9]{0,17}",
+            f"workflow-run:{FLOW_RUN_ID_PATTERN}",
             *sorted(COLLECTION_TOPICS),
         ]
     )

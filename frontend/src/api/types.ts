@@ -129,6 +129,14 @@ export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
 /** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
 export type Operation = Schemas['Operation']
+
+// Flows (#1057, backend `api/flows.py`): a flow's runs and what they wait on.
+export type FlowRun = Schemas['Run']
+export type FlowRunView = Schemas['RunView']
+export type FlowRunStatus = FlowRunView['status']
+export type FlowPending = Schemas['PendingEntry']
+export type FlowStep = Schemas['FlowStep']
+export type FlowDecided = Schemas['Decided']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 

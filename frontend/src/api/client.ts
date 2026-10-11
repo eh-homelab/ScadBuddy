@@ -72,6 +72,9 @@ import type {
   PrintProgress,
   PrintCheck,
   PrintRun,
+  FlowDecided,
+  FlowRun,
+  FlowRunView,
   Operation,
   OperationAccepted,
   PrintRunRequest,
@@ -638,6 +641,31 @@ async function followPrintRun(
 }
 
 export const api = {
+  // Flows (#1057): runs, and a person's answers and approvals for them. An answer or
+  // a decision is an operation, keyed per call (`command`); a stale one is a 409
+  // `stale-entry`.
+  listFlowRuns: (query: { session?: string; definition_id?: string } = {}) => {
+    const params = new URLSearchParams()
+    if (query.session) params.set('session', query.session)
+    if (query.definition_id) params.set('definition_id', query.definition_id)
+    const search = params.toString()
+    return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ''}`)
+  },
+
+  getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+
+  answerFlowRun: (id: string, callId: string, answer: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ call_id: callId, answer }),
+    }),
+
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
+      method: 'POST',
+      body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+    }),
+
   listModels: () => request<ModelSummary[]>('/models'),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
