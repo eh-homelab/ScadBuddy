@@ -16,6 +16,7 @@ import {
   type ApprovalRecords,
   durableSession,
   NOT_APPROVED,
+  type ResultBlobs,
   resultText,
   type SessionOwners,
   TOOL_ERROR,
@@ -89,6 +90,8 @@ export type TurnToolsDeps = {
   report?: ((session: string, problems: readonly string[]) => Promise<void>) | undefined
   /** This replica's own queue (`agent-tools.<host>`), where a pinned server's calls run. */
   hostQueue?: string | undefined
+  /** Where a call's result images are kept for `view_tool_images` (toolActivities.ts `resultText`). */
+  blobs?: ResultBlobs | undefined
 }
 
 /** What DurableSession declares for one turn tool. */
@@ -280,7 +283,14 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       } finally {
         clearInterval(heartbeat)
       }
-      const text = scrub(resultText((result.content ?? []) as { type: string; text?: string }[]))
+      // The images go to the session's blobs, never into the payload; their names and
+      // the text go through the same scrub.
+      const text = scrub(
+        await resultText(
+          (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
+          deps.blobs ? { session, blobs: deps.blobs } : undefined,
+        ),
+      )
       await record(result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)
       return text

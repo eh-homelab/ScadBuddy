@@ -36,6 +36,9 @@ function notes(calls: string[]): () => McpServer {
       calls.push(`post ${body}`)
       return { content: [{ type: 'text', text: `posted ${body}` }] }
     })
+    server.registerTool('shot', { description: 'a picture', inputSchema: {} }, async () => ({
+      content: [{ type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' }],
+    }))
     server.registerTool('broken', { description: 'fails', inputSchema: {} }, async () => ({
       isError: true,
       content: [{ type: 'text', text: 'it broke' }],
@@ -65,6 +68,7 @@ function harness(
   const calls: string[] = []
   const audits: AuditEntry[] = []
   const reported: string[] = []
+  const stored: string[] = []
   const owner = options.owner ?? BROWSER
   const server: TurnServer = { name: 'notes', connect: () => connectInProcess(notes(calls)), tierOf, ...(options.pinned ? { pinned: true } : {}) }
   const deps: TurnToolsDeps = {
@@ -83,8 +87,9 @@ function harness(
       summarise: (tool) => `summary:${tool}`,
     },
     report: async (_session, problems) => void reported.push(...problems),
+    blobs: { put: async (session, images) => void stored.push(...images.map((i) => `${session}/${i.name}`)) },
   }
-  return { calls, audits, reported, activities: turnToolActivities(deps), call: turnToolActivity(deps) }
+  return { calls, audits, reported, stored, activities: turnToolActivities(deps), call: turnToolActivity(deps) }
 }
 
 function env(activityType: string, activityId = 'tool-toolu_01', workflowId = `session-${SESSION}`) {
@@ -107,6 +112,7 @@ describe('turn tools in a durable session', () => {
     expect(tools.map((t) => [t.name, t.may_park])).toEqual([
       ['notes__read_note', false],
       ['notes__post', true],
+      ['notes__shot', true],
       ['notes__broken', true],
       ['notes__echo', true],
       ['notes__leak', true],
@@ -155,6 +161,16 @@ describe('turn tools in a durable session', () => {
     expect(broken.message).toBe('it broke')
     expect(broken.nonRetryable).toBe(true)
     expect((await failure(env('something_else').run(harness().call, {}))).message).toContain('no activity something_else')
+  })
+
+  it("keeps a turn tool's images for view_tool_images (#2320)", async () => {
+    const h = harness()
+    const out = String(await env('turn:notes__shot', 'tool-toolu_approved').run(h.call as (input: unknown) => Promise<unknown>, {}))
+    expect(h.stored).toHaveLength(1)
+    const [session, name] = h.stored[0]!.split('/')
+    expect(session).toBe(SESSION)
+    expect(out).toContain(`[image ${name}]`)
+    expect(out).toContain('view_tool_images')
   })
 
   it('refuses a workflow that is no durable session', async () => {

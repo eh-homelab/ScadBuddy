@@ -1,5 +1,6 @@
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createBackendClient } from '../src/api/backend.js'
@@ -12,7 +13,7 @@ import { answerResult } from '../src/gate/answers.js'
 import { answeredText, timedOutText } from '../src/harness/attention.js'
 import { answersText } from '../src/harness/questions.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
-import { DESCRIBE_CALL_ACTIVITY, DURABLE_IMAGE_NOTE, gateActivities, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { DESCRIBE_CALL_ACTIVITY, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
@@ -214,7 +215,8 @@ describe('tool activities', () => {
     expect(none.type).toBe('NotApproved')
   })
 
-  it('joins a result into the text the plugin hands the model, and names an image it cannot', async () => {
+  it("keeps a result's images in the session's blobs and names them for view_tool_images (#2320)", async () => {
+    const PNG = 'iVBORw0KGgo='
     const pic = defineTool({
       name: 'pic',
       description: 'an image and words',
@@ -224,17 +226,27 @@ describe('tool activities', () => {
       handler: async () => ({
         content: [
           { type: 'text', text: 'first' },
-          { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+          { type: 'image', data: PNG, mimeType: 'image/png' },
           { type: 'text', text: 'second' },
+          // Not the type it claims: never stored, and said so.
+          { type: 'image', data: PNG, mimeType: 'image/jpeg' },
         ],
       }),
     })
-    const out = await env().run(harness({}, [pic]).activities.pic!, {})
-    expect(typeof out).toBe('string')
+    const stored: { session: string; names: string[] }[] = []
+    const blobs = {
+      put: async (session: string, images: readonly { name: string }[]) => void stored.push({ session, names: images.map((i) => i.name) }),
+    }
+    const out = String(await env().run(harness({ blobs }, [pic]).activities.pic as (input: unknown) => Promise<unknown>, {}))
+    const name = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).digest('hex')}.png`
+    expect(stored).toEqual([{ session: SESSION, names: [name] }])
     expect(out).toContain('first')
     expect(out).toContain('second')
-    expect(out).toContain(DURABLE_IMAGE_NOTE)
-    expect(out).not.toContain('iVBORw0KGgo')
+    expect(out).toContain(`[image ${name}]`)
+    expect(out).toContain(TOOL_IMAGES_TOOL)
+    expect(out).toContain('[an image the model cannot take]')
+    expect(out).not.toContain(PNG)
+    expect(out).not.toContain('classic session')
   })
 
   it('refuses a workflow that is not a known session, and runs nothing', async () => {
