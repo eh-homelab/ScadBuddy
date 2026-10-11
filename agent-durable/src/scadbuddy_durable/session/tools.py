@@ -5,7 +5,8 @@ durable-only answer tools) is read once, when the worker starts, from
 ``SCADBUDDY_DURABLE_TOOLS_JSON``. Each entry becomes an ``activity_as_tool`` on
 ``agent-tools``, where the agent service serves it under its name; the stub here
 names the activity and never runs. A call parks at the session's gate when the tool
-has a ``hitl`` kind (``needs_approval``).
+has a ``hitl`` kind (``needs_approval``), or when Settings → Plugins raised it to
+``outward`` (#2088): ``apply_overrides``, each turn, from what ``gate_settings`` read.
 
 The workflow sandbox imports this module through, so the manifest the worker loaded is
 the one every DurableSession declares.
@@ -14,7 +15,7 @@ the one every DurableSession declares.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -27,6 +28,12 @@ from temporalio.common import RetryPolicy
 from scadbuddy_durable.session.models import TOOLS_QUEUE
 
 Hitl = Literal["approval", "answer"]
+
+# agent/src/harness/permissions.ts RISK_TIERS, least to most.
+RISK_TIERS = ("read", "write", "outward")
+# agent/src/plugins/builtInTools.ts builtInToolsSetting(OWN_PLUGIN_NAME): the overrides
+# of the tools a durable session calls.
+OVERRIDES_SETTING = "builtin_tools.scadbuddy"
 
 
 @dataclass(frozen=True)
@@ -107,3 +114,52 @@ def durable_tools(entries: Sequence[ManifestEntry]) -> list[DurableTool]:
         )
         for e in entries
     ]
+
+
+def sanitise_overrides(
+    entries: Sequence[ManifestEntry], stored: Any
+) -> tuple[dict[str, str], list[str]]:
+    """What Settings stored for the set, as builtInTools.ts ``sanitise`` keeps it:
+    TIGHTEN ONLY. A tier counts only where it raises a known tool above its own tier, and
+    a disabled tool only where it is known, so a stale or hand-edited row never lowers or
+    invents anything. The answer tools are durable-only, in no Settings set."""
+    if not isinstance(stored, dict):
+        return {}, []
+    own = {e.name: e.tier for e in entries if e.hitl != "answer"}
+
+    def rank(tier: str) -> int:
+        return RISK_TIERS.index(tier) if tier in RISK_TIERS else -1
+
+    tiers: dict[str, str] = {}
+    raw_tiers = stored.get("tool_tiers")
+    if isinstance(raw_tiers, dict):
+        for name, tier in raw_tiers.items():
+            if name in own and tier in RISK_TIERS and rank(tier) > rank(own[name]):
+                tiers[name] = tier
+    raw_disabled = stored.get("disabled_tools")
+    disabled = (
+        sorted({t for t in raw_disabled if isinstance(t, str) and t in own})
+        if isinstance(raw_disabled, list)
+        else []
+    )
+    return tiers, disabled
+
+
+def apply_overrides(
+    tools: Mapping[str, DurableTool],
+    entries: Sequence[ManifestEntry],
+    tool_tiers: Mapping[str, str],
+    disabled: Collection[str],
+) -> None:
+    """Sets each tool's gate from its effective tier, as effectiveTool (registry.ts) has
+    it: a tool raised to ``outward`` parks for approval and runs at most once, like any
+    outward tool. A disabled tool never parks: its call goes straight to agent-tools,
+    which refuses it naming Settings → Plugins. Computed from the manifest every time,
+    so an override taken away is gone on the next turn."""
+    for e in entries:
+        tool = tools.get(e.name)
+        if tool is None:
+            continue
+        raised = tool_tiers.get(e.name) == "outward" and e.tier != "outward"
+        tool.needs_approval = e.name not in disabled and (e.hitl is not None or raised)
+        tool.retry_policy = _ONCE if e.hitl == "approval" or raised else _RETRY

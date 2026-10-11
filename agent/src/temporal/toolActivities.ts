@@ -192,8 +192,10 @@ async function runAsActivity(
   // the namespace can name a workflow after a durable session (security review of 5b).
   // Gated as the tool runs now (#1953): a tier Settings raised to outward needs the
   // approval too, whatever tier the durable worker's manifest declared it at.
+  // A disabled tool is never parked (#2088), so it skips this check and is refused below,
+  // by runToolWithOutcome, naming Settings → Plugins rather than a missing approval.
   const effective = await effectiveTool(tool, deps.services)
-  if (effective.gated && !(await caller.approvals?.approved(requestId))) {
+  if (effective.gated && !effective.disabled && !(await caller.approvals?.approved(requestId))) {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({

@@ -31,6 +31,9 @@ the ``image_long_edge`` setting. The panel scales to that setting, but nothing s
 image sent another way (MCP, the attachment store), and an oversized request reached
 Claude, failed, and was sent again on every retry. One over a bound ends the turn with a
 readable error and no retry.
+
+The tools Settings → Plugins disabled (the workflow's ``segment_context``) are left out
+of the segment's declared tools (#2088), so Claude is never offered them.
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ import os
 import re
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import psycopg
@@ -330,6 +333,10 @@ class ScadBuddyRunner:
             "preset": "claude_code",
             **({"append": context.system_append} if context.system_append else {}),
         }
+        if context.disabled_tools:
+            # Settings → Plugins turned them off (#2088): Claude is not offered them.
+            off = set(context.disabled_tools)
+            inp = replace(inp, tools=[t for t in inp.tools if t.name not in off])
         images = await self._images(session, context)
         problem = image_problem(images, await self._long_edge()) if images else None
         if problem is not None:
