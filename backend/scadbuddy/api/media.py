@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import os
 import uuid
 from collections import OrderedDict
@@ -68,6 +69,8 @@ from scadbuddy.operations.component import OperationCommands, OperationsDep
 
 if TYPE_CHECKING:
     from _hashlib import HASH
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["media"])
 
@@ -453,7 +456,9 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
     so a large photo is still cheap enough to shrink. Any error decoding it is a None
     too, since serving the file as it is is always safe: Pillow's metadata parser has
     no single error type, and a malformed EXIF block raises ``ValueError``,
-    ``SyntaxError``, ``TypeError`` or ``struct.error`` among others (#1690).
+    ``SyntaxError``, ``TypeError`` or ``struct.error`` among others (#1690). Each is
+    logged by type, so a bug of ScadBuddy's own that makes every thumbnail fall back
+    is still visible (#2096).
 
     The box is square, so an EXIF orientation of 5 to 8, which swaps width and height,
     fits it either way round: the image is shrunk before it is turned upright, and the
@@ -470,7 +475,9 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
                 out = io.BytesIO()
                 upright.save(out, "WEBP", quality=80)
                 return out.getvalue()
-    except Exception:
+    except Exception as error:
+        # The type only: a message can carry the file's own bytes or path.
+        logger.info("thumbnail fell back to the original: %s", type(error).__name__)
         return None
 
 
