@@ -331,6 +331,7 @@ def test_the_connection_test_only_reads(client: TestClient) -> None:
         "Manage Queue": ("unknown", True),
         "Manage Projects": ("unknown", False),
         "Manage Archives": ("unknown", False),
+        "Manage Inventory": ("unknown", False),
     }
     assert {call.request.method for call in respx.calls} == {"GET"}
     unchecked = next(row for row in body["scopes"] if row["scope"] == "Manage Library")

@@ -1185,9 +1185,7 @@ async def plan_run(
 
 def _filament_map(plan: NozzlePlan | None, filaments: int) -> FilamentMap | None:
     """The plan as the 3MF states it, for a file of ``filaments`` filaments."""
-    if plan is None or filaments < 1:
-        return None
-    return FilamentMap(tuple(plan.filament_map(filaments)), tuple(plan.volume_map(filaments)))
+    return plan.stated_map(filaments) if plan is not None else None
 
 
 def finish_run(

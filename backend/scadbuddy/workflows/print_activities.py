@@ -311,6 +311,7 @@ class PrintActivities:
                         planned.project_id,
                         printer_id=planned.printer_id,
                         nozzle_size=planned.nozzle_size,
+                        nozzle_plan=planned.nozzle_plan,
                     )
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)

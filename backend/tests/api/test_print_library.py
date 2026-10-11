@@ -956,9 +956,9 @@ def test_a_two_colour_library_file_offers_both_sides_and_slices_every_plate(
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     assert settings["filament_map_mode"] == "Manual"
-    assert settings["filament_map"] == ["2"]
-    assert settings["extruder_nozzle_stats"] == ["High Flow#0", "High Flow#1"]
-    assert settings["extruder_nozzle_stats_new"] == ["High Flow#0", "High Flow#1"]
+    assert settings["filament_map"] == ["2", "1"]
+    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "High Flow#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["High Flow#1", "High Flow#1"]
     request = json.loads(sliced.calls.last.request.content)
     assert request["plate"] == 0
     assert len(request["filament_colours"]) == 2
@@ -1090,9 +1090,14 @@ def test_a_library_print_into_a_project_is_filed_there_and_remembered(
     assert settings["filament_colour"] == ["#688197"]
     uploads = _state(client).uploads
     assert [copy.id for copy in asyncio.run(uploads.for_output("library:89"))] == [141]
-    assert asyncio.run(uploads.project_target(7)) == ProjectTarget(
+    remembered = asyncio.run(uploads.project_target(7))
+    assert remembered is not None
+    assert remembered.model_copy(update={"nozzle_plan": None}) == ProjectTarget(
         printer_id=1, nozzle_diameter="0.2"
     )
+    # The run's nozzle plan too, which the next Generate lays the file out with (#2166).
+    assert remembered.nozzle_plan is not None
+    assert [slot["side"] for slot in remembered.nozzle_plan["slots"]] == ["R"]
 
 
 # --- #1753: viewing a library file as an output is viewed ---------------------------------

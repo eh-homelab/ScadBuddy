@@ -30,6 +30,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.models import LibraryFile
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
@@ -151,9 +152,16 @@ class PrintSource(Protocol):
         run_id: str | None = None,
     ) -> list[PlateSend]: ...
 
-    async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
+    async def remember_project(
+        self,
+        project_id: int,
+        *,
+        printer_id: int,
+        nozzle_size: str,
+        nozzle_plan: NozzlePlan | None = None,
+    ) -> None:
         """After a print into a project: what the next Generate into it lays its file
-        out for (#317)."""
+        out for (#317), its nozzle plan too (#2166)."""
         ...
 
 
@@ -404,11 +412,21 @@ class PrintPipeline:
         return sent
 
     async def remember_project(
-        self: _Fetching, project_id: int, *, printer_id: int, nozzle_size: str
+        self: _Fetching,
+        project_id: int,
+        *,
+        printer_id: int,
+        nozzle_size: str,
+        nozzle_plan: NozzlePlan | None = None,
     ) -> None:
         assert self.uploads is not None, "a source that remembers needs the uploads"
         await self.uploads.remember_project_target(
-            project_id, ProjectTarget(printer_id=printer_id, nozzle_diameter=nozzle_size)
+            project_id,
+            ProjectTarget(
+                printer_id=printer_id,
+                nozzle_diameter=nozzle_size,
+                nozzle_plan=nozzle_plan.model_dump() if nozzle_plan is not None else None,
+            ),
         )
 
 

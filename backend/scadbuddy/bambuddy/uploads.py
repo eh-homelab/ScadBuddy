@@ -15,9 +15,11 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 
 from psycopg import AsyncConnection, Connection
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
@@ -88,6 +90,8 @@ class ProjectTarget(BaseModel):
 
     printer_id: int
     nozzle_diameter: str | None = None
+    #: Its ``NozzlePlan`` (#2166), as JSON: this module is below the plan's.
+    nozzle_plan: dict[str, Any] | None = None
 
 
 class BambuddyUploadStore:
@@ -290,15 +294,10 @@ class BambuddyUploadStore:
     def _project_targets(self) -> dict[int, ProjectTarget]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT project_id, printer_id, nozzle_diameter FROM project_print_targets"
-                " ORDER BY project_id"
+                "SELECT project_id, printer_id, nozzle_diameter, nozzle_plan"
+                " FROM project_print_targets ORDER BY project_id"
             ).fetchall()
-        return {
-            row["project_id"]: ProjectTarget(
-                printer_id=row["printer_id"], nozzle_diameter=row["nozzle_diameter"]
-            )
-            for row in rows
-        }
+        return {row["project_id"]: ProjectTarget.model_validate(row) for row in rows}
 
     def _forget_project_targets(self, project_id: int | None) -> None:
         with self._pool.connection() as conn:
@@ -312,22 +311,29 @@ class BambuddyUploadStore:
     def _project_target(self, project_id: int) -> ProjectTarget | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT printer_id, nozzle_diameter FROM project_print_targets"
+                "SELECT printer_id, nozzle_diameter, nozzle_plan FROM project_print_targets"
                 " WHERE project_id = %s",
                 (project_id,),
             ).fetchone()
         if row is None:
             return None
-        return ProjectTarget(printer_id=row["printer_id"], nozzle_diameter=row["nozzle_diameter"])
+        return ProjectTarget.model_validate(row)
 
     def _remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "INSERT INTO project_print_targets (project_id, printer_id, nozzle_diameter)"
-                " VALUES (%s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
+                "INSERT INTO project_print_targets"
+                " (project_id, printer_id, nozzle_diameter, nozzle_plan)"
+                " VALUES (%s, %s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
                 " SET printer_id = EXCLUDED.printer_id,"
-                " nozzle_diameter = EXCLUDED.nozzle_diameter, updated_at = now()",
-                (project_id, target.printer_id, target.nozzle_diameter),
+                " nozzle_diameter = EXCLUDED.nozzle_diameter,"
+                " nozzle_plan = EXCLUDED.nozzle_plan, updated_at = now()",
+                (
+                    project_id,
+                    target.printer_id,
+                    target.nozzle_diameter,
+                    Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
+                ),
             )
 
     def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:

@@ -75,6 +75,7 @@ from scadbuddy.bambuddy.models import (
     SpoolAssignment,
 )
 from scadbuddy.bambuddy.trays import family, tray_label, tray_material_colour, tray_of_spool_id
+from scadbuddy.render.bambu3mf import FilamentMap
 
 #: ``NozzleVolumeType`` as Bambu Studio numbers it (``PrintConfig.cpp``).
 VOLUME_INDEX: dict[FlowType, str] = {"standard": "0", "high_flow": "1"}
@@ -141,6 +142,26 @@ class NozzlePlan(BaseModel):
         flows = {LEFT: self.left_flow, RIGHT: self.right_flow}
         order = self.filament_map(filaments)
         return [VOLUME_INDEX[flows[SLICER_ORDER[int(entry) - 1]]] for entry in order]
+
+    def stated_map(self, filaments: int) -> FilamentMap | None:
+        """The Manual map the 3MF states for a file of ``filaments`` filaments."""
+        if filaments < 1:
+            return None
+        return FilamentMap(tuple(self.filament_map(filaments)), tuple(self.volume_map(filaments)))
+
+
+def one_side_map(
+    sides: frozenset[int] | None, nozzles: Sequence[NozzleChoice], filaments: int
+) -> FilamentMap | None:
+    """Every filament on the one side offered, as a plan for those sides states it, or
+    ``None`` unless exactly one side is. What Generate lays the project file out with
+    before any print planned one (#317): a print whose plan the one side decides then
+    writes the same map, and reuses that file."""
+    if sides is None or len(sides) != 1 or filaments < 1:
+        return None
+    [side] = sides
+    flow = VOLUME_INDEX[_flows(nozzles)[side]]
+    return FilamentMap((str(SLICER_ORDER.index(side) + 1),) * filaments, (flow,) * filaments)
 
 
 def _flow_words(left: FlowType, right: FlowType, size: str, sides: frozenset[int]) -> str:
