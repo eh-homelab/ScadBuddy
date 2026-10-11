@@ -17,10 +17,11 @@ where each colour falls on it is the slicer's to work out again, as it was for t
 A negative part is cut out of its object's other parts, as Bambu Studio cuts it
 (#2146), with Manifold (``manifold3d``, the library OpenSCAD's ``--backend=Manifold``
 is): each face it leaves keeps its painting, by the original face Manifold says it
-came from, and the walls the cut opens are the part's own colour. A face the cut split
-keeps its whole triangle's painting on the smaller triangle, so its colours are those
-of the face it was; on the 1943 ankylosaurs keychain that is 950 of 133,534 painted
-faces, all at the keyring hole.
+came from (each face given its own id), corners in their original order, and the walls
+the cut opens are the part's own colour. A face the cut split keeps its whole
+triangle's painting on each smaller triangle, so its colours are those of the face it
+was; on the 1943 ankylosaurs keychain the 133,534 painted faces come out as 134,732,
+the split ones repeated, all at the keyring hole.
 
 What cannot be read faithfully is refused (:class:`UnreadableObjectsError`) rather than
 guessed: a sliced file, PrusaSlicer's painting, painting in a file with no Bambu Studio
@@ -310,6 +311,7 @@ class _Reader:
         matrix: np.ndarray,
         extruder: int | None,
         depth: int = 0,
+        cutter: bool = False,
     ) -> Iterator[_Piece]:
         """(colour, vertices, faces, painting) of every mesh the object is made of,
         transformed by ``matrix``. ``extruder`` is the Bambu part's, which colours the
@@ -324,7 +326,12 @@ class _Reader:
         mesh = obj.find(f"{_CORE}mesh")
         if mesh is not None:
             yield from self._mesh(
-                root, obj, mesh, _combine(matrix, np.diag([scale, scale, scale, 1.0])), extruder
+                root,
+                obj,
+                mesh,
+                _combine(matrix, np.diag([scale, scale, scale, 1.0])),
+                extruder,
+                cutter,
             )
             return
         components = obj.find(f"{_CORE}components")
@@ -336,6 +343,7 @@ class _Reader:
                 _combine(matrix, _matrix(component.get("transform"))),
                 extruder,
                 depth + 1,
+                cutter,
             )
 
     def _mesh(
@@ -345,7 +353,10 @@ class _Reader:
         mesh: ET.Element,
         matrix: np.ndarray,
         extruder: int | None,
+        cutter: bool = False,
     ) -> Iterator[_Piece]:
+        """``cutter``: a negative part's mesh, its shape only: whatever painting it
+        carries prints nothing."""
         arrays = self.archive.meshes[mesh]
         if (
             mesh.find(f"{_CORE}vertices") is None
@@ -369,13 +380,17 @@ class _Reader:
             raise UnreadableObjectsError(
                 "a transform of the 3MF places a vertex at a position that is not a finite number"
             )
+        mirrored = np.linalg.det(matrix[:3, :3]) < 0
+        if cutter:
+            _check_faces(arrays.faces, points)
+            yield STL_COLOUR, points, arrays.faces[:, ::-1] if mirrored else arrays.faces, None
+            return
         name = obj.get("name") or obj.get("id")
         if arrays.prusa_painted:
             raise UnreadableObjectsError(
                 f"object {name} is painted in PrusaSlicer, which Arrange cannot read;"
                 " paint it in Bambu Studio, or split it into a part per colour"
             )
-        mirrored = np.linalg.det(matrix[:3, :3]) < 0
         if arrays.paint is not None:
             yield self._painted(name, points, arrays.faces, arrays.paint, extruder, mirrored)
             return
@@ -493,8 +508,7 @@ class _Reader:
                 if part.subtype == "negative_part":
                     path = (component.get(_PATH) or "").lstrip("/") or model
                     combined = _combine(matrix, _matrix(component.get("transform")))
-                    extruder = part.extruder or settings.extruder or 1
-                    for _, points, faces, _ in self.meshes(path, cid, combined, extruder):
+                    for _, points, faces, _ in self.meshes(path, cid, combined, None, cutter=True):
                         negative = trimesh.Trimesh(vertices=points, faces=faces, process=False)
                         negatives.append(negative)
                     continue
@@ -525,27 +539,35 @@ class _Reader:
             name = settings.name if settings is not None and settings.name else object_id
             # One cutter, built once: their triangles were spent as they were read.
             cutter = manifold3d.Manifold.batch_boolean(
-                [_solid(negative, name) for negative in negatives], manifold3d.OpType.Add
+                [_solid(negative, name, "negative part") for negative in negatives],
+                manifold3d.OpType.Add,
             )
             cut = [_cut_out(part, cutter, name, self._spend) for part in parts]
-            parts = [part for part in cut if part is not None]
+            # Renumbered: a part the cut removed whole leaves no gap.
+            parts = [
+                ColourPart(index, f"Color {index}", part.colour, part.mesh, part.paint)
+                for index, part in enumerate((p for p in cut if p is not None), start=1)
+            ]
             notes.append("a negative part was cut out")
         return parts, notes
 
 
-def _solid(mesh: trimesh.Trimesh, name: str) -> manifold3d.Manifold:
-    shape = manifold3d.Mesh(
-        vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
-        tri_verts=np.asarray(mesh.faces, dtype=np.uint32),
+def _solid(mesh: trimesh.Trimesh, name: str, what: str) -> manifold3d.Manifold:
+    """``mesh`` as a Manifold, in float64, each face its own id: left to make them
+    itself, Manifold names a group of coplanar faces by one of them, which would hand
+    one face's painting to its neighbours."""
+    shape = manifold3d.Mesh64(
+        vert_properties=np.ascontiguousarray(mesh.vertices, dtype=np.float64),
+        tri_verts=np.ascontiguousarray(mesh.faces, dtype=np.uint64),
+        face_id=np.arange(len(mesh.faces), dtype=np.uint64),
     )
     shape.merge()
     solid = manifold3d.Manifold(shape)
     if solid.status() != manifold3d.Error.NoError:
         raise UnreadableObjectsError(
-            f"object {name} has a negative part, and a mesh of it is not closed, so the"
-            " part cannot be cut out"
+            f"object {name}'s {what} is not closed, so its negative part cannot be cut out"
         )
-    return solid.as_original()
+    return solid
 
 
 def _cut_out(
@@ -558,26 +580,47 @@ def _cut_out(
     face by face; None when nothing of it is left. What the cut adds is spent against
     the read's budget like what was read: the faces it opens or splits, and the paint
     digits a split face's copies repeat."""
-    solid = _solid(part.mesh, name)
-    out = (solid - cutter).to_mesh()
-    faces = np.asarray(out.tri_verts, dtype=np.int64)
+    out = (_solid(part.mesh, name, "part") - cutter).to_mesh64()
+    faces = np.array(out.tri_verts, dtype=np.int64)
     spend(triangles=max(0, len(faces) - len(part.mesh.faces)))
     if not len(faces):
         return None
     points = np.asarray(out.vert_properties, dtype=np.float64)[:, :3]
-    mesh = trimesh.Trimesh(vertices=points, faces=faces, process=False)
     paint = part.paint
     if paint is not None:
-        # Each run of faces came from one input mesh; a face from the part's own keeps its
-        # original face's painting, a wall the cut opened is the part's colour.
+        # Each run of faces came from one input mesh; the cutter's runs are the walls the
+        # cut opened (the part's own colour), every other face is one of the part's.
         runs = np.diff(np.asarray(out.run_index, dtype=np.int64)) // 3
         source = np.repeat(np.asarray(out.run_original_id), runs)
+        own = ~np.isin(source, np.asarray(cutter.to_mesh64().run_original_id))
         original = np.asarray(out.face_id, dtype=np.int64)
-        own = source == solid.original_id()
+        _keep_corner_order(faces, points, own, original, part.mesh)
         codes = tuple(paint.codes[f] if mine else "" for f, mine in zip(original, own, strict=True))
         spend(paint_digits=max(0, sum(map(len, codes)) - sum(map(len, paint.codes))))
         paint = Paint(codes, paint.colours)
+    mesh = trimesh.Trimesh(vertices=points, faces=faces, process=False)
     return ColourPart(part.material_index, part.name, part.colour, mesh, paint)
+
+
+def _keep_corner_order(
+    faces: np.ndarray,
+    points: np.ndarray,
+    own: np.ndarray,
+    original: np.ndarray,
+    was: trimesh.Trimesh,
+) -> None:
+    """Turn each face the cut left whole back to its original first corner, in place: a
+    painting's tree is read from the corners in order, and Manifold may start a
+    triangle at another one."""
+    rows = np.flatnonzero(own)
+    have = points[faces[rows]]
+    want = np.asarray(was.vertices)[np.asarray(was.faces)[original[rows]]]
+    errors = np.stack([np.abs(np.roll(have, -k, axis=1) - want).max(axis=(1, 2)) for k in range(3)])
+    turn = errors.argmin(axis=0)
+    whole = errors.min(axis=0) < 1e-6 * max(1.0, float(np.abs(want).max(initial=0.0)))
+    for k in (1, 2):
+        pick = rows[whole & (turn == k)]
+        faces[pick] = np.roll(faces[pick], -k, axis=1)
 
 
 def read_objects(payload: bytes, budget: ReadBudget | None = None) -> list[ReadObject]:

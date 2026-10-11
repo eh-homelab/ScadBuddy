@@ -227,13 +227,82 @@ def test_what_a_cut_adds_is_spent_against_the_read_budget() -> None:
         read_objects(payload, ReadBudget(max_paint_digits=read))
 
 
+def _painted_xml(mesh: trimesh.Trimesh, object_id: int, codes: list[str]) -> str:
+    vertices = "".join(f'<vertex x="{v[0]}" y="{v[1]}" z="{v[2]}"/>' for v in mesh.vertices)
+    triangles = "".join(
+        f'<triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"'
+        + (f' paint_color="{code}"' if code else "")
+        + "/>"
+        for f, code in zip(mesh.faces, codes, strict=True)
+    )
+    return (
+        f'<object id="{object_id}" type="model"><mesh><vertices>{vertices}</vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object>"
+    )
+
+
+def test_coplanar_faces_painted_apart_keep_their_own_painting_through_a_cut() -> None:
+    """Manifold names a coplanar group by one face unless each face's id is given: the
+    side's two triangles, painted differently, must each keep their own code, corners
+    in their own order (a code's tree is read from them)."""
+    body = _box(20, 10, 5)
+    side = [i for i, n in enumerate(body.face_normals) if np.allclose(n, (-1, 0, 0))]
+    codes = [""] * len(body.faces)
+    codes[side[0]], codes[side[1]] = "4", "8"
+    objects = _painted_xml(body, 1, codes) + _mesh_xml(_hole(), 2)
+    [obj] = read_objects(_painted_project(objects, ("normal_part", "negative_part")))
+    [part] = obj.parts
+    assert part.paint is not None
+    out = part.mesh.vertices[part.mesh.faces]
+    for index in side:
+        corners = body.vertices[body.faces[index]]
+        [match] = [i for i in range(len(out)) if np.allclose(out[i], corners, atol=1e-4)]
+        assert part.paint.codes[match] == codes[index]
+
+
+def test_a_painted_negative_part_is_only_a_cutter() -> None:
+    """Its painting prints nothing, so a file with no filaments to name is not refused."""
+    hole = _hole()
+    objects = _mesh_xml(_box(20, 10, 5), 1) + _painted_xml(hole, 2, ["8"] * len(hole.faces))
+    [obj] = read_objects(_painted_project(objects, ("normal_part", "negative_part"), colours=()))
+    [part] = obj.parts
+    assert part.paint is None
+    assert part.mesh.volume == pytest.approx(20 * 10 * 5 - 5 * 5 * 5)
+
+
+def test_a_mirrored_object_with_a_negative_part_is_cut() -> None:
+    payload = bambu_project(
+        items=["-1 0 0 0 1 0 0 0 1 0 0 0"],
+        parts={1: (_box(20, 10, 5), "normal_part", None), 2: (_hole(), "negative_part", 1)},
+    )
+    [obj] = read_objects(payload)
+    [part] = obj.parts
+    assert part.mesh.is_watertight
+    assert part.mesh.volume == pytest.approx(20 * 10 * 5 - 5 * 5 * 5)
+
+
+def test_a_part_cut_away_whole_leaves_the_others_numbered_in_order() -> None:
+    small = _box(4, 4, 4)
+    small.apply_translation((8, 3, 0.5))  # inside the hole
+    payload = bambu_project(
+        items=[at(0, 0)],
+        parts={
+            1: (small, "normal_part", 2),
+            2: (_box(20, 10, 5), "normal_part", 1),
+            3: (_hole(), "negative_part", 1),
+        },
+    )
+    [obj] = read_objects(payload)
+    assert [(p.material_index, p.name, p.colour) for p in obj.parts] == [(1, "Color 1", "#FF0000")]
+
+
 def test_a_negative_part_in_an_open_mesh_is_refused() -> None:
     body = _box(20, 10, 5)
     body.update_faces(np.arange(len(body.faces)) != 0)
     payload = bambu_project(
         items=[at(0, 0)], parts={1: (body, "normal_part", None), 2: (_hole(), "negative_part", 1)}
     )
-    with pytest.raises(UnreadableObjectsError, match=r"negative part.*not closed"):
+    with pytest.raises(UnreadableObjectsError, match=r"Widget's part .*is not closed"):
         read_objects(payload)
 
 
@@ -276,7 +345,11 @@ def test_a_painted_part_keeps_its_faces_in_order_beside_plain_parts() -> None:
     assert np.allclose(painted.mesh.vertices[painted.mesh.faces[0]], body.vertices[body.faces[0]])
 
 
-def _painted_project(objects: str) -> bytes:
+def _painted_project(
+    objects: str,
+    subtypes: tuple[str, str] = ("normal_part", "normal_part"),
+    colours: tuple[str, ...] = ("#FF0000", "#00FF00"),
+) -> bytes:
     """`bambu_project`'s shape with the object file's meshes given as XML, both parts
     extruder 1, at the origin."""
     root = (
@@ -288,8 +361,8 @@ def _painted_project(objects: str) -> bytes:
     )
     settings = (
         '<config><object id="10"><metadata key="name" value="Widget"/>'
-        '<metadata key="extruder" value="1"/><part id="1" subtype="normal_part"/>'
-        '<part id="2" subtype="normal_part"/></object></config>'
+        f'<metadata key="extruder" value="1"/><part id="1" subtype="{subtypes[0]}"/>'
+        f'<part id="2" subtype="{subtypes[1]}"/></object></config>'
     )
     return _zip(
         {
@@ -299,9 +372,7 @@ def _painted_project(objects: str) -> bytes:
                 "<build/></model>"
             ),
             "Metadata/model_settings.config": settings,
-            "Metadata/project_settings.config": json.dumps(
-                {"filament_colour": ["#FF0000", "#00FF00"]}
-            ),
+            "Metadata/project_settings.config": json.dumps({"filament_colour": list(colours)}),
         }
     )
 
