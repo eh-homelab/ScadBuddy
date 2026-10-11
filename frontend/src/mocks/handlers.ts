@@ -3545,9 +3545,6 @@ export const handlers = [
   }),
 
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
-  http.get(`${base}/ai/templates/blank`, () =>
-    HttpResponse.json({ source: '// A blank starter\n/* [Hidden] */\n$fn = 64;\n\ncube(10);\n' }),
-  ),
   http.get(`${base}/ai/settings/headless-browser`, () =>
     HttpResponse.json({ enabled: state.headlessBrowser }),
   ),

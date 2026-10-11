@@ -12,6 +12,10 @@ export type BlankTemplateView = { source: string }
 /** The blank starter template, for the UI. */
 export const route: RouteModule = {
   register(app) {
-    app.get('/api/v1/ai/templates/blank', (c) => c.json({ source: BLANK_TEMPLATE } satisfies BlankTemplateView))
+    app.get('/api/v1/ai/templates/blank', (c) => {
+      // A constant of the image: a browser may keep it for an hour.
+      c.header('Cache-Control', 'public, max-age=3600')
+      return c.json({ source: BLANK_TEMPLATE } satisfies BlankTemplateView)
+    })
   },
 }
