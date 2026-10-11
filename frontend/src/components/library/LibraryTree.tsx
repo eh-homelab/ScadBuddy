@@ -173,7 +173,7 @@ export function LibraryTree({ folders, selected, onSelect }: Props) {
           {folder.file_count ? <span className="sb-num ml-auto pl-1 text-faint">{folder.file_count}</span> : null}
         </div>
         {branch && open && (
-          <ul role="group">
+          <ul role="group" className="mt-0.5 space-y-0.5">
             {(children.get(folder.id) ?? []).map((child) => renderFolder(child, level + 1))}
           </ul>
         )}

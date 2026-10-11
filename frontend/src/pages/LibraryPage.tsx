@@ -212,7 +212,7 @@ export function LibraryPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6">
+      <div className={`mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6 ${deleted ? 'pb-44' : ''}`}>
         <nav aria-label="Library" className="w-full md:w-60 md:shrink-0">
           {tree ? (
             <LibraryTree folders={tree} selected={folderId} onSelect={selectFolder} />
@@ -455,7 +455,7 @@ function DeletedToast({
       {restored === null && result.skipped.length > 0 && (
         <div data-testid="library-skipped">
           <p className="text-warn">Not deleted:</p>
-          <ul className="list-disc pl-5 text-[12px] break-all text-muted">
+          <ul className="list-disc pl-5 text-[12px] break-words text-muted">
             {result.skipped.map((file) => (
               <li key={file.id}>
                 {file.filename ?? `#${file.id}`}: {file.reason}
