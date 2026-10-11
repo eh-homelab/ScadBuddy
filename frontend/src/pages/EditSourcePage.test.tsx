@@ -491,6 +491,8 @@ describe('EditSourcePage, live (#269)', () => {
 
     await user.click(within(banner).getByRole('button', { name: 'Compare' }))
     expect(screen.getByTestId('diff-original')).toHaveTextContent(THEIRS.trim())
+    // The banner row is the live region, not the diff: typing must not re-announce it (#2194).
+    expect(screen.getByTestId('source-diff').closest('[role="status"]')).toBeNull()
     expect(screen.getByTestId('diff-modified')).toHaveTextContent('sphere(2);')
     // The buffer stays editable, and the diff follows it.
     await user.type(editor, '// mine')

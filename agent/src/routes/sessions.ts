@@ -58,6 +58,11 @@ import { ready, type RouteModule } from './module.js'
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
+//   DELETE /api/v1/ai/sessions/:id/handoff        → {cancelled, session}: withdraw the session's live
+//                                                 handoff offer, or decline one made to the browser
+//                                                 user (#1284; manager.ts `cancelHandoff`, as MCP's
+//                                                 sessions_cancel_handoff). `cancelled` is false when
+//                                                 there was none (it expired, or was accepted)
 //   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true, archived?} → {session}: rename
 //                                                 it, mark it done (#795), or archive or unarchive it
 //                                                 (#1885; sessions/edits.ts). Owner-only (403); done is
@@ -348,6 +353,25 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }),
   )
 
+  app.get(
+    `${base}/:id/http/:saved`,
+    route('read', async (c, sessions) => {
+      const { meta, bytes } = await sessions.httpBody(idOf(c), c.req.param('saved') ?? '', BROWSER_USER)
+      // Untrusted bytes from whatever server answered (#1292). Plain text and JSON
+      // are shown as text; everything else, HTML and SVG included, only downloads.
+      // Nothing in either may run, and no other site may embed it.
+      const viewable = /^(text\/plain|application\/(?:[\w.+-]+\+)?json)\b/i.test(meta.content_type ?? '')
+      return c.body(new Uint8Array(bytes), 200, {
+        'Content-Type': viewable ? 'text/plain; charset=utf-8' : 'application/octet-stream',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Cross-Origin-Resource-Policy': 'same-origin',
+        'Content-Disposition': `${viewable ? 'inline' : 'attachment'}; filename="response-${c.req.param('saved')!.slice(0, 8)}.${viewable ? 'txt' : 'bin'}"`,
+        'Cache-Control': 'private, no-store',
+      })
+    }),
+  )
+
   app.post(
     `${base}/:id/messages`,
     limit,
@@ -373,6 +397,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) =>
       c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER), BROWSER_USER)),
     ),
+  )
+
+  app.delete(
+    `${base}/:id/handoff`,
+    limit,
+    route('write', async (c, sessions) => {
+      const cancelled = await sessions.cancelHandoff(idOf(c), BROWSER_USER)
+      return c.json({ cancelled, session: sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER) })
+    }),
   )
 
   app.post(

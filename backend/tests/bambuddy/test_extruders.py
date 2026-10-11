@@ -298,11 +298,32 @@ def test_a_nozzle_of_the_other_flow_still_beats_another_size(
 
 
 @pytest.mark.parametrize(
+    ("mounted", "nozzles", "expected"),
+    [
+        # Queue 268: a 0.4 High Flow on both sides, High Flow chosen.
+        (
+            (("HH00", "0.4"), ("HH01", "0.4")),
+            _choose("0.4", "high_flow"),
+            ["High Flow#1", "High Flow#1"],
+        ),
+        # The owner's case (a): a standard 0.2 on both sides.
+        ((("HS00", "0.2"), ("HS00", "0.2")), _size("0.2"), ["Standard#1", "Standard#1"]),
+    ],
+)
+def test_two_sides_of_the_chosen_nozzle_are_both_offered(
+    mounted: tuple[tuple[str, str], tuple[str, str]],
+    nozzles: list[NozzleChoice],
+    expected: list[str],
+) -> None:
+    """#2181: either side may print, so both are stated. Left as ``None``, a library
+    file kept its own stats, and one made for a single extruder offered the slicer one
+    side: queue 268 sliced both colours onto the left."""
+    assert slicer_nozzle_stats(_nozzles(*mounted), nozzles) == expected
+
+
+@pytest.mark.parametrize(
     ("status", "size"),
     [
-        # Both sides have it (the owner's case (a)): either may print, so the slicer
-        # keeps its own choice.
-        (_nozzles(("HS00", "0.2"), ("HS00", "0.2")), "0.2"),
         # Neither has it: stating no nozzle anywhere fails the slice, and the printer
         # may swap one in (#768), so the file is left as it was.
         (fts_status(), "0.6"),

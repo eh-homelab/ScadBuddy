@@ -1882,10 +1882,58 @@ class Catalogue:
         except FileNotFoundError:
             raise SidecarNotFoundError(README_NAME) from None
 
-    def write_readme(self, slug: str, text: str) -> ModelRecord:
-        """Set or replace the model's README, as one revision."""
-        self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
-        self._commit(f"Set {slug} README", slug)
+    def write_readme(
+        self,
+        slug: str,
+        text: str,
+        *,
+        message: str | None = None,
+        expected_version: str | None = None,
+    ) -> ModelRecord:
+        """Set or replace the model's README, as one revision.
+
+        ``expected_version`` is as :meth:`write_file`'s (#1067): unless the model is
+        still at it, :class:`StaleVersionError` with nothing written, checked under the
+        history's write lock, and the README is only ever kept with its revision.
+        """
+        message = message or f"Set {slug} README"
+        if expected_version is None:
+            self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
+            self._commit(message, slug)
+            return self.record(slug)
+        self._require(slug)
+        history = self.history
+        if history is None or not history.available:
+            raise GitUnavailableError("model history is unavailable, so no base can be checked")
+        path = self.readme_path(slug)
+        written = False
+        # What the write replaced, None when there was no README: what `undo` puts back.
+        previous: bytes | None = None
+
+        def change() -> None:
+            nonlocal written, previous
+            current = history.last_commit(model_path(slug))
+            if current is None or not current.startswith(expected_version):
+                raise StaleVersionError(slug, expected_version, current)
+            previous = path.read_bytes() if path.is_file() else None
+            self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
+            written = True
+
+        def undo() -> None:
+            nonlocal written
+            if not written:
+                return
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_atomic(path, previous)
+            written = False
+
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if written:
+                self.notify_change(slug)
         return self.record(slug)
 
     def delete_readme(self, slug: str) -> ModelRecord:

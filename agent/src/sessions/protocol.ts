@@ -74,6 +74,8 @@ export type SessionSummary = {
   budgetUsd: number
   /** Classic or durable (plan 5d), for the switcher's badge. */
   mode: SessionMode
+  /** A live handoff offer (manager.ts `handoff`), for the switcher's "Offered to" badge (#1284). */
+  offer: { to: SeenOwner; until: string } | null
 }
 
 type V = { v: typeof PROTOCOL_VERSION }

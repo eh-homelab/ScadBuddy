@@ -402,7 +402,9 @@ export function ActionBar({
         disabled={!ready}
         onImage={() => setImageOpen(true)}
         // #1289 — a breakdown says something only with two colours or more, and the
-        // backend draws at most 16.
+        // backend draws at most 16. The backend counts the colours the GLB's parts
+        // carry, which can exceed the job's extruder colours, so a job offered here
+        // can still get a 422 past the cap; the dialog shows that refusal.
         onColours={
           job?.colors && job.colors.length > 1 && job.colors.length <= MAX_BREAKDOWN_COLOURS
             ? () => setColoursOpen(true)

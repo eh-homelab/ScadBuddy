@@ -396,6 +396,47 @@ export const printTools: Tool[] = [
     },
   }),
 
+  // #2167 — Bambuddy's library writes: a delete to its trash, and the restore that undoes it.
+  defineTool({
+    name: 'delete_library_files',
+    description:
+      "Delete files from Bambuddy's library (ids from list_library), moving them to Bambuddy's trash. A file " +
+      'linked from an external folder (`is_external`) is removed for good. Bambuddy may skip a file its API ' +
+      "key's user did not add: those are listed in `skipped`, not deleted. A file a print waiting in " +
+      "Bambuddy's queue names is refused. restore_library_files undoes a delete.",
+    input: z.object({ file_ids: z.array(libraryFileId).min(1).max(500) }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/delete'],
+    summarize: ({ file_ids }) =>
+      `Delete ${file_ids.length === 1 ? `library file ${file_ids[0]}` : `${file_ids.length} library files`} to Bambuddy's trash`,
+    handler: async ({ file_ids }, ctx) =>
+      json(
+        await command(ctx, 'delete library files', (headers) =>
+          ctx.backend.POST('/api/v1/print/library/delete', { body: { file_ids }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'restore_library_files',
+    description:
+      "Restore deleted files from Bambuddy's trash, under their own ids: a delete_library_files undone. A file " +
+      'not in the trash (an external one, or one emptied from it) is listed in `skipped`.',
+    input: z.object({ file_ids: z.array(libraryFileId).min(1).max(500) }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/restore'],
+    summarize: ({ file_ids }) =>
+      `Restore ${file_ids.length === 1 ? `library file ${file_ids[0]}` : `${file_ids.length} library files`} from Bambuddy's trash`,
+    handler: async ({ file_ids }, ctx) =>
+      json(
+        await command(ctx, 'restore library files', (headers) =>
+          ctx.backend.POST('/api/v1/print/library/restore', { body: { file_ids }, headers }),
+        ),
+      ),
+  }),
+
   // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
   defineTool({
     name: 'remember_model_print_choices',

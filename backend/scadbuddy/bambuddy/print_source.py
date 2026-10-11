@@ -99,6 +99,12 @@ class PrintSource(Protocol):
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
 
+    @property
+    def slices_whole_file(self) -> bool:
+        """Whether its slice asks for the whole file rather than a plate
+        (:attr:`~scadbuddy.bambuddy.dispatch.SlicePlan.whole_file`, #2180)."""
+        ...
+
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
         """The 3MF to lay out and slice: the one thing that differs between an output
         and a library file (#1752). ``None`` when there are no bytes to lay out: a
@@ -419,6 +425,12 @@ class OutputSource(PrintPipeline):
         return download_filename(self.meta)
 
     @property
+    def slices_whole_file(self) -> bool:
+        """Never: only a library file is sliced whole (#2180); a render names its plate
+        as it always has."""
+        return False
+
+    @property
     def origin_id(self) -> int | None:
         return None
 
@@ -529,6 +541,12 @@ class LibrarySource(PrintPipeline):
     @property
     def print_settings(self) -> dict[str, str]:
         return {}
+
+    @property
+    def slices_whole_file(self) -> bool:
+        """A file of one plate (#2180). Plate 0 slices every plate, so a file with more
+        keeps naming the one chosen."""
+        return len(self.plates) == 1
 
     @property
     def inbox_name(self) -> str:

@@ -341,6 +341,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
+  // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
+  delete_library_files: (_input, result) =>
+    (Array.isArray(field(result, 'deleted')) ? (field(result, 'deleted') as unknown[]) : []).flatMap((file) => {
+      const id = bambuddyId(field(file, 'id'))
+      return id ? [{ type: 'bambuddy_file' as const, id, action: 'deleted' as const }] : []
+    }),
+  restore_library_files: (_input, result) =>
+    ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
   remember_model_print_choices: (input) => {
     const slug = str(input.slug)
     const file = bambuddyId(input.library_file_id)

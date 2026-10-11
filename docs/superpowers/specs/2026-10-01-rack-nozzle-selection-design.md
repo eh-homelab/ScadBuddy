@@ -562,6 +562,14 @@ Serials go into the three `rack_nozzle_*` tables and nowhere else. They never ap
 in logs, in API errors, in the print dialog (which shows positions), in test
 fixtures (which use invented serials), or in commits.
 
+**Amended (#2170).** The owner asked to see each hotend's serial in Settings. So
+`GET /print/printers/{id}/rack-usage` answers it (`RackHotendUsage.serial`) and the
+Hotend usage panel shows it; that route and that panel are the only places it reaches
+the browser. Everything else above still holds: no serial in logs, API errors, `/check`
+or the print dialog, fixtures or commits (`test_no_serial_appears_anywhere_in_the_check_body` still holds
+the dialog to it). A hotend's spool history (`rack_nozzle_pick_spools`) starts with #2170: picks
+made before it have no spool rows, so their prints count but name no spool.
+
 **Decision (#1011).** The type-name-only rule is kept knowingly. A failure on these
 paths is logged with a fixed message naming the step, `type(exc).__name__` and the
 ids, which says *where* and *what class* failed. A redaction pass over `str(exc)` was

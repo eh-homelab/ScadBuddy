@@ -32,6 +32,8 @@ import {
   httpRequestEnabled,
   httpRequestServer,
   httpTierOf,
+  type SavedMeta,
+  savedBody,
   SETTING_HTTP_REQUEST,
 } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
@@ -959,6 +961,18 @@ export class SessionManager {
     return blob
   }
 
+  /**
+   * A response body the session's http_request saved (#1292), by the id its
+   * audit row names; not_found for a session the principal may not see, or a
+   * body that is not (or no longer) in the session's directory on this replica.
+   */
+  async httpBody(id: string, saved: string, principal: Owner): Promise<{ meta: SavedMeta; bytes: Buffer }> {
+    await this.get(id, principal)
+    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
+    return body
+  }
+
   /** Newest first. */
   async list(principal: Owner, filter: ListFilter = {}): Promise<SessionRecord[]> {
     const { text, params } = listQuery(principal, filter)
@@ -983,6 +997,9 @@ export class SessionManager {
         costUsd: s.costUsd,
         budgetUsd: s.budgetUsd,
         mode: s.mode,
+        // #1284 — the switcher's "Offered to" badge and Cancel offer; an expired offer reads as
+        // none. Its target is named only as `principal` may see it, as the session routes do.
+        offer: s.offer ? { to: ownerSeenBy(principal, s.offer.to), until: s.offer.until } : null,
       })),
     })
   }
@@ -2214,8 +2231,8 @@ export class SessionManager {
   /**
    * Announces a change to a session's offer as `session.owner` on the bus
    * (busEvents.ts), so a watcher of the session or of the list re-reads it. An
-   * offer is state on the session row, not a transcript event (the panel's
-   * protocol has none for it), so nothing is appended.
+   * offer is state on the session row, not a transcript event (the panel reads it
+   * from `sessions.snapshot`, #1284), so nothing is appended.
    */
   private async announceOwner(id: string): Promise<void> {
     const session = await this.row(id)

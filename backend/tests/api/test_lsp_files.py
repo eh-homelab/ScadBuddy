@@ -421,3 +421,82 @@ def test_the_open_descriptor_is_where_the_file_is(tmp_path: Path) -> None:
     (tmp_path / "a.scad").write_text("x\n", encoding="utf-8")
     with (tmp_path / "a.scad").open("rb") as file:
         assert editor_files.opened_path(file.fileno()) == (tmp_path / "a.scad").resolve()
+
+
+# ── listings (#1067) ──────────────────────────────────────────────────────────
+
+
+def test_a_models_tree_lists_every_plain_file_with_its_size(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    directory = paths.model_dir(model)
+    (directory / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (directory / "ui").mkdir()
+    (directory / "ui" / "index.html").write_text("<p>hi</p>\n", encoding="utf-8")
+    (directory / "images").mkdir()
+    (directory / "images" / "cover.png").write_bytes(b"\x89PNG")
+    # Never listed: dot-files, dot-directories, and symlinks of either kind.
+    (directory / ".renders").mkdir()
+    (directory / ".renders" / "job.stl").write_text("solid\n", encoding="utf-8")
+    (directory / ".secret.scad").write_text("TOP SECRET\n", encoding="utf-8")
+    (paths.root / "outside").mkdir()
+    (paths.root / "outside" / "secret.scad").write_text("TOP SECRET\n", encoding="utf-8")
+    (directory / "door").symlink_to(paths.root / "outside")
+    (directory / "peek.scad").symlink_to(paths.root / "outside" / "secret.scad")
+
+    response = client.get(f"/api/v1/models/{model}/tree")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["truncated"] is False
+    assert [f["path"] for f in body["files"]] == [
+        "README.md",
+        "images/cover.png",
+        "model.json",
+        "model.scad",
+        "ui/index.html",
+    ]
+    assert {f["path"]: f["size"] for f in body["files"]}["README.md"] == len("# Demo\n")
+    assert client.get("/api/v1/models/nobody/tree").status_code == 404
+
+
+def test_a_listing_past_the_cap_is_cut_and_says_so(tmp_path: Path) -> None:
+    for i in range(5):
+        (tmp_path / f"f{i}.scad").write_text("x\n", encoding="utf-8")
+
+    files, truncated = editor_files.list_files(tmp_path, limit=3)
+
+    assert truncated is True
+    assert [path for path, _ in files] == ["f0.scad", "f1.scad", "f2.scad"]
+    assert editor_files.list_files(tmp_path, limit=5) == (
+        [(f"f{i}.scad", 2) for i in range(5)],
+        False,
+    )
+
+
+def test_a_pinned_librarys_files_are_listed_from_its_checkout(
+    client: TestClient, model: str, library: Path, paths: DataPaths
+) -> None:
+    (library / "tests").mkdir()
+    (library / "tests" / "test_shapes.scad").write_text("include <../std.scad>\n", "utf-8")
+    (library / ".github").mkdir()
+    (library / ".github" / "ci.yml").write_text("on: push\n", encoding="utf-8")
+
+    response = client.get(f"/api/v1/models/{model}/libraries/BOSL2/files")
+
+    assert response.status_code == 200, response.text
+    assert [f["path"] for f in response.json()["files"]] == [
+        "shapes3d.scad",
+        "std.scad",
+        "tests/test_shapes.scad",
+    ]
+
+
+def test_a_library_listing_needs_the_pin_and_its_checkout(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    assert client.get(f"/api/v1/models/{model}/libraries/BOSL2/files").status_code == 404
+    _pin(paths, model, [PIN])
+    gone = client.get(f"/api/v1/models/{model}/libraries/BOSL2/files")
+    assert gone.status_code == 404
+    assert "not on the volume" in gone.json()["detail"]
