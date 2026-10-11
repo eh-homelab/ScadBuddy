@@ -14,10 +14,19 @@ A part painted in several colours in Bambu Studio (``paint_color``, #1965) is on
 of its own, its painting carried as it is (:class:`~scadbuddy.render.split.Paint`):
 where each colour falls on it is the slicer's to work out again, as it was for the file.
 
+A negative part is cut out of its object's other parts, as Bambu Studio cuts it
+(#2146), with Manifold (``manifold3d``, the library OpenSCAD's ``--backend=Manifold``
+is): each face it leaves keeps its painting, by the original face Manifold says it
+came from, and the walls the cut opens are the part's own colour. A face the cut split
+keeps its whole triangle's painting on the smaller triangle, so its colours are those
+of the face it was; on the 1943 ankylosaurs keychain that is 950 of 133,534 painted
+faces, all at the keyring hole.
+
 What cannot be read faithfully is refused (:class:`UnreadableObjectsError`) rather than
 guessed: a sliced file, PrusaSlicer's painting, painting in a file with no Bambu Studio
-filaments for it to name, a painted part the file mirrors, a negative part. Modifiers
-and support blockers or enforcers print nothing and are dropped, with a note.
+filaments for it to name, a painted part the file mirrors, a negative part in or of a
+mesh that is not closed. Modifiers and support blockers or enforcers print nothing and
+are dropped, with a note.
 
 The file is untrusted: the archive is bounded as the print path bounds it
 (:data:`~scadbuddy.render.bambu3mf.MAX_UNCOMPRESSED_BYTES`), every entry is read
@@ -38,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from xml.sax.saxutils import quoteattr
 
+import manifold3d
 import numpy as np
 import trimesh
 
@@ -460,6 +470,7 @@ class _Reader:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
         # A painted mesh stays a part of its own: its faces are its painting's (#1965).
         painted: list[tuple[str, trimesh.Trimesh, Paint]] = []
+        negatives: list[trimesh.Trimesh] = []
         notes: list[str] = []
 
         def add(pieces: Iterator[_Piece]) -> None:
@@ -480,10 +491,13 @@ class _Reader:
                 cid = component.get("objectid", "")
                 part = settings.parts.get(cid, _PartSettings(None, "normal_part"))
                 if part.subtype == "negative_part":
-                    raise UnreadableObjectsError(
-                        f"object {settings.name or object_id} has a negative part, which"
-                        " Arrange cannot cut out"
-                    )
+                    path = (component.get(_PATH) or "").lstrip("/") or model
+                    combined = _combine(matrix, _matrix(component.get("transform")))
+                    extruder = part.extruder or settings.extruder or 1
+                    for _, points, faces, _ in self.meshes(path, cid, combined, extruder):
+                        negative = trimesh.Trimesh(vertices=points, faces=faces, process=False)
+                        negatives.append(negative)
+                    continue
                 if part.subtype in _DROPPED:
                     note = f"a {part.subtype.replace('_', ' ')} was left out"
                     if note not in notes:
@@ -507,7 +521,55 @@ class _Reader:
         for colour, mesh, paint in painted:
             index = len(parts) + 1
             parts.append(ColourPart(index, f"Color {index}", colour, mesh, paint))
+        if negatives:
+            name = settings.name if settings is not None and settings.name else object_id
+            cut = [_cut_out(part, negatives, name) for part in parts]
+            parts = [part for part in cut if part is not None]
+            notes.append("a negative part was cut out")
         return parts, notes
+
+
+def _solid(mesh: trimesh.Trimesh, name: str) -> manifold3d.Manifold:
+    shape = manifold3d.Mesh(
+        vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
+        tri_verts=np.asarray(mesh.faces, dtype=np.uint32),
+    )
+    shape.merge()
+    solid = manifold3d.Manifold(shape)
+    if solid.status() != manifold3d.Error.NoError:
+        raise UnreadableObjectsError(
+            f"object {name} has a negative part, and a mesh of it is not closed, so the"
+            " part cannot be cut out"
+        )
+    return solid.as_original()
+
+
+def _cut_out(part: ColourPart, negatives: list[trimesh.Trimesh], name: str) -> ColourPart | None:
+    """``part`` less every negative part, its painting carried face by face; None when
+    nothing of it is left."""
+    solid = _solid(part.mesh, name)
+    kept = solid
+    for negative in negatives:
+        kept = kept - _solid(negative, name)
+    out = kept.to_mesh()
+    faces = np.asarray(out.tri_verts, dtype=np.int64)
+    if not len(faces):
+        return None
+    points = np.asarray(out.vert_properties, dtype=np.float64)[:, :3]
+    mesh = trimesh.Trimesh(vertices=points, faces=faces, process=False)
+    paint = part.paint
+    if paint is not None:
+        # Each run of faces came from one input mesh; a face from the part's own keeps its
+        # original face's painting, a wall the cut opened is the part's colour.
+        runs = np.diff(np.asarray(out.run_index, dtype=np.int64)) // 3
+        source = np.repeat(np.asarray(out.run_original_id), runs)
+        original = np.asarray(out.face_id, dtype=np.int64)
+        own = source == solid.original_id()
+        paint = Paint(
+            tuple(paint.codes[f] if mine else "" for f, mine in zip(original, own, strict=True)),
+            paint.colours,
+        )
+    return ColourPart(part.material_index, part.name, part.colour, mesh, paint)
 
 
 def read_objects(payload: bytes, budget: ReadBudget | None = None) -> list[ReadObject]:

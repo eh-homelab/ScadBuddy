@@ -378,7 +378,15 @@
       "#9D2235"
     ],
     "arrange_reads": {
-      "refused": "object anquilosaurio_3556_autosave-Esfera.003.stl has a negative part, which Arrange cannot cut out"
+      "objects": 3,
+      "copies": 3,
+      "colours": [
+        "#9D432C"
+      ],
+      "painted_parts": 3,
+      "notes": [
+        "a negative part was cut out"
+      ]
     }
   },
   {
@@ -416,7 +424,15 @@
       "#FFFFFF"
     ],
     "arrange_reads": {
-      "refused": "object Adapter has a negative part, which Arrange cannot cut out"
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#F99963"
+      ],
+      "painted_parts": 0,
+      "notes": [
+        "a negative part was cut out"
+      ]
     }
   },
   {

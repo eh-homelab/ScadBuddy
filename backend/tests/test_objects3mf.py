@@ -151,7 +151,7 @@ def test_a_component_transform_applies() -> None:
     assert tuple(np.round(obj.parts[0].mesh.extents, 3)) == (40, 20, 10)
 
 
-def test_a_modifier_is_dropped_and_a_negative_part_refused() -> None:
+def test_a_modifier_is_dropped() -> None:
     payload = bambu_project(
         items=[at(0, 0)],
         parts={
@@ -162,12 +162,62 @@ def test_a_modifier_is_dropped_and_a_negative_part_refused() -> None:
     [obj] = read_objects(payload)
     assert [p.colour for p in obj.parts] == ["#FF0000"]
     assert obj.notes and "modifier" in obj.notes[0]
-    negative = bambu_project(
+
+
+def _hole() -> trimesh.Trimesh:
+    """A 5 x 5 mm negative part through the middle of `_box(20, 10, 5)`."""
+    hole = _box(5, 5, 9)
+    hole.apply_translation((7.5, 2.5, -2))
+    return hole
+
+
+def _in_the_hole(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Which faces are the hole's walls: inside its outline, between the box's faces."""
+    x, y, z = np.asarray(mesh.triangles_center).T
+    e = 1e-4
+    found: np.ndarray = (x > 7.5 - e) & (x < 12.5 + e) & (y > 2.5 - e) & (y < 7.5 + e)
+    found &= (z > e) & (z < 5 - e)
+    return found
+
+
+def test_a_negative_part_is_cut_out() -> None:
+    """Bambu Studio subtracts a negative part from the object it is in; Arrange does
+    the same (#2146: the ankylosaurs keychain, library file 1943, was refused)."""
+    payload = bambu_project(
         items=[at(0, 0)],
-        parts={1: (_box(20, 10, 5), "normal_part", None), 2: (_box(5, 5, 5), "negative_part", 1)},
+        parts={1: (_box(20, 10, 5), "normal_part", None), 2: (_hole(), "negative_part", 1)},
     )
-    with pytest.raises(UnreadableObjectsError, match="negative"):
-        read_objects(negative)
+    [obj] = read_objects(payload)
+    [part] = obj.parts
+    assert part.mesh.is_watertight
+    assert part.mesh.volume == pytest.approx(20 * 10 * 5 - 5 * 5 * 5)
+    assert _in_the_hole(part.mesh).any()
+    assert "a negative part was cut out" in obj.notes
+
+
+def test_a_cut_out_painted_part_keeps_its_painting_and_leaves_the_walls_its_own() -> None:
+    payload = bambu_project(
+        items=[at(0, 0)],
+        parts={1: (_box(20, 10, 5), "normal_part", 1), 2: (_hole(), "negative_part", 1)},
+        triangle_extra=' paint_color="8"',
+    )
+    [obj] = read_objects(payload)
+    [part] = obj.parts
+    assert part.paint is not None and len(part.paint.codes) == len(part.mesh.faces)
+    codes = np.array(part.paint.codes)
+    walls = _in_the_hole(part.mesh)
+    assert set(codes[walls]) == {""}
+    assert set(codes[~walls]) == {"8"}
+
+
+def test_a_negative_part_in_an_open_mesh_is_refused() -> None:
+    body = _box(20, 10, 5)
+    body.update_faces(np.arange(len(body.faces)) != 0)
+    payload = bambu_project(
+        items=[at(0, 0)], parts={1: (body, "normal_part", None), 2: (_hole(), "negative_part", 1)}
+    )
+    with pytest.raises(UnreadableObjectsError, match=r"negative part.*not closed"):
+        read_objects(payload)
 
 
 def test_a_painted_object_is_one_part_carrying_its_painting() -> None:

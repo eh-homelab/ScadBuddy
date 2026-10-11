@@ -402,6 +402,24 @@ wheels = [
 ]
 
 [[package]]
+name = "manifold3d"
+version = "3.5.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f3/0f/1f7e51a8f9a6f25e837159c5bf7c95a3ae948aa12e1c5fdeee0fd90ca5f9/manifold3d-3.5.4.tar.gz", hash = "sha256:5bd88c482c6fd7fc01aa7b715b3e31c2585ee98343d5559d286ba30db0d0b6f0", size = 307695, upload-time = "2026-09-25T10:46:09.083Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ad/f4/3bde89d5e37eb223ef7493b9ba782462dd8aea5af07d0370e6ce8a847186/manifold3d-3.5.4-cp312-cp312-macosx_10_14_universal2.whl", hash = "sha256:d4b47d7b0aba1ba1b575e7d549be8c9ba2d552b03e4043e3022454fdaad13447", size = 1843283, upload-time = "2026-09-25T10:45:25.725Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/95/3b2e63c154d3b2e70cb8e52fc72a061eaf1bc82e826c955b324381162dc7/manifold3d-3.5.4-cp312-cp312-macosx_10_14_x86_64.whl", hash = "sha256:b1ae587cf7cfa489fb50bba84a0e048d9daadd105b6a047a312e45a7602163fa", size = 1005349, upload-time = "2026-09-25T10:45:27.09Z" },
+    { url = "https://files.pythonhosted.org/packages/66/28/6ec4f751be1b5868964eb92925da789c985efdaff5f0a5f85b47cbd87428/manifold3d-3.5.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d440e37d1e9888f90f42c70b4b3da98655be54105616e7739d84692bf7bda671", size = 884727, upload-time = "2026-09-25T10:45:28.554Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/f2/15ab84b2a80dcdc91ef53cde5fafdeb63cc3989646f17da7542011522b58/manifold3d-3.5.4-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4f4e8ca1c59d68047b262dbdb6e917ac4abff2942a65e7e469f4a398ce1f0b9b", size = 1317923, upload-time = "2026-09-25T10:45:30.034Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/04/91323ab10f23d185931b572622589673ec561a8106fa1ae0f2fc876fb960/manifold3d-3.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4a985892699268bbf07192b78b5e5569034c41ce74bf8183495123e8095af4fe", size = 1427177, upload-time = "2026-09-25T10:45:31.537Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/35/6b67f3af439f209b6f4ba653a5f3500f56464c99274fb4aa21323886c762/manifold3d-3.5.4-cp312-cp312-win_amd64.whl", hash = "sha256:5be1025860df8a83ed3c4fd585d87376b075e23ea45e833578fe77eacc49bee1", size = 1036128, upload-time = "2026-09-25T10:45:32.819Z" },
+    { url = "https://files.pythonhosted.org/packages/79/55/aacf4b263a8bef710108cdcf1469156b53e44a63af574b435262b0e46820/manifold3d-3.5.4-cp312-cp312-win_arm64.whl", hash = "sha256:559b6cd07976a6ab3edf9806e5f1757432c397589069e01a0045e78d326ff510", size = 1145058, upload-time = "2026-09-29T05:41:55.705Z" },
+]
+
+[[package]]
 name = "mypy"
 version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1104,6 +1122,7 @@ dependencies = [
     { name = "httpx" },
     { name = "jsonschema" },
     { name = "lxml" },
+    { name = "manifold3d" },
     { name = "networkx" },
     { name = "numpy" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -1145,6 +1164,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "lxml", specifier = ">=5.3" },
+    { name = "manifold3d", specifier = ">=3.5.4" },
     { name = "networkx", specifier = ">=3.4" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.45,<2" },
