@@ -523,7 +523,11 @@ class _Reader:
             parts.append(ColourPart(index, f"Color {index}", colour, mesh, paint))
         if negatives:
             name = settings.name if settings is not None and settings.name else object_id
-            cut = [_cut_out(part, negatives, name) for part in parts]
+            # One cutter, built once: their triangles were spent as they were read.
+            cutter = manifold3d.Manifold.batch_boolean(
+                [_solid(negative, name) for negative in negatives], manifold3d.OpType.Add
+            )
+            cut = [_cut_out(part, cutter, name, self._spend) for part in parts]
             parts = [part for part in cut if part is not None]
             notes.append("a negative part was cut out")
         return parts, notes
@@ -544,15 +548,20 @@ def _solid(mesh: trimesh.Trimesh, name: str) -> manifold3d.Manifold:
     return solid.as_original()
 
 
-def _cut_out(part: ColourPart, negatives: list[trimesh.Trimesh], name: str) -> ColourPart | None:
-    """``part`` less every negative part, its painting carried face by face; None when
-    nothing of it is left."""
+def _cut_out(
+    part: ColourPart,
+    cutter: manifold3d.Manifold,
+    name: str,
+    spend: Callable[..., None],
+) -> ColourPart | None:
+    """``part`` less ``cutter`` (its object's negative parts), its painting carried
+    face by face; None when nothing of it is left. What the cut adds is spent against
+    the read's budget like what was read: the faces it opens or splits, and the paint
+    digits a split face's copies repeat."""
     solid = _solid(part.mesh, name)
-    kept = solid
-    for negative in negatives:
-        kept = kept - _solid(negative, name)
-    out = kept.to_mesh()
+    out = (solid - cutter).to_mesh()
     faces = np.asarray(out.tri_verts, dtype=np.int64)
+    spend(triangles=max(0, len(faces) - len(part.mesh.faces)))
     if not len(faces):
         return None
     points = np.asarray(out.vert_properties, dtype=np.float64)[:, :3]
@@ -565,10 +574,9 @@ def _cut_out(part: ColourPart, negatives: list[trimesh.Trimesh], name: str) -> C
         source = np.repeat(np.asarray(out.run_original_id), runs)
         original = np.asarray(out.face_id, dtype=np.int64)
         own = source == solid.original_id()
-        paint = Paint(
-            tuple(paint.codes[f] if mine else "" for f, mine in zip(original, own, strict=True)),
-            paint.colours,
-        )
+        codes = tuple(paint.codes[f] if mine else "" for f, mine in zip(original, own, strict=True))
+        spend(paint_digits=max(0, sum(map(len, codes)) - sum(map(len, paint.codes))))
+        paint = Paint(codes, paint.colours)
     return ColourPart(part.material_index, part.name, part.colour, mesh, paint)
 
 

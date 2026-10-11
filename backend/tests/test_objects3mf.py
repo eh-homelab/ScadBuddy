@@ -210,6 +210,23 @@ def test_a_cut_out_painted_part_keeps_its_painting_and_leaves_the_walls_its_own(
     assert set(codes[~walls]) == {"8"}
 
 
+def test_what_a_cut_adds_is_spent_against_the_read_budget() -> None:
+    """The faces a cut opens or splits, and the paint digits a split face's copies
+    repeat, count like what was read: a file cannot buy past its budget with a cut."""
+    payload = bambu_project(
+        items=[at(0, 0)],
+        parts={1: (_box(20, 10, 5), "normal_part", 1), 2: (_hole(), "negative_part", 1)},
+        triangle_extra=' paint_color="8"',
+    )
+    read = 12 + 12  # the box's and the hole's triangles, each painted with one digit
+    [obj] = read_objects(payload, ReadBudget(max_triangles=10_000, max_paint_digits=10_000))
+    assert len(obj.parts[0].mesh.faces) > 12
+    with pytest.raises(UnreadableObjectsError, match="max_triangles"):
+        read_objects(payload, ReadBudget(max_triangles=read))
+    with pytest.raises(UnreadableObjectsError, match="max_paint_digits"):
+        read_objects(payload, ReadBudget(max_paint_digits=read))
+
+
 def test_a_negative_part_in_an_open_mesh_is_refused() -> None:
     body = _box(20, 10, 5)
     body.update_faces(np.arange(len(body.faces)) != 0)
