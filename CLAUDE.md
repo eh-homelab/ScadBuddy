@@ -445,7 +445,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
     `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
-    `ai_sessions.mode` is `durable`), and `AgentOperation` (`workflows.ts`, bundled by
+    `ai_sessions.mode` is `durable`, or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
+    run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
+    approval; no browser or answer tools)), and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
     the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
