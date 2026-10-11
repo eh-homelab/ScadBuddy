@@ -198,7 +198,12 @@ export class DurableTurns {
          AND ${POOL_COST} < ${POOL_BUDGET}
        RETURNING prior.prior_status, prior.durable_offset`,
       // The turn's tool activities run with these, cut to what the owner holds then (#2320).
-      [id, turn.author.kind, turn.author.id, turn.tiers ? [...turn.tiers] : null],
+      [
+        id,
+        turn.author.kind,
+        turn.author.id,
+        turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
+      ],
     )
     if (!claimed) return undefined
     let seq = 0

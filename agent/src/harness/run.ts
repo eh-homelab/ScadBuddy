@@ -309,15 +309,22 @@ export function remotePluginOptions(
   return { mcpServers, disallowedTools }
 }
 
+/** Whether the run loads any plugin with skills or agents: the own plugin or a package. */
+function loadsPlugins(run: Pick<HarnessRun, 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths'>): boolean {
+  return run.ownPlugin !== undefined || !!run.pluginPaths?.length || !!run.allowedPluginPaths?.length
+}
+
 /**
- * The tier resolver a run uses: the own plugin's Skill and Agent when it is
- * loaded, then its plugins' tiers, then `run.tierOf`.
+ * The tier resolver a run uses: Skill and Agent when any plugin is loaded,
+ * then its plugins' tiers, then `run.tierOf`.
  */
-export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin'>): TierResolver {
+export function harnessTierOf(
+  run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths'>,
+): TierResolver {
   const given = run.tierOf ?? (() => undefined)
   const remote = run.remotePlugins?.length ? pluginTierResolver(run.remotePlugins) : undefined
   const base: TierResolver = remote ? (toolName, input) => remote(toolName) ?? given(toolName, input) : given
-  if (run.ownPlugin === undefined) return base
+  if (!loadsPlugins(run)) return base
   return (toolName, input) => ownPluginTierOf(toolName) ?? base(toolName, input)
 }
 
@@ -521,7 +528,9 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   for (const p of run.allowedPluginPaths ?? []) plugins.push({ type: 'local', path: path.resolve(p) })
   const builtins = [
     ...new Set([
-      ...(run.ownPlugin !== undefined ? OWN_PLUGIN_TOOLS : []),
+      // Every loaded plugin's skills and agents need these, not only the own plugin's:
+      // a package's stayed dark with the own plugin switched off (#2320).
+      ...(loadsPlugins(run) ? OWN_PLUGIN_TOOLS : []),
       ...(questions ? [ASK_USER_QUESTION] : []),
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
     ]),

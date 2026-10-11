@@ -195,12 +195,12 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const m = await durableManager()
     const token = { kind: 'bearer' as const, id: 'token:t', label: 'MCP token' }
     const { session } = await m.start(token, { origin: 'mcp', prompt: 'hi', tiers: ['read', 'write'] })
-    const tiers = async () =>
-      (await db.sql<{ turn_tiers: string[] | null }[]>`SELECT turn_tiers FROM ai_sessions WHERE id = ${session.id}`)[0]?.turn_tiers
-    expect(await tiers()).toEqual(['read', 'write'])
+    const tiersOf = async (id: string) =>
+      (await db.sql<{ turn_tiers: unknown }[]>`SELECT turn_tiers FROM ai_sessions WHERE id = ${id}`)[0]?.turn_tiers
+    // With who sent them: they apply only while that sender owns the session.
+    expect(await tiersOf(session.id)).toEqual({ by: { kind: 'bearer', id: 'token:t' }, tiers: ['read', 'write'] })
     const { session: own } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
-    const [row] = await db.sql<{ turn_tiers: string[] | null }[]>`SELECT turn_tiers FROM ai_sessions WHERE id = ${own.id}`
-    expect(row?.turn_tiers).toBeNull()
+    expect(await tiersOf(own.id)).toBeNull()
   }, 60_000)
 
   it("takes a turn's images from the chat socket's attachments, by name (#1959: the only way a panel sends them)", async () => {

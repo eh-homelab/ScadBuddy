@@ -29,9 +29,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await owners.ownerOf(session.id)).toBeUndefined()
       await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${session.id}`
       expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null })
-      // The tiers its current turn was sent with (#2320).
-      await db.sql`UPDATE ai_sessions SET turn_tiers = ${['read', 'write']} WHERE id = ${session.id}`
+      // The tiers its current turn was sent with (#2320), only while the sender owns it.
+      const sent = (by: { kind: string; id: string }, tiers: string[]) =>
+        db.sql`UPDATE ai_sessions SET turn_tiers = ${db.sql.json({ by, tiers })} WHERE id = ${session.id}`
+      await sent({ kind: 'browser', id: 'browser' }, ['read', 'write', 'admin'])
       expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: ['read', 'write'] })
+      await sent({ kind: 'bearer', id: 'token:old-owner' }, ['read', 'write', 'outward'])
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null })
       await expect(db.sql`UPDATE ai_sessions SET mode = 'other' WHERE id = ${session.id}`).rejects.toThrow()
     })
 

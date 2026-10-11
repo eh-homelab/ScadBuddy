@@ -2,7 +2,7 @@ import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { AuditLog } from '../audit/log.js'
-import type { Tier } from '../auth/principal.js'
+import { type Tier, TIERS } from '../auth/principal.js'
 import type { Owner } from '../sessions/protocol.js'
 import { effectiveTool, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
@@ -46,10 +46,21 @@ export class PgSessionOwners implements SessionOwners {
 
   async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null }) | undefined> {
     const [row] = await this.sql<
-      { owner_kind: Owner['kind']; owner_id: string; owner_label: string; turn_tiers: Tier[] | null }[]
+      {
+        owner_kind: Owner['kind']
+        owner_id: string
+        owner_label: string
+        turn_tiers: { by?: { kind?: string; id?: string }; tiers?: unknown } | null
+      }[]
     >`
       SELECT owner_kind, owner_id, owner_label, turn_tiers FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
-    return row ? { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers: row.turn_tiers } : undefined
+    if (!row) return undefined
+    // Only the sender's own tiers, while it still owns the session (a handoff since
+    // leaves the new owner its default), and only tiers there are.
+    const sent = row.turn_tiers
+    const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
+    const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
+    return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers }
   }
 }
 
