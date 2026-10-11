@@ -14,7 +14,8 @@ import { Spinner } from '../ui/Spinner'
  * a count of how many have been opened. Contents come from the agent
  * (`GET /api/v1/ai/plugin-packages/:name/file`), which reads only the files of the pin
  * under review (`of.pending`: the re-pin's). A binary file is a placeholder; a long one
- * is cut until "Show all". Markdown is shown raw (what the assistant reads) or rendered.
+ * is cut until "Show all", unless it is too large to send whole (#2151). Markdown is
+ * shown raw (what the assistant reads) or rendered.
  */
 export function PackageFiles({ review, of }: { review: PackageReview; of: PackageFilesOf }) {
   const [open, setOpen] = useState(false)
@@ -200,10 +201,13 @@ function FileViewer({
           <div className="mt-2 flex flex-wrap items-center gap-2 text-muted">
             <p>
               Showing the first {formatBytes(new TextEncoder().encode(content).length)} of {formatBytes(data.size)}.
+              {data.too_large && ' Too large to show whole.'}
             </p>
-            <Button size="sm" onClick={() => setFull(true)}>
-              Show all
-            </Button>
+            {!data.too_large && (
+              <Button size="sm" onClick={() => setFull(true)}>
+                Show all
+              </Button>
+            )}
           </div>
         )}
       </div>
