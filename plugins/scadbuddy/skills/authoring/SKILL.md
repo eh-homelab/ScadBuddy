@@ -161,8 +161,8 @@ A size in millimetres that can never usefully exceed the plate can say so on a
 comment line of its own, `// plate width = x` (or `y`, `z`). The customizer then
 caps that parameter's range at the selected printer's plate (main spec §6.1,
 "Printer-bound sizes"). A value past the cap is not rendered, so keep the
-default within the smallest plate you target (the default plate is 256 mm
-unless the Settings page sets one). Put the line somewhere other than directly above a
+default within the smallest plate you target (the default plate is 256 x 256 mm,
+250 mm high, unless the Settings page sets one). Put the line somewhere other than directly above a
 parameter, such as the end of the file. Judgement: OpenSCAD's customizer takes a
 comment directly above a parameter as that parameter's description.
 
