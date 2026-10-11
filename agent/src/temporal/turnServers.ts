@@ -69,7 +69,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
                 secrets: () => secrets,
                 audit: http.audit,
                 actor: context.owner,
-                sessionId: context.session,
+                // A flow's call has no session to audit it under (its saved bodies are under `flow-<run>`).
+                sessionId: context.flow ? undefined : context.session,
                 signal: context.signal,
                 ...(http.resolve ? { resolve: http.resolve } : {}),
                 ...(http.limits ? { limits: http.limits } : {}),
@@ -79,7 +80,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         pinned: true,
       })
     }
-    if (deps.extra) servers.push(...(await deps.extra(context)))
+    // The browser and its grant are a session's: a flow has neither, as it has no browser_* tools.
+    if (deps.extra && !context.flow) servers.push(...(await deps.extra(context)))
     return {
       servers,
       problems: forwarded?.problems ?? [],

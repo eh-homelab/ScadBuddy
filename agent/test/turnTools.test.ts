@@ -4,6 +4,7 @@ import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { AuditEntry } from '../src/audit/log.js'
+import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import {
@@ -12,6 +13,7 @@ import {
   TURN_TOOLS_ACTIVITY,
   turnToolActivities,
   turnToolActivity,
+  type TurnContext,
   type TurnServer,
   type TurnToolsDeps,
   type TurnToolsResult,
@@ -24,6 +26,7 @@ const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 const SECRET = 'sk-plugin-header-0123456789'
+const FLOW = '7c2d9a10-3b4e-4f5a-8b6c-1d2e3f4a5b6c'
 
 function notes(calls: string[]): () => McpServer {
   return () => {
@@ -60,8 +63,16 @@ const tierOf = (name: string, input: unknown): RiskTier => {
 }
 
 function harness(
-  options: { owner?: Owner & { turnTiers?: string[] }; offered?: boolean; problems?: string[]; pinned?: boolean } = {},
+  options: {
+    owner?: Owner & { turnTiers?: string[] }
+    offered?: boolean
+    problems?: string[]
+    pinned?: boolean
+    flowStarter?: Owner
+    starterTiers?: Tier[]
+  } = {},
 ) {
+  const contexts: TurnContext[] = []
   const calls: string[] = []
   const audits: AuditEntry[] = []
   const reported: string[] = []
@@ -69,7 +80,8 @@ function harness(
   const server: TurnServer = { name: 'notes', connect: () => connectInProcess(notes(calls)), tierOf, ...(options.pinned ? { pinned: true } : {}) }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
-    servers: async () => ({
+    servers: async (context) => ({
+      ...(void contexts.push(context), {}),
       servers: options.offered === false ? [] : [server],
       problems: options.problems ?? [],
       secrets: [SECRET],
@@ -77,6 +89,12 @@ function harness(
     }),
     hostQueue: 'agent-tools.host-1',
     approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
+    flows: {
+      startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
+      // Only the backend's workflow_run_decisions approves a flow's call.
+      approved: async (requestId) => requestId === `flow:${FLOW}:run-1:flow_approved`,
+    },
+    currentTiers: async () => options.starterTiers,
     audit: {
       record: async (entry) => void audits.push(entry),
       hash: (tool) => `hash:${tool}`,
@@ -84,7 +102,7 @@ function harness(
     },
     report: async (_session, problems) => void reported.push(...problems),
   }
-  return { calls, audits, reported, activities: turnToolActivities(deps), call: turnToolActivity(deps) }
+  return { contexts, calls, audits, reported, activities: turnToolActivities(deps), call: turnToolActivity(deps) }
 }
 
 function env(activityType: string, activityId = 'tool-toolu_01', workflowId = `session-${SESSION}`) {
@@ -178,5 +196,49 @@ describe('turn tools in a durable session', () => {
     const reported = harness({ problems: [`plugin x failed with header ${SECRET}`] })
     await env(TURN_TOOLS_ACTIVITY).run(reported.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)
     expect(reported.reported).toEqual(['plugin x failed with header [redacted]'])
+  })
+
+  describe("from a flow's tool(name, args) (#2320 phase 8)", () => {
+    const flowEnv = (activityType: string, activityId = 'tool-flow_01') => env(activityType, activityId, `flow-${FLOW}`)
+
+    it("tiers and runs a read call as the run's starter, with no session and no browser", async () => {
+      const h = harness({ pinned: true })
+      const tier = h.activities[TURN_TOOL_TIER_ACTIVITY]!
+      expect(await flowEnv(TURN_TOOL_TIER_ACTIVITY).run(tier, { tool: 'notes__read_note', input: { id: 'a' } })).toEqual({
+        tier: 'read',
+        task_queue: 'agent-tools.host-1',
+      })
+      expect(await flowEnv('turn:notes__read_note').run(h.call, { id: 'a' })).toBe('note a')
+      expect(h.contexts.every((c) => c.flow === FLOW && c.session === `flow-${FLOW}`)).toBe(true)
+      expect(h.audits).toEqual([
+        expect.objectContaining({ action: 'notes__read_note', sessionId: null, requestId: `flow:${FLOW}:run-1:flow_01` }),
+      ])
+    })
+
+    it("runs an outward call only with the backend's decision for it, never a session approval", async () => {
+      const h = harness()
+      const refused = await failure(flowEnv('turn:notes__post', 'tool-toolu_approved').run(h.call, { method: 'POST', body: 'x' }))
+      expect(refused.type).toBe('NotApproved')
+      expect(h.calls).toEqual([])
+      expect(await flowEnv('turn:notes__post', 'tool-flow_approved').run(h.call, { method: 'POST', body: 'x' })).toBe('posted x')
+    })
+
+    it('holds a token starter to the tiers its token holds now', async () => {
+      const h = harness({ flowStarter: BEARER, starterTiers: ['read'] })
+      const refused = await failure(flowEnv('turn:notes__post', 'tool-flow_approved').run(h.call, { method: 'POST', body: 'x' }))
+      expect(refused.message).toContain("which this flow run's starter does not hold")
+      expect(h.calls).toEqual([])
+    })
+
+    it('refuses a run that is not recorded, and a tool no server offers, before any call', async () => {
+      const h = harness()
+      const unrecorded = env(TURN_TOOL_TIER_ACTIVITY, 'x', 'flow-00000000-0000-4000-8000-000000000000')
+      const unknown = await failure(unrecorded.run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input: {} }))
+      expect(unknown.type).toBe('UnknownFlow')
+      const none = harness({ offered: false })
+      const gone = await failure(flowEnv(TURN_TOOL_TIER_ACTIVITY).run(none.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input: {} }))
+      expect(gone.message).toContain('not offered')
+      expect(h.calls).toEqual([])
+    })
   })
 })

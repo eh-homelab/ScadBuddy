@@ -438,6 +438,8 @@ const durableCredentialSecrets = async () => {
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
+      // A flow's tool(name, ...) reaches the same tools, as the run's starter (#2320).
+      flows: new PgFlowRuns(temporal.sql),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         ...(settings ? { settings } : {}),
