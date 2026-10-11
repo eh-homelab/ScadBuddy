@@ -6,8 +6,9 @@ import { harnessPrincipal } from '../auth/principal.js'
 import type { Owner } from '../sessions/protocol.js'
 import { effectiveTool, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
-import { durableRequestId } from '../gate/ids.js'
+import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
+import { flowOf, type FlowRuns } from './flowRuns.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
 // under the tool's name, which is how the durable worker's `activity_as_tool` stubs
@@ -25,8 +26,9 @@ import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 // The session is the workflow's: an activity of `session-<id>` runs as that session,
 // and only when that session is durable (`ai_sessions.mode`, §6.1). A classic
 // session's outward calls park in ai_approvals, so a workflow that borrowed its id
-// must not skip that. Any other caller (a flow before phase 6, a workflow no session
-// started) is refused.
+// must not skip that. A flow run's workflow (`flow-<run id>`, #1057) runs as the run's
+// starter, in no session, and a gated call needs a person's decision in the backend's
+// `workflow_run_decisions` (flowRuns.ts). Any other caller is refused.
 
 /** Where a durable session's owner is read; undefined for any other session. */
 export interface SessionOwners {
@@ -77,6 +79,8 @@ export type ToolActivityDeps = {
   /** Where a gated call's approval is checked; a gated call is refused without it. */
   approvals?: ApprovalRecords | undefined
   audit?: Pick<AuditLog, 'record' | 'hash' | 'summarise'> | undefined
+  /** Flow runs' starters and decisions (flowRuns.ts); a flow's call is refused without it. */
+  flows?: FlowRuns | undefined
   /** The recorded answers an `answer` tool returns (gate/answers.ts); those tools refuse without it. */
   answers?: AnswerReader | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
@@ -91,6 +95,10 @@ export const TOOL_ERROR = 'ToolError'
 export const UNKNOWN_SESSION = 'UnknownSession'
 /** The failure type of a gated call with no approval recorded for it. */
 export const NOT_APPROVED = 'NotApproved'
+/** The failure type of a call from a `flow-<id>` workflow with no flow run recorded. */
+export const UNKNOWN_FLOW = 'UnknownFlow'
+/** The failure type of a tool a flow cannot use: a browser tool (no tab) or an answer tool (no session). */
+export const NOT_FOR_FLOWS = 'NotForFlows'
 
 /** What the model reads in place of an image a tool returned (plan 5c Ruling 4). */
 export const DURABLE_IMAGE_NOTE =
@@ -141,6 +149,23 @@ async function durableSession(what: string, sessions: SessionOwners): Promise<{ 
   return { session, owner }
 }
 
+/** Who a call runs as, in which session if any, and the id its gate entry is recorded under. */
+type Caller = { owner: Owner; session: string | undefined; requestId: string; approvals: ApprovalRecords | undefined }
+
+/** A flow run's call: its starter, no session, and the run's decisions as its approvals. */
+async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, toolUseId: string): Promise<Caller> {
+  if (DURABLE_ONLY_NAMES.has(tool.name) || tool.name.startsWith('browser_')) {
+    throw ApplicationFailure.nonRetryable(`${tool.name} is not for flows: a flow has no session and no browser tab`, NOT_FOR_FLOWS)
+  }
+  // A lookup that throws (the database is away) is left to the activity's retries.
+  const owner = deps.flows ? await deps.flows.startedBy(flow) : undefined
+  if (owner === undefined) {
+    throw ApplicationFailure.nonRetryable(`${tool.name}: no flow run ${flow} is recorded`, UNKNOWN_FLOW)
+  }
+  const runId = Context.current().info.workflowExecution?.runId ?? ''
+  return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals: deps.flows }
+}
+
 async function runAsActivity(
   tool: Tool,
   input: unknown,
@@ -149,18 +174,26 @@ async function runAsActivity(
 ): Promise<unknown> {
   const context = Context.current()
   const { workflowExecution, activityId } = context.info
-  const { session, owner } = await durableSession(tool.name, deps.sessions)
   const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
-  // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
-  const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
-  if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
+  const flow = flowOf(workflowExecution?.workflowId)
+  let caller: Caller
+  if (flow !== undefined) {
+    caller = await flowCaller(tool, flow, deps, toolUseId)
+  } else {
+    const { session, owner } = await durableSession(tool.name, deps.sessions)
+    // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
+    const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
+    if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
+    caller = { owner, session, requestId, approvals: deps.approvals }
+  }
+  const { owner, session, requestId } = caller
   // `gate: 'workflow'` below skips preparing an approval because the workflow parked
   // the call and a person approved it. That is checked here, not assumed: any client of
   // the namespace can name a workflow after a durable session (security review of 5b).
   // Gated as the tool runs now (#1953): a tier Settings raised to outward needs the
   // approval too, whatever tier the durable worker's manifest declared it at.
   const effective = await effectiveTool(tool, deps.services)
-  if (effective.gated && !(await deps.approvals?.approved(requestId))) {
+  if (effective.gated && !(await caller.approvals?.approved(requestId))) {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({
@@ -168,7 +201,7 @@ async function runAsActivity(
       action: tool.name,
       surface: 'harness',
       actor: owner,
-      sessionId: session,
+      sessionId: session ?? null,
       toolUseId,
       requestId,
       tier: effective.risk,
@@ -189,10 +222,10 @@ async function runAsActivity(
   try {
     run = await runToolWithOutcome(tool, input, {
       ...services,
-      // The tab paired with this session (#254), as for a classic turn.
-      ...(services.browser ? { browser: services.browser.forSession(session) } : {}),
+      // The tab paired with this session (#254), as for a classic turn; a flow has none.
+      ...(services.browser && session !== undefined ? { browser: services.browser.forSession(session) } : {}),
       principal,
-      session,
+      ...(session === undefined ? {} : { session }),
       progress: async (progress, total, message) => context.heartbeat({ progress, total, message }),
       signal: context.cancellationSignal,
       lookup,
@@ -209,7 +242,7 @@ async function runAsActivity(
     action,
     surface: 'harness',
     actor: owner,
-    sessionId: session,
+    sessionId: session ?? null,
     toolUseId,
     requestId,
     tier: run.ran ? (lookup(run.ran.tool)?.risk ?? effective.risk) : effective.risk,

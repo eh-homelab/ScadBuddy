@@ -40,3 +40,8 @@ export function parseRequestId(id: string): RequestId | undefined {
 export function durableRequestId(sessionId: string, runId: string, toolUseId: string): string {
   return `durable:${sessionId.toLowerCase()}:${runId}:${toolUseId}`
 }
+
+/** A flow run's call's entry id, as the backend records its decision (flows/operations.py `request_id`). */
+export function flowRequestId(runId: string, workflowRunId: string, callId: string): string {
+  return `flow:${runId}:${workflowRunId}:${callId}`
+}
