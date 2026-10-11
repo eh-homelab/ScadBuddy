@@ -348,6 +348,19 @@ describe('extractors', () => {
     expect(touches('browser_fill', {}, {})).toEqual([{ type: 'unclassified', id: null, action: 'modified' }])
   })
 
+  it('records the library files deleted and restored, never a skipped one (#2167)', () => {
+    const deleted = {
+      deleted: [{ id: 1, filename: 'a.3mf', trashed: true }],
+      skipped: [{ id: 2, filename: 'b.3mf', reason: 'not owned' }],
+    }
+    expect(touches('delete_library_files', { file_ids: [1, 2] }, deleted, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '1', action: 'deleted' },
+    ])
+    expect(touches('restore_library_files', { file_ids: [1] }, { restored: [1], skipped: [] }, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '1', action: 'created' },
+    ])
+  })
+
   it('leaves only the browser click and fill unclassified', () => {
     const open = ALL_TOOLS.filter((t) => t.risk !== 'read' && !EXTRACTORS[t.name] && !TOUCHES_NOTHING.has(t.name))
     expect(open.map((t) => t.name).sort()).toEqual(['browser_click', 'browser_fill'])

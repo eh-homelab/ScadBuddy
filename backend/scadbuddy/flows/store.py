@@ -23,12 +23,16 @@ from scadbuddy.core.events import FlowRunEvent
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
+    Decision,
     Definition,
     DefinitionSummary,
     Run,
 )
 from scadbuddy.workflows.flow_models import FlowRecord, ProjectionWrite
 
+_DECISION = (
+    "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder, created_at"
+)
 _DEFINITION = "id, name, version, script, approval_timeout_s, created_by, created_at"
 _SUMMARY = "id, name, version, approval_timeout_s, created_by, created_at"
 _RUN = (
@@ -108,7 +112,63 @@ class FlowStore:
         """Delete the run's row; False when there was none."""
         return await asyncio.to_thread(self._delete_run, run_id)
 
+    # -- decisions ---------------------------------------------------------------
+
+    async def record_decision(self, decision: Decision) -> bool:
+        """Record a person's answer before the harness is told. True when recorded, or
+        when this same decision is there already (a retried run resends it); False when
+        another decision holds the request id."""
+        return await asyncio.to_thread(self._record_decision, decision)
+
+    async def get_decision(self, request_id: str) -> Decision | None:
+        return await asyncio.to_thread(self._get_decision, request_id)
+
+    async def delete_decision(self, request_id: str) -> None:
+        """Undo a decision the harness refused: no `approved` row for a call it never ran."""
+        await asyncio.to_thread(self._delete_decision, request_id)
+
     # -- implementation -----------------------------------------------------------
+
+    def _record_decision(self, decision: Decision) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
+                " call_id, kind, outcome, response, responder)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
+                (
+                    decision.request_id,
+                    decision.run_id,
+                    decision.workflow_run_id,
+                    decision.call_id,
+                    decision.kind,
+                    decision.outcome,
+                    Jsonb(decision.response),
+                    decision.responder,
+                ),
+            ).fetchone()
+            if row is not None:
+                return True
+            existing = conn.execute(
+                f"SELECT {_DECISION} FROM workflow_run_decisions WHERE request_id = %s",
+                (decision.request_id,),
+            ).fetchone()
+        if existing is None:
+            return False
+        held = Decision.model_validate(existing)
+        return (held.outcome, held.response) == (decision.outcome, decision.response)
+
+    def _get_decision(self, request_id: str) -> Decision | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_DECISION} FROM workflow_run_decisions WHERE request_id = %s",
+                (request_id,),
+            ).fetchone()
+        return Decision.model_validate(row) if row else None
+
+    def _delete_decision(self, request_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM workflow_run_decisions WHERE request_id = %s", (request_id,))
 
     def _announce(self, conn: Connection[DictRow], run: Run) -> None:
         if self.events is not None:
@@ -274,7 +334,10 @@ class FlowStore:
             )
 
     def _delete_run(self, run_id: str) -> bool:
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
+            # Its decisions go by cascade; the operations that made them carry the
+            # answers in their requests, so they go too.
+            conn.execute("DELETE FROM operations WHERE subject = %s", (f"flow:{run_id}",))
             cur = conn.execute("DELETE FROM workflow_runs WHERE id = %s", (run_id,))
         return cur.rowcount > 0
 

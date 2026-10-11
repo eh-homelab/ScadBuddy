@@ -27,6 +27,8 @@ class Flows:
         self.client = client
         self.queue = queue
         self.store = store
+        #: Workers a test started beside the fixture's, shut down after it.
+        self.cleanup: list[tuple[Any, Any]] = []
 
     async def start(self, script: str, *, update_id: str | None = None) -> str:
         definition = await self.store.create_definition("t", script, {"kind": "browser"})

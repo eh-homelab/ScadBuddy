@@ -101,6 +101,7 @@ Operation = Literal[
     "external_links.list",
     "external_links.update",
     "library.annotate",
+    "library.bulk_delete",
     "library.delete",
     "library.download",
     "library.filament_requirements",
@@ -113,6 +114,7 @@ Operation = Literal[
     "library.plate_thumbnail",
     "library.plates",
     "library.thumbnail",
+    "library.trash.restore",
     "library.upload",
     "media.download",
     "media.photo",
@@ -852,13 +854,55 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
-    async def delete_library_file(self, file_id: int) -> None:
-        await self._send(
+    async def delete_library_file(self, file_id: int) -> bool:
+        """``DELETE /library/files/{id}``: moves the file to Bambuddy's trash, and says
+        so as ``trashed``. An external file skips the trash (``trashed: false``): its
+        record is dropped for good (Bambuddy's ``openapi.json``, read 2026-10-10, #2167)."""
+        response = await self._send(
             "DELETE",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
             operation="library.delete",
             what=f"delete library file {file_id}",
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            return True
+        return not (isinstance(body, dict) and body.get("trashed") is False)
+
+    async def bulk_delete_library_files(self, file_ids: list[int]) -> int:
+        """``POST /library/bulk-delete`` (``BulkDeleteRequest``): each file to the trash,
+        as :meth:`delete_library_file` does. Bambuddy skips a file the key's user does
+        not own (without ``*_all``) and answers only how many it deleted
+        (``BulkDeleteResponse.deleted_files``), so the caller reads which it skipped."""
+        what = f"delete {len(file_ids)} library files"
+        response = await self._send(
+            "POST",
+            "/library/bulk-delete",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.bulk_delete",
+            what=what,
+            json={"file_ids": file_ids, "folder_ids": []},
+        )
+        body = response.json()
+        deleted = body.get("deleted_files") if isinstance(body, dict) else None
+        if not isinstance(deleted, int):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not say how many files it deleted when asked to {what}",
+            )
+        return deleted
+
+    async def restore_library_file(self, file_id: int) -> None:
+        """``POST /library/trash/{id}/restore``: a trashed file back where it was. A file
+        not in the trash (an external one, or one already purged) is the 404."""
+        await self._send(
+            "POST",
+            f"/library/trash/{file_id}/restore",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.trash.restore",
+            what=f"restore library file {file_id} from Bambuddy's trash",
         )
 
     # --- slice ---------------------------------------------------------------

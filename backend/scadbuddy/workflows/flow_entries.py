@@ -10,15 +10,16 @@ wait. It runs a workflow timer beside it, and when the timer fires, the
 person's answer would be (decisions A and B). The harness then ends the call its own
 way, and the caller sees `TimeoutError`.
 
-Callbacks only, for now: approvals would use `tool_approval`'s deny, which waits on the
-approval-timeout decision (plan open question 5).
+Approvals the same way (the user's answer to plan open question 5): an outward call
+parked longer than its run's approval timeout is denied with `tool_approval`'s public
+deny, and the script sees `ToolApprovalDenied: timed out`.
 """
 
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
@@ -27,7 +28,11 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
-    from temporal_agent_harness.harness.agent_client import AgentClient, CallbackResultError
+    from temporal_agent_harness.harness.agent_client import (
+        AgentClient,
+        CallbackResultError,
+        ToolApprovalError,
+    )
 
 FLOW_ENTRY_TIMEOUT = "flow_entry_timeout"
 #: The error a timed-out callback is resolved with; what the harness hands the caller.
@@ -42,6 +47,8 @@ class EntryTimeout(BaseModel):
 
     workflow_id: str
     call_id: str
+    #: A callback is answered with an error; an approval is denied.
+    kind: Literal["answer", "approval"] = "answer"
 
 
 @activity.defn(name=FLOW_ENTRY_TIMEOUT)
@@ -50,11 +57,24 @@ async def flow_entry_timeout(entry: EntryTimeout) -> bool:
     A retried attempt sends the same Update id, so Temporal answers it as the first."""
     client = AgentClient(activity.client(), entry.workflow_id)
     try:
-        await client.provide_callback_result(
-            entry.call_id, error=TIMED_OUT, update_id=f"timeout-{entry.call_id}"
-        )
-    except CallbackResultError as err:
-        if err.error_type in {"CallbackAlreadyResolved", "UnknownCallback"}:
+        if entry.kind == "approval":
+            await client.approve_tool(
+                entry.call_id,
+                approved=False,
+                reason=TIMED_OUT,
+                update_id=f"timeout-{entry.call_id}",
+            )
+        else:
+            await client.provide_callback_result(
+                entry.call_id, error=TIMED_OUT, update_id=f"timeout-{entry.call_id}"
+            )
+    except (CallbackResultError, ToolApprovalError) as err:
+        if err.error_type in {
+            "CallbackAlreadyResolved",
+            "UnknownCallback",
+            "ToolApprovalAlreadyResolved",
+            "UnknownToolApproval",
+        }:
             return False
         raise ApplicationError(
             f"the harness refused the timeout ({err.error_type})",
@@ -105,3 +125,40 @@ async def run_callback(
         if timed_out:
             raise TimeoutError(f"no answer within {timeout_s:g} seconds") from err
         raise
+
+
+async def run_gated(
+    run_tool: Callable[..., Awaitable[Any]],
+    tool: Callable[..., Awaitable[Any]],
+    timeout_s: float,
+    started: Callable[[], bool],
+    *,
+    call_id: str,
+    **kwargs: Any,
+) -> Any:
+    """Run the gated `tool` through `run_tool`; while it waits for approval, deny it
+    after `timeout_s` seconds with the harness's own Update (0: never). `started` says
+    the tool's body is running, so the call was approved and the timer is over."""
+    call = asyncio.ensure_future(run_tool(call_id, tool, **kwargs))
+    if timeout_s > 0:
+        try:
+            await workflow.wait_condition(
+                lambda: call.done() or started(), timeout=timedelta(seconds=timeout_s)
+            )
+        except TimeoutError:
+            try:
+                await workflow.execute_activity(
+                    FLOW_ENTRY_TIMEOUT,
+                    EntryTimeout(
+                        workflow_id=workflow.info().workflow_id, call_id=call_id, kind="approval"
+                    ),
+                    result_type=bool,
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=TIMEOUT_RETRY,
+                )
+            except ActivityError as err:
+                call.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await call
+                raise TimeoutError(f"no decision within {timeout_s:g} seconds") from err
+    return await call

@@ -164,7 +164,7 @@ export type RackOption = Schemas['RackOption']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
-/** #1298 — what each hotend on a printer's rack has printed; never a serial. */
+/** #1298, #2170 — each hotend on a printer's rack: its use, what it has loaded, and its serial (the one route that carries one, spec 2026-10-01 §7 amendment). */
 export type PrinterRackUsage = Schemas['PrinterRackUsage']
 export type RackHotendUsage = Schemas['RackHotendUsage']
 export type RackSpoolUse = Schemas['RackSpoolUse']
@@ -176,6 +176,8 @@ export type OutputPlate = Schemas['OutputPlate']
 export type LibraryListing = Schemas['LibraryListing']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
+export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
+export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']

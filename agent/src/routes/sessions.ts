@@ -355,6 +355,25 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }),
   )
 
+  app.get(
+    `${base}/:id/http/:saved`,
+    route('read', async (c, sessions) => {
+      const { meta, bytes } = await sessions.httpBody(idOf(c), c.req.param('saved') ?? '', BROWSER_USER)
+      // Untrusted bytes from whatever server answered (#1292). Plain text and JSON
+      // are shown as text; everything else, HTML and SVG included, only downloads.
+      // Nothing in either may run, and no other site may embed it.
+      const viewable = /^(text\/plain|application\/(?:[\w.+-]+\+)?json)\b/i.test(meta.content_type ?? '')
+      return c.body(new Uint8Array(bytes), 200, {
+        'Content-Type': viewable ? 'text/plain; charset=utf-8' : 'application/octet-stream',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Cross-Origin-Resource-Policy': 'same-origin',
+        'Content-Disposition': `${viewable ? 'inline' : 'attachment'}; filename="response-${c.req.param('saved')!.slice(0, 8)}.${viewable ? 'txt' : 'bin'}"`,
+        'Cache-Control': 'private, no-store',
+      })
+    }),
+  )
+
   app.post(
     `${base}/:id/messages`,
     limit,
