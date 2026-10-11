@@ -24,11 +24,12 @@ from scadbuddy.flows.operations import (
     STALE_ENTRY,
     flow_kinds,
     request_id,
+    seal_answer,
 )
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, ProjectionWrite
 from scadbuddy.workflows.flows_client import harness_plugins
-from tests.flows.flows_support import Flows, script
+from tests.flows.flows_support import Flows, Keys, script
 from tests.flows.harness_probe import (
     PROBE_TOOLS,
     PROBE_WORKFLOW,
@@ -41,7 +42,7 @@ pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 
 def kinds(flows: Flows) -> dict[str, OperationKind]:
-    return {kind.name: kind for kind in flow_kinds(flows.store)}
+    return {kind.name: kind for kind in flow_kinds(flows.store, Keys())}
 
 
 async def operate(flows: Flows, kind: OperationKind, request: dict[str, Any]) -> dict[str, Any]:
@@ -67,6 +68,21 @@ async def test_an_answer_is_recorded_then_reaches_the_run(flows: Flows) -> None:
     assert result["outcome"] == "answered"
     done = await flows.finished(run.id)
     assert done.result == "result: 'ok'"
+    decision = await flows.store.get_decision(request_id(run, call_id))
+    assert decision is not None and decision.response == {"answer": "ok"}
+
+
+async def test_a_sealed_answer_is_opened_and_reaches_the_run(flows: Flows) -> None:
+    """#2221: the route sends `answer_sealed`; the operation opens it with the run's key."""
+    run, call_id = await parked(flows)
+    sealed = await seal_answer(Keys(), run.id, "ok")
+    # A resent request seals to the same bytes, so it keeps its operation key.
+    assert await seal_answer(Keys(), run.id, "ok") == sealed
+    assert await seal_answer(Keys(), run.id, "no") != sealed
+    request = {"run_id": run.id, "call_id": call_id, "answer_sealed": sealed}
+    result = await operate(flows, kinds(flows)[FLOW_ANSWER], request)
+    assert result["outcome"] == "answered"
+    assert (await flows.finished(run.id)).result == "result: 'ok'"
     decision = await flows.store.get_decision(request_id(run, call_id))
     assert decision is not None and decision.response == {"answer": "ok"}
 

@@ -27,11 +27,22 @@ it. If no attempt ever resends it and the call is later resolved another way (th
 approval timer, a Reset), the row disagrees with the run. The window is the time until
 the next attempt; it stays open only once every attempt has been exhausted without
 Temporal ever answering.
+
+The reverse is accepted, not reconciled (#2221): an Update still on its way to the
+history when Temporal answers the probe with no such Update lands after its row was
+deleted, so the call is resolved with no row recording who resolved it. Only that audit
+row is lost; the run itself is right, and a later decision for the call is refused.
+
+The answer text never reaches the operation's history in the clear (#2221): the route
+seals it under the run's own payload key (`seal_answer`), so the operation's input and
+its `operations` row carry `answer_sealed`, and forgetting the run (`forget.py`) makes
+them unreadable with the rest of the run's payloads.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -49,10 +60,12 @@ from temporalio.client import WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.secrets import open_bytes, seal_bytes
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Run
 from scadbuddy.flows.store import FlowStore, ResetSupersededError
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
+from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -76,6 +89,28 @@ def request_id(run: Run, call_id: str) -> str:
     return f"flow:{run.id}:{run.workflow_run_id}:{call_id}"
 
 
+def _answer_context(subject: str) -> str:
+    return f"flow-answer:{subject}"
+
+
+async def seal_answer(keys: PayloadKeys, run_id: str, answer: str) -> str:
+    """`answer` sealed under the run's payload key, as the request's `answer_sealed`.
+    The IV is derived from the text, so a resent request seals to the same bytes and keeps
+    its operation key; one IV is only ever used for one text. Raises
+    `SubjectForgottenError` for a run with no key (forgotten, or never started)."""
+    subject = f"flow-{run_id}"
+    key = await keys.key_for(subject, False)
+    plain = answer.encode()
+    iv = dedup_iv(key, _answer_context(subject), plain)
+    return base64.b64encode(seal_bytes(key, plain, _answer_context(subject), iv)).decode()
+
+
+async def open_answer(keys: PayloadKeys, run_id: str, sealed: str) -> str:
+    subject = f"flow-{run_id}"
+    key = await keys.key_for(subject, False)
+    return open_bytes(key, base64.b64decode(sealed), _answer_context(subject)).decode()
+
+
 def _stale() -> ApiError:
     return ApiError(
         status.HTTP_409_CONFLICT,
@@ -88,10 +123,13 @@ def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
 
 
-def _wanted(kind: str, request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The outcome and response a request asks for, as its row records them."""
+def _wanted(
+    kind: str, request: dict[str, Any], answer: str | None = None
+) -> tuple[str, dict[str, Any]]:
+    """The outcome and response a request asks for, as its row records them; `answer`
+    is an answer request's text, opened."""
     if kind == "answer":
-        return "answered", {"answer": str(request["answer"])}
+        return "answered", {"answer": str(answer)}
     reason = request.get("reason")
     return (
         "approved" if bool(request["approved"]) else "denied",
@@ -99,14 +137,26 @@ def _wanted(kind: str, request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     )
 
 
-def _same(existing: Decision, kind: str, request: dict[str, Any]) -> bool:
+def _same(existing: Decision, kind: str, request: dict[str, Any], answer: str | None) -> bool:
     """Whether a recorded row is the decision `request` asks for (a resend), not another."""
-    outcome, response = _wanted(kind, request)
+    outcome, response = _wanted(kind, request, answer)
     return existing.kind == kind and existing.outcome == outcome and existing.response == response
 
 
-def flow_kinds(store: FlowStore) -> list[OperationKind]:
-    """Both kinds over `store`; the `projects` worker serves them."""
+def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind]:
+    """The kinds over `store`, opening answers with `keys`; the `projects` worker serves
+    them."""
+
+    async def answer_of(request: dict[str, Any]) -> str:
+        if "answer" in request:
+            # Sent before answers were sealed (#2221), still running after the upgrade.
+            return str(request["answer"])
+        if keys is None:
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Flows need ScadBuddy's secret key file (SCADBUDDY_SECRET_KEY_FILE).",
+            )
+        return await open_answer(keys, str(request["run_id"]), str(request["answer_sealed"]))
 
     async def check(kind: str, request: dict[str, Any]) -> dict[str, Any]:
         run = await store.get_run(str(request["run_id"]))
@@ -128,7 +178,8 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         # resend must reach Temporal's answer, not a 409 (#2247).
         existing = await store.get_decision(rid)
         if existing is not None:
-            if not _same(existing, kind, request):
+            answer = await answer_of(request) if kind == "answer" else None
+            if not _same(existing, kind, request, answer):
                 raise _resolved()
         elif not any(w.call_id == call_id and w.kind == kind for w in run.waiting_on):
             raise _stale()
@@ -191,7 +242,7 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         return await check("answer", request)
 
     async def run_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        outcome, response = _wanted("answer", request)
+        outcome, response = _wanted("answer", request, await answer_of(request))
         decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
         await record(request, checked, decision)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
@@ -349,7 +400,8 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
     from scadbuddy.flows.component import FLOWS
 
-    return flow_kinds(components.get(FLOWS).store)
+    flows = components.get(FLOWS)
+    return flow_kinds(flows.store, flows.keys)
 
 
 OPERATION_KINDS: KindsBuild = _kinds
