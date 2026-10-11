@@ -34,7 +34,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Run
-from scadbuddy.flows.store import FlowStore
+from scadbuddy.flows.store import FlowStore, ResetSupersededError
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
 
 if TYPE_CHECKING:
@@ -48,6 +48,7 @@ RUN_CLOSED = "https://scadbuddy.dev/problems/flow-run-closed"
 FLOW_RESET = "flow_reset"
 RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
+RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 
 
 def request_id(run: Run, call_id: str) -> str:
@@ -193,6 +194,15 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         run = await store.get_run(str(request["run_id"]))
         if run is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+        if any(w.history_length is None for w in run.waiting_on):
+            # Parked before 6e recorded where: a Reset cannot tell whether such a call
+            # comes back, and guessing would leave a card for a call nothing waits on.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "This run parked a call before ScadBuddy recorded where in its history,"
+                " so it cannot be reset safely. Answer the call, or start a new run.",
+                type_=RESET_UNRECORDED,
+            )
         client = activity.client()
         try:
             described = await client.get_workflow_handle(run.workflow_id).describe()
@@ -231,7 +241,8 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
                     workflow_execution=WorkflowExecution(workflow_id=workflow_id, run_id=replaced),
                     reason=f"flow reset by {request.get('responder') or 'browser'}",
                     workflow_task_finish_event_id=event_id,
-                    # The operation's own id: a retried run resets once.
+                    # The operation's own id: a retried run resets once, and the row
+                    # records it to tell that retry from another Reset.
                     request_id=str(activity.info().workflow_id),
                     # Every answer, approval and `close` after the point is undone with it:
                     # the calls past it run again and park again for a person.
@@ -243,9 +254,20 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
             )
             return answer.run_id
 
-        run = await store.reset_run(
-            str(request["run_id"]), replaced=replaced, point=event_id, reset=reset
-        )
+        try:
+            run = await store.reset_run(
+                str(request["run_id"]),
+                replaced=replaced,
+                point=event_id,
+                request_id=str(activity.info().workflow_id),
+                reset=reset,
+            )
+        except ResetSupersededError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "Another Reset moved the run first; check its history again.",
+                type_=RESET_CHANGED,
+            ) from None
         if run is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
         return {"run_id": run.id, "workflow_run_id": run.workflow_run_id, "event_id": event_id}

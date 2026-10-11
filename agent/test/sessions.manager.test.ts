@@ -890,9 +890,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
               budgetUsd: 1,
               // Plan 5d: the default (durable) ran classic, with no Temporal here.
               mode: 'classic',
+              offer: null,
             },
           ],
         })
+        // #1284: an offer's target is named only as the viewer may see it.
+        await m.handoff(b.id, agentB, agentA)
+        const offered = (await m.snapshot(agentB)) as { sessions: { offer: unknown }[] }
+        expect(offered.sessions[0]!.offer).toEqual({ to: { kind: 'bearer', label: 'another MCP token' }, until: expect.any(String) })
       })
 
       it('moves ownership only explicitly: owner to the browser or by accepted offer, browser takes over, nobody else', async () => {

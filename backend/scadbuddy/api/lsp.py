@@ -19,6 +19,7 @@ from scadbuddy.api.deps import (
     STATE_ATTR,
     AppState,
     CatalogueDep,
+    CommitPath,
     HistoryDep,
     PathsDep,
     SlugPath,
@@ -35,7 +36,7 @@ from scadbuddy.api.models import (
 from scadbuddy.api.realtime import refuse_foreign_origin
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.fontconfig import env_for
-from scadbuddy.core.paths import model_path
+from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.editor.component import LANGUAGE_SERVER_CLIENTS
 from scadbuddy.library.editor_files import (
@@ -43,6 +44,7 @@ from scadbuddy.library.editor_files import (
     FilePathError,
     FileTooLargeError,
     NotTextError,
+    list_files,
     plain_segments,
     read_file,
     read_text_file,
@@ -213,6 +215,104 @@ def get_model_file(
     return _text_file(paths.model_dir(slug), path)
 
 
+#: The most files one listing names (#1067): far above any model's own, and a bound on
+#: a library checkout's.
+MAX_LISTED_FILES = 2000
+
+
+class ListedFile(BaseModel):
+    path: str = Field(description="Relative to the listed directory, `/`-separated")
+    size: int = Field(description="Bytes")
+
+
+class FileListing(BaseModel):
+    files: list[ListedFile] = Field(description="In path order")
+    truncated: bool = Field(
+        description=(
+            f"True when there were more than {MAX_LISTED_FILES:,} files and the rest are left out"
+        )
+    )
+
+
+def _listing(root: Path, missing: str) -> FileListing:
+    try:
+        files, truncated = list_files(root, limit=MAX_LISTED_FILES)
+    except FileNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, missing) from None
+    return FileListing(
+        files=[ListedFile(path=path, size=size) for path, size in files], truncated=truncated
+    )
+
+
+@router.get(
+    "/models/{slug}/tree",
+    response_model=FileListing,
+    summary="Every file in a model's directory",
+    description=(
+        "The paths `GET /models/{slug}/files/{path}` can read, with their sizes: the "
+        "`.scad` files, README.md, model.json, images and `ui/` files, in path order "
+        f"(#1067). No dot-file, dot-directory or symlink is listed; at most "
+        f"{MAX_LISTED_FILES:,} files, with `truncated` true when there were more."
+    ),
+)
+def get_model_tree(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> FileListing:
+    require_model_exists(catalogue, slug)
+    return _listing(paths.model_dir(slug), f"no model named {slug!r}")
+
+
+@router.get(
+    "/models/{slug}/versions/{commit}/files/{path:path}",
+    response_class=Response,
+    responses={**TEXT_RESPONSE, 503: {"description": "Model history is unavailable"}},
+    summary="A text file in a model's directory at a revision",
+    description=(
+        "`GET /models/{slug}/files/{path}` as the file was at `commit` (#1067): any text "
+        "file the model had then, not only `model.scad`. The same path rules: a path "
+        "with a `.`, `..` or dot-file segment is a 422; a file the revision did not have "
+        f"a 404, one over {MAX_SOURCE_CHARS:,} bytes a 413, and one that is not UTF-8 "
+        "text a 415. Cached as immutable."
+    ),
+)
+def get_revision_file(
+    slug: SlugPath,
+    commit: CommitPath,
+    path: FilePath,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+) -> Response:
+    require_model_exists(catalogue, slug)
+    require_history(history)
+    try:
+        plain = "/".join(plain_segments(path))
+    except FilePathError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    folder = model_path(slug)
+    try:
+        data = history.read_blob(commit, f"{folder}/{plain}", limit=MAX_SOURCE_CHARS, root=folder)
+    except RevisionNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no {path!r} at {commit}") from None
+    except BlobTooLargeError:
+        raise ApiError(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"{path!r} is larger than the {MAX_SOURCE_CHARS:,} bytes a text file here may be",
+        ) from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    if b"\0" in data:
+        raise ApiError(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"{path!r} is not UTF-8 text")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ApiError(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"{path!r} is not UTF-8 text"
+        ) from None
+    return Response(
+        text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": REVISION_CACHE_CONTROL},
+    )
+
+
 #: An image a model's README shows beside it (#951), by extension, as served.
 IMAGE_MEDIA_TYPES = {
     ".png": "image/png",
@@ -353,16 +453,44 @@ def get_library_file(
     ] = None,
 ) -> Response:
     require_model_exists(catalogue, slug)
+    pinned = _pinned_commit(paths, slug, name)
+    if commit is not None and commit != pinned:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} pins {name!r} at {pinned[:7]} now, not {commit[:7]}; "
+            "reopen the editor to follow the new pin",
+        )
+    return _text_file(paths.libraries / name / pinned / name, path)
+
+
+def _pinned_commit(paths: DataPaths, slug: str, name: str) -> str:
     pin = next((p for p in declared_libraries(paths.model_dir(slug)) if p.name == name), None)
     if pin is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not pin a library {name!r}")
-    if commit is not None and commit != pin.commit:
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            f"{slug!r} pins {name!r} at {pin.commit[:7]} now, not {commit[:7]}; "
-            "reopen the editor to follow the new pin",
-        )
-    return _text_file(paths.libraries / name / pin.commit / name, path)
+    return pin.commit
+
+
+@router.get(
+    "/models/{slug}/libraries/{name}/files",
+    response_model=FileListing,
+    summary="Every file in a library the model pins",
+    description=(
+        "The paths `GET /models/{slug}/libraries/{name}/files/{path}` can read, with "
+        "their sizes, in the checkout the model's pin names (#1067). A 404 when the "
+        "model does not pin `name` or its checkout is not on the volume. No dot-file, "
+        f"dot-directory or symlink is listed; at most {MAX_LISTED_FILES:,} files, with "
+        "`truncated` true when there were more."
+    ),
+)
+def get_library_tree(
+    slug: SlugPath, name: LibraryName, catalogue: CatalogueDep, paths: PathsDep
+) -> FileListing:
+    require_model_exists(catalogue, slug)
+    pinned = _pinned_commit(paths, slug, name)
+    return _listing(
+        paths.libraries / name / pinned / name,
+        f"the {name!r} checkout {slug!r} pins is not on the volume",
+    )
 
 
 #: What a 503 from a busy language-server budget says to wait.

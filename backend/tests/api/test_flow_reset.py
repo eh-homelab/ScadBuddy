@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -100,6 +101,28 @@ def test_a_point_before_the_script_is_refused(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert response.json()["type"].endswith("/flow-reset-point")
+
+
+def test_a_run_parked_before_resets_recorded_where_is_refused(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    definition = register(client, script("await wait_for_human('q?', 600)"))
+    run_id = start(client, definition["id"], "legacy").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "waiting")
+    # As a row written before 6e: the parked call has no history length.
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE workflow_runs SET waiting_on = (SELECT jsonb_agg(w - 'history_length')"
+            " FROM jsonb_array_elements(waiting_on) w) WHERE id = %s",
+            (run_id,),
+        )
+    response = client.post(
+        f"/api/v1/workflow-runs/{run_id}/reset",
+        json={"event_id": 5, "as_of_event_id": 0},
+        headers={"Idempotency-Key": "legacy"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["type"].endswith("/flow-reset-unrecorded")
 
 
 def test_an_unknown_run_has_no_preview(client: TestClient) -> None:

@@ -268,10 +268,15 @@ class NozzleRackSlot(NozzleInfo):
     stat: int | None = None
     filament_type: str = ""
     filament_colour: str = Field(default="", alias="filament_color")
+    #: The Bambu filament id it last ran (``GFA00``), ``""`` when none (#2170);
+    #: ``bambuddy.filament_ids`` names it.
+    filament_id: str = ""
     #: The hotend's own serial (#836). It goes into the ``rack_nozzle_*`` tables and
-    #: nowhere else (spec 2026-10-01 §7), so it is kept out of ``repr``. A firmware
-    #: ``null`` reads as ``""`` and any other non-string is coerced to text, so it can
-    #: never fail the whole status parse or leak through a ValidationError's input.
+    #: the Settings rack-usage route only (spec 2026-10-01 §7), so it is kept out of
+    #: ``repr``. A firmware ``null`` reads as ``""`` and any other non-string is coerced
+    #: to text, so it can never fail the whole status parse or leak through a
+    #: ValidationError's input. The firmware's ``N/A`` (an empty mount) reads as ``""``
+    #: too (#2170), so every empty hotend does not share one history.
     serial_number: str = Field(default="", repr=False)
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
@@ -279,6 +284,12 @@ class NozzleRackSlot(NozzleInfo):
     @field_validator("serial_number", mode="before")
     @classmethod
     def _serial_text(cls, value: Any) -> Any:
+        text = "" if value is None else str(value).strip()
+        return "" if text.upper() == "N/A" else text
+
+    @field_validator("filament_id", mode="before")
+    @classmethod
+    def _filament_id_text(cls, value: Any) -> Any:
         return "" if value is None else str(value)
 
 
@@ -457,6 +468,9 @@ class LibraryFile(BambuddyModel):
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None
+    #: A file Bambuddy only indexes from an external folder: a delete drops its record
+    #: for good instead of moving it to the trash (#2167).
+    is_external: bool = False
 
 
 class LibraryListRow(BambuddyModel):
@@ -474,6 +488,8 @@ class LibraryListRow(BambuddyModel):
     sliced_for_model: str | None = None
     #: When it was added to the library; naive, and UTC like Bambuddy's other times.
     created_at: datetime | None = None
+    #: Indexed from an external folder: a delete cannot be undone (#2167).
+    is_external: bool = False
 
 
 class LibraryPlate(BambuddyModel):

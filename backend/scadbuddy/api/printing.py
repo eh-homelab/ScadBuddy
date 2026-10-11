@@ -47,6 +47,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.print_run import (
@@ -71,7 +72,7 @@ from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import ModelPrintChoices, RackAlgorithmSupersededError
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
-from scadbuddy.rack.rank import Usage, rack_positions
+from scadbuddy.rack.rank import Usage, rack_color, rack_positions
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -175,14 +176,40 @@ class PrinterRackAlgorithm(BaseModel):
     algorithm: RackAlgorithm
 
 
+class RackSpoolUse(BaseModel):
+    """One spool's settled prints on a hotend (#2170)."""
+
+    spool_id: int | None
+    label: str | None
+    material: str | None
+    #: ``#RRGGBB``.
+    colour: str | None
+    prints: int
+    grams: float
+    last_used_at: datetime | None
+
+
 class RackHotendUsage(BaseModel):
-    """What one rack position's hotend has printed (#1298). Named by position and nozzle,
-    never by serial (spec 2026-10-01 §7)."""
+    """What one rack position's hotend has printed (#1298), and what it is (#2170)."""
 
     position: int
+    #: The hotend's own serial, for Settings alone (#2170, spec 2026-10-01 §7); ``null``
+    #: when the printer reports none. The usage below follows it, not the position.
+    serial: str | None = None
     nozzle_diameter: str
     nozzle_type: str
     high_flow: bool
+    #: As the printer reports it: Bambuddy shows it as a percentage, but the H2C reports
+    #: 128 for most hotends, so the panel reads a value over 100 as not reported.
+    wear: int | None = None
+    #: The filament it last ran: Bambu's id (``GFA00``), its profile name and material
+    #: (``bambuddy.filament_ids``), and its colour as ``#RRGGBB``. ``null`` when unknown.
+    filament_id: str | None = None
+    filament_name: str | None = None
+    filament_material: str | None = None
+    filament_colour: str | None = None
+    #: Every spool that ran through it, most used first (#2170).
+    spools: list[RackSpoolUse] = Field(default_factory=list)
     prints: int
     print_seconds: int
     grams: float
@@ -318,7 +345,9 @@ async def get_printer_rack_usage(
         printer = await client.printer_status(printer_id)
     positions = rack_positions(printer.nozzle_rack)
     try:
-        usage = await rack.usage(slot.serial_number for slot in positions.values())
+        serials = [slot.serial_number for slot in positions.values()]
+        usage = await rack.usage(serials)
+        history = await rack.spool_history(serials)
     except DATABASE_ERRORS as error:
         # By type only: a database error's text can carry a serial (spec §7).
         logger.warning(
@@ -333,12 +362,20 @@ async def get_printer_rack_usage(
     hotends = []
     for position, slot in positions.items():
         use = usage.get(slot.serial_number, Usage()) if slot.serial_number else Usage()
+        spools = history.get(slot.serial_number, []) if slot.serial_number else []
         hotends.append(
             RackHotendUsage(
                 position=position,
+                serial=slot.serial_number or None,
                 nozzle_diameter=slot.nozzle_diameter,
                 nozzle_type=slot.nozzle_type,
                 high_flow=slot.high_flow,
+                wear=slot.wear,
+                filament_id=slot.filament_id or None,
+                filament_name=filament_name(slot.filament_id),
+                filament_material=filament_material(slot.filament_id),
+                filament_colour=rack_color(slot.filament_colour),
+                spools=[RackSpoolUse(**spool.model_dump()) for spool in spools],
                 prints=use.prints,
                 print_seconds=use.print_seconds,
                 grams=use.grams,

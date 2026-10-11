@@ -61,7 +61,10 @@ import type { RiskTier } from './permissions.js'
 //   - Responses are untrusted data (safety/untrusted.ts): every result is
 //     wrapped in the `untrusted_data` envelope naming the URL's host.
 //   - Every request (every hop) is an `http` audit row: method, scheme, host,
-//     status, size and timing. Never a path, a header or a body.
+//     status, size and timing, and on the hop that answered, the id its body
+//     was saved under, if it was (#1292: AI activity links to the body, served
+//     by GET /api/v1/ai/sessions/:id/http/:saved). Never a path, a header or a
+//     body.
 
 export const HTTP_SERVER = 'scadbuddy_http'
 export const HTTP_TOOL = 'http_request'
@@ -244,6 +247,16 @@ function textual(contentType: string | undefined, bytes: Buffer): boolean {
   return !bytes.subarray(0, 8192).includes(0)
 }
 
+/**
+ * Whether a final hop's body is saved for paging: when it has one and it does not
+ * fit inline, or is binary (never inlined).
+ */
+function savesBody(hop: Hop, limits: HttpLimits): boolean {
+  const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
+  const fits = hop.bytes.length <= limits.inlineMaxBytes && hop.complete
+  return hop.bytes.length > 0 && !(fits && textual(contentType, hop.bytes))
+}
+
 /** `end` moved back so it does not split a UTF-8 sequence. */
 function utf8Boundary(bytes: Buffer, end: number): number {
   if (end >= bytes.length) return bytes.length
@@ -328,8 +341,17 @@ type Outcome =
     }
   | { ok: false; reason: string }
 
-/** Sends the request, following redirects within the limits; audits every hop. */
-async function exchange(args: HttpRequestArgs, context: HttpRequestContext, callSignal?: AbortSignal): Promise<Outcome> {
+/**
+ * Sends the request, following redirects within the limits; audits every hop.
+ * The last hop's row names `savedAs` when its body is saved under that id
+ * (#1292: so AI activity can link to it).
+ */
+async function exchange(
+  args: HttpRequestArgs,
+  context: HttpRequestContext,
+  savedAs: string,
+  callSignal?: AbortSignal,
+): Promise<Outcome> {
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const resolve = context.resolve ?? systemResolver
   const deadline = AbortSignal.timeout(args.timeout_ms)
@@ -346,7 +368,10 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
   }
   for (let hop = 0; ; hop++) {
     const startedAt = new Date()
-    const audited = (outcome: 'ok' | 'error' | 'refused', extra: { status?: number; size?: number; detail?: string }) =>
+    const audited = (
+      outcome: 'ok' | 'error' | 'refused',
+      extra: { status?: number; size?: number; detail?: string; saved?: string },
+    ) =>
       context.audit?.record({
         kind: 'http',
         action: method,
@@ -362,6 +387,7 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
           ...(hop > 0 ? { redirect: hop } : {}),
           ...(extra.status !== undefined ? { status: extra.status } : {}),
           ...(extra.size !== undefined ? { size_bytes: extra.size } : {}),
+          ...(extra.saved !== undefined ? { saved: extra.saved } : {}),
         }),
         outcome,
         ...(extra.detail !== undefined ? { detail: safeDetail(extra.detail, context.secrets()) } : {}),
@@ -388,23 +414,33 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
       await audited('error', { detail: reason })
       return { ok: false, reason }
     }
-    await audited('ok', { status: result.status, size: result.bytes.length })
+    // The row of the hop whose body is the result names where that body was saved.
+    const last = () =>
+      audited('ok', {
+        status: result.status,
+        size: result.bytes.length,
+        ...(savesBody(result, limits) ? { saved: savedAs } : {}),
+      })
     const location = result.headers.location
     if (!isRedirect(result.status) || typeof location !== 'string') {
+      await last()
       return { ok: true, url, redirects, hop: result }
     }
     if (redirects.length >= limits.maxRedirects) {
+      await audited('ok', { status: result.status, size: result.bytes.length })
       return { ok: false, reason: `more than ${limits.maxRedirects} redirects (last: ${url.href} → ${location})` }
     }
     let next: URL
     try {
       next = assertHttpUrl(new URL(location, url).href, 'redirect')
     } catch (err) {
+      await audited('ok', { status: result.status, size: result.bytes.length })
       return { ok: false, reason: (err as Error).message }
     }
     const crossOrigin = next.origin !== url.origin
     const toGet = result.status === 303 ? method !== 'HEAD' : (result.status === 301 || result.status === 302) && method === 'POST'
     if (!toGet && crossOrigin && !READ_METHODS.has(method)) {
+      await last()
       return {
         ok: true,
         url,
@@ -413,6 +449,7 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
         note: `not followed: a ${result.status} would re-send the approved ${method} to another origin (${next.origin})`,
       }
     }
+    await audited('ok', { status: result.status, size: result.bytes.length })
     if (toGet) {
       method = 'GET'
       body = undefined
@@ -427,11 +464,10 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
 }
 
 /** The ids of saved bodies are UUIDs; a file's name is `<id>.body`, its metadata `<id>.json`. */
-type SavedMeta = { content_type: string | null; size_bytes: number; complete: boolean; url: string }
+export type SavedMeta = { content_type: string | null; size_bytes: number; complete: boolean; url: string }
 
-async function save(dir: string, bytes: Buffer, meta: SavedMeta): Promise<string> {
+async function save(dir: string, id: string, bytes: Buffer, meta: SavedMeta): Promise<string> {
   await mkdir(dir, { recursive: true })
-  const id = randomUUID()
   await writeFile(path.join(dir, `${id}.body`), bytes, { mode: 0o600 })
   await writeFile(path.join(dir, `${id}.json`), JSON.stringify(meta), { mode: 0o600 })
   await prune(dir)
@@ -494,17 +530,17 @@ export async function runHttpRequest(
     return text({ error: `Not sent: ${problem}.` }, true)
   }
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
-  const outcome = await exchange(args, context, callSignal)
+  const savedAs = randomUUID()
+  const outcome = await exchange(args, context, savedAs, callSignal)
   if (!outcome.ok) return text({ error: `Not completed: ${outcome.reason}.` }, true)
   const { hop } = outcome
   const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
   const isText = textual(contentType, hop.bytes)
   const fits = hop.bytes.length <= limits.inlineMaxBytes && hop.complete
   // Saved when it does not fit inline, or is binary (not inlined at all), so it can be paged.
-  const saved =
-    hop.bytes.length === 0 || (fits && isText)
+  const saved = !savesBody(hop, limits)
     ? undefined
-    : await save(context.saveDir, hop.bytes, {
+    : await save(context.saveDir, savedAs, hop.bytes, {
         content_type: contentType ?? null,
         size_bytes: hop.bytes.length,
         complete: hop.complete,
@@ -538,6 +574,21 @@ export async function runHttpRequest(
       : null,
   }
   return text(result)
+}
+
+/**
+ * A saved body whole, with what was recorded about it, for the UI to download
+ * (#1292); undefined for anything that is not a saved response id, or one not in
+ * `dir` (pruned, or saved on another replica).
+ */
+export async function savedBody(dir: string, id: string): Promise<{ meta: SavedMeta; bytes: Buffer } | undefined> {
+  if (!SAVED_ID.test(id)) return undefined
+  try {
+    const meta = JSON.parse(await readFile(path.join(dir, `${id}.json`), 'utf8')) as SavedMeta
+    return { meta, bytes: await readFile(path.join(dir, `${id}.body`)) }
+  } catch {
+    return undefined
+  }
 }
 
 /** The `http_response_read` handler: one page of a saved body. NOT yet marked untrusted. */

@@ -3,7 +3,7 @@ import { statusLabel } from '../../agent/chat/labels'
 import { isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import { timeAgo } from '../../lib/format'
 import { Button } from '../ui/Button'
-import { OriginBadge, OwnerBadge } from './badges'
+import { OfferBadge, OriginBadge, OwnerBadge } from './badges'
 import { usd } from './SessionBudget'
 
 // #795 — the panel's session list: forks under their parent, each with its status,
@@ -20,6 +20,8 @@ interface Props {
   onDone: (id: string) => Promise<void>
   /** #1885 — puts the chat away: out of this list, read-only, until it is unarchived. */
   onArchive: (id: string) => Promise<void>
+  /** #1284 — withdraws the chat's pending handoff offer. */
+  onCancelOffer: (id: string) => Promise<void>
 }
 
 const RUNNING: ReadonlySet<SessionState['status']> = new Set(['running', 'waiting_approval', 'waiting_input'])
@@ -56,7 +58,7 @@ function grouped(sessions: SessionState[]): { root: SessionState; forks: Session
   })
 }
 
-export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, onArchive }: Props) {
+export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, onArchive, onCancelOffer }: Props) {
   return (
     <ul className="max-h-56 overflow-y-auto py-1">
       {grouped(sessions).map(({ root, forks }) => (
@@ -68,6 +70,7 @@ export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, 
           onRename={onRename}
           onDone={onDone}
           onArchive={onArchive}
+          onCancelOffer={onCancelOffer}
         >
           {forks.length > 0 && (
             <ul aria-label={`Forks of ${root.title}`} className="ml-3 border-l border-line">
@@ -80,6 +83,7 @@ export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, 
                   onRename={onRename}
                   onDone={onDone}
                   onArchive={onArchive}
+                  onCancelOffer={onCancelOffer}
                 />
               ))}
             </ul>
@@ -97,6 +101,7 @@ function SessionRow({
   onRename,
   onDone,
   onArchive,
+  onCancelOffer,
   children,
 }: Omit<Props, 'sessions'> & { session: SessionState; children?: ReactNode }) {
   const [editing, setEditing] = useState(false)
@@ -176,6 +181,7 @@ function SessionRow({
             {s.parentId && <span className="text-[10.5px] text-faint">fork</span>}
             <OriginBadge origin={s.origin} />
             <OwnerBadge owner={s.owner} />
+            {s.offer && <OfferBadge offer={s.offer} />}
             <span className="text-[11px] text-faint">{outOfBudget(s) ? 'Out of budget' : statusLabel(s.status)}</span>
             {s.budget && (
               <span className="text-[11px] text-faint">
@@ -215,6 +221,18 @@ function SessionRow({
                 onClick={() => void act(onDone)}
               >
                 Done
+              </Button>
+            )}
+            {s.offer && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Cancel the offer of ${s.title}`}
+                title="Withdraw the handoff offer: the chat stays yours"
+                data-agent-user-only=""
+                onClick={() => void act(onCancelOffer)}
+              >
+                Cancel offer
               </Button>
             )}
             {canArchive && (
