@@ -7,6 +7,7 @@ import { principalFor } from '../src/auth/tokens.js'
 import { type BrowserTabs, TabHub, type TabConnection } from '../src/bridge/hub.js'
 import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
+import type { SessionTabStore } from '../src/bridge/sessionTabs.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { browserTools, tabBackNotRun } from '../src/tools/browser.js'
@@ -320,7 +321,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const chat = new ChatConnection(sessions, () => {}, { tabs: hub })
     await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
     await chat.receive(JSON.stringify({ v, type: 'user.message', text: 'hi', context }))
-    expect(hub.sessionHasTab('s-new')).toBe(true)
+    expect(await hub.sessionHasTab('s-new')).toBe(true)
     expect((await hub.status({ principal: browser, sessionId: 's-new' })).attached).toBe(true)
 
     // Another tab's panel attaching to it does not steal it; sending from there does.
@@ -336,13 +337,42 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     elsewhere.close()
   })
 
+  it("asks the shared row, not this replica's map, whether an attached session has a tab", async () => {
+    // Two replicas sharing ai_session_tabs (#2086). `here` paired s-new with TAB,
+    // which is connected to it; the user then sent to s-new from OTHER_TAB, through
+    // `there`, and closed that tab. `here`'s map still says TAB, so attaching from
+    // TAB took the session for paired and left the row on a tab nobody holds.
+    const rows = new Map<string, string>()
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+    }
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    here.pairSession('s-new', TAB)
+    there.pairSession('s-new', OTHER_TAB)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(await here.sessionHasTab('s-new')).toBe(false)
+
+    const { sessions } = fakeSessions()
+    const chat = new ChatConnection(sessions, () => {}, { tabs: here })
+    await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await chat.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(rows.get('s-new')).toBe(TAB)
+    chat.close()
+  })
+
   it('pairs nothing before the panel names its tab', async () => {
     const hub = new TabHub()
     await tab(hub, TAB)
     const { sessions } = fakeSessions()
     const chat = new ChatConnection(sessions, () => {}, { tabs: hub })
     await chat.receive(JSON.stringify({ v, type: 'user.message', text: 'hi', context }))
-    expect(hub.sessionHasTab('s-new')).toBe(false)
+    expect(await hub.sessionHasTab('s-new')).toBe(false)
     chat.close()
   })
 })
@@ -468,7 +498,7 @@ describe('waiting for the tab (#815)', () => {
     hub.pairSession('s1', TAB)
     await new Promise((r) => setTimeout(r, 0))
     expect(logged.join('\n')).toMatch(/db down/)
-    expect(hub.sessionHasTab('s1')).toBe(true)
+    expect(await hub.sessionHasTab('s1')).toBe(true)
   })
 
   it('waits on no tab, then runs a read call once the tab is back', async () => {
