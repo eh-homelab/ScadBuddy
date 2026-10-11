@@ -150,6 +150,13 @@ export type ToolContext = ToolServices & {
    */
   gate?: 'harness' | 'workflow'
   /**
+   * Under `harness`: the tier the turn's permission seam applied to this tool.
+   * The seam reads Settings → Plugins once per turn (sessions/manager.ts), so a
+   * tool raised to `outward` since then was not parked, and is refused here
+   * rather than run unasked (#2100).
+   */
+  seamTier?: Risk
+  /**
    * What the handler itself knows about how the call went, for the audit row
    * (`ToolRun`): `confirm_action` reports the approval it ran on and the tool
    * it ran, and that a claim answered pending or was refused. Set by
@@ -481,6 +488,12 @@ async function runJudgedByResult(
   }
   const off = await ctx.switchedOff?.(tool.name)
   if (off) return refused(off)
+  if (ctx.gate === 'harness' && effective.risk === 'outward' && ctx.seamTier !== undefined && ctx.seamTier !== 'outward') {
+    return refused(
+      `${tool.name} was raised to "outward" during this turn, so it needs a human approval this turn did not ask for; ` +
+        'nothing was sent. It asks for one from the next turn.',
+    )
+  }
   try {
     if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
