@@ -112,6 +112,11 @@ function prefill(base: string, suffix: string): string {
 const FIELD =
   'w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong'
 
+/** The user's own input, which ends a pick's settling (#1775, #2132). */
+const USER_EVENTS = ['pointerdown', 'keydown', 'wheel', 'input'] as const
+/** How long after its last write a just-picked preset's template UI is still answering it. */
+const SETTLE_MS = 1000
+
 /**
  * Named parameter sets for this template: the ones it ships with and the ones saved on
  * it, built-ins included. Picking one puts its values on screen over the defaults, and
@@ -207,8 +212,10 @@ export function PresetPicker({
    * #1775 — a preset just put on screen, which the template UI may still be answering:
    * one that seeds its own state when its inputs change (a tab, or state a preset saved
    * before it had any lacks) would make every pick read as changed. Until the user
-   * presses a key or a pointer, or a value moves off the preset's, the UI state it
-   * writes is taken as the preset's.
+   * presses a key or a pointer, turns the wheel or types (#2132), or a value moves off
+   * the preset's, the UI state it writes is taken as the preset's. A UI that answers does
+   * so at once, so settling also ends `SETTLE_MS` after the last write it took (#2132): a
+   * write from a timer or a fetch that lands later is a change, not the preset's.
    */
   const [settling, setSettling] = useState(elsewhere !== null)
 
@@ -232,13 +239,18 @@ export function PresetPicker({
   useEffect(() => {
     if (!settling) return
     const settled = () => setSettling(false)
-    document.addEventListener('pointerdown', settled, true)
-    document.addEventListener('keydown', settled, true)
+    for (const kind of USER_EVENTS) document.addEventListener(kind, settled, true)
     return () => {
-      document.removeEventListener('pointerdown', settled, true)
-      document.removeEventListener('keydown', settled, true)
+      for (const kind of USER_EVENTS) document.removeEventListener(kind, settled, true)
     }
   }, [settling])
+
+  // Restarted by every write taken as the preset's (`extra` is a new object each time).
+  useEffect(() => {
+    if (!settling) return
+    const timer = setTimeout(() => setSettling(false), SETTLE_MS)
+    return () => clearTimeout(timer)
+  }, [settling, extra])
 
   // #350 — the prefill selected, so typing replaces it rather than appending to it.
   // After the dialog's own effect, which focuses its panel.
