@@ -20,6 +20,7 @@ const selection: PrintSelection = {
   bedType: 'Textured PEI Plate',
   overrides: {},
   plate: 'all',
+  sides: {},
 }
 
 /**

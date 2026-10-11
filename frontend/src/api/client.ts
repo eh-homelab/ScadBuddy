@@ -69,6 +69,9 @@ import type {
   PrintPage,
   PrintProgress,
   PrintCheck,
+  PreviewStarted,
+  SlicePreview,
+  TrayAssigned,
   PrintRun,
   Operation,
   OperationAccepted,
@@ -1191,6 +1194,30 @@ export const api = {
     }),
 
   /**
+   * #2169 — slice the dialog's choices in the background, through the run's own path,
+   * without queueing; follow it with `getPreviewSlice`.
+   */
+  previewSlice: (outputId: string, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — how a background slice stands, and what it came to once finished. */
+  getPreviewSlice: (jobId: number, signal?: AbortSignal) =>
+    request<SlicePreview>(`/print/preview-slices/${jobId}`, signal ? { signal } : {}),
+
+  /**
+   * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
+   * on the person's own "yes".
+   */
+  assignTraySpool: (printerId: number, amsId: number, trayId: number, spoolId: number) =>
+    command<TrayAssigned>(`/print/printers/${printerId}/trays/${amsId}/${trayId}/spool`, {
+      method: 'POST',
+      body: JSON.stringify({ spool_id: spoolId }),
+    }),
+
+  /**
    * #284 — judge an output against the request the print dialog would send. Reads only:
    * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
    */
@@ -1337,6 +1364,13 @@ export const api = {
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — slice the dialog's choices for a library file in the background. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

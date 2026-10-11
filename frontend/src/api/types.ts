@@ -159,6 +159,12 @@ export type PrinterBedType = Schemas['PrinterBedType']
 /** #836 — the rack nozzle ScadBuddy would pick, its candidates, and what a run sent. */
 export type RackPickView = Schemas['RackPickView']
 export type RackOption = Schemas['RackOption']
+export type NozzlePlan = Schemas['NozzlePlan']
+export type PlannedSlot = Schemas['PlannedSlot']
+export type UnknownTray = Schemas['UnknownTray']
+export type PreviewStarted = Schemas['PreviewStarted']
+export type SlicePreview = Schemas['SlicePreview']
+export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']

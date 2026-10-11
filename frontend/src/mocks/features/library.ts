@@ -18,6 +18,8 @@ import type {
 } from '../../api/types'
 import { choicesView } from '../choices'
 import * as fixtures from '../fixtures'
+import { keychainGlb } from '../glb'
+import { H2C_FILE, H2C_FILENAME, H2C_NOZZLES, h2cFilaments, h2cPlan } from '../h2c'
 import {
   mockLibraryChoices,
   mockLibraryOutput,
@@ -39,7 +41,7 @@ const base = '/api/v1'
 
 /** The mocked Bambuddy library, shaped like tests/bambuddy/recordings. */
 export const libraryFolders: LibraryFolderView[] = [
-  { id: 1, name: 'MakerWorld', parent_id: null, depth: 0, file_count: 1 },
+  { id: 1, name: 'MakerWorld', parent_id: null, depth: 0, file_count: 2 },
   { id: 3, name: 'Supplies', parent_id: null, depth: 0, file_count: 0 },
   { id: 4, name: 'Storage', parent_id: 3, depth: 1, file_count: 1 },
   { id: 9, name: 'Bulk', parent_id: null, depth: 0, file_count: 300 },
@@ -76,6 +78,8 @@ export const libraryFiles: LibraryEntry[] = [
     created_at: '2026-09-27T17:17:51Z',
   }),
   entry(67, "Clara's Wand.3mf", '3mf', 1),
+  // #2166 — the H2C's two-colour file (Mistletoe Green and Inland Black PLA).
+  entry(H2C_FILE, H2C_FILENAME, '3mf', 1),
   entry(46, 'Desiccant_Box.stl', 'stl', 4),
   ...Array.from({ length: 300 }, (_, n) => entry(2000 + n, `part-${n}.3mf`, '3mf', 9)),
 ]
@@ -130,6 +134,14 @@ export const handlers = [
 
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
   http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
+  // #1723 — a plate's mesh, in the file's own colours (the H2C file's green and black).
+  http.get(`${base}/print/library/:id/preview.glb`, ({ params }) => {
+    const colours = Number(params['id']) === H2C_FILE ? ['#3F8E43', '#1A1A1A'] : ['#0047BB', '#FF1493']
+    const glb = keychainGlb(colours, { x: 60, y: 60, z: 8 })
+    return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
+      headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
 
   http.get(`${base}/print/library/:id/plates`, ({ params }) => {
     const file = libraryFiles.find((row) => row.id === Number(params['id']))
@@ -153,6 +165,16 @@ export const handlers = [
       asked !== null ? Number(asked) : (remembered.printer_id ?? choicesView.printer_id ?? null)
     const printerName =
       (choicesView.printers ?? []).find((printer) => printer.id === printerId)?.name ?? null
+    if (fileId === H2C_FILE) {
+      return HttpResponse.json({
+        ...choicesView,
+        printer_id: printerId,
+        installed: [{ size: '0.4', flow: 'high_flow', count: 2 }],
+        default_nozzles: H2C_NOZZLES,
+        filaments: h2cFilaments(printerId),
+        model_choices: remembered,
+      } satisfies ChoicesView)
+    }
     return HttpResponse.json({
       ...choicesView,
       printer_id: printerId,
@@ -192,6 +214,9 @@ export const handlers = [
     const refused = libraryRefusal(Number(params['id']))
     if (refused) return refused
     const printerId = new URL(request.url).searchParams.get('printer_id')
+    if (Number(params['id']) === H2C_FILE) {
+      return HttpResponse.json(h2cFilaments(printerId === null ? null : Number(printerId)))
+    }
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...(printerId === null ? { nozzles: [] } : {}),
@@ -202,9 +227,13 @@ export const handlers = [
 
   // #755 — refuses a missing or unprintable file as the run does; a test that needs a
   // verdict answers this route itself.
-  http.post(`${base}/print/library/:id/check`, ({ params }) => {
+  http.post(`${base}/print/library/:id/check`, async ({ params, request }) => {
     const refused = libraryRefusal(Number(params['id']))
     if (refused) return refused
+    if (Number(params['id']) === H2C_FILE) {
+      const body = (await request.json()) as PrintRunRequest
+      return HttpResponse.json({ errors: [], warnings: [], rack: null, nozzle_plan: h2cPlan(body) } satisfies PrintCheck)
+    }
     return HttpResponse.json({ errors: [], warnings: [], rack: null } satisfies PrintCheck)
   }),
 

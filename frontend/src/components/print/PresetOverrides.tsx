@@ -9,7 +9,16 @@ type Props = {
   onChange: (slotId: number, key: string) => void
 }
 
-/** Advanced only — a filament preset per slot, in place of the spool's own. */
+/** "PLA" for "PLA Basic" or "PLA-CF": the material a preset and a slot are matched by. */
+function materialFamily(material: string | null | undefined): string {
+  return (material ?? '').trim().split(/[\s-]/)[0]?.toUpperCase() ?? ''
+}
+
+/**
+ * Advanced only — a filament preset per slot, in place of the spool's own. A slot is
+ * offered only presets of its own material (#2166), and any preset when its material
+ * is unknown; the one chosen stays listed.
+ */
 export function PresetOverrides({ size, slots, presets, overrides, onChange }: Props) {
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
@@ -18,6 +27,14 @@ export function PresetOverrides({ size, slots, presets, overrides, onChange }: P
         {slots.map((slot) => {
           const id = `preset-override-${slot.slot_id}`
           const chosen = overrides[String(slot.slot_id)]
+          const family = materialFamily(slot.material)
+          const offered = presets.filter(
+            (row) =>
+              !family ||
+              !row.filament_type ||
+              materialFamily(row.filament_type) === family ||
+              (chosen !== undefined && refKey(row.ref) === refKey(chosen)),
+          )
           return (
             <div key={slot.slot_id} className="flex flex-col gap-1">
               <label htmlFor={id} className="text-[12px] text-muted">
@@ -30,7 +47,7 @@ export function PresetOverrides({ size, slots, presets, overrides, onChange }: P
                 className="sb-field"
               >
                 <option value="">The spool&apos;s own preset</option>
-                {presets.map((row) => (
+                {offered.map((row) => (
                   <option key={refKey(row.ref)} value={refKey(row.ref)}>
                     {row.name}
                   </option>

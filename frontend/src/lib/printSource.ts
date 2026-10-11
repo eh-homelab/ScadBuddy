@@ -9,6 +9,7 @@ import type {
   Output,
   OutputPlate,
   PrintCheck,
+  PreviewStarted,
   PrintProgress,
   PrintRunRequest,
   PrintRunResult,
@@ -44,6 +45,8 @@ export interface SourceApi {
   run: (body: PrintRunRequest, signal?: AbortSignal, within?: Within) => Promise<PrintRunResult>
   /** #755, #760 — what the run would refuse for `body`, with nothing uploaded or queued. */
   check: (body: PrintRunRequest) => Promise<PrintCheck>
+  /** #2169 — slice `body` in the background through the run's own path; nothing queued. */
+  preview: (body: PrintRunRequest) => Promise<PreviewStarted>
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
 }
@@ -118,6 +121,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       previewUrl: () => api.outputPreviewGlbUrl(id),
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
       check: (body) => api.checkPrint(id, body),
+      preview: (body) => api.previewSlice(id, body),
       remember: (choices) => api.putModelChoices(slug, choices),
     }
   }
@@ -130,6 +134,7 @@ export function sourceApi(source: PrintSource): SourceApi {
     previewUrl: (plate) => api.libraryPreviewGlbUrl(id, plate),
     run: (body, signal, within) => api.runLibraryPrint(id, body, signal, within),
     check: (body) => api.checkLibraryPrint(id, body),
+    preview: (body) => api.previewLibrarySlice(id, body),
     remember: (choices) => api.putLibraryChoices(id, choices),
   }
 }

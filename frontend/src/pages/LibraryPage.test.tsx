@@ -204,6 +204,6 @@ describe('LibraryPage, item context (#975)', () => {
     await user.click(bulk)
     expect(bulk).toHaveAttribute('aria-current', 'true')
     expect(within(nav).getByRole('button', { name: 'Top level' })).not.toHaveAttribute('aria-current')
-    expect(within(nav).getByRole('button', { name: 'MakerWorld, 1 file' })).toBeInTheDocument()
+    expect(within(nav).getByRole('button', { name: 'MakerWorld, 2 files' })).toBeInTheDocument()
   })
 })

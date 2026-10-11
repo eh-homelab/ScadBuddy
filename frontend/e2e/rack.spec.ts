@@ -20,8 +20,8 @@ test.describe('rack nozzle', () => {
 
   test('Simple mode names the automatic pick and prints with it', async ({ page }) => {
     const dialog = await openDialog(page)
-    await expect(dialog.getByText('Rack nozzle: position 4', { exact: false })).toBeVisible()
-    await expect(dialog.getByLabel('Rack nozzle position')).toHaveCount(0)
+    await expect(dialog.getByText('Right nozzle from the rack: position 4', { exact: false })).toBeVisible()
+    await expect(dialog.getByTestId('rack-step')).toHaveCount(0)
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('rack-pick')).toHaveText('Rack nozzle: position 4')
@@ -31,15 +31,14 @@ test.describe('rack nozzle', () => {
     const dialog = await openDialog(page)
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
 
-    const position = dialog.getByLabel('Rack nozzle position')
-    await expect(position.locator('option')).toHaveText([
-      'Automatic',
-      /^Position 2 · 0\.4 Standard · PLA · 14 prints/,
-      /^Position 4 · 0\.4 Standard · material unknown · 3 prints$/,
-      /^Position 6 · 0\.4 Standard · PETG · 9 prints/,
-    ])
-    await position.selectOption('6')
-    await expect(dialog.getByText('Rack nozzle: position 6', { exact: false })).toBeVisible()
+    // #2166 — each hotend named by the filament it last ran, never by a hex.
+    const step = dialog.getByTestId('rack-step')
+    await expect(step).toContainText('Position 2 · 0.4 Standard · last ran white PLA')
+    await expect(step).toContainText('Position 4 · 0.4 Standard3 prints')
+    await expect(step).toContainText('Position 6 · 0.4 Standard · last ran blue PETG')
+    await expect(step).not.toContainText('#1E90FF')
+    await dialog.getByTestId('rack-position-6').check()
+    await expect(dialog.getByText('Right nozzle from the rack: position 6', { exact: false })).toBeVisible()
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('rack-pick')).toHaveText('Rack nozzle: position 6')
@@ -49,11 +48,11 @@ test.describe('rack nozzle', () => {
     const dialog = await openDialog(page)
     const advanced = dialog.getByRole('switch', { name: 'Advanced' })
     await advanced.click()
-    await dialog.getByLabel('Rack nozzle position').selectOption('2')
-    await expect(dialog.getByText('Rack nozzle: position 2', { exact: false })).toBeVisible()
+    await dialog.getByTestId('rack-position-2').check()
+    await expect(dialog.getByText('Right nozzle from the rack: position 2', { exact: false })).toBeVisible()
     await advanced.click()
 
-    await expect(dialog.getByText('Rack nozzle: position 4', { exact: false })).toBeVisible()
+    await expect(dialog.getByText('Right nozzle from the rack: position 4', { exact: false })).toBeVisible()
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('rack-pick')).toHaveText('Rack nozzle: position 4')
   })
