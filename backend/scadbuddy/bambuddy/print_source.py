@@ -502,6 +502,19 @@ class SpoolFullError(Exception):
         )
 
 
+class ReadOutOfMemoryError(Exception):
+    """A library file this process ran out of memory reading. With no triangle limit
+    (the default) nothing refuses a file for its size, so a huge one can; the file is
+    not at fault and a smaller budget or more memory would read it, so this is never
+    kept as its refusal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "ScadBuddy ran out of memory reading it; set a triangle limit under Settings →"
+            " Projects & files (SCADBUDDY_READ_MAX_TRIANGLES) or give the server more memory"
+        )
+
+
 def printable(file_type: str | None) -> bool:
     return (file_type or "").lower() in PRINTABLE_TYPES
 
@@ -652,6 +665,9 @@ class LibrarySource(PrintPipeline):
         await asyncio.to_thread(check_stl, out, budget)
         try:
             await asyncio.to_thread(self._wrap_stl, out)
+        except MemoryError:
+            # Not "holds no mesh": that would be kept as the file's refusal for good.
+            raise ReadOutOfMemoryError from None
         except Exception as exc:
             logger.warning(
                 "could not read the STL's mesh",
