@@ -290,21 +290,21 @@ def get_revision_file(
     try:
         data = history.read_blob(commit, f"{folder}/{plain}", limit=MAX_SOURCE_CHARS, root=folder)
     except RevisionNotFoundError:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no {path!r} at {commit}") from None
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no {plain!r} at {commit}") from None
     except BlobTooLargeError:
         raise ApiError(
             status.HTTP_413_CONTENT_TOO_LARGE,
-            f"{path!r} is larger than the {MAX_SOURCE_CHARS:,} bytes a text file here may be",
+            f"{plain!r} is larger than the {MAX_SOURCE_CHARS:,} bytes a text file here may be",
         ) from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     if b"\0" in data:
-        raise ApiError(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"{path!r} is not UTF-8 text")
+        raise ApiError(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"{plain!r} is not UTF-8 text")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise ApiError(
-            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"{path!r} is not UTF-8 text"
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"{plain!r} is not UTF-8 text"
         ) from None
     return Response(
         text,

@@ -23,6 +23,7 @@ is refused rather than read.
 
 from __future__ import annotations
 
+import bisect
 import os
 import stat
 from pathlib import Path
@@ -114,9 +115,11 @@ def list_files(root: Path, *, limit: int) -> tuple[list[tuple[str, int]], bool]:
     with True when more were left out (#1067).
 
     A dot-file or dot-directory is neither listed nor walked into, and neither is a
-    symlink, so nothing listed is outside the root or on a hidden path. The walk goes
-    in sorted order and stops once past ``limit``, so a huge tree costs a bounded walk
-    and a cut listing is always the same prefix.
+    symlink, so nothing listed is outside the root or on a hidden path. A cut listing
+    is the first ``limit`` paths of the whole tree in path order (#2237): the walk
+    visits every directory, since os.walk lists a directory's files before its
+    subdirectories' and a prefix of the walk is not a prefix of the sorted paths, but
+    keeps only the ``limit + 1`` smallest paths seen, so memory stays bounded.
     """
     base = root.resolve(strict=True)
     found: list[tuple[str, int]] = []
@@ -134,10 +137,11 @@ def list_files(root: Path, *, limit: int) -> tuple[list[tuple[str, int]], bool]:
             relative = path.relative_to(base).as_posix()
             if not stat.S_ISREG(info.st_mode) or len(relative) > MAX_PATH_LENGTH:
                 continue
-            found.append((relative, info.st_size))
-            if len(found) > limit:
-                return sorted(found[:limit]), True
-    return sorted(found), False
+            if len(found) > limit and relative >= found[-1][0]:
+                continue
+            bisect.insort(found, (relative, info.st_size))
+            del found[limit + 1 :]
+    return found[:limit], len(found) > limit
 
 
 def opened_path(fd: int) -> Path | None:
