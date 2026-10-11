@@ -367,7 +367,7 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(await (await cancel()).json()).toMatchObject({ cancelled: false })
   })
 
-  it("refuses to withdraw an offer the browser user is neither the owner nor the target of (#1284)", async () => {
+  it("refuses to withdraw an offer on a session the browser user does not own (#1284)", async () => {
     const { session } = await m.start(agentA, { origin: 'mcp', title: 'theirs' })
     await waitIdle(session.id)
     await m.handoff(session.id, agentA, agentB)

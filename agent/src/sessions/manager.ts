@@ -2156,7 +2156,9 @@ export class SessionManager {
 
   /**
    * Ends the live offer of a session: its owner withdraws it, its target
-   * declines it. Resolves false when there was none.
+   * declines it. Resolves false when there was none. The browser user is only
+   * ever an owner here, since a handoff to it transfers at once and is never
+   * offered: declining by the target serves MCP principals (`sessions_cancel_handoff`).
    */
   async cancelHandoff(id: string, actor: Owner): Promise<boolean> {
     const session = await this.get(id, actor)

@@ -63,7 +63,8 @@ import { ready, type RouteModule } from './module.js'
 //                                                 manager.ts `cancelHandoff`, as MCP's
 //                                                 sessions_cancel_handoff); 403 for anyone else's.
 //                                                 Nothing is ever offered *to* the browser user: a
-//                                                 handoff to it transfers at once. `cancelled` is
+//                                                 handoff to it transfers at once, so the manager's
+//                                                 target-declines branch serves MCP callers only. `cancelled` is
 //                                                 false when there was none (it expired, or was accepted)
 //   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true, archived?} → {session}: rename
 //                                                 it, mark it done (#795), or archive or unarchive it
