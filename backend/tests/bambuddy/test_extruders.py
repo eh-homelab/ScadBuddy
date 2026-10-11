@@ -311,6 +311,30 @@ def test_both_sides_with_the_size_are_both_offered() -> None:
 
 
 @pytest.mark.parametrize(
+    ("mounted", "nozzles", "expected"),
+    [
+        # Queue 268: a 0.4 High Flow on both sides, High Flow chosen.
+        (
+            (("HH00", "0.4"), ("HH01", "0.4")),
+            _choose("0.4", "high_flow"),
+            ["High Flow#1", "High Flow#1"],
+        ),
+        # The owner's case (a): a standard 0.2 on both sides.
+        ((("HS00", "0.2"), ("HS00", "0.2")), _size("0.2"), ["Standard#1", "Standard#1"]),
+    ],
+)
+def test_two_sides_of_the_chosen_nozzle_are_both_offered(
+    mounted: tuple[tuple[str, str], tuple[str, str]],
+    nozzles: list[NozzleChoice],
+    expected: list[str],
+) -> None:
+    """#2181: either side may print, so both are stated. Left as ``None``, a library
+    file kept its own stats, and one made for a single extruder offered the slicer one
+    side: queue 268 sliced both colours onto the left."""
+    assert slicer_nozzle_stats(_nozzles(*mounted), nozzles) == expected
+
+
+@pytest.mark.parametrize(
     ("status", "size"),
     [
         # Neither has it: stating no nozzle anywhere fails the slice, and the printer
@@ -367,11 +391,11 @@ def test_the_warning_says_which_side_and_both_flows() -> None:
 
 def test_either_side_the_slicer_may_choose_is_warned_about() -> None:
     """High Flow chosen for the left and Standard for the right, with the 0.2s mounted
-    the other way round: neither side has its flow, so both are offered (#2181), and
+    the other way round: neither side has its flow, so the slicer is left to choose, and
     each side is warned of in its own flow."""
     status = _nozzles(("HH01", "0.2"), ("HS00", "0.2"))
     nozzles = _choose("0.2", "high_flow", "standard")
-    assert slicer_nozzle_stats(status, nozzles) == ["High Flow#1", "Standard#1"]
+    assert slicer_nozzle_stats(status, nozzles) is None
     assert high_flow_warnings(status, nozzles) == [
         high_flow_warning(RIGHT, "standard"),
         high_flow_warning(LEFT, "high_flow"),

@@ -1103,8 +1103,6 @@ async def plan_run(
     every, errors = await resolve_plates(
         client, plate_ids, per_plate, request.filament_plan, choices, catalogue
     )
-    # A library file of one plate is sliced as "every plate" (#2180, ``SlicePlan``).
-    slice_all = isinstance(source, LibrarySource) and len(await source.plate_ids(client)) == 1
     for plate_id, options, resolved in zip(plate_ids, per_plate, every, strict=True):
         if resolved.errors:
             continue
@@ -1117,6 +1115,7 @@ async def plan_run(
                 "process preset for the chosen nozzle.",
             )
         plan = SlicePlan(
+            whole_file=source.slices_whole_file,
             printer_preset=resolved.printer_preset,
             process_preset=resolved.process_preset,
             filament_presets=resolved.filament_presets,
@@ -1127,7 +1126,6 @@ async def plan_run(
                 if request.print_sequence is None
                 else {**source.print_settings, "print_sequence": request.print_sequence}
             ),
-            slice_all=slice_all,
         )
         planned.append((plate_id, options, resolved, plan))
     if errors:

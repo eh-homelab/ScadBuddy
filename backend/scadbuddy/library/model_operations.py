@@ -222,7 +222,15 @@ def model_kinds(state: AppState) -> list[OperationKind]:
 
     async def readme_put_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         content = await _text(request["content"])
-        return _record(await models_api.readme_put_run(request["slug"], content, state))
+        return _record(
+            await models_api.readme_put_run(
+                request["slug"],
+                content,
+                state,
+                message=request.get("message"),
+                base=request.get("base"),
+            )
+        )
 
     async def readme_delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         return _record(await models_api.readme_delete_run(request["slug"], state))

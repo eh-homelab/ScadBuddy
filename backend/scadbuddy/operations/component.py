@@ -52,7 +52,11 @@ def _build(core: Core, components: Components) -> OperationCommands:
         store=OperationStore(core.projection.pool, events=transactional_events(core.events)),
         client=runs.client,
         queues=MappingProxyType(
-            {"bambuddy": runs.task_queue, "library": core.settings.temporal_task_queue_library}
+            {
+                "bambuddy": runs.task_queue,
+                "library": core.settings.temporal_task_queue_library,
+                "projects": core.settings.temporal_task_queue_projects,
+            }
         ),
         kinds=MappingProxyType(
             build_kinds(core, components, feature_exports(KINDS_MODULE, KINDS_ATTR))

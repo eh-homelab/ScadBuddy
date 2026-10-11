@@ -68,16 +68,13 @@ class SlicePlan(BaseModel):
     #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
     #: when they are, an explicit fix goes over these.
     process_overrides: dict[str, str] = Field(default_factory=dict)
-    #: Slice as Bambuddy's ``plate: 0``, "every plate", for a file of one plate (#2180).
-    #: Bambuddy runs ``substitute_unused_plate_filaments`` on any other plate number, and
-    #: it finds the slots a plate uses only in component ``.model`` files: a mesh painted
-    #: inline (``paint_color``, as Bambu Studio and MakerWorld files carry it) looks
-    #: unused there, so a two-colour file's second slot was overwritten with the first's
-    #: preset and colour, and it sliced in one colour (queue item 268). ``plate=0`` skips
-    #: the substitution (Bambuddy ``api/routes/library.py``: "``plate=0`` is the
-    #: slice-all sentinel"), and for one plate slices that same plate. ScadBuddy pads
-    #: the unused slots itself (``resolver.resolve``), so nothing relies on it.
-    slice_all: bool = False
+    #: Slice the file as a whole (``plate: 0``) rather than by its plate number: set
+    #: for a library file of one plate (#2180). Naming a plate makes Bambuddy repaint
+    #: any slot it thinks that plate leaves unused, and it cannot see colour painted
+    #: inline on a mesh, so queue 268's two-colour file sliced in one colour. The
+    #: queue item still names the plate. Defaults off, so a plan in a workflow's
+    #: history from before it reads as before.
+    whole_file: bool = False
 
 
 async def slice_and_queue(
@@ -186,7 +183,7 @@ def slice_request(plan: SlicePlan, plate_id: int) -> SliceRequest:
         filament_presets=plan.filament_presets,
         filament_colours=plan.filament_colours,
         bed_type=plan.bed_type,
-        plate=0 if plan.slice_all else plate_id,
+        plate=0 if plan.whole_file else plate_id,
         process_overrides=plan.process_overrides or None,
     )
 

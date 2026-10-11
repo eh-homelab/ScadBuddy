@@ -9,9 +9,8 @@ test.describe('print dialog on the H2C', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack is covered by real-backend.spec.ts')
 
   async function openDialog(page: Page) {
-    await page.goto('/library')
-    await page.getByRole('button', { name: /^MakerWorld/ }).click()
-    await page.getByTestId('library-print-2182').click()
+    // A print link (#2165) opens the dialog on the file.
+    await page.goto('/library?print=2182&file=2182')
     const dialog = page.getByRole('dialog', { name: 'Print' })
     await expect(dialog.getByTestId('nozzle-plan')).toBeVisible()
     return dialog
@@ -94,9 +93,7 @@ test.describe('print dialog on the H2C', () => {
 
   // #2169 — a plate clicked loads into the pane; one chosen to print does too.
   test('a plate clicked is the one the preview shows', async ({ page }) => {
-    await page.goto('/library')
-    await page.getByRole('button', { name: /^MakerWorld/ }).click()
-    await page.getByTestId('library-print-67').click()
+    await page.goto('/library?print=67&file=67')
     const dialog = page.getByRole('dialog', { name: 'Print' })
     const label = dialog.getByTestId('preview-label')
     await expect(label).toHaveText('Showing Plate 1')

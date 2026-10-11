@@ -287,6 +287,17 @@ def default_nozzles(status: PrinterStatus | None, size: NozzleSize = "0.4") -> l
     return [NozzleChoice(size=size, flow=flow(LEFT)), NozzleChoice(size=size, flow=flow(RIGHT))]
 
 
+def _found(status: PrinterStatus, nozzles: Sequence[NozzleChoice]) -> dict[int, list[bool]]:
+    """Each side's nozzles of the chosen size, as :func:`_nozzles_on` counts them."""
+    size = nozzles[0].size
+    return {extruder: _nozzles_on(status, extruder, size) for extruder in (RIGHT, LEFT)}
+
+
+def _matching(found: dict[int, list[bool]], chosen: dict[int, FlowType]) -> set[int]:
+    """The sides with a nozzle of the flow chosen for them."""
+    return {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows}
+
+
 def _offered_sides(
     status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
 ) -> frozenset[int] | None:
@@ -307,17 +318,20 @@ def _offered_sides(
     the left, so Auto For Flush put every colour there: queue item 268."""
     if status is None or not two_nozzles(status):
         return None
-    size = nozzles[0].size
     chosen = _flows(nozzles)
-    found = {extruder: _nozzles_on(status, extruder, size) for extruder in (RIGHT, LEFT)}
-    matching = {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows}
+    found = _found(status, nozzles)
+    matching = _matching(found, chosen)
     if len(matching) == 2 and chosen[LEFT] != chosen[RIGHT]:
         return frozenset({LEFT if chosen[LEFT] == "high_flow" else RIGHT})
+    if len(matching) == 2:
+        return frozenset({LEFT, RIGHT})
+    # One side of the flow chosen for it, else one side of the size at all. Both of the
+    # size, neither in the flow chosen for it, leaves the slicer its own choice.
     for has in (matching, {e for e, flows in found.items() if flows}):
         if len(has) == 1:
             return frozenset(has)
         if has:
-            return frozenset({LEFT, RIGHT})
+            return None
     return None
 
 

@@ -52,6 +52,11 @@ from scadbuddy.bambuddy.projects import AttachResult, ProjectAttach
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.library_file_operations import (
+    LibraryDeleteResult,
+    LibraryFilesRequest,
+    LibraryRestoreResult,
+)
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
@@ -60,6 +65,9 @@ from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
 
 router = APIRouter(prefix="/print/library", tags=["print"])
+
+#: The operations record's subject for a library delete or restore.
+LIBRARY_FILES_SUBJECT = "library-files"
 
 FileIdPath = Annotated[int, Path(ge=1)]
 
@@ -70,16 +78,74 @@ async def get_library(
     uploads: UploadsDep,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
+    file_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
     Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
-    A file ScadBuddy uploaded names its ``output_id`` (#1864)."""
+    A file ScadBuddy uploaded names its ``output_id`` (#1864). ``file_id`` in place of
+    ``folder_id`` lists the folder that file is in, which a deep link to a file opens
+    (#2165); a file Bambuddy no longer has is its 404."""
     async with client_for(store.load()) as client:
+        if file_id is not None and folder_id is None:
+            folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
     made = await uploads.outputs_for_files(entry.id for entry in listing.files)
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+@router.post(
+    "/delete",
+    response_model=LibraryDeleteResult,
+    summary="Delete library files through Bambuddy, to its trash",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_delete(
+    body: LibraryFilesRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryDeleteResult | JSONResponse:
+    """Moves each file to Bambuddy's trash (#2167), one file with ``DELETE``, several with
+    Bambuddy's bulk delete. An external file skips the trash and is gone for good
+    (``trashed: false``). A file Bambuddy skipped is listed in ``skipped``, never in
+    ``deleted``. A file a print waiting in Bambuddy's queue names is a 409, and one
+    Bambuddy no longer has a 404, both before anything is deleted."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_file_delete"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryDeleteResult)
+
+
+@router.post(
+    "/restore",
+    response_model=LibraryRestoreResult,
+    summary="Restore library files from Bambuddy's trash",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_restore(
+    body: LibraryFilesRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryRestoreResult | JSONResponse:
+    """A delete's Undo (#2167): each file back from Bambuddy's trash, under its own id. A
+    file not in the trash (external, or emptied from it) is listed in ``skipped``."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_file_restore"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryRestoreResult)
 
 
 @router.get(

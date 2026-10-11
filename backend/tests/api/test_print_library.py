@@ -211,7 +211,7 @@ def test_an_stl_slices_as_one_plate(client: TestClient) -> None:
     )
 
     assert response.status_code == 200, response.text
-    # One plate is sliced as "every plate" (#2180).
+    # One plate is sliced as the whole file (#2180).
     assert json.loads(sliced.calls.last.request.content)["plate"] == 0
     assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert uploaded_name(upload) == "file-46 (ScadBuddy).3mf"
@@ -371,8 +371,57 @@ def test_a_file_with_no_plate_metadata_prints_plate_one(client: TestClient) -> N
     assert response.status_code == 200, response.text
     assert sliced.call_count == 1
     sent = json.loads(sliced.calls.last.request.content)
+    # Its one plate, sliced as the whole file (#2180).
     assert sent["plate"] == 0 and len(sent["filament_presets"]) == 1
     assert client.get("/api/v1/print/library/70/plates").json() == []
+
+
+@respx.mock
+def test_a_one_plate_library_file_is_sliced_as_the_whole_file(client: TestClient) -> None:
+    """#2180: Bambuddy repaints a slot it thinks the plate leaves unused whenever the
+    slice names a plate, and it cannot see colour painted inline on a mesh, so queue 268's
+    two-colour file sliced all green. ``plate: 0`` skips that substitution."""
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89, plates="library-plates-single.json")
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 0
+
+
+@respx.mock
+def test_a_plate_of_a_file_with_several_is_sliced_by_its_number(client: TestClient) -> None:
+    """Plate 0 slices every plate, so a file with more than one keeps naming its plate."""
+    configure(client)
+    one_color(67)
+    flow_copy_routes()
+    library_file(67, plates="library-plates-multi.json")
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        67,
+        json={
+            **body(),
+            "plate_id": 2,
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 2
 
 
 @respx.mock

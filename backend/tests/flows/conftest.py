@@ -39,4 +39,10 @@ async def flows(temporal_address: str, jobs: JobProjection) -> AsyncIterator[Flo
     store = FlowStore(jobs.pool)
     queue = f"projects-{uuid.uuid4().hex[:8]}"
     async with projects_worker(client, queue, FlowActivities(store).all()):
-        yield Flows(client, queue, store)
+        flows = Flows(client, queue, store)
+        try:
+            yield flows
+        finally:
+            for worker, task in flows.cleanup:
+                await worker.shutdown()
+                await task

@@ -6,10 +6,12 @@ import type {
   ProjectAttach,
   ChoicesView,
   FilamentOptions,
+  LibraryDeleteResult,
   LibraryEntry,
   LibraryFileObjects,
   LibraryFolderView,
   LibraryListing,
+  LibraryRestoreResult,
   ModelPrintChoices,
   OutputPlate,
   PrintRun,
@@ -45,6 +47,10 @@ export const libraryFolders: LibraryFolderView[] = [
   { id: 3, name: 'Supplies', parent_id: null, depth: 0, file_count: 0 },
   { id: 4, name: 'Storage', parent_id: 3, depth: 1, file_count: 1 },
   { id: 9, name: 'Bulk', parent_id: null, depth: 0, file_count: 300 },
+  // #2165 — a name repeated under another folder, as the live library has it.
+  { id: 10, name: 'Spec', parent_id: null, depth: 0, file_count: 0 },
+  { id: 11, name: 'MakerWorld', parent_id: 10, depth: 1, file_count: 0 },
+  { id: 12, name: 'Work', parent_id: 11, depth: 2, file_count: 3 },
 ]
 
 function entry(
@@ -52,7 +58,7 @@ function entry(
   filename: string,
   fileType: string,
   folderId: number | null,
-  added: Pick<LibraryEntry, 'file_size' | 'created_at'> = {},
+  added: Pick<LibraryEntry, 'file_size' | 'created_at'> & { is_external?: boolean } = {},
 ): LibraryEntry {
   return {
     id,
@@ -64,6 +70,7 @@ function entry(
     printable: ['3mf', 'stl'].includes(fileType.toLowerCase()),
     file_size: added.file_size ?? 64_000,
     created_at: added.created_at ?? '2026-09-20T12:00:00Z',
+    is_external: added.is_external ?? false,
   }
 }
 
@@ -81,6 +88,11 @@ export const libraryFiles: LibraryEntry[] = [
   // #2166 — the H2C's two-colour file (Mistletoe Green and Inland Black PLA).
   entry(H2C_FILE, H2C_FILENAME, '3mf', 1),
   entry(46, 'Desiccant_Box.stl', 'stl', 4),
+  // #2167 — in Spec/MakerWorld/Work: one to delete, one Bambuddy's key may not (another
+  // user added it), and one linked from an external folder.
+  entry(120, 'drawer-label.3mf', '3mf', 12),
+  entry(121, 'alex-headphone-hook.3mf', '3mf', 12),
+  entry(122, 'nas-share-bracket.3mf', '3mf', 12, { is_external: true }),
   ...Array.from({ length: 300 }, (_, n) => entry(2000 + n, `part-${n}.3mf`, '3mf', 9)),
 ]
 
@@ -119,9 +131,15 @@ export const handlers = [
   http.get(`${base}/print/library`, ({ request }) => {
     const search = new URL(request.url).searchParams
     const asked = search.get('folder_id')
-    const folderId = asked === null ? null : Number(asked)
+    const linked = search.get('file_id')
+    let folderId = asked === null ? null : Number(asked)
+    if (asked === null && linked !== null) {
+      const file = listedFiles().find((row) => row.id === Number(linked))
+      if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${linked}`)
+      folderId = file.folder_id ?? null
+    }
     const all = search.get('all') === 'true'
-    const here = libraryFiles.filter((file) => (file.folder_id ?? null) === folderId)
+    const here = listedFiles().filter((file) => (file.folder_id ?? null) === folderId)
     const files = all ? here : here.filter((file) => file.file_type?.toLowerCase() === '3mf')
     return HttpResponse.json({
       folder_id: folderId,
@@ -130,6 +148,36 @@ export const handlers = [
       files: files.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
       hidden: here.length - files.length,
     } satisfies LibraryListing)
+  }),
+
+  /** #2167 — to the mocked trash; Bambuddy skips the file another user added. */
+  http.post(`${base}/print/library/delete`, async ({ request }) => {
+    const { file_ids } = (await request.json()) as { file_ids: number[] }
+    const ids = [...new Set(file_ids)]
+    const files = ids.map((id) => listedFiles().find((row) => row.id === id))
+    const absent = ids.find((_, n) => !files[n])
+    if (absent !== undefined) return problem(404, 'Not Found', `library file ${absent} is no longer in Bambuddy's library`)
+    const result: LibraryDeleteResult = { deleted: [], skipped: [] }
+    for (const file of files as LibraryEntry[]) {
+      if (file.id === NOT_OWNED) {
+        result.skipped.push({ id: file.id, filename: file.filename, reason: "Bambuddy deletes only files its API key's user added" })
+        continue
+      }
+      if (file.is_external) removed.add(file.id)
+      else trashed.add(file.id)
+      result.deleted.push({ id: file.id, filename: file.filename, trashed: !file.is_external })
+    }
+    return HttpResponse.json(result)
+  }),
+
+  http.post(`${base}/print/library/restore`, async ({ request }) => {
+    const { file_ids } = (await request.json()) as { file_ids: number[] }
+    const result: LibraryRestoreResult = { restored: [], skipped: [] }
+    for (const id of new Set(file_ids)) {
+      if (trashed.delete(id)) result.restored.push(id)
+      else result.skipped.push({ id, reason: "it is not in Bambuddy's trash" })
+    }
+    return HttpResponse.json(result)
   }),
 
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
@@ -302,6 +350,18 @@ export const handlers = [
 /** #1751 — each library file's newest queue item, by the mocked run that queued it. */
 const lastQueued = new Map<number, number>()
 
+/** #2167 — the files the mocked delete moved to the trash, or removed for good. */
+const trashed = new Set<number>()
+const removed = new Set<number>()
+/** The file Bambuddy's key may not delete: another user added it. */
+export const NOT_OWNED = 121
+
+function listedFiles(): LibraryEntry[] {
+  return libraryFiles.filter((file) => !trashed.has(file.id) && !removed.has(file.id))
+}
+
 export function reset(): void {
   lastQueued.clear()
+  trashed.clear()
+  removed.clear()
 }

@@ -216,7 +216,7 @@ export function PrintPicker({
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
-  const { filaments, plan, setPlan, planChanged, filamentError } = useFilamentPlan(
+  const { filaments, plan, setPlan, planChanged, filamentError, planReady } = useFilamentPlan(
     source,
     choices,
     plate,
@@ -673,7 +673,14 @@ export function PrintPicker({
               // Held while the dialog's own project list loads, so a Simple-mode print
               // cannot go out before the last project has seeded it.
               disabled={
-                running || loading || !choices || refused || runRefuses || ownProjects.loading || projectCreating
+                running ||
+                loading ||
+                !choices ||
+                !planReady ||
+                refused ||
+                runRefuses ||
+                ownProjects.loading ||
+                projectCreating
               }
               data-testid="run-print"
               {...USER_ONLY}

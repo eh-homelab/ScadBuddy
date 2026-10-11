@@ -844,7 +844,14 @@ so a name re-pointed between check and connect reaches nothing new.
   returned inline up to 1 MiB (text only, cut on a UTF-8 boundary); a longer or binary
   body is saved under the session's directory (`work/sessions/<id>/http/`, the 10
   newest kept) and read in pages of up to 1 MiB, text as text and anything else as
-  base64.
+  base64. The UI can fetch a saved body whole (#1292,
+  `GET /api/v1/ai/sessions/:id/http/:saved`): a UI read, gated by whether the
+  principal may see the session, by the UUID the audit row names and nothing else.
+  It is untrusted bytes from whatever server answered, so it is never rendered:
+  `text/plain` and JSON are served as `text/plain` inline, everything else (HTML and
+  SVG included) as `application/octet-stream` with `Content-Disposition:
+  attachment`, always with `nosniff` and `Content-Security-Policy: default-src
+  'none'; sandbox`.
 - **Redirects** follow fetch's rules: a 303, or a 301/302 after a `POST`, becomes a
   `GET` with no body. `Authorization`, `Cookie` and `Proxy-Authorization` are dropped
   when a redirect leaves the origin, and a 307/308 that would re-send an approved

@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
+import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { libraryFiles } from '../mocks/features/library'
@@ -194,16 +195,108 @@ describe('LibraryPage, item context (#975)', () => {
     )
   })
 
-  it('marks the open folder, and reads its count apart from its name', async () => {
+  it('marks the open folder in a tree, and reads its count apart from its name', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')
-    const nav = screen.getByRole('navigation', { name: 'Library folders' })
-    expect(within(nav).getByRole('button', { name: 'Top level' })).toHaveAttribute('aria-current', 'true')
+    const tree = screen.getByRole('tree', { name: 'Library folders' })
+    expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'true')
 
-    const bulk = within(nav).getByRole('button', { name: 'Bulk, 300 files' })
+    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk, 300 files' })
     await user.click(bulk)
-    expect(bulk).toHaveAttribute('aria-current', 'true')
-    expect(within(nav).getByRole('button', { name: 'Top level' })).not.toHaveAttribute('aria-current')
-    expect(within(nav).getByRole('button', { name: 'MakerWorld, 2 files' })).toBeInTheDocument()
+    expect(bulk).toHaveAttribute('aria-selected', 'true')
+    expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'false')
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld, 2 files' })).toBeInTheDocument()
+  })
+
+  it('opens and closes folders with the keyboard, others starting closed (#2165)', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const spec = screen.getByTestId('library-folder-10')
+    expect(spec).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByTestId('library-folder-11')).toBeNull()
+
+    screen.getByRole('treeitem', { name: 'Top level' }).focus()
+    await user.keyboard('{End}')
+    expect(spec).toHaveFocus()
+    await user.keyboard('{ArrowRight}')
+    expect(spec).toHaveAttribute('aria-expanded', 'true')
+    await user.keyboard('{ArrowRight}')
+    const makerWorld = screen.getByTestId('library-folder-11')
+    expect(makerWorld).toHaveFocus()
+    expect(makerWorld).toHaveAttribute('aria-level', '2')
+    await user.keyboard('{ArrowRight}{ArrowDown}')
+    expect(screen.getByTestId('library-folder-12')).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(screen.getByTestId('where')).toHaveTextContent('/library/Spec/MakerWorld/Work')
+    expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+    await user.keyboard('{ArrowLeft}')
+    expect(makerWorld).toHaveFocus()
+    await user.keyboard('{ArrowLeft}')
+    expect(makerWorld).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByTestId('library-folder-12')).toBeNull()
+  })
+
+  it('opens a deep link on its folder, expanded to it (#2165)', async () => {
+    renderPage(<LibraryPage />, { route: '/library/Spec/MakerWorld/Work' })
+    expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+    expect(screen.getByTestId('library-folder-10')).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByTestId('library-folder-12')).toHaveAttribute('aria-selected', 'true')
+    // The other MakerWorld, at the top, stays where it is.
+    expect(screen.getByTestId('library-folder-1')).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('finds a linked file in its folder and highlights it, and a print link opens the dialog', async () => {
+    renderPage(<><LibraryPage /><Where /></>, { route: '/library?print=67&file=67' })
+    const card = await screen.findByTestId('library-file-67')
+    expect(card).toHaveAttribute('aria-current', 'true')
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/library/MakerWorld?print=67&file=67'))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('says so when the path names no folder', async () => {
+    renderPage(<LibraryPage />, { route: '/library/Nowhere' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('There is no folder Nowhere in the library.')
+  })
+
+  it('deletes a file to the trash after a confirmation, and Undo restores it (#2167)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/Spec/MakerWorld/Work' })
+    await user.click(await screen.findByRole('button', { name: 'Delete drawer-label.3mf' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete drawer-label.3mf?' })
+    expect(dialog).toHaveTextContent("It goes to Bambuddy's trash.")
+    await user.click(within(dialog).getByRole('button', { name: 'Delete file' }))
+    const toast = await screen.findByTestId('library-deleted')
+    expect(toast).toHaveTextContent("Moved 1 file to Bambuddy's trash.")
+    await waitFor(() => expect(screen.queryByTestId('library-file-120')).toBeNull())
+
+    await user.click(within(toast).getByRole('button', { name: 'Undo' }))
+    expect(await within(toast).findByText('Restored 1 file.')).toBeInTheDocument()
+    expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+  })
+
+  it('deletes the selection, warns of an external file, and reports the one skipped (#2167)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/Spec/MakerWorld/Work' })
+    await screen.findByTestId('library-file-120')
+    for (const name of ['drawer-label.3mf', 'alex-headphone-hook.3mf', 'nas-share-bracket.3mf']) {
+      await user.click(screen.getByRole('checkbox', { name: `Select ${name}` }))
+    }
+    await user.click(screen.getByRole('button', { name: 'Delete selected (3)' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete 3 files?' })
+    expect(within(dialog).getByRole('list', { name: 'Files to delete' })).toHaveTextContent('nas-share-bracket.3mf')
+    expect(within(dialog).getByTestId('library-delete-external')).toHaveTextContent(
+      'nas-share-bracket.3mf is linked from an external folder',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Delete 3 files' }))
+    const toast = await screen.findByTestId('library-deleted')
+    expect(toast).toHaveTextContent("Moved 1 file to Bambuddy's trash. Removed 1 external file for good.")
+    expect(within(toast).getByTestId('library-skipped')).toHaveTextContent('alex-headphone-hook.3mf')
+    // The skipped file stays selected and listed; the deleted ones leave the selection.
+    expect(await screen.findByRole('button', { name: 'Delete selected (1)' })).toBeEnabled()
+    await waitFor(() => expect(screen.queryByTestId('library-file-122')).toBeNull())
+    expect(screen.getByTestId('library-file-121')).toBeInTheDocument()
   })
 })
+
+function Where() {
+  const location = useLocation()
+  return <p data-testid="where">{`${location.pathname}${location.search}`}</p>
+}

@@ -56,3 +56,17 @@ class Run(BaseModel):
     started_by: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+class Decision(BaseModel):
+    """A person's answer to one parked call of a run (`workflow_run_decisions`)."""
+
+    request_id: str
+    run_id: str
+    workflow_run_id: str
+    call_id: str
+    kind: Literal["approval", "answer"]
+    outcome: Literal["approved", "denied", "answered"]
+    response: dict[str, Any] = {}
+    responder: str
+    created_at: datetime | None = None

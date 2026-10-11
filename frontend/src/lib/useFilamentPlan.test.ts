@@ -28,6 +28,32 @@ describe('useFilamentPlan', () => {
     expect(getFilaments).not.toHaveBeenCalled()
   })
 
+  it('is never ready on a plan seeded from other choices (#2186)', async () => {
+    const next: ChoicesView = {
+      ...choicesView,
+      filaments: { ...choicesView.filaments, suggested: [{ slot_id: 1, spool_id: 22 }] },
+    }
+    const renders: { choices: ChoicesView | null; ready: boolean; plan: SlotChoice[] }[] = []
+    const { result, rerender } = renderHook(
+      ({ choices }: { choices: ChoicesView | null }) => {
+        const state = useFilamentPlan(OUTPUT, choices, 1)
+        renders.push({ choices, ready: state.planReady, plan: state.plan })
+        return state
+      },
+      { initialProps: { choices: choicesView as ChoicesView | null } },
+    )
+    await waitFor(() => expect(result.current.planReady).toBe(true))
+    rerender({ choices: null })
+    expect(result.current.planReady).toBe(false)
+    rerender({ choices: next })
+    await waitFor(() => expect(result.current.planReady).toBe(true))
+
+    expect(result.current.plan).toEqual(next.filaments.suggested)
+    for (const render of renders.filter((entry) => entry.ready)) {
+      expect(render.plan).toEqual(render.choices?.filaments.suggested)
+    }
+  })
+
   it('seeds plate 1 from the filaments the choices read already carried, no extra fetch', async () => {
     const { result } = renderHook(() => useFilamentPlan(OUTPUT, choicesView, 1))
     await waitFor(() => expect(result.current.filaments).not.toBeNull())

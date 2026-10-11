@@ -17,10 +17,20 @@ import { MAX_MESSAGE_CHARS, MAX_SOURCE_CHARS } from './sourceFiles.js'
 // (model.scad parse-checked unless `force`; bundled templates refused there).
 // An edit is made against the revision it read, so a write that lands between
 // the read and the write is a conflict, never a silent overwrite.
+//
+// #1067 widens them past the .scad files: glob and grep see the whole model
+// directory (README.md, model.json, images/, ui/**) and grep a pinned library's
+// checkout; read_file reads any text file at an earlier revision; README.md is
+// written as the others are, against a base; and a sibling .scad write comes
+// back with openscad-lsp's diagnostics of it, since only model.scad's write is
+// parse-checked. model.json stays update_model's: it is validated metadata, not
+// text to patch.
 
 type ModelRecord = components['schemas']['ModelRecord']
 
 const MAIN = 'model.scad'
+const README = 'README.md'
+const META = 'model.json'
 /** The backend's SOURCE_FILE_PATTERN (api/model_files.py): what a write may name. */
 const SCAD_FILE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}\.scad$/
 /** As Claude Code's Read: lines per page, and characters per line before it is cut. */
@@ -34,6 +44,9 @@ const MAX_GREP_BYTES = 32 * 1024 * 1024
 const GREP_TIMEOUT_MS = 10_000
 const DEFAULT_HEAD_LIMIT = 250
 
+/** What a listing the backend cut at its cap says. */
+const CUT_LISTING = 'the directory holds more files than one listing names, so only the first ones in path order were seen'
+
 const SOURCE = "a model's files (OpenSCAD source, README, metadata) written by its author, imported from the web or pulled from an upstream"
 
 const filePath = z
@@ -42,9 +55,15 @@ const filePath = z
   .max(512)
   .describe('A path inside the model\'s directory, e.g. "model.scad", "parts.scad" or "README.md"')
 
-const scadPath = filePath.describe(
-  'A .scad file at the top of the model\'s directory: "model.scad" or a file beside it that it includes or uses',
+const writablePath = filePath.describe(
+  'A file at the top of the model\'s directory: "model.scad", a .scad file beside it that it includes or uses, or "README.md"',
 )
+
+/** The backend's LibraryName: the directory `use <NAME/...>` names. */
+const libraryName = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/)
+  .describe('A library the model pins (list_libraries), by the directory `use <NAME/...>` names, e.g. "BOSL2"')
 
 const message = z
   .string()
@@ -73,10 +92,15 @@ function normalize(path: string): string {
 
 function writable(path: string): string {
   const name = normalize(path)
-  if (!SCAD_FILE.test(name)) {
+  if (name === META) {
     throw new ToolError(
-      `${path} cannot be written by this tool: only .scad files at the top of the model's directory can ` +
-        '(set_readme writes README.md, update_model its details)',
+      `${META} cannot be written by this tool: it is the model's validated metadata, which update_model changes`,
+    )
+  }
+  if (name !== README && !SCAD_FILE.test(name)) {
+    throw new ToolError(
+      `${path} cannot be written by this tool: only ${README} and .scad files at the top of the model's ` +
+        `directory can (update_model changes ${META})`,
     )
   }
   return name
@@ -354,6 +378,54 @@ async function scadFiles(backend: BackendClient, slug: string): Promise<string[]
   return files.map((f) => f.name)
 }
 
+type Listing = { paths: string[]; truncated: boolean }
+
+/** Every file in the model's directory (#1067), as paths relative to it. */
+async function modelTree(backend: BackendClient, slug: string): Promise<Listing> {
+  const tree = await ok(backend.GET('/api/v1/models/{slug}/tree', { params: { path: { slug } } }), `list the directory of ${slug}`)
+  return { paths: tree.files.map((f) => f.path), truncated: tree.truncated }
+}
+
+/** Every file in the checkout of `library` the model pins, relative to the library's directory. */
+async function libraryTree(backend: BackendClient, slug: string, library: string): Promise<Listing> {
+  const tree = await ok(
+    backend.GET('/api/v1/models/{slug}/libraries/{name}/files', { params: { path: { slug, name: library } } }),
+    `list the ${library} library ${slug} pins`,
+  )
+  return { paths: tree.files.map((f) => f.path), truncated: tree.truncated }
+}
+
+async function readLibraryFile(backend: BackendClient, slug: string, library: string, path: string): Promise<string> {
+  return ok(
+    backend.GET('/api/v1/models/{slug}/libraries/{name}/files/{path}', {
+      params: { path: { slug, name: library, path } },
+      parseAs: 'text',
+    }),
+    `read ${library}/${path}`,
+  )
+}
+
+/**
+ * openscad-lsp's diagnostics of a sibling .scad just written, opened in the model's
+ * directory so its own includes resolve. Only model.scad's write is parse-checked, so
+ * this is the check a sibling gets; it never fails the write it reports on.
+ */
+async function siblingDiagnostics(ctx: ToolContext, slug: string, content: string) {
+  const retry = 'get_lsp_diagnostics can try again'
+  let answered
+  try {
+    answered = await ctx.backend.POST('/api/v1/lsp/diagnostics', { body: { source: content, slug }, signal: ctx.signal })
+  } catch (error) {
+    // The write has landed already; the check that follows it must not report it as failed.
+    return { diagnostics_note: `not checked (${error instanceof Error ? error.message : String(error)}); ${retry}` }
+  }
+  if (answered.error !== undefined || answered.data === undefined) {
+    return { diagnostics_note: `not checked: the language server answered ${answered.response.status}; ${retry}` }
+  }
+  if (!answered.data.available) return { diagnostics_note: 'not checked: no openscad-lsp is installed' }
+  return { diagnostics: answered.data.diagnostics }
+}
+
 function conflict(given: string, current: string | null) {
   return {
     ...json({
@@ -394,11 +466,17 @@ async function save(ctx: ToolContext, w: Write) {
           body: { source: w.content, message: w.message ?? null, base: w.base, force: w.force },
           headers,
         })
-      : ctx.backend.PUT('/api/v1/models/{slug}/files/{name}', {
-          params: { path: { slug: w.slug, name: w.path } },
-          body: { content: w.content, message: w.message ?? null, base: w.base },
-          headers,
-        }),
+      : w.path === README
+        ? ctx.backend.PUT('/api/v1/models/{slug}/readme', {
+            params: { path: { slug: w.slug } },
+            body: { content: w.content, message: w.message ?? null, base: w.base },
+            headers,
+          })
+        : ctx.backend.PUT('/api/v1/models/{slug}/files/{name}', {
+            params: { path: { slug: w.slug, name: w.path } },
+            body: { content: w.content, message: w.message ?? null, base: w.base },
+            headers,
+          }),
   )
   if (isRunning(answered)) return json(answered)
   if (answered.response.status === 409 && w.base !== null) {
@@ -410,16 +488,17 @@ async function save(ctx: ToolContext, w: Write) {
   const record = (await ok(Promise.resolve(answered), what)) as ModelRecord
   const revision = record.version ?? null
   const full = w.response === 'full' ? { content: w.content } : {}
+  const checked = w.path !== MAIN && w.path !== README ? await siblingDiagnostics(ctx, w.slug, w.content) : {}
   if (revision === null || revision === w.previous) {
     // Nothing new was committed (the file already held this), or there is no history to diff.
-    return json({ status: revision === null ? 'written' : 'unchanged', slug: w.slug, file_path: w.path, revision, ...full })
+    return json({ status: revision === null ? 'written' : 'unchanged', slug: w.slug, file_path: w.path, revision, ...checked, ...full })
   }
   const diff = await ok(
     ctx.backend.GET('/api/v1/models/{slug}/versions/{commit}/diff', { params: { path: { slug: w.slug, commit: revision } } }),
     `diff ${w.slug}@${revision}`,
   )
   const patch = diff.patch.length > MAX_DIFF_CHARS ? `${diff.patch.slice(0, MAX_DIFF_CHARS)}\n… [diff cut; diff_version has all of it]` : diff.patch
-  return json({ status: 'written', slug: w.slug, file_path: w.path, revision, previous: diff.base, diff: patch, ...full })
+  return json({ status: 'written', slug: w.slug, file_path: w.path, revision, previous: diff.base, diff: patch, ...checked, ...full })
 }
 
 /** Read the file at the model's current revision (or refuse a stale `base`), edit it, and write it back against that revision. */
@@ -463,29 +542,38 @@ export const fileTools: Tool[] = [
   defineTool({
     name: 'read_file',
     description:
-      "Read a file in a model's directory (model.scad, a .scad beside it, README.md, model.json), as " +
-      '`cat -n` prints it: numbered lines, up to 2000 from `offset`. Ends with the revision it was read ' +
-      'at: pass it as `base` to edit_file, multi_edit or write_file. `version` reads model.scad at an ' +
-      'earlier revision (list_versions), which is not a base for a write.',
+      "Read a text file in a model's directory (model.scad, a .scad beside it, README.md, model.json, " +
+      'ui/ files; glob lists them), as `cat -n` prints it: numbered lines, up to 2000 from `offset`. Ends ' +
+      'with the revision it was read at: pass it as `base` to edit_file, multi_edit or write_file. ' +
+      '`version` reads the file as it was at an earlier revision (list_versions), which is not a base for a write.',
     input: z.object({
       slug,
       file_path: filePath,
       offset: z.number().int().min(1).optional().describe('The line to start from (1-based)'),
       limit: z.number().int().min(1).max(10_000).optional().describe(`How many lines (${DEFAULT_LIMIT} by default)`),
-      version: commit.optional().describe('An earlier revision to read model.scad at'),
+      version: commit.optional().describe('An earlier revision to read the file at'),
     }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/models/{slug}', 'GET /api/v1/models/{slug}/files/{path}', 'GET /api/v1/models/{slug}/versions/{commit}/source'],
+    routes: [
+      'GET /api/v1/models/{slug}',
+      'GET /api/v1/models/{slug}/files/{path}',
+      'GET /api/v1/models/{slug}/versions/{commit}/source',
+      'GET /api/v1/models/{slug}/versions/{commit}/files/{path}',
+    ],
     handler: async ({ slug, file_path, offset, limit, version }, { backend }) => {
       const path = normalize(file_path)
       let content: string
       let revision: string | null
       if (version !== undefined) {
-        if (path !== MAIN) throw new ToolError(`only ${MAIN} can be read at an earlier revision; diff_version shows what changed in the others`)
         content = await ok(
-          backend.GET('/api/v1/models/{slug}/versions/{commit}/source', { params: { path: { slug, commit: version } }, parseAs: 'text' }),
-          `read ${slug}/${MAIN}@${version}`,
+          path === MAIN
+            ? backend.GET('/api/v1/models/{slug}/versions/{commit}/source', { params: { path: { slug, commit: version } }, parseAs: 'text' })
+            : backend.GET('/api/v1/models/{slug}/versions/{commit}/files/{path}', {
+                params: { path: { slug, commit: version, path } },
+                parseAs: 'text',
+              }),
+          `read ${slug}/${path}@${version}`,
         )
         revision = version
       } else {
@@ -514,14 +602,15 @@ export const fileTools: Tool[] = [
   defineTool({
     name: 'edit_file',
     description:
-      "Replace text in one of a model's .scad files, as one revision in its history: `old_string` must " +
-      'match exactly once (or set `replace_all`). Returns the new revision and its diff (or the whole file ' +
-      'with `response: "full"`). model.scad is parse-checked unless `force`. With `base`, refused as a ' +
+      "Replace text in one of a model's .scad files or its README.md, as one revision in its history: " +
+      '`old_string` must match exactly once (or set `replace_all`). Returns the new revision and its diff ' +
+      '(or the whole file with `response: "full"`). model.scad is parse-checked unless `force`; a .scad ' +
+      "file beside it comes back with openscad-lsp's `diagnostics` of it. With `base`, refused as a " +
       'conflict if the model has moved on since that revision. Pass the `base` read_file gave you, so a ' +
-      'repeated call cannot apply the edit twice.',
+      'repeated call cannot apply the edit twice. update_model changes model.json.',
     input: z.object({
       slug,
-      file_path: scadPath,
+      file_path: writablePath,
       old_string: oldString,
       new_string: newString,
       replace_all: replaceAll,
@@ -536,8 +625,10 @@ export const fileTools: Tool[] = [
       'GET /api/v1/models/{slug}',
       'GET /api/v1/models/{slug}/files/{path}',
       'PUT /api/v1/models/{slug}/source',
+      'PUT /api/v1/models/{slug}/readme',
       'PUT /api/v1/models/{slug}/files/{name}',
       'GET /api/v1/models/{slug}/versions/{commit}/diff',
+      'POST /api/v1/lsp/diagnostics',
     ],
     handler: async ({ old_string, new_string, replace_all, ...args }, ctx) =>
       edit(ctx, { ...args, edits: [{ old_string, new_string, replace_all }] }),
@@ -546,11 +637,12 @@ export const fileTools: Tool[] = [
   defineTool({
     name: 'multi_edit',
     description:
-      "Several edit_file replacements in one of a model's .scad files, applied in order, all or nothing, " +
-      'as ONE revision. Each edit sees the text the ones before it left. Pass `base`, as for edit_file.',
+      "Several edit_file replacements in one of a model's .scad files or its README.md, applied in order, " +
+      'all or nothing, as ONE revision. Each edit sees the text the ones before it left. Pass `base`, as ' +
+      'for edit_file.',
     input: z.object({
       slug,
-      file_path: scadPath,
+      file_path: writablePath,
       edits: z
         .array(z.object({ old_string: oldString, new_string: newString, replace_all: replaceAll }))
         .min(1)
@@ -566,8 +658,10 @@ export const fileTools: Tool[] = [
       'GET /api/v1/models/{slug}',
       'GET /api/v1/models/{slug}/files/{path}',
       'PUT /api/v1/models/{slug}/source',
+      'PUT /api/v1/models/{slug}/readme',
       'PUT /api/v1/models/{slug}/files/{name}',
       'GET /api/v1/models/{slug}/versions/{commit}/diff',
+      'POST /api/v1/lsp/diagnostics',
     ],
     handler: async (args, ctx) => edit(ctx, args),
   }),
@@ -575,11 +669,12 @@ export const fileTools: Tool[] = [
   defineTool({
     name: 'write_file',
     description:
-      "Create or replace one of a model's .scad files with `content`, as one revision. Prefer edit_file " +
-      'for a change to part of a file. With `base`, refused as a conflict if the model has moved on since.',
+      "Create or replace one of a model's .scad files or its README.md with `content`, as one revision. " +
+      'Prefer edit_file for a change to part of a file. A .scad file beside model.scad comes back with ' +
+      "openscad-lsp's `diagnostics` of it. With `base`, refused as a conflict if the model has moved on since.",
     input: z.object({
       slug,
-      file_path: scadPath,
+      file_path: writablePath,
       content: z.string().describe("The file's whole new text"),
       message,
       base,
@@ -591,8 +686,10 @@ export const fileTools: Tool[] = [
     routes: [
       'GET /api/v1/models/{slug}',
       'PUT /api/v1/models/{slug}/source',
+      'PUT /api/v1/models/{slug}/readme',
       'PUT /api/v1/models/{slug}/files/{name}',
       'GET /api/v1/models/{slug}/versions/{commit}/diff',
+      'POST /api/v1/lsp/diagnostics',
     ],
     handler: async ({ slug, file_path, content, message, base, force, response }, ctx) => {
       const path = writable(file_path)
@@ -605,15 +702,18 @@ export const fileTools: Tool[] = [
   defineTool({
     name: 'glob',
     description:
-      "A model's .scad files whose names match `pattern` (`*.scad`, `part*`, `{a,b}.scad`): the files " +
-      'model.scad can include or use. read_file also reads README.md and model.json.',
-    input: z.object({ slug, pattern: z.string().min(1).max(200).describe('A glob, e.g. "*.scad"') }),
+      "The files in a model's directory whose paths, relative to it, match `pattern`: `*.scad` (the " +
+      'files model.scad can include or use), `*.md`, `ui/**`, `images/*`, `{a,b}.scad`. `*` and `?` stop ' +
+      'at `/`; `**` crosses it, so `**` lists every file. read_file reads the text ones.',
+    input: z.object({ slug, pattern: z.string().min(1).max(200).describe('A glob, e.g. "*.scad" or "**"') }),
     risk: 'read',
     source: 'file names in a model directory, chosen by its author',
-    routes: ['GET /api/v1/models/{slug}/files'],
+    routes: ['GET /api/v1/models/{slug}/tree'],
     handler: async ({ slug, pattern }, { backend }) => {
-      const names = (await scadFiles(backend, slug)).filter(globMatcher(pattern))
-      return text(names.length ? names.join('\n') : `no file in ${slug} matches ${pattern}`)
+      const tree = await modelTree(backend, slug)
+      const names = tree.paths.filter(globMatcher(pattern))
+      const body = names.length ? names.join('\n') : `no file in ${slug} matches ${pattern}`
+      return text(tree.truncated ? `${body}\n[${CUT_LISTING}]` : body)
     },
   }),
 
@@ -621,14 +721,18 @@ export const fileTools: Tool[] = [
     name: 'grep',
     description:
       "Search model files with a regular expression (JavaScript syntax), in one model (`slug`) or across " +
-      'every model in the catalogue. Searches the .scad files, filtered by `glob`, or one `path` (any text ' +
-      'file). `output_mode`: `files_with_matches` (default, `slug/file` per line), `content` ' +
-      '(`slug/file:line:text`, with `-A`/`-B`/`-C` context) or `count`. At most `head_limit` lines.',
+      "every model in the catalogue. Searches the model's .scad files; `glob` searches every file in its " +
+      'directory whose path matches instead (`**` for all: README.md, model.json, ui/**; files that are ' +
+      'not text are skipped), and `path` one file. `library` searches the .scad files of a library the ' +
+      'model pins (named as `use <…>` names them; `glob` and `path` apply inside it). `output_mode`: ' +
+      '`files_with_matches` (default, `slug/file` per line), `content` (`slug/file:line:text`, with ' +
+      '`-A`/`-B`/`-C` context) or `count`. At most `head_limit` lines.',
     input: z.object({
       pattern: z.string().min(1).max(1000).describe('A JavaScript regular expression, matched per line'),
       slug: slug.optional().describe('Search only this model; every model when omitted'),
-      path: filePath.optional().describe('Search only this file in each model'),
-      glob: z.string().min(1).max(200).optional().describe('Only the .scad files whose names match, e.g. "model.scad"'),
+      library: libraryName.optional().describe('Search this library the model pins instead of the model; needs `slug`'),
+      path: filePath.optional().describe('Search only this file in each model (or in the library)'),
+      glob: z.string().min(1).max(200).optional().describe('Only the files whose paths match, e.g. "*.scad", "ui/**" or "**"'),
       output_mode: z.enum(['content', 'files_with_matches', 'count']).default('files_with_matches'),
       '-i': z.boolean().default(false).describe('Case-insensitive'),
       '-n': z.boolean().default(true).describe('Line numbers in content mode'),
@@ -639,30 +743,57 @@ export const fileTools: Tool[] = [
     }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/models', 'GET /api/v1/models/{slug}/files', 'GET /api/v1/models/{slug}/files/{path}'],
+    routes: [
+      'GET /api/v1/models',
+      'GET /api/v1/models/{slug}/files',
+      'GET /api/v1/models/{slug}/tree',
+      'GET /api/v1/models/{slug}/files/{path}',
+      'GET /api/v1/models/{slug}/libraries/{name}/files',
+      'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
+    ],
     handler: async (args, { backend, signal }) => {
+      if (args.library !== undefined && args.slug === undefined) throw new ToolError('`library` needs the `slug` of a model that pins it')
       const slugs = args.slug !== undefined ? [args.slug] : (await ok(backend.GET('/api/v1/models'), 'list models')).map((m) => m.slug)
       const only = args.glob !== undefined ? globMatcher(args.glob) : null
+      let listingCut = false
+      // Each file to search: what the output calls it, and how to read it.
+      type Target = { label: string; read: () => Promise<string> }
       const targets = (
-        await eachLimited(slugs, GREP_CONCURRENCY, async (s) => {
-          if (args.path !== undefined) return [{ slug: s, name: normalize(args.path) }]
-          const names = await scadFiles(backend, s)
-          return names.filter((n) => only === null || only(n)).map((name) => ({ slug: s, name }))
+        await eachLimited(slugs, GREP_CONCURRENCY, async (s): Promise<Target[]> => {
+          const library = args.library
+          if (library !== undefined) {
+            let names: string[]
+            if (args.path !== undefined) names = [normalize(args.path)]
+            else {
+              const tree = await libraryTree(backend, s, library)
+              listingCut ||= tree.truncated
+              names = tree.paths.filter((n) => (only === null ? n.endsWith('.scad') : only(n)))
+            }
+            return names.map((name) => ({ label: `${library}/${name}`, read: () => readLibraryFile(backend, s, library, name) }))
+          }
+          let names: string[]
+          if (args.path !== undefined) names = [normalize(args.path)]
+          else if (only !== null) {
+            const tree = await modelTree(backend, s)
+            listingCut ||= tree.truncated
+            names = tree.paths.filter(only)
+          } else names = await scadFiles(backend, s)
+          return names.map((name) => ({ label: `${s}/${name}`, read: () => readFile(backend, s, name) }))
         })
       ).flat()
       let bytes = 0
       let cut = false
       const files = (
-        await eachLimited(targets, GREP_CONCURRENCY, async ({ slug: s, name }) => {
+        await eachLimited(targets, GREP_CONCURRENCY, async ({ label, read }) => {
           if (cut) return null
           try {
-            const content = await readFile(backend, s, name)
+            const content = await read()
             bytes += Buffer.byteLength(content)
             if (bytes > MAX_GREP_BYTES) {
               cut = true
               return null
             }
-            return { name: `${s}/${name}`, text: content }
+            return { name: label, text: content }
           } catch (error) {
             // One file of one model gone or not text is not the search's failure; a named
             // file in a single model is.
@@ -688,6 +819,7 @@ export const fileTools: Tool[] = [
       const notes = [
         ...(lines.length > shown.length ? [`${lines.length - shown.length} more lines past head_limit ${args.head_limit}`] : []),
         ...(cut ? [`stopped reading after ${MAX_GREP_BYTES / 1024 / 1024} MiB; narrow it with slug, glob or path`] : []),
+        ...(listingCut ? [CUT_LISTING] : []),
       ]
       const body = shown.length ? shown.join('\n') : `no matches in ${files.length} file(s)`
       return text(notes.length ? `${body}\n[${notes.join('; ')}]` : body)

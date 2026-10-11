@@ -12,6 +12,18 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
+    reason:
+      "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
+      'Ruling 6); the route refuses an agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/decide',
+    reason:
+      "A flow's outward calls are approved by the browser user on the Workflows page only (spec §6.6, plan 6 " +
+      'Ruling 6); the route refuses an agent-authored request.',
+  },
+  {
     operation: 'DELETE /api/v1/workflow-runs/{run_id}',
     reason:
       "Forgets a flow run: its payload key, workflow and row (#1057). A person's decision on the Workflows " +
@@ -120,13 +132,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Serves the image files beside a model to the browser, so a README's relative `![](thumbnail.png)` " +
       'shows (#951). The bytes are only useful to an <img>; an agent reads the README itself through ' +
       'get_source_file and sees the image path in it.',
-  },
-  {
-    operation: 'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
-    reason:
-      "Serves the file a go-to-definition lands in to the source editor's read-only view (#185). The " +
-      'editor asks for the path openscad-lsp named; an agent has no definition to follow and reads a ' +
-      "model's own files through get_source and get_source_file.",
   },
   {
     operation: 'GET /api/v1/analyzers',

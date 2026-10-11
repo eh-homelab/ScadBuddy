@@ -36,7 +36,9 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileObjects,
+  LibraryDeleteResult,
   LibraryListing,
+  LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
   LibraryCheck,
@@ -1353,13 +1355,29 @@ export const api = {
   },
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
-  listLibrary: (query: { folderId: number | null; all: boolean }) => {
+  /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
+  listLibrary: (query: { folderId: number | null; all: boolean; fileId?: number }) => {
     const search = new URLSearchParams()
     if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    else if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
     if (query.all) search.set('all', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<LibraryListing>(`/print/library${suffix}`)
   },
+
+  /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */
+  deleteLibraryFiles: (fileIds: number[]) =>
+    command<LibraryDeleteResult>('/print/library/delete', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2167 — a delete's Undo: the files back from Bambuddy's trash. */
+  restoreLibraryFiles: (fileIds: number[]) =>
+    command<LibraryRestoreResult>('/print/library/restore', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 
