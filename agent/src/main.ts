@@ -61,6 +61,7 @@ import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
 import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
+import { SessionBlobs } from './sessions/blobs.js'
 import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
@@ -452,6 +453,7 @@ const turnToolDeps = temporal
       approvals: new PgApprovalRecords(temporal.sql),
       audit,
       currentTiers: liveTokenTiers(tokens),
+      blobs: new SessionBlobs(temporal.sql),
       ...(sessions
         ? {
             report: async (session: string, problems: readonly string[]) => {
@@ -479,6 +481,8 @@ const temporalWorker =
             audit,
             answers: new PgAnswers(temporal.sql),
             currentTiers: liveTokenTiers(tokens),
+            // A result's images, for the durable segment's view_tool_images (#2320).
+            blobs: new SessionBlobs(temporal.sql),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
