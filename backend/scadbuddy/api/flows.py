@@ -39,6 +39,7 @@ from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.forget import forget_run
 from scadbuddy.flows.history import ResetPreview, outward_since
+from scadbuddy.flows.manifest import tiers
 from scadbuddy.flows.models import (
     HOST_FN,
     TERMINAL,
@@ -281,6 +282,7 @@ async def start_flow_run(
                     started_by=_started_by(),
                     approval_timeout_s=timeout,
                     tools_queue=flows.settings.temporal_task_queue_agent_tools,
+                    tool_tiers=tiers(),
                     search_attributes=flows.search_attributes,
                 ),
                 update_id=key,
@@ -544,7 +546,7 @@ async def preview_flow_reset(
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     if flows.client is None:
         raise _unavailable()
-    return await outward_since(flows.client, run.workflow_id, event_id)
+    return await outward_since(flows.client, run, event_id)
 
 
 @router.post(

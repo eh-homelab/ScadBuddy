@@ -11,14 +11,14 @@ landed after the person looked.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 
 from pydantic import BaseModel
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
 from temporalio.client import Client
 
-from scadbuddy.flows.manifest import tier_of
+from scadbuddy.flows.models import Run
 from scadbuddy.workflows.flow_tools import OUTWARD_PREFIX, TOOL_PREFIX
 
 
@@ -40,8 +40,11 @@ class ResetPreview(BaseModel):
     calls: list[OutwardCall]
 
 
-def preview_of(events: Iterable[HistoryEvent], event_id: int) -> ResetPreview:
-    """The preview over one execution's events."""
+def preview_of(
+    events: Iterable[HistoryEvent], event_id: int, outward_tools: Collection[str] = ()
+) -> ResetPreview:
+    """The preview over one execution's events. `outward_tools` are the call ids of the
+    run's outward `tool(...)` steps: their activity id alone does not say."""
     last = 0
     valid = False
     started = False
@@ -62,11 +65,8 @@ def preview_of(events: Iterable[HistoryEvent], event_id: int) -> ResetPreview:
         activity_id = scheduled.activity_id
         if activity_id.startswith(OUTWARD_PREFIX):
             fn, _, call_id = activity_id.removeprefix(OUTWARD_PREFIX).partition("-")
-        elif (
-            activity_id.startswith(TOOL_PREFIX)
-            and tier_of(scheduled.activity_type.name) == "outward"
-        ):
-            # An outward agent tool (`tool(...)`), by its tier in the manifest.
+        elif activity_id.removeprefix(TOOL_PREFIX) in outward_tools:
+            # An outward agent tool (`tool(...)`), by the run's own step for it.
             fn, call_id = f"tool:{scheduled.activity_type.name}", activity_id[len(TOOL_PREFIX) :]
         else:
             continue
@@ -80,8 +80,9 @@ def preview_of(events: Iterable[HistoryEvent], event_id: int) -> ResetPreview:
 
 
 async def outward_since(
-    client: Client, workflow_id: str, event_id: int, *, run_id: str | None = None
+    client: Client, run: Run, event_id: int, *, run_id: str | None = None
 ) -> ResetPreview:
-    """The preview of the workflow's execution `run_id`, else its current one."""
-    history = await client.get_workflow_handle(workflow_id, run_id=run_id).fetch_history()
-    return preview_of(history.events, event_id)
+    """The preview of the run's execution `run_id`, else its current one."""
+    history = await client.get_workflow_handle(run.workflow_id, run_id=run_id).fetch_history()
+    tools = {s.call_id for s in run.steps if s.outward and s.fn.startswith("tool:")}
+    return preview_of(history.events, event_id, tools)

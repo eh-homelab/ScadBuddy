@@ -2,9 +2,10 @@
 2026-10-09-durable-phase-6-flows.md Task D2).
 
 ``agent/dist/tools.json`` (the agent's build writes it from ALL_TOOLS, as
-`agent-durable` reads it) is read once, when the `projects` worker starts, from
-``SCADBUDDY_FLOW_TOOLS_JSON``. The workflow sandbox imports this module through, so
-every ProjectWorkflow on the worker sees the manifest it loaded.
+`agent-durable` reads it) is read once, when the API starts, from
+``SCADBUDDY_FLOW_TOOLS_JSON``. A run takes a copy of it at its start (`FlowStart.tool_tiers`),
+so what `tool(...)` does is in the run's history, never in the worker's state: a run
+replays the same on any worker, whatever manifest that worker's image carries.
 """
 
 from __future__ import annotations
@@ -39,3 +40,8 @@ def use_manifest(tiers: Mapping[str, str]) -> None:
 def tier_of(name: str) -> str | None:
     """The tool's tier, or None for a name the manifest does not list."""
     return _TIERS.get(name)
+
+
+def tiers() -> dict[str, str]:
+    """A copy of the manifest, for a run's start."""
+    return dict(_TIERS)
