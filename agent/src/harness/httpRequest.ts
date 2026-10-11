@@ -338,20 +338,21 @@ type Outcome =
       hop: Hop
       /** Set when a redirect was returned instead of followed. */
       note?: string
+      /**
+       * Writes the last hop's audit row, naming `saved` when its body was saved
+       * under that id. Left to the caller so a row never names a body whose save
+       * failed (#2224).
+       */
+      audit: (saved?: string) => Promise<void>
     }
   | { ok: false; reason: string }
 
 /**
- * Sends the request, following redirects within the limits; audits every hop.
- * The last hop's row names `savedAs` when its body is saved under that id
- * (#1292: so AI activity can link to it).
+ * Sends the request, following redirects within the limits; audits every hop but
+ * the last one of a completed exchange, whose row the caller writes with `audit`
+ * once it knows whether the body was saved (#1292, #2224).
  */
-async function exchange(
-  args: HttpRequestArgs,
-  context: HttpRequestContext,
-  savedAs: string,
-  callSignal?: AbortSignal,
-): Promise<Outcome> {
+async function exchange(args: HttpRequestArgs, context: HttpRequestContext, callSignal?: AbortSignal): Promise<Outcome> {
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const resolve = context.resolve ?? systemResolver
   const deadline = AbortSignal.timeout(args.timeout_ms)
@@ -415,16 +416,12 @@ async function exchange(
       return { ok: false, reason }
     }
     // The row of the hop whose body is the result names where that body was saved.
-    const last = () =>
-      audited('ok', {
-        status: result.status,
-        size: result.bytes.length,
-        ...(savesBody(result, limits) ? { saved: savedAs } : {}),
-      })
+    const last = async (saved?: string) => {
+      await audited('ok', { status: result.status, size: result.bytes.length, ...(saved !== undefined ? { saved } : {}) })
+    }
     const location = result.headers.location
     if (!isRedirect(result.status) || typeof location !== 'string') {
-      await last()
-      return { ok: true, url, redirects, hop: result }
+      return { ok: true, url, redirects, hop: result, audit: last }
     }
     if (redirects.length >= limits.maxRedirects) {
       await audited('ok', { status: result.status, size: result.bytes.length })
@@ -440,12 +437,12 @@ async function exchange(
     const crossOrigin = next.origin !== url.origin
     const toGet = result.status === 303 ? method !== 'HEAD' : (result.status === 301 || result.status === 302) && method === 'POST'
     if (!toGet && crossOrigin && !READ_METHODS.has(method)) {
-      await last()
       return {
         ok: true,
         url,
         redirects,
         hop: result,
+        audit: last,
         note: `not followed: a ${result.status} would re-send the approved ${method} to another origin (${next.origin})`,
       }
     }
@@ -530,22 +527,29 @@ export async function runHttpRequest(
     return text({ error: `Not sent: ${problem}.` }, true)
   }
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
-  const savedAs = randomUUID()
-  const outcome = await exchange(args, context, savedAs, callSignal)
+  const outcome = await exchange(args, context, callSignal)
   if (!outcome.ok) return text({ error: `Not completed: ${outcome.reason}.` }, true)
   const { hop } = outcome
   const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
   const isText = textual(contentType, hop.bytes)
   const fits = hop.bytes.length <= limits.inlineMaxBytes && hop.complete
   // Saved when it does not fit inline, or is binary (not inlined at all), so it can be paged.
-  const saved = !savesBody(hop, limits)
-    ? undefined
-    : await save(context.saveDir, savedAs, hop.bytes, {
+  let saved: string | undefined
+  if (savesBody(hop, limits)) {
+    try {
+      saved = await save(context.saveDir, randomUUID(), hop.bytes, {
         content_type: contentType ?? null,
         size_bytes: hop.bytes.length,
         complete: hop.complete,
         url: outcome.url.href,
       })
+    } catch (err) {
+      // The request was made, so its row is still written, naming no body (#2224).
+      await outcome.audit()
+      throw err
+    }
+  }
+  await outcome.audit(saved)
   let inline: string | null = null
   if (isText) {
     const end = utf8Boundary(hop.bytes, Math.min(hop.bytes.length, limits.inlineMaxBytes))

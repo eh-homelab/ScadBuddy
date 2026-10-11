@@ -966,11 +966,12 @@ export class SessionManager {
    * audit row names; not_found for a session the principal may not see, or a
    * body that is not (or no longer) in the session's directory on this replica.
    */
-  async httpBody(id: string, saved: string, principal: Owner): Promise<{ meta: SavedMeta; bytes: Buffer }> {
+  /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
+  async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
     const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
-    return body
+    return { id: saved, ...body }
   }
 
   /** Newest first. */
