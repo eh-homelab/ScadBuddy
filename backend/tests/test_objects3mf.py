@@ -463,6 +463,15 @@ def test_a_non_finite_vertex_or_prusa_painting_is_refused() -> None:
         read_objects(_one_triangle('<vertex x="0" y="1" z="0"/>', ' slic3rpe:mmu_segmentation="4"'))
 
 
+@pytest.mark.parametrize("transform", ["nan 0 0 0 1 0 0 0 1 0 0 0", "1 0 0 0 1 0 0 0 1 inf 0 0"])
+def test_a_non_finite_transform_is_refused(transform: str) -> None:
+    box = {1: (_box(20, 10, 5), "normal_part", None)}
+    with pytest.raises(UnreadableObjectsError, match="finite"):
+        read_objects(bambu_project(items=[transform], parts=box))
+    with pytest.raises(UnreadableObjectsError, match="finite"):
+        read_objects(bambu_project(items=[at(0, 0)], parts=box, component_transform=transform))
+
+
 def test_a_plates_parts_are_placed_as_the_file_places_them() -> None:
     body = _box(20, 10, 5)
     cap = _box(20, 10, 2)
