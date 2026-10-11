@@ -20,7 +20,13 @@ export const flowTools: Tool[] = [
     name: 'register_flow',
     description:
       'Register a flow: a Python script that runs durably, for as long as it needs, over the host functions ' +
-      '`sleep(seconds)` and `wait_for_human(question, timeout_s)` (10 to 86400 s; it returns {answer}). The script ' +
+      '`sleep(seconds)`, `wait_for_human(question, timeout_s)` (10 to 86400 s; returns {answer}), ' +
+      '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +
+      '`save_output(slug, job_id, name)` (returns the output id), and two that wait for a person to approve them ' +
+      'in ScadBuddy: `queue_print(source, request)` (source {output_id} or {file_id}; request is the print ' +
+      "route's body, filament_plan and choices; returns {run_id, status, may_have_queued, error}) and " +
+      "`arrange(request)` (the arrange route's body; returns {job_id, status, output_id, error}). Results are " +
+      'dicts; a refusal is an exception in ScadBuddy\'s words, and a denial a ToolApprovalDenied. The script ' +
       'is `import asyncio`, an `async def main()` that awaits host functions, and `asyncio.run(main())`; it may ' +
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
       'Registering an existing `name` adds its next version; a version never changes. `approval_timeout` sets ' +

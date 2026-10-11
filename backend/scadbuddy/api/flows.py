@@ -16,6 +16,7 @@ from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import APIRouter, Body, Query, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from temporal_agent_harness.harness.agent_client import AgentClient, MidTurnRejectedError
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
@@ -26,7 +27,10 @@ from scadbuddy.api.deps import StateDep
 from scadbuddy.api.operations import (
     KEY_REQUIRED_DETAIL,
     KEY_REQUIRED_PROBLEM,
+    OPERATION_RESPONSES,
     IdempotencyKey,
+    operation_answer,
+    run_operation,
     still_accepting,
 )
 from scadbuddy.core.authorship import current_author
@@ -35,7 +39,9 @@ from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.forget import forget_run
 from scadbuddy.flows.models import TERMINAL, Definition, DefinitionSummary, Run, RunStatus
+from scadbuddy.flows.operations import FLOW_ANSWER, FLOW_DECIDE
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
@@ -50,9 +56,14 @@ FLOW_NAMESPACE = uuid.UUID("5b6f1d0e-6a8f-4f0e-9a51-0c1f1e57f10f")
 FLOWS_UNAVAILABLE = "https://scadbuddy.dev/problems/flows-unavailable"
 SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
+ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
 _STATUS_SECONDS = 2.0
-#: The harness's callback behind a host function, by the function's name.
-_CALLBACK_FN = {"human_answer": "wait_for_human"}
+#: The host function behind a harness callback or gated tool, by the tool's name.
+_HOST_FN = {
+    "human_answer": "wait_for_human",
+    "approved_print": "queue_print",
+    "approved_arrange": "arrange",
+}
 
 ApprovalTimeout = int | Literal["never"]
 
@@ -341,7 +352,7 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
             PendingEntry(
                 call_id=approval.tool_id,
                 kind="approval",
-                fn=seen.fn if seen else approval.tool_name,
+                fn=seen.fn if seen else _HOST_FN.get(approval.tool_name, approval.tool_name),
                 since=seen.since if seen else None,
             )
         )
@@ -351,7 +362,7 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
             PendingEntry(
                 call_id=callback.tool_id,
                 kind="answer",
-                fn=seen.fn if seen else _CALLBACK_FN.get(callback.tool_name, callback.tool_name),
+                fn=seen.fn if seen else _HOST_FN.get(callback.tool_name, callback.tool_name),
                 prompt=seen.prompt if seen else None,
                 since=seen.since if seen else None,
             )
@@ -405,3 +416,89 @@ async def delete_flow_run(run_id: str, flows: FlowsDep) -> Response:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     await forget_run(run_id, connect=flows.connect, client=flows.client, store=flows.store)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class AnswerBody(BaseModel):
+    """A person's answer to a run's `wait_for_human` question."""
+
+    #: The parked call, from the run's `pending`.
+    call_id: str = Field(min_length=1, max_length=64)
+    answer: str = Field(max_length=16_384)
+
+
+class DecideBody(BaseModel):
+    """A person's decision on a run's outward call."""
+
+    call_id: str = Field(min_length=1, max_length=64)
+    approved: bool
+    #: Why, for a denial: the script sees it.
+    reason: str | None = Field(default=None, max_length=1024)
+
+
+class Decided(BaseModel):
+    """What a decision did."""
+
+    run_id: str
+    call_id: str
+    outcome: Literal["approved", "denied", "answered"]
+
+
+def _browser_only() -> None:
+    # Spec §6.6, plan 6 Ruling 6: a flow's entries are answered on the Workflows page,
+    # never by an agent, whatever grant it holds.
+    if current_author() is not None:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a person answers a flow's questions and approvals.",
+            type_=ENTRY_BROWSER_ONLY,
+        )
+
+
+@router.post(
+    "/workflow-runs/{run_id}/answer",
+    response_model=Decided,
+    responses=OPERATION_RESPONSES,
+    summary="Answer a run's question",
+)
+async def answer_flow_run(
+    run_id: str,
+    body: AnswerBody,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Decided | JSONResponse:
+    _browser_only()
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[FLOW_ANSWER],
+        subject=f"flow:{run_id}",
+        request={"run_id": run_id, **body.model_dump()},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Decided)
+
+
+@router.post(
+    "/workflow-runs/{run_id}/decide",
+    response_model=Decided,
+    responses=OPERATION_RESPONSES,
+    summary="Approve or deny a run's outward call",
+)
+async def decide_flow_run(
+    run_id: str,
+    body: DecideBody,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Decided | JSONResponse:
+    _browser_only()
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[FLOW_DECIDE],
+        subject=f"flow:{run_id}",
+        request={"run_id": run_id, **body.model_dump()},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Decided)

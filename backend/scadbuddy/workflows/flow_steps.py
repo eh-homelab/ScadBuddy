@@ -27,6 +27,13 @@ class StepOwner(Protocol):
 
     def next_seq(self) -> int: ...
 
+    @property
+    def approval_timeout_s(self) -> int: ...
+
+    def mark_started(self, call_id: str) -> None: ...
+
+    def started(self, call_id: str) -> bool: ...
+
 
 async def project(write: ProjectionWrite) -> None:
     """One write to the run's row. Retried without limit: a projection write never

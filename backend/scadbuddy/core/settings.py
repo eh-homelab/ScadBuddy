@@ -262,8 +262,8 @@ class Settings(BaseSettings):
     # runs, #1057) inside the API process, as the print flag does for `bambuddy`.
     temporal_projects_worker_inprocess: bool = False
     # SCADBUDDY_API_INTERNAL_URL: the API's cluster-internal URL, which the print worker
-    # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5). Only that
-    # worker reads it.
+    # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5), and the
+    # projects worker calls for a flow's render, print and arrange (#1057).
     api_internal_url: str | None = None
     # SCADBUDDY_TEMPORAL_UI_URL: the Temporal web UI, which Settings → Administration
     # links to (#668). Empty (the default) shows no link.
@@ -512,8 +512,8 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " deployment runs the `scadbuddy-print` worker."
         ),
         "api_internal_url": (
-            "Where the print worker reaches the API inside the cluster: the deployment's"
-            " Service, read only by that worker."
+            "Where the print and projects workers reach the API inside the cluster: the"
+            " deployment's Service, read only by those workers."
         ),
         "revision": "A build stamp that /healthz reports, not a setting.",
         "version": "A build stamp that /healthz reports, not a setting.",
