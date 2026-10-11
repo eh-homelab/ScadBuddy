@@ -110,6 +110,22 @@ async def test_attaching_again_after_a_crash_changes_nothing(
 
 
 @pytest.mark.requires_postgres
+async def test_a_stopped_pass_attaches_nothing_more(tmp_path: Path, pg_conninfo: str) -> None:
+    """#2128: the boot's pass runs in a thread the shutdown cannot cancel; once its stop
+    is set it attaches no further output, and what it left waits for the next pass."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    stop = threading.Event()
+    stop.set()
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, _jobs(job), stop=stop) == 0
+        assert store.backfill(old.id) == BackfillState(job_id=job.id)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+    assert store.manifest(old.id) == written.manifest
+
+
+@pytest.mark.requires_postgres
 async def test_an_unfinished_rerender_is_left_for_the_next_pass(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
@@ -618,6 +634,57 @@ async def test_the_reaper_removes_an_orphan_s_old_directory_too(
     assert not store.paths.output_dir(old.slug, stale).exists()
     assert store.paths.output_dir(old.slug, fresh).is_dir()
     assert store.get(old.id).id == old.id
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_never_removes_a_symlinked_orphan_directory(
+    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2129: an aged orphan whose directory is a symlink (no meta.json behind it) has
+    its holds released, but the link and its target are left alone, and quietly: the
+    guard skips it rather than leaving `rmtree` to refuse it."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    orphan = "c" * 32
+    target = tmp_path / "elsewhere" / orphan
+    target.mkdir(parents=True)
+    (target / "model.3mf").write_bytes(b"x")
+    two_hours_ago = time.time() - 7200
+    os.utime(target, (two_hours_ago, two_hours_ago))
+    link = store.paths.output_dir(old.slug, orphan)
+    link.symlink_to(target, target_is_directory=True)
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        for output_id in (old.id, orphan):
+            hold_parts(refs, output_id, written.manifest, old.slug)
+            _age_holds(refs, output_id, 2)
+        with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
+            assert reap_orphan_holds(refs, store) == 1
+    assert link.is_symlink()
+    assert (target / "model.3mf").read_bytes() == b"x"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.requires_postgres
+async def test_the_reaper_never_removes_a_directory_not_named_as_an_output(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#2129: the directory comes from a hold's id; one that is not an output id
+    (`OUTPUT_ID_PATTERN`) is never removed, though its holds are released."""
+    store, old, _, written = await _legacy_output(tmp_path)
+    holder = "not-an-output-id"
+    directory = store.paths.output_dir(old.slug, holder)
+    directory.mkdir()
+    (directory / "keep.txt").write_bytes(b"x")
+    two_hours_ago = time.time() - 7200
+    os.utime(directory, (two_hours_ago, two_hours_ago))
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        for output_id in (old.id, holder):
+            hold_parts(refs, output_id, written.manifest, old.slug)
+            _age_holds(refs, output_id, 2)
+        assert reap_orphan_holds(refs, store) == 1
+        assert (OUTPUT_HOLDER, holder) not in _holders(refs, written.manifest[0].part)
+    assert (directory / "keep.txt").read_bytes() == b"x"
 
 
 @pytest.mark.requires_postgres
