@@ -132,7 +132,6 @@ export type ThumbnailKeyed = Pick<
   'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id' | 'thumbnail_preview_id'
 >
 
-/** The optional parts of a model upload besides its source (#179). */
 /** #1289 — `GET /jobs/{id}/colours.png`: tile `i` shows where `colours[i]` goes. */
 export interface ColourBreakdown {
   image: Blob
@@ -140,6 +139,7 @@ export interface ColourBreakdown {
   columns: number
 }
 
+/** The optional parts of a model upload besides its source (#179). */
 export interface UploadExtras {
   /** What the source is called on the wire, which is where the slug comes from. */
   filename?: string

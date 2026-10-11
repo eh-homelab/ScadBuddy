@@ -34,7 +34,12 @@ export function ColoursDialog({ open, jobId, colors, onClose }: Props) {
     const stop = new AbortController()
     const asked = `${jobId}:${view}`
     api.getJobColours(jobId, view, stop.signal).then(
-      (breakdown) => setDrawn({ key: asked, breakdown, url: URL.createObjectURL(breakdown.image) }),
+      (breakdown) => {
+        if (stop.signal.aborted) return
+        // A draw that works replaces an earlier failure of the same view (a 503 retried).
+        setFailed((f) => (f?.key === asked ? null : f))
+        setDrawn({ key: asked, breakdown, url: URL.createObjectURL(breakdown.image) })
+      },
       (cause: unknown) => {
         if (stop.signal.aborted) return
         setFailed({ key: asked, message: cause instanceof ApiError ? cause.detail : 'The colours could not be drawn.' })

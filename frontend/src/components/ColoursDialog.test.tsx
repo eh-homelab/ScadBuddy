@@ -68,6 +68,33 @@ describe('ColoursDialog', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('17 colours is more than a breakdown draws (16)')
   })
 
+  it('shows the grid once a view that failed draws after all', async () => {
+    let calls = 0
+    server.use(
+      http.get(`/api/v1/jobs/${JOB}/colours.png`, () => {
+        calls += 1
+        if (calls === 1) {
+          return HttpResponse.json(
+            { title: 'Service Unavailable', status: 503, detail: 'The breakdown took too long to draw' },
+            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return new HttpResponse(new Uint8Array([137, 80, 78, 71]), {
+          headers: { 'Content-Type': 'image/png', 'X-ScadBuddy-Colours': '#FF0000,#00FF00', 'X-ScadBuddy-Colour-Columns': '2' },
+        })
+      }),
+    )
+    const props = { jobId: JOB, colors: ['#FF0000', '#00FF00'], onClose: () => undefined }
+    const { rerender } = render(<ColoursDialog open {...props} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('took too long')
+
+    // Closed and opened again: the same view is asked for again, and this time it draws.
+    rerender(<ColoursDialog open={false} {...props} />)
+    rerender(<ColoursDialog open {...props} />)
+    expect(await screen.findByRole('list', { name: 'Tiles, row by row' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('asks for nothing while closed', () => {
     const seen: string[] = []
     answer(['#FF0000', '#00FF00'], 2, seen)
