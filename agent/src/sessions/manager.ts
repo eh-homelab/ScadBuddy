@@ -983,6 +983,9 @@ export class SessionManager {
         costUsd: s.costUsd,
         budgetUsd: s.budgetUsd,
         mode: s.mode,
+        // #1284 — the switcher's "Offered to" badge and Cancel offer; an expired offer reads as
+        // none. Its target is named only as `principal` may see it, as the session routes do.
+        offer: s.offer ? { to: ownerSeenBy(principal, s.offer.to), until: s.offer.until } : null,
       })),
     })
   }
@@ -2214,8 +2217,8 @@ export class SessionManager {
   /**
    * Announces a change to a session's offer as `session.owner` on the bus
    * (busEvents.ts), so a watcher of the session or of the list re-reads it. An
-   * offer is state on the session row, not a transcript event (the panel's
-   * protocol has none for it), so nothing is appended.
+   * offer is state on the session row, not a transcript event (the panel reads it
+   * from `sessions.snapshot`, #1284), so nothing is appended.
    */
   private async announceOwner(id: string): Promise<void> {
     const session = await this.row(id)

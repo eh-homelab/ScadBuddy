@@ -9,7 +9,7 @@
  * `schema.d.ts` is not committed (#492): typecheck, test and build regenerate it
  * first, so after a backend change `tsc` points at whatever broke.
  */
-import type { Origin, SessionStatus } from '../agent/chat/protocol'
+import type { Origin, Owner, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
 
 type Schemas = components['schemas']
@@ -365,6 +365,8 @@ export interface AiSessionView {
   /** #1885 — archived by its owner: out of the panel's list, and read-only. Absent from an older agent. */
   archived?: boolean
   archived_at?: string | null
+  /** #1284 — a live handoff offer: to whom, until when. */
+  offer?: { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string } | null
 }
 
 /**

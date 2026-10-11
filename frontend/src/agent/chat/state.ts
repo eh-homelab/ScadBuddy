@@ -128,7 +128,11 @@ export interface SessionState {
    * unarchived. Known from a session route's answer; the snapshot lists only the others.
    */
   archived?: boolean
+  /** #1284 — a live handoff offer the agent's list reported: to whom, until when. */
+  offer?: HandoffOffer | null
 }
+
+export type HandoffOffer = { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string }
 
 /**
  * #792 — what a session route answered about a session (`AiSessionView` of a fork or
@@ -150,6 +154,8 @@ export interface SessionPatch {
   owner?: Owner
   /** #1885 — archived, or not. */
   archived?: boolean
+  /** #1284 — the live handoff offer, or none. */
+  offer?: HandoffOffer | null
 }
 
 export interface ChatState {
@@ -222,6 +228,7 @@ function withListed(s: SessionState, summary: SessionSummary, live: boolean): Se
   if (summary.parentId !== undefined) next = { ...next, parentId: summary.parentId }
   if (summary.updatedAt !== undefined) next = { ...next, updatedAt: summary.updatedAt }
   if (summary.mode !== undefined) next = { ...next, mode: summary.mode }
+  if (summary.offer !== undefined) next = { ...next, offer: summary.offer }
   if (summary.costUsd !== undefined && summary.budgetUsd !== undefined && (!live || !next.budget)) {
     next = withBudget(next, summary.costUsd, summary.budgetUsd)
   }
@@ -540,6 +547,7 @@ function patched(state: ChatState, p: SessionPatch): ChatState {
   if (p.updatedAt !== undefined) s = { ...s, updatedAt: p.updatedAt }
   if (p.mode !== undefined) s = { ...s, mode: p.mode }
   if (p.archived !== undefined) s = { ...s, archived: p.archived }
+  if (p.offer !== undefined) s = { ...s, offer: p.offer }
   if (p.costUsd !== undefined && p.budgetUsd !== undefined) s = withBudget(s, p.costUsd, p.budgetUsd)
   return {
     ...state,

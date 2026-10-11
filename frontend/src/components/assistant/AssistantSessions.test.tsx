@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import type { ClientMessage } from '../../agent/chat/protocol'
-import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentOptions, type MockAgentTransport } from '../../mocks/agent'
+import { EXTERNAL_SESSION_ID, createMockAgentTransport, mockAgentSessions, type MockAgentOptions, type MockAgentTransport } from '../../mocks/agent'
 import { sessionWrites } from '../../mocks/features/assistantSessions'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
@@ -249,5 +249,26 @@ describe('archive (#1885)', () => {
     await screen.findByRole('button', { name: 'Stop' })
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
     expect(within(picker()).queryByRole('button', { name: /^Archive / })).toBeNull()
+  })
+})
+
+describe('handoff offers (#1284)', () => {
+  const OWN = `${PARENT} (fork)`
+
+  it("shows who the user's chat is offered to, and withdraws the offer", async () => {
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+    // The desktop agent's chat is not the user's: no offer to cancel there.
+    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${PARENT}` })).toBeNull()
+
+    mockAgentSessions()!.offerChat(OWN, { kind: 'bearer', id: 'token:t1', label: 'MCP token:t1' })
+    expect(await within(picker()).findByText('Offered to MCP token t1')).toBeInTheDocument()
+
+    await user.click(within(picker()).getByRole('button', { name: `Cancel the offer of ${OWN}` }))
+    expect(sessionWrites().at(-1)).toEqual({ method: 'DELETE', path: expect.stringMatching(/^\/sessions\/.+\/handoff$/), body: {} })
+    await waitFor(() => expect(within(picker()).queryByText('Offered to MCP token t1')).toBeNull())
+    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
   })
 })
