@@ -631,15 +631,20 @@ class ModelHistory:
             return None
         return completed.stdout.strip() or None
 
-    def previous_commit(self, slug: str) -> str | None:
-        """The commit before :meth:`last_commit` in the model's own history (#1071):
-        what its current revision was made from. None for its first commit."""
+    def last_two_commits(self, slug: str) -> tuple[str | None, str | None]:
+        """:meth:`last_commit` and the commit before it in the model's own history
+        (#1071: what its current revision was made from; None for its first commit),
+        from ONE ``git log`` (#2158): two runs could straddle a commit to the model, and
+        then name a "previous" that is not the current revision's parent."""
         completed = self._run("log", "-2", "--format=%H", "--", slug, check=False)
         assert isinstance(completed.stdout, str)
         if completed.returncode != 0:
-            return None
+            return None, None
         commits = completed.stdout.split()
-        return commits[1] if len(commits) > 1 else None
+        return (
+            commits[0] if commits else None,
+            commits[1] if len(commits) > 1 else None,
+        )
 
     def seed_commit(self, slug: str) -> str | None:
         """The ``Seed … from the image`` commit ``slug`` as it stands was copied in by.

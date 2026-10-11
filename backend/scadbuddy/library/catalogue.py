@@ -714,14 +714,16 @@ class Catalogue:
             logger.exception("could not read the revision", extra={"slug": slug})
             return None
 
-    def previous_version(self, slug: str) -> str | None:
+    def version_pair(self, slug: str) -> tuple[str | None, str | None]:
+        """``slug``'s revision and the one before it in its own history, read together
+        (#2158), so a commit landing between two reads cannot pair them wrongly."""
         if self.history is None or not self.history.available:
-            return None
+            return None, None
         try:
-            return self.history.previous_commit(model_path(slug))
+            return self.history.last_two_commits(model_path(slug))
         except (GitError, OSError):
-            logger.exception("could not read the previous revision", extra={"slug": slug})
-            return None
+            logger.exception("could not read the revision", extra={"slug": slug})
+            return None, None
 
     def ui_version(self, slug: str) -> str | None:
         """The last commit that touched ``slug``'s ``ui/`` directory (#846); none when
@@ -865,12 +867,14 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
 
     def record(self, slug: str) -> ModelRecord:
+        # One `git log` for the record's own pair (#2158); an upstream's is its own read.
+        version, previous = self.version_pair(slug)
         return self._record(
             slug,
-            self.version,
+            lambda asked: version if asked == slug else self.version(asked),
             self._has_history,
             ui_version_of=self.ui_version,
-            previous_version_of=self.previous_version,
+            previous_version_of=lambda _: previous,
         )
 
     def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
