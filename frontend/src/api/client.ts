@@ -91,6 +91,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  SourceFile,
   StoreUsage,
   UpstreamMerge,
   UpstreamStatus,
@@ -787,6 +788,24 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ source, force, message: null }),
     }),
+
+  /** #1290 — the model's `.scad` files, `model.scad` first (`GET /models/{slug}/files`). */
+  listSourceFiles: (slug: string) => request<SourceFile[]>(`/models/${seg(slug)}/files`),
+
+  /**
+   * #1290 — writes a `.scad` file beside `model.scad` as one revision. With `base`, a
+   * 409 naming the `current` revision when the model has moved on since, writing
+   * nothing. `model.scad` itself is written with `replaceSource`.
+   */
+  writeSourceFile: (slug: string, name: string, content: string, base?: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, message: null, base: base ?? null }),
+    }),
+
+  /** #1290 — removes a `.scad` file beside `model.scad` as one revision. */
+  deleteSourceFile: (slug: string, name: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, { method: 'DELETE' }),
 
 
   /**
