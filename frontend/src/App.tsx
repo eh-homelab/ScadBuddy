@@ -10,6 +10,8 @@ import { PrintDetailPage } from './pages/PrintDetailPage'
 import { PrintsPage, TemplatePrintsPage } from './pages/PrintsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { VersionsPage } from './pages/VersionsPage'
+import { WorkflowRunPage } from './pages/WorkflowRunPage'
+import { WorkflowsPage } from './pages/WorkflowsPage'
 
 // Monaco is the biggest thing in the bundle and only these two routes want it, so
 // they are split out: opening the customizer never downloads an editor.
@@ -63,6 +65,8 @@ export function App() {
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="library" element={<LibraryPage />} />
+        <Route path="workflows" element={<WorkflowsPage />} />
+        <Route path="workflows/runs/:id" element={<WorkflowRunPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
