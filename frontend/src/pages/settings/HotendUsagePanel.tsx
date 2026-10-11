@@ -108,7 +108,7 @@ function HotendRow({ hotend }: { hotend: RackHotendUsage }) {
                 key={spool.spool_id ?? `label-${spool.label ?? index}`}
                 className="flex items-center gap-1.5 rounded border border-line px-1.5 py-0.5"
               >
-                <Swatch colour={spool.colour} label={spool.colour ?? ''} />
+                <Swatch colour={spool.colour} label={`${spoolName(spool)} ${spool.colour ?? ''}`.trim()} />
                 <span>{spoolName(spool)}</span>
                 <span className="sb-num whitespace-nowrap text-muted">
                   ×{spool.prints}

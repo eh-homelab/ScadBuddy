@@ -162,7 +162,7 @@ export type RackOption = Schemas['RackOption']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
-/** #1298 — what each hotend on a printer's rack has printed; never a serial. */
+/** #1298, #2170 — each hotend on a printer's rack: its use, what it has loaded, and its serial (the one route that carries one, spec 2026-10-01 §7 amendment). */
 export type PrinterRackUsage = Schemas['PrinterRackUsage']
 export type RackHotendUsage = Schemas['RackHotendUsage']
 export type RackSpoolUse = Schemas['RackSpoolUse']
