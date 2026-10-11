@@ -390,7 +390,9 @@ async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWork
         )
         return text
     async with step(f"tool:{name}", call_id, outward=False):
-        return await _call_tool(call_id, name, args, attempts=3)
+        # Only a read is retried: a write that landed and then lost its answer would
+        # land again.
+        return await _call_tool(call_id, name, args, attempts=3 if tier == "read" else 1)
 
 
 #: Registered with the harness plugin. `human_answer` is the callback behind

@@ -45,3 +45,28 @@ def tier_of(name: str) -> str | None:
 def tiers() -> dict[str, str]:
     """A copy of the manifest, for a run's start."""
     return dict(_TIERS)
+
+
+#: Lowest first: an override only raises (agent/src/harness/permissions.ts `raiseTier`).
+RISK_TIERS = ("read", "write", "outward")
+#: Where Settings keeps the raised tiers of ScadBuddy's own tools (agent
+#: `plugins/builtInTools.ts`, `builtin_tools.<set>` in `ai_settings`).
+OVERRIDES_SETTING = "builtin_tools.scadbuddy"
+
+
+def raise_tiers(tiers: Mapping[str, str], overrides: Any) -> dict[str, str]:
+    """`tiers` with Settings' stored overrides applied as the agent applies them
+    (`effectiveTool`): a known tool's tier only goes up; anything else is ignored."""
+    out = dict(tiers)
+    raised = overrides.get("tool_tiers") if isinstance(overrides, dict) else None
+    if not isinstance(raised, dict):
+        return out
+    for name, tier in raised.items():
+        own = out.get(name)
+        if (
+            own in RISK_TIERS
+            and tier in RISK_TIERS
+            and RISK_TIERS.index(tier) > RISK_TIERS.index(own)
+        ):
+            out[name] = tier
+    return out
