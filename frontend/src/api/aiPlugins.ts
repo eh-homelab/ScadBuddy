@@ -22,6 +22,8 @@ export interface RemotePlugin {
   tool_prefix: string
   auth: { header: string; last4: string } | null
   usable: boolean
+  /** Why it is never handed to the harness (a name Claude Code now reserves, #2127), or null. */
+  problem: string | null
   tool_tiers: Record<string, RiskTier>
   disabled_tools: string[]
   created_at: string

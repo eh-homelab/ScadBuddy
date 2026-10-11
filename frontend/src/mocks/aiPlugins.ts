@@ -143,6 +143,7 @@ export function resetAiPluginMocks(): void {
     tool_prefix: 'mcp__hindsight__',
     auth: { header: 'Authorization', last4: '9f3a' },
     usable: true,
+    problem: null,
     tool_tiers: { recall: 'read' },
     disabled_tools: [],
     created_at: now(),
@@ -221,6 +222,12 @@ function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
 }
 
 /** The remote plugins as the mock has them now; `GET /plugins` lists them after the built-ins (`features/builtInToolSets.ts`). */
+/** Gives a stored remote plugin a problem, as the agent reports a reserved name (#2127). */
+export function setRemotePluginProblem(name: string, problem: string | null): void {
+  const plugin = state.remote.get(name)
+  if (plugin) state.remote.set(name, { ...plugin, problem })
+}
+
 export function remotePluginList(): RemotePlugin[] {
   return [...state.remote.values()]
 }
@@ -250,6 +257,7 @@ export const aiPluginHandlers = [
       tool_prefix: `mcp__${body.name}__`,
       auth: body.secret ? { header: body.auth_header || 'Authorization', last4: body.secret.slice(-4) } : null,
       usable: true,
+      problem: null,
       tool_tiers: {},
       disabled_tools: [],
       created_at: now(),
