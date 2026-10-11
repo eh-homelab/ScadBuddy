@@ -307,6 +307,7 @@ async def test_running_out_of_memory_is_never_kept_as_the_files_refusal(
     respx.get(f"{API}/library/files/93/download").mock(
         return_value=httpx.Response(200, content=stl)
     )
+
     def out_of_memory(*_: object, **__: object) -> bytes:
         raise MemoryError
 
