@@ -563,8 +563,10 @@ async def reset_flow_run(
     the current code with the same script, and every host call after it runs again.
     The answers and approvals after it are undone, so those calls park again. 409
     `flow-reset-changed` with the new `preview` when outward calls landed after
-    `as_of_event_id`; 422 `flow-reset-point` for an event that is not a completed
-    workflow task after the script started."""
+    `as_of_event_id`, or (with no preview) when another Reset moved the run first; 422
+    `flow-reset-point` for an event that is not a completed workflow task after the
+    script started, and 422 `flow-reset-unrecorded` for a run with a call parked
+    before ScadBuddy recorded where in the history."""
     author = current_author()
     result = await run_operation(
         ops,

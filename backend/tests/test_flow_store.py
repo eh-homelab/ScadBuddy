@@ -12,7 +12,7 @@ from psycopg import Connection
 
 from scadbuddy.core.events import Event, FlowRunEvent
 from scadbuddy.flows.models import RESULT_MAX
-from scadbuddy.flows.store import FlowStore
+from scadbuddy.flows.store import FlowStore, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
 
@@ -139,7 +139,9 @@ async def test_waiting_moves_the_status_and_back(store: FlowStore) -> None:
     run = await store.project(
         ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_add=waiting)
     )
-    assert run is not None and run.status == "waiting" and run.waiting_on == [waiting]
+    # Stamped with the execution that parked it.
+    assert run is not None and run.status == "waiting"
+    assert run.waiting_on == [waiting.model_copy(update={"workflow_run_id": "wr1"})]
     run = await store.project(
         ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_remove="c")
     )
@@ -258,7 +260,7 @@ async def test_a_reset_moves_the_row_to_the_point(store: FlowStore, events: Even
 
     # Event 26: the task started at 25 is done again, so 'b' (answered at 31) waits again
     # and its step runs again; 'c' (asked at 41) is dropped; 'a' stays answered.
-    run = await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
+    run = await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
     assert run is not None
     assert (run.workflow_run_id, run.status) == ("wr2", "waiting")
     assert [(s.call_id, s.status) for s in run.steps] == [("a", "succeeded"), ("b", "running")]
@@ -282,7 +284,7 @@ async def test_a_failed_reset_leaves_the_row(store: FlowStore) -> None:
         raise RuntimeError("refused")
 
     with pytest.raises(RuntimeError):
-        await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
+        await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
     assert await store.get_run("r1") == before
     after = await store.project(ProjectionWrite(run_id="r1", workflow_run_id="wr1"))
     assert after is not None and after.workflow_run_id == "wr1"
@@ -296,6 +298,81 @@ async def test_a_retried_reset_resets_once(store: FlowStore) -> None:
         calls.append("reset")
         return "wr2"
 
-    await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
-    await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
+    await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
+    await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
     assert calls == ["reset"]
+
+
+async def test_another_reset_of_the_same_execution_is_refused(store: FlowStore) -> None:
+    await _history(store)
+
+    async def reset() -> str:
+        return "wr2"
+
+    await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
+    # The same operation retried finds its own Reset and answers the row.
+    again = await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
+    assert again is not None and again.workflow_run_id == "wr2"
+    # A different Reset checked against wr1 before op1 committed: not a success it never had.
+    with pytest.raises(ResetSupersededError) as refused:
+        await store.reset_run("r1", replaced="wr1", point=21, request_id="op2", reset=reset)
+    assert refused.value.run.workflow_run_id == "wr2"
+
+
+async def test_a_retry_after_a_reset_that_landed_keeps_the_new_executions_records(
+    store: FlowStore,
+) -> None:
+    await _history(store)
+    attempts: list[str] = []
+
+    async def reset() -> str:
+        attempts.append("reset")
+        if len(attempts) == 1:
+            # The RPC landed (Temporal started wr2) but its answer never came back.
+            raise TimeoutError
+        return "wr2"
+
+    with pytest.raises(TimeoutError):
+        await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
+    # wr2 runs on from the point while the row is rolled back: it records a new step
+    # and parks a new call, both past the point.
+    redo = step("d", 4).model_copy(update={"history_length": 30})
+    await store.project(
+        ProjectionWrite(
+            run_id="r1",
+            workflow_run_id="wr2",
+            step=redo,
+            waiting_add=parked("d", 30),
+            history_length=30,
+        )
+    )
+    run = await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
+    assert run is not None and run.workflow_run_id == "wr2"
+    # wr1's records past the point are gone, wr2's own are kept as it wrote them.
+    assert [(s.call_id, s.status) for s in run.steps] == [
+        ("a", "succeeded"),
+        ("b", "running"),
+        ("d", "running"),
+    ]
+    assert sorted(w.call_id for w in run.waiting_on) == ["b", "d"]
+
+
+async def test_a_reset_keeps_a_step_that_ended_before_6e_recorded_where(store: FlowStore) -> None:
+    await started(store)
+    # A step written before 6e: ended, with no end length.
+    await store.project(
+        ProjectionWrite(
+            run_id="r1",
+            workflow_run_id="wr1",
+            step=step("a", 1, "succeeded").model_copy(update={"ended_at": NOW}),
+        )
+    )
+
+    async def reset() -> str:
+        return "wr2"
+
+    run = await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
+    assert run is not None
+    # Not reopened: nothing would ever end it, while a step that does run again records
+    # its end again.
+    assert [(s.call_id, s.status) for s in run.steps] == [("a", "succeeded")]
