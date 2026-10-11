@@ -13,6 +13,9 @@ from scadbuddy.flows.models import TERMINAL, Run
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 
+#: The key a flow approval's input hash is made with in these tests (#2318).
+HASH_KEY = b"\x05" * 32
+
 
 class Keys:
     """A subject's data key derived from its name: the codec runs, the key table is not

@@ -170,6 +170,12 @@ export type ToolContext = ToolServices & {
    */
   seamTier?: Risk
   /**
+   * The tier and Settings state the caller already resolved for this call and checked
+   * it against (toolActivities.ts, #2088). Used as given, never read again, so the
+   * check and the run cannot see two different overrides.
+   */
+  effective?: EffectiveTool
+  /**
    * What the handler itself knows about how the call went, for the audit row
    * (`ToolRun`): `confirm_action` reports the approval it ran on and the tool
    * it ran, and that a claim answered pending or was refused. Set by
@@ -486,7 +492,7 @@ async function runJudgedByResult(
 ): Promise<ToolRun> {
   let effective: EffectiveTool
   try {
-    effective = await effectiveTool(tool, ctx)
+    effective = ctx.effective ?? (await effectiveTool(tool, ctx))
   } catch {
     // Fails closed: a database blip never runs a tool Settings disabled.
     return refused(`${tool.name} is refused: its Settings → Plugins entry cannot be read`)

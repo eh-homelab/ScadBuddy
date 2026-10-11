@@ -101,7 +101,9 @@ async def settled(connect: Connect, sid: str, timeout: float = 60.0) -> str:
 class StandInTools:
     """agent-tools as the agent service serves it, played here: each call is recorded,
     an outward call runs only with its approval row (Ruling 10), an answer tool returns
-    its recorded response, and describe_call answers a fixed summary and hash."""
+    its recorded response, and describe_call answers a fixed summary and hash.
+    render_preview applies Settings → Plugins as toolActivities.ts does (#2088): disabled,
+    it is refused naming Settings; raised to outward, it runs only with its approval."""
 
     def __init__(self, connect: Connect) -> None:
         self._connect = connect
@@ -120,9 +122,30 @@ class StandInTools:
             row = await cur.fetchone()
         return None if row is None else (str(row[0]), row[1])
 
+    async def _overrides(self) -> tuple[dict[str, str], list[str]]:
+        async with self._connect() as conn:
+            cur = await conn.execute(
+                "SELECT value FROM ai_settings WHERE key = %s", (tools.OVERRIDES_SETTING,)
+            )
+            row = await cur.fetchone()
+        value = None if row is None else (json.loads(row[0]) if isinstance(row[0], str) else row[0])
+        return tools.sanitise_overrides(MANIFEST, value)
+
     def activities(self) -> list[Callable[..., Any]]:
         @activity.defn(name="render_preview")
         async def render_preview(args: dict[str, Any]) -> str:
+            tiers, disabled = await self._overrides()
+            if "render_preview" in disabled:
+                raise ApplicationError(
+                    "render_preview is disabled in Settings → Plugins; the user can turn it"
+                    " back on there",
+                    type="ToolError",
+                    non_retryable=True,
+                )
+            if tiers.get("render_preview") == "outward":
+                recorded = await self._response("render_preview")
+                if recorded is None or recorded[0] != "approved":
+                    raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
             self.ran.append(("render_preview", args))
             return "rendered"
 

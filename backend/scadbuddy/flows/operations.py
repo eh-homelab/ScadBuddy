@@ -61,9 +61,10 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
+from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Run
-from scadbuddy.flows.store import FlowStore, ResetSupersededError
+from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
 from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
 
@@ -81,6 +82,9 @@ RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
 LANDED_PROBE = timedelta(seconds=10)
+#: The harness tool an outward `tool(...)` call parks as (`flow_tools.approved_tool`):
+#: its input names the agent tool and its arguments.
+APPROVED_TOOL = "approved_tool"
 
 
 def request_id(run: Run, call_id: str) -> str:
@@ -123,6 +127,15 @@ def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
 
 
+def _before_floor(floor: int) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        f"This run keeps the questions and approvals it can park again only for points"
+        f" after event {floor + 1}; reset it to a later point.",
+        type_=RESET_POINT,
+    )
+
+
 def _wanted(
     kind: str, request: dict[str, Any], answer: str | None = None
 ) -> tuple[str, dict[str, Any]]:
@@ -143,9 +156,12 @@ def _same(existing: Decision, kind: str, request: dict[str, Any], answer: str | 
     return existing.kind == kind and existing.outcome == outcome and existing.response == response
 
 
-def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind]:
+def flow_kinds(
+    store: FlowStore, keys: PayloadKeys | None, hash_key: bytes | None
+) -> list[OperationKind]:
     """The kinds over `store`, opening answers with `keys`; the `projects` worker serves
-    them."""
+    them. `hash_key` makes an approval's input hash (`approval_hash.py`); None records
+    none, and the agent then runs no approved tool call."""
 
     async def answer_of(request: dict[str, Any]) -> str:
         if "answer" in request:
@@ -264,6 +280,22 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
                 raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
+    async def parked_hash(checked: dict[str, Any], call_id: str) -> str | None:
+        """The input hash of the call as it is parked (#2318): an outward agent tool's
+        name and arguments, which the agent hashes again from the call it is asked to
+        run. None for a ScadBuddy host function (the workflow runs it itself)."""
+        client = AgentClient(activity.client(), str(checked["workflow_id"]))
+        for parked in await client.get_pending_approvals():
+            if parked.tool_id != call_id:
+                continue
+            if parked.tool_name != APPROVED_TOOL or hash_key is None:
+                return None
+            args = parked.tool_input.get("args")
+            return input_hash(
+                hash_key, str(parked.tool_input.get("name")), args if isinstance(args, dict) else {}
+            )
+        raise _stale()
+
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:
         return await check("approval", request)
 
@@ -272,6 +304,10 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
         reason = request.get("reason")
         outcome, response = _wanted("approval", request)
         decision = _decision(request, checked, kind="approval", outcome=outcome, response=response)
+        if approved and await store.get_decision(decision.request_id) is None:
+            # Bound to the call as it waits now, which is what the person was shown; a
+            # resend keeps the hash its first attempt recorded.
+            decision.input_hash = await parked_hash(checked, decision.call_id)
         await record(request, checked, decision)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         try:
@@ -304,6 +340,10 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
                 " so it cannot be reset safely. Answer the call, or start a new run.",
                 type_=RESET_UNRECORDED,
             )
+        event_id = int(request["event_id"])
+        floor = await store.reset_floor(run.id)
+        if floor is not None and event_id - 1 <= floor:
+            raise _before_floor(floor)
         client = activity.client()
         try:
             described = await client.get_workflow_handle(run.workflow_id).describe()
@@ -311,7 +351,6 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
             if err.status == RPCStatusCode.NOT_FOUND:
                 raise ApiError(status.HTTP_404_NOT_FOUND, "The run's history is gone.") from None
             raise
-        event_id = int(request["event_id"])
         preview = await outward_since(client, run, event_id, run_id=described.run_id)
         if described.run_id != str(request["workflow_run_id"]):
             # Another Reset replaced the execution the preview read: past its point, the
@@ -372,6 +411,8 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
                 request_id=str(activity.info().workflow_id),
                 reset=reset,
             )
+        except ResetBeforeFloorError as err:
+            raise _before_floor(err.floor) from None
         except ResetSupersededError:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
@@ -399,9 +440,10 @@ def flow_kinds(store: FlowStore, keys: PayloadKeys | None) -> list[OperationKind
 
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
     from scadbuddy.flows.component import FLOWS
+    from scadbuddy.flows.keys import approval_key
 
     flows = components.get(FLOWS)
-    return flow_kinds(flows.store, flows.keys)
+    return flow_kinds(flows.store, flows.keys, approval_key(core.settings))
 
 
 OPERATION_KINDS: KindsBuild = _kinds

@@ -22,13 +22,13 @@ from scadbuddy.flows.operations import (
 )
 from scadbuddy.operations.kinds import OperationKind
 from tests.flows.fake_api import PLAN, FakeApi, Outward
-from tests.flows.flows_support import Keys, script
+from tests.flows.flows_support import HASH_KEY, Keys, script
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 
 def kind(flows: Outward, name: str) -> OperationKind:
-    return next(k for k in flow_kinds(flows.store, Keys()) if k.name == name)
+    return next(k for k in flow_kinds(flows.store, Keys(), HASH_KEY) if k.name == name)
 
 
 async def operate(flows: Outward, name: str, request: dict[str, Any]) -> dict[str, Any]:
