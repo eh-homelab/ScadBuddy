@@ -191,6 +191,7 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_blobs", _broken(RuntimeError("the refs are gone")))
     monkeypatch.setattr(main, "attach_backfills", _broken(RuntimeError("the outputs are gone")))
     monkeypatch.setattr(main, "reap_orphan_holds", _broken(RuntimeError("the holds are gone")))
+    monkeypatch.setattr(main, "sweep_flow_runs", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -204,6 +205,7 @@ async def test_a_failing_sweep_fails_its_activity(
         catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
         paths=SimpleNamespace(claims=None),
         events=None,
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(client=object(), store=None)),
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (
