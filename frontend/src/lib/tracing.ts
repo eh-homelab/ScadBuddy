@@ -33,7 +33,10 @@ export const MAX_EXPORT_BATCH_SIZE = 64
  * The polls (#2187): reads on a timer or a follow, outside any action, that would each be
  * a trace of their own. The attention badge (`agent/attention.ts` `ATTENTION_PATH`,
  * `RUNNING_PATH`), the assistant's availability (`agent/chat/availability.ts`
- * `AI_STATUS_PATH`) and a print's progress (`printSource.ts` `readPrintProgress`).
+ * `AI_STATUS_PATH`), a print's progress (`printSource.ts` `readPrintProgress`), and the
+ * client's 1 s follows: a print run (`followPrintRun`), an operation (`followOperation`,
+ * the backend's and the agent's) and a render job's fallback poll (`api.getJob`). Literal
+ * paths, not those modules' constants: importing them would pull them into this lazy chunk.
  */
 function isPoll(url: URL): boolean {
   const path = url.pathname
@@ -41,7 +44,8 @@ function isPoll(url: URL): boolean {
     path === '/api/v1/ai/pending-input' ||
     path === '/api/v1/ai/status' ||
     (path === '/api/v1/ai/sessions' && url.searchParams.get('status') === 'running') ||
-    /^\/api\/v1\/print\/(outputs|library)\/[^/]+\/progress$/.test(path)
+    /^\/api\/v1\/print\/(outputs|library)\/[^/]+\/progress$/.test(path) ||
+    /^\/api\/v1\/(print\/runs|operations|ai\/operations|jobs)\/[^/]+$/.test(path)
   )
 }
 
@@ -53,6 +57,8 @@ function isPoll(url: URL): boolean {
 const noParentlessPolls: Sampler = {
   shouldSample: (_context, _traceId, _name, kind, attributes) => {
     if (kind !== SpanKind.CLIENT) return { decision: SamplingDecision.RECORD_AND_SAMPLED }
+    // instrumentation-fetch sets `url.full` (stable semconv) at span start; were it renamed,
+    // every parentless fetch would fall to NOT_RECORD, which the tests would catch.
     const full = attributes['url.full']
     let keep = false
     if (typeof full === 'string') {

@@ -556,7 +556,8 @@ set, replaces this default entirely. The browser's provider narrows the
 rule to its polls (#2187): a `fetch` outside any user action is kept, so a
 page's or dialog's loads are traced without each needing an action. Only a
 poll's (the attention badge's `ai/pending-input` and running-session check,
-`ai/status`, a print's `…/progress`, listed in `frontend/src/lib/tracing.ts`
+`ai/status`, a print's `…/progress`, and the client's 1 s follows of a print
+run, an operation and a render job, listed in `frontend/src/lib/tracing.ts`
 `isPoll`) or another origin's is dropped, and a poll's goes with an unsampled
 `traceparent` (`-00`). A new poll is added to that list. The backend and agent
 honour the browser's decision.

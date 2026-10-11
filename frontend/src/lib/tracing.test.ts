@@ -56,6 +56,10 @@ describe('startTracing', () => {
     ['the assistant availability', AI_STATUS_PATH],
     ['an output print’s progress', '/api/v1/print/outputs/abc/progress'],
     ['a library print’s progress', '/api/v1/print/library/7/progress'],
+    ['a print run’s follow', '/api/v1/print/runs/r1'],
+    ['an operation’s follow', '/api/v1/operations/op1'],
+    ['an agent operation’s follow', '/api/v1/ai/operations/op1'],
+    ['a render job’s fallback poll', '/api/v1/jobs/j1'],
   ])('sends a poll (%s) unsampled, so the backend drops it too', async (_name, url) => {
     const seen = capture(new URL(url, location.href).pathname)
     stop = startTracing()
@@ -68,6 +72,15 @@ describe('startTracing', () => {
     const seen = capture('/api/v1/ai/sessions')
     stop = startTracing()
     await fetch('/api/v1/ai/sessions?status=closed')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a job’s own files: only the job read itself is the poll', async () => {
+    const seen = capture('/api/v1/jobs/j1/preview.glb')
+    stop = startTracing()
+    await fetch('/api/v1/jobs/j1/preview.glb')
+    expect(seen).toHaveLength(1)
     expect(seen[0]).toMatch(TRACEPARENT)
   })
 
