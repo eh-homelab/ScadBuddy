@@ -28,15 +28,18 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.output_reader import LocalOutputs
+from scadbuddy.bambuddy.preview import sweep_preview_slices
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
-from scadbuddy.core.problems import install_problem_handlers
+from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.flows.component import FLOWS
@@ -78,6 +81,7 @@ from scadbuddy.workflows.housekeeping import (
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     HEARTBEAT_TIMEOUT,
+    PREVIEWS_SWEEP,
     REAP_SWEEP,
     SWEEPS,
     ensure_schedules,
@@ -404,6 +408,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_flow_runs() -> None:
         await _heartbeating(_sweep_flow_runs_logged(state))
 
+    @activity.defn(name=PREVIEWS_SWEEP)
+    async def sweep_preview_slices() -> None:
+        await _heartbeating(_sweep_preview_slices_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -413,6 +421,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_backfills,
         reap_output_holds,
         sweep_flow_runs,
+        sweep_preview_slices,
     ]
 
 
@@ -444,6 +453,24 @@ async def _sweep_flow_runs_logged(state: AppState) -> None:
         raise
     if ended:
         logger.info("ended flow runs whose execution closed", extra={"count": len(ended)})
+
+
+async def _sweep_preview_slices_logged(state: AppState) -> None:
+    settings = await asyncio.to_thread(state.settings_store.load)
+    try:
+        async with client_for(settings) as client:
+            removed = await sweep_preview_slices(client, state.uploads)
+    except ApiError as error:
+        if error.type == NOT_CONFIGURED_PROBLEM:
+            logger.debug("no background-slice sweep: Bambuddy is not set up")
+            return
+        logger.exception("could not sweep the print dialog's background slices")
+        raise
+    except Exception:
+        logger.exception("could not sweep the print dialog's background slices")
+        raise
+    if removed:
+        logger.info("removed unprinted background slices", extra={"count": removed})
 
 
 async def _reap_output_holds_logged(state: AppState) -> None:

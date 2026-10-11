@@ -42,6 +42,7 @@ import {
 import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
+import { usePreviewSlice } from '../lib/usePreviewSlice'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -49,7 +50,12 @@ import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
+import { FlowChoice } from './print/FlowChoice'
+import { NozzlePlanLine, NozzlePlanStep } from './print/NozzlePlan'
 import { NozzleStep } from './print/NozzleStep'
+import { PreviewPane } from './print/PreviewPane'
+import { TrayQuestion } from './print/TrayQuestion'
+import { useDeclinedTrays } from '../lib/trays'
 import { PrintVerdict } from './print/PrintVerdict'
 import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
@@ -548,6 +554,31 @@ export function PrintPicker({
         }
       : null
   const check = usePrintCheck(source, checkRequest)
+  /**
+   * #2169 — the choices on screen, sliced in the background once the check finds nothing
+   * the run would refuse. A run of the same choices queues that slice.
+   */
+  const sliceable = check.current && check.verdict !== null && (check.verdict.errors ?? []).length === 0
+  /**
+   * #2169 — the plate the docked pane shows: the one chosen to print, or one clicked to
+   * look at. "All plates" shows plate 1 until another is clicked.
+   */
+  const [clickedPlate, setClickedPlate] = useState<number | null>(null)
+  const previewPlate = clickedPlate ?? (plate === 'all' ? 1 : plate)
+  useEffect(() => {
+    setClickedPlate(null)
+  }, [plate, currentKey])
+  const multiPlate = picker.plates.length > 1
+  const previewLabel = plateLabel(picker.plates, previewPlate)
+  // The plate the pane shows, sliced on its own: the run's own slice of it when it is
+  // the plate chosen to print.
+  const previewRequest =
+    checkRequest && (allPlates || previewPlate !== plate)
+      ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
+      : checkRequest
+  const previewSlice = usePreviewSlice(source, sliceable ? previewRequest : null)
+  /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
+  const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
   // position gone from its options) would be sent unseen, so it goes back to Automatic.
   // Only a current verdict decides: one still on its way keeps the pick.
@@ -607,6 +638,7 @@ export function PrintPicker({
             : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
       onClose={close}
+      size={choices && !result && unanswered === null ? 'split' : 'md'}
       footer={
         result ? (
           <>
@@ -700,7 +732,8 @@ export function PrintPicker({
           )}
 
           {choices && (
-            <div className="space-y-3">
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
+            <div className="min-w-0 space-y-3">
               <AdvancedSwitch
                 value={picker.advanced}
                 onToggle={picker.toggleAdvanced}
@@ -737,14 +770,30 @@ export function PrintPicker({
                   ScadBuddy could not read the filament inventory: {filamentError}
                 </p>
               )}
+              {!picker.advanced && (
+                <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
+              )}
+              {printerId !== null &&
+                trays.open.map((tray) => (
+                  <TrayQuestion
+                    key={`${tray.ams_id}:${tray.tray_id}`}
+                    printerId={printerId}
+                    tray={tray}
+                    spools={filaments?.spools ?? []}
+                    onAssigned={picker.reload}
+                    onDecline={() => trays.decline(tray)}
+                  />
+                ))}
               {filaments && (
                 <FilamentPicker
                   options={filaments}
                   plan={plan}
                   onChange={setPlan}
                   copies={effectiveCopies}
+                  offeredTrays={trays.offered}
                 />
               )}
+              <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
               {target && known && (
                 <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                   <legend className="px-1 text-[13px] text-ink">Arrange</legend>
@@ -810,7 +859,15 @@ export function PrintPicker({
               {/* #986 — one plate has no choice to make, but its name still says what prints. */}
               {picker.plates.length === 1 && picker.plates[0]?.name && (
                 <p className="text-[13px]" data-testid="single-plate">
-                  <span className="text-muted">Plate:</span> {picker.plates[0].name}
+                  <span className="text-muted">Plate:</span>{' '}
+                  <button
+                    type="button"
+                    onClick={() => setClickedPlate(1)}
+                    className="underline decoration-dotted underline-offset-2 hover:text-accent"
+                    title="Show it in the preview"
+                  >
+                    {picker.plates[0].name}
+                  </button>
                 </p>
               )}
 
@@ -820,6 +877,8 @@ export function PrintPicker({
                   value={plate}
                   onChange={picker.setPlate}
                   thumbnailUrl={sourceApi(source).plateThumbnailUrl}
+                  previewed={previewPlate}
+                  onPreview={setClickedPlate}
                 />
               )}
 
@@ -860,6 +919,7 @@ export function PrintPicker({
                     value={nozzles}
                     onChange={picker.changeNozzles}
                   />
+                  <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
                   {check.verdict?.rack && (
                     <RackNozzleStep
                       rack={check.verdict.rack}
@@ -934,6 +994,23 @@ export function PrintPicker({
               <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
                 {verdict}
               </AnalyzerPanel>
+            </div>
+            <div className="min-w-0 lg:sticky lg:top-0 lg:self-start">
+              <PreviewPane
+                key={previewPlate}
+                url={source ? sourceApi(source).previewUrl(previewPlate, multiPlate) : null}
+                thumbnailUrl={source ? sourceApi(source).plateThumbnailUrl(previewPlate) : null}
+                label={multiPlate || picker.plates[0]?.name ? previewLabel : null}
+                slots={filaments?.slots ?? []}
+                spools={filaments?.spools ?? []}
+                plan={plan}
+                colors={previewColors}
+                slice={previewSlice.result}
+                stale={previewSlice.stale}
+                slicing={previewSlice.slicing}
+                sliceError={previewSlice.error}
+              />
+            </div>
             </div>
           )}
 

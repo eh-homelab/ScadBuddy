@@ -157,8 +157,9 @@ def test_choices_list_the_filament_presets_each_nozzle_size_takes(
     assert len(names_02) == len(set(names_02))
     abs_02 = next(row for row in by_size["0.2"] if row["name"] == "Bambu ABS @BBL H2C 0.2 nozzle")
     assert abs_02["ref"] == {"source": "cloud", "id": "GFSB00_23"}
-    # Fix round 1 #7 — the dialog reads only the name and the ref.
-    assert {key for row in by_size["0.4"] for key in row} == {"ref", "name"}
+    # Fix round 1 #7 — the dialog reads only the name and the ref, and the material it
+    # filters the list by (#2164).
+    assert {key for row in by_size["0.4"] for key in row} == {"ref", "name", "filament_type"}
 
 
 @respx.mock

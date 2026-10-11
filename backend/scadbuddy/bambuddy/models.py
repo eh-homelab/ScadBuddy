@@ -574,6 +574,12 @@ class SliceJob(BambuddyModel):
 
     id: int | None = None
     status: SliceStatus | str
+    #: The file it slices (``library_file`` jobs) and when Bambuddy created the job:
+    #: its job ids live in memory and start from 1 again after a restart, so these
+    #: tell one job from another of the same id (#2169).
+    kind: str | None = None
+    source_id: int | None = None
+    created_at: str | None = None
     error_status: int | None = None
     error_detail: Any = None
     error: str | None = None

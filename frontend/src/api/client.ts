@@ -71,6 +71,9 @@ import type {
   PrintPage,
   PrintProgress,
   PrintCheck,
+  PreviewStarted,
+  SlicePreview,
+  TrayAssigned,
   PrintRun,
   FlowDecided,
   FlowRun,
@@ -1160,7 +1163,9 @@ export const api = {
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
   /** #1723 — the output's preview mesh, every part in its colour. */
-  outputPreviewGlbUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/preview.glb`,
+  /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
+  outputPreviewGlbUrl: (id: string, plate?: number) =>
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
 
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
@@ -1262,6 +1267,34 @@ export const api = {
     request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+
+  /**
+   * #2169 — slice the dialog's choices in the background, through the run's own path,
+   * without queueing; follow it with `getPreviewSlice`.
+   */
+  previewSlice: (outputId: string, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — how an output's background slice stands, and what it came to once finished. */
+  getPreviewSlice: (outputId: string, jobId: number) =>
+    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+
+  /** #2169 — as `getPreviewSlice`, for a library file's. */
+  getLibraryPreviewSlice: (fileId: number, jobId: number) =>
+    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
+
+  /**
+   * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
+   * on the person's own "yes".
+   */
+  assignTraySpool: (printerId: number, amsId: number, trayId: number, spoolId: number) =>
+    command<TrayAssigned>(`/print/printers/${printerId}/trays/${amsId}/${trayId}/spool`, {
+      method: 'POST',
+      body: JSON.stringify({ spool_id: spoolId }),
     }),
 
   /**
@@ -1427,6 +1460,13 @@ export const api = {
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — slice the dialog's choices for a library file in the background. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

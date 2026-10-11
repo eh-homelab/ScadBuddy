@@ -775,10 +775,10 @@ def test_queue_268_a_one_extruder_library_file_gets_both_nozzles_and_one_slice(
     client: TestClient,
 ) -> None:
     """#2181, #2227: a library file saved for one extruder (an A1's stats) printed on a
-    printer with the chosen 0.4 High Flow on both sides. The copy sliced states both
-    sides, so the slicer may spread the colours; before, the file's own one-side stats
-    were kept and both colours went onto the left. Its one plate is sliced whole
-    (#2180)."""
+    printer with the chosen 0.4 High Flow on both sides. The file's own one-side stats
+    are no longer kept (before, both colours went onto the left): the nozzle plan
+    (#2166) names the side for its one filament, and the copy offers that side alone,
+    in a Manual map. Its one plate is sliced whole (#2180)."""
     configure(client)
     one_color(89)
     upload = flow_copy_routes()
@@ -798,8 +798,10 @@ def test_queue_268_a_one_extruder_library_file_gets_both_nozzles_and_one_slice(
     assert response.status_code == 200, response.text
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
-    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "High Flow#1"]
-    assert settings["extruder_nozzle_stats_new"] == ["High Flow#1", "High Flow#1"]
+    assert settings["filament_map_mode"] == "Manual"
+    assert settings["filament_map"] == ["2"]
+    assert settings["extruder_nozzle_stats"] == ["High Flow#0", "High Flow#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["High Flow#0", "High Flow#1"]
     assert json.loads(sliced.calls.last.request.content)["plate"] == 0
 
 
@@ -898,6 +900,68 @@ def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) ->
     assert sliced.call_count == 2
     assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert first.call_count == 1
+
+
+def one_extruder_3mf() -> bytes:
+    """A two-colour library file saved for a one-extruder printer (an A1), as queue item
+    268's MakerWorld file was: its stats offer the slicer one extruder."""
+    settings = {
+        **STUB_SETTINGS,
+        "filament_colour": ["#3F8E43", "#27272C"],
+        "extruder_nozzle_stats": ["Standard#1"],
+        "extruder_nozzle_stats_new": ["Standard#1"],
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+    return buffer.getvalue()
+
+
+@respx.mock
+def test_a_two_colour_library_file_offers_both_sides_and_slices_every_plate(
+    client: TestClient,
+) -> None:
+    """Queue item 268, on a printer with a 0.4 High Flow on each side.
+
+    #2181: the file's one-extruder stats offered the slicer only the left, so both
+    colours went there; the copy offers both sides. #2180: a one-plate file is sliced as
+    ``plate: 0``, so Bambuddy does not repaint the second slot (which it reads as unused
+    in an inline-painted mesh) with the first's colour."""
+    configure(client)
+    respx.get(f"{API}/library/files", params={"folder_id": 2}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    upload = respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(
+            200, json={"id": 141, "filename": "file-89.3mf", "file_type": "3mf"}
+        )
+    )
+    library_file(89, content=one_extruder_3mf())
+    run_routes()
+    both_sides_high_flow()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={
+            **body(nozzles=[{"size": "0.4", "flow": "high_flow"}], tier="standard"),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["filament_map_mode"] == "Manual"
+    assert settings["filament_map"] == ["2", "1"]
+    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "High Flow#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["High Flow#1", "High Flow#1"]
+    request = json.loads(sliced.calls.last.request.content)
+    assert request["plate"] == 0
+    assert len(request["filament_colours"]) == 2
 
 
 def _settings_bomb() -> bytes:
@@ -1026,9 +1090,14 @@ def test_a_library_print_into_a_project_is_filed_there_and_remembered(
     assert settings["filament_colour"] == ["#688197"]
     uploads = _state(client).uploads
     assert [copy.id for copy in asyncio.run(uploads.for_output("library:89"))] == [141]
-    assert asyncio.run(uploads.project_target(7)) == ProjectTarget(
+    remembered = asyncio.run(uploads.project_target(7))
+    assert remembered is not None
+    assert remembered.model_copy(update={"nozzle_plan": None}) == ProjectTarget(
         printer_id=1, nozzle_diameter="0.2"
     )
+    # The run's nozzle plan too, which the next Generate lays the file out with (#2166).
+    assert remembered.nozzle_plan is not None
+    assert [slot["side"] for slot in remembered.nozzle_plan["slots"]] == ["R"]
 
 
 # --- #1753: viewing a library file as an output is viewed ---------------------------------

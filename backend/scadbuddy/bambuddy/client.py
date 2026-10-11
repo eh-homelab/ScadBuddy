@@ -142,6 +142,7 @@ Operation = Literal[
     "slice.start",
     "slicer.local_presets",
     "slicer.presets",
+    "spools.assign",
     "spools.assignments",
     "spools.filament_presets",
     "spools.list",
@@ -428,6 +429,28 @@ class BambuddyClient:
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
         return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def assign_spool(
+        self, *, spool_id: int, printer_id: int, ams_id: int, tray_id: int
+    ) -> SpoolAssignment:
+        """``POST /api/v1/inventory/assignments``: record that ``spool_id`` is in the
+        tray (#2164). Only on a person's confirmation in the print dialog. Bambuddy also
+        configures the tray over MQTT from the spool, as its own Assign does."""
+        what = f"assign spool {spool_id} to printer {printer_id}'s tray"
+        response = await self._send(
+            "POST",
+            "/inventory/assignments",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.assign",
+            what=what,
+            json={
+                "spool_id": spool_id,
+                "printer_id": printer_id,
+                "ams_id": ams_id,
+                "tray_id": tray_id,
+            },
+        )
+        return SpoolAssignment.model_validate(response.json())
 
     async def inventory_remain(self, printer_id: int) -> InventoryRemain:
         """Per-loaded-slot remaining grams, flat tray id and feeding extruder."""

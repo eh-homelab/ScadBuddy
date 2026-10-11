@@ -1151,8 +1151,11 @@ def test_one_matching_nozzle_prints_two_colours_whose_spools_are_on_its_side(
 
     assert response.status_code == 200, response.text
     assert upload.called
-    # Every filament on one extruder, as Bambu Studio saved the test print (#768).
-    assert _uploaded_settings(upload)["filament_map"] == ["1", "1"]
+    # Every filament on the one nozzle of the size (#768), stated in Manual mode (#2166):
+    # the slicer numbers its extruders left (1) then right (2).
+    settings = _uploaded_settings(upload)
+    assert settings["filament_map"] == ["2", "2"]
+    assert settings["filament_map_mode"] == "Manual"
     assert not NOZZLE_KINDS & _kinds(response)
 
 
@@ -1548,7 +1551,12 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
 
     assert check.status_code == 200, check.text
     assert run.status_code == 422, run.text
-    assert check.json() == {"errors": [run.json()["detail"]], "warnings": [], "rack": None}
+    assert check.json() == {
+        "errors": [run.json()["detail"]],
+        "warnings": [],
+        "rack": None,
+        "nozzle_plan": None,
+    }
     assert not uploaded.called
     assert not sliced.called
 

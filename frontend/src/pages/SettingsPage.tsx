@@ -710,7 +710,7 @@ export function SettingsPage() {
                 label="API key"
                 badge={badge('bambuddy_api_key')}
                 error={errors.bambuddy_api_key}
-                help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects and Manage Archives for print photos."
+                help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects, Manage Archives for print photos and Manage Inventory to record a tray's spool."
               >
                 <div className="flex gap-2">
                   <input

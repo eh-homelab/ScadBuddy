@@ -331,7 +331,10 @@ def test_the_connection_test_only_reads(client: TestClient) -> None:
         "Manage Queue": ("unknown", True),
         "Manage Projects": ("unknown", False),
         "Manage Archives": ("unknown", False),
+        "Manage Inventory": ("unknown", False),
     }
+    # One row per scope: the dict above would hide a repeated one.
+    assert len(body["scopes"]) == len(_scopes(body))
     assert {call.request.method for call in respx.calls} == {"GET"}
     unchecked = next(row for row in body["scopes"] if row["scope"] == "Manage Library")
     assert "Not checked" in unchecked["detail"]

@@ -26,6 +26,7 @@ from scadbuddy.bambuddy.extruders import (
     high_flow_warning,
     high_flow_warnings,
     rack_volume_type,
+    side_of,
     slicer_nozzle_stats,
     slicer_volume_types,
     with_sides,
@@ -41,6 +42,7 @@ from scadbuddy.bambuddy.filaments import (
     every_plate,
     gather_plate_options,
     queue_filaments,
+    read_inventory,
 )
 from scadbuddy.bambuddy.hardware import (
     installed_nozzles,
@@ -56,6 +58,7 @@ from scadbuddy.bambuddy.models import (
     RackAlgorithm,
     Spool,
 )
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import (
@@ -66,6 +69,7 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
+from scadbuddy.bambuddy.trays import colour_word, tray_colours, with_trays
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
@@ -94,6 +98,7 @@ from scadbuddy.rack.usage import (
     record_seen,
     save_picks,
 )
+from scadbuddy.render.bambu3mf import FilamentMap
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +181,10 @@ class RackOption(BaseModel):
     flow: FlowType
     color: str | None = None
     nozzle_type: str
+    #: The filament it last ran (#2166), so the dialog can name it; None unknown.
+    filament_type: str | None = None
+    #: That filament's colour as a word ("black"), so the dialog never shows a hex.
+    color_word: str | None = None
     #: Decoded from the code through ``rack.rank.NOZZLE_MATERIALS``; ``None`` is unknown.
     material: str | None = None
     prints: int = 0
@@ -285,7 +294,8 @@ async def filament_options(
     options.nozzles = printer_status.nozzles
     # Each loaded spool's side, as a label in the picker (#469); nothing is checked
     # against it (#768).
-    return with_sides(options, printer_status)
+    # A filled tray Bambuddy has no spool for is asked about, and offered (#2164).
+    return with_trays(with_sides(options, printer_status), printer_status, printer_id)
 
 
 async def filament_options_for_output(
@@ -356,6 +366,9 @@ class PrintCheck(BaseModel):
     warnings: list[FilamentWarning] = Field(default_factory=list)
     #: The rack side's preview (#836); ``None`` with no readable rack.
     rack: RackPickView | None = None
+    #: Which nozzle each filament prints from, as the run will state it (#2166);
+    #: ``None`` when the slicer is left to choose (one extruder, no readable status).
+    nozzle_plan: NozzlePlan | None = None
 
 
 ChooseRack = Callable[[int], Awaitable[RackChoice | None]]
@@ -497,7 +510,9 @@ async def resolve_plates(
     # Read once for every plate: the plan's spools are the same on every plate.
     spool_presets = {
         spool_id: await client.spool_filament_presets(spool_id)
+        # A tray chosen for itself (#2164) has no spool, so no presets of its own.
         for spool_id in sorted({slot.spool_id for slot in plan.slots} & inventory)
+        if spool_id > 0
     }
     every: list[Resolved] = []
     errors: list[str] = []
@@ -534,6 +549,9 @@ async def _slot_errors(
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
     )
+    per_plate = [
+        with_trays(options, prepared.printer_status, prepared.printer_id) for options in per_plate
+    ]
     _, errors = await resolve_plates(
         client,
         prepared.plate_ids,
@@ -578,6 +596,18 @@ async def check_print(
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
     laid_out = await source.states_nozzles(client)
+    nozzle_plan = (
+        await plan_for(
+            client,
+            prepared.printer_status,
+            prepared.printer_id,
+            request.filament_plan,
+            request.choices.nozzles,
+            request.choices.sides,
+        )
+        if laid_out
+        else None
+    )
     rack_view, rack_notes = await rack_preview(
         client,
         request,
@@ -586,6 +616,7 @@ async def check_print(
         status=prepared.printer_status,
         rack=rack,
         laid_out=laid_out,
+        nozzle_plan=nozzle_plan,
     )
     # A refused manual pick still previews the rack, so the dialog can offer another,
     # and is said once: as the error, not again as a rack-manual-partial warning.
@@ -611,10 +642,12 @@ async def check_print(
                 request.choices.nozzles,
                 rack_picked=rack_picked,
                 laid_out=laid_out,
+                sides=nozzle_plan.sides if nozzle_plan is not None else None,
             ),
             *rack_notes,
         ],
         rack=rack_view,
+        nozzle_plan=nozzle_plan,
     )
 
 
@@ -624,6 +657,8 @@ def _rack_option(candidate: RackCandidate) -> RackOption:
         nozzle_diameter=candidate.nozzle_diameter,
         flow="high_flow" if candidate.high_flow else "standard",
         color=candidate.color,
+        filament_type=candidate.filament_type or None,
+        color_word=colour_word(candidate.color),
         nozzle_type=candidate.nozzle_type,
         material=candidate.material,
         prints=candidate.prints,
@@ -645,18 +680,26 @@ async def rack_preview(
     status: PrinterStatus | None,
     rack: RackUsage | None,
     laid_out: bool,
+    nozzle_plan: NozzlePlan | None = None,
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
     the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
     (#484): the one chosen there for a file the run lays out, Standard for a library file
     (``laid_out``, :func:`~scadbuddy.bambuddy.extruders.rack_volume_type`). Every chosen
     spool counts toward the material test, since the slice may put any of them on the
-    rack side. Advisory: a failure previews nothing."""
+    rack side, unless ScadBuddy's nozzle plan (#2166) says which do: then only those
+    on the rack side count. Advisory: a failure previews nothing."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
+    rack_letter = side_of(RACK_SIDE)
+    slots = [
+        slot
+        for slot in request.filament_plan.slots
+        if nozzle_plan is None or nozzle_plan.side_of_slot(slot.slot_id) in (None, rack_letter)
+    ]
     try:
         inventory = {spool.id: spool for spool in await client.spools()}
-        chosen = [inventory.get(slot.spool_id) for slot in request.filament_plan.slots]
+        chosen = [inventory.get(slot.spool_id) for slot in slots]
         known = [spool for spool in chosen if spool is not None]
         first = known[0].rgba if known else None
         group = RackGroup(
@@ -910,6 +953,8 @@ class PlannedRun(BaseModel):
     rack_algorithm: RackAlgorithm = DEFAULT_ALGORITHM
     rack_position: int | None = None
     has_rack: bool = False
+    #: Which nozzle each filament prints from, as the 3MF states it (#2166).
+    nozzle_plan: NozzlePlan | None = None
 
 
 class QueuedPlate(BaseModel):
@@ -1003,16 +1048,36 @@ async def plan_run(
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
     project_id = chosen_project(request, settings)
+    # ScadBuddy plans each filament's nozzle (#2166) and states it in the 3MF.
+    # One read of the inventory for the plan and every plate's options (#480).
+    inventory = await read_inventory(client)
+    nozzle_plan = await plan_for(
+        client,
+        printer_status,
+        printer_id,
+        request.filament_plan,
+        choices.nozzles,
+        choices.sides,
+        inventory=inventory,
+    )
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
-        # Only the side with the nozzle is offered to the slicer (#834), and each side
-        # states the flow chosen for it (#484).
-        nozzle_stats=slicer_nozzle_stats(printer_status, choices.nozzles),
+        # Only the sides the plan uses, or else the sides with the nozzle, are offered
+        # to the slicer (#834, #2181), and each side states the flow chosen for it (#484).
+        nozzle_stats=(
+            nozzle_plan.nozzle_stats(choices.nozzles)
+            if nozzle_plan is not None
+            else slicer_nozzle_stats(printer_status, choices.nozzles)
+        ),
         nozzle_volume_type=slicer_volume_types(choices.nozzles),
+        tray_colours=tray_colours(
+            [slot.spool_id for slot in request.filament_plan.slots], printer_status
+        ),
+        filament_map=_filament_map(nozzle_plan, len(source.colours)),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
@@ -1032,7 +1097,9 @@ async def plan_run(
         printer_id=printer_id,
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
+        inventory=inventory,
     )
+    per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
     every, errors = await resolve_plates(
         client, plate_ids, per_plate, request.filament_plan, choices, catalogue
     )
@@ -1068,7 +1135,10 @@ async def plan_run(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
     hardware += high_flow_warnings(
-        printer_status, choices.nozzles, laid_out=await source.states_nozzles(client)
+        printer_status,
+        choices.nozzles,
+        laid_out=await source.states_nozzles(client),
+        sides=nozzle_plan.sides if nozzle_plan is not None else None,
     )
     warnings: list[FilamentWarning] = []
     for _, options, resolved, _ in planned:
@@ -1109,7 +1179,13 @@ async def plan_run(
         # extra read per plate, and no rack warning on a printer without one. An
         # unreadable status still tries, since the pick reads a fresh one (#1043).
         has_rack=printer_status is None or bool(rack_positions(printer_status.nozzle_rack)),
+        nozzle_plan=nozzle_plan,
     )
+
+
+def _filament_map(plan: NozzlePlan | None, filaments: int) -> FilamentMap | None:
+    """The plan as the 3MF states it, for a file of ``filaments`` filaments."""
+    return plan.stated_map(filaments) if plan is not None else None
 
 
 def finish_run(

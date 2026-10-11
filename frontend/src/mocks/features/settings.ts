@@ -177,6 +177,7 @@ export const handlers = [
             ['Manage Queue', true, 'Queueing prints.'],
             ['Manage Projects', false, 'Sending to a Bambuddy project.'],
             ['Manage Archives', false, 'Attaching photos and timelapses to a print.'],
+            ['Manage Inventory', false, 'Recording which spool is in a tray, when you confirm it.'],
           ] as const
         ).map(([scope, required, what]) => ({
           scope,

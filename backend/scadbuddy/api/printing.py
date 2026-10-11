@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 import psycopg
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
@@ -50,6 +50,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
+from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -387,6 +388,53 @@ async def get_printer_rack_usage(
     return PrinterRackUsage(printer_id=printer_id, hotends=hotends)
 
 
+class TraySpool(BaseModel):
+    """The spool a person confirmed is in a tray (#2164)."""
+
+    spool_id: int = Field(ge=1)
+
+
+class TrayAssigned(BaseModel):
+    spool_id: int
+    printer_id: int
+    ams_id: int
+    tray_id: int
+
+
+@router.post(
+    "/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool",
+    response_model=TrayAssigned,
+    summary="Record which spool is in a tray",
+    responses=OPERATION_RESPONSES,
+)
+async def post_tray_spool(
+    printer_id: int,
+    ams_id: Annotated[int, Path(ge=0, le=255)],
+    tray_id: Annotated[int, Path(ge=0, le=15)],
+    body: TraySpool,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> TrayAssigned | JSONResponse:
+    """#2164: a filled tray Bambuddy has no spool for, answered by the person in the
+    print dialog. ``POST /inventory/assignments`` in Bambuddy, which needs the key's
+    Manage Inventory scope. Never sent without that confirmation."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["assign_tray_spool"],
+        subject=f"printer-{printer_id}",
+        request={
+            "printer_id": printer_id,
+            "ams_id": ams_id,
+            "tray_id": tray_id,
+            "spool_id": body.spool_id,
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, TrayAssigned)
+
+
 @router.get(
     "/printers/{printer_id}/camera",
     response_class=Response,
@@ -660,6 +708,55 @@ async def post_check(
     settings = store.load()
     async with client_for(settings) as client:
         return await check_for_output(client, outputs, uploads, meta, settings, body, rack=rack)
+
+
+@router.post(
+    "/outputs/{output_id}/preview-slice",
+    response_model=PreviewStarted,
+    summary="Slice the dialog's choices in the background, without queueing",
+    responses=OPERATION_RESPONSES,
+)
+async def post_preview_slice(
+    output_id: OutputIdPath,
+    body: PrintRunRequest,
+    response: Response,
+    outputs: OutputsDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> PreviewStarted | JSONResponse:
+    """#2169: what the dialog's choices would print, sliced through the run's own path
+    and never queued. Follow ``GET /print/preview-slices/{job_id}``. A run of the same
+    choices queues this slice rather than slicing again."""
+    require_output(outputs, output_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["preview_slice"],
+        subject=output_id,
+        request={"output_id": output_id, "request": body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, PreviewStarted)
+
+
+@router.get(
+    "/outputs/{output_id}/preview-slices/{job_id}",
+    response_model=SlicePreview,
+    summary="How a background slice stands, and what it came to",
+)
+async def get_preview_slice(
+    output_id: OutputIdPath,
+    job_id: int,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+) -> SlicePreview:
+    """#2169: grams per slot, print time, the side each filament went to and how many
+    filament changes the slice makes, once it has finished. Only a slice started for
+    this output, while Bambuddy's job is still that slice; else 404."""
+    meta = require_output(outputs, output_id)
+    async with client_for(store.load()) as client:
+        return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
 
 
 @router.get(

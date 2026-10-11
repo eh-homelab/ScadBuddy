@@ -24,6 +24,7 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PathsDep,
+    ReadBudgetDep,
     RenderDep,
     SettingsStoreDep,
     SlugPath,
@@ -70,6 +71,7 @@ from scadbuddy.bambuddy.library_objects import (
     NotArrangeableError,
     read_library_objects,
 )
+from scadbuddy.bambuddy.library_view import plate_glb
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
@@ -99,6 +101,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
 )
 from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
+from scadbuddy.render.objects3mf import UnreadableObjectsError
 from scadbuddy.render.read_budget import ReadBudget, ReadBudgetOverride, budget_of
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
@@ -840,12 +843,30 @@ async def download_output(
 
 @router.get(
     "/outputs/{output_id}/preview.glb",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="The output's preview mesh",
 )
-def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+async def get_output_preview(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    budget: ReadBudgetDep,
+    plate: Annotated[int | None, Query(ge=1)] = None,
+) -> Response:
+    """The output's preview mesh, or with ``plate`` that one plate of its 3MF, where the
+    file places it: what the print dialog's pane shows for a plate clicked (#2169)."""
     require_output(outputs, output_id)
+    if plate is not None:
+        payload = await outputs.model_3mf(output_id)
+        if payload is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
+        try:
+            data = await asyncio.to_thread(plate_glb, payload, plate, budget)
+        except NoSuchPlateError as error:
+            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+        except UnreadableObjectsError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        return Response(data, media_type=GLB_MEDIA_TYPE)
     path = outputs.directory(output_id) / PREVIEW_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")

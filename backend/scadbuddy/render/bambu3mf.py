@@ -753,6 +753,7 @@ def replate_3mf(
     nozzle_diameter: str | None = None,
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
+    filament_map: FilamentMap | None = None,
 ) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
@@ -833,25 +834,46 @@ def replate_3mf(
             if nozzle_diameter is not None:
                 settings["nozzle_diameter"] = [nozzle_diameter]
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
-            _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
+            _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
             _set_towers(settings, [placement.tower for placement in placements])
             data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
         rewritten.append((name, data))
     return _zipped(rewritten)
 
 
+@dataclass(frozen=True)
+class FilamentMap:
+    """ScadBuddy's own filament→extruder map (#2166, ``bambuddy.nozzle_plan``): per
+    filament of the file, its extruder in the slicer's numbering ("1" the left on the
+    H2C) and its flow as ``NozzleVolumeType`` ("0" Standard, "1" High Flow)."""
+
+    extruders: tuple[str, ...]
+    volumes: tuple[str, ...]
+
+
 def _state_nozzles(
     settings: dict[str, Any],
     nozzle_stats: Sequence[str] | None,
     nozzle_volume_type: Sequence[str] | None,
+    filament_map: FilamentMap | None = None,
 ) -> None:
     """Write which extruders have the nozzle and each one's flow into ``settings``
-    (#834, #484); see :func:`replate_3mf`. ``None`` leaves a key as it is."""
+    (#834, #484); see :func:`replate_3mf`. ``None`` leaves a key as it is.
+
+    ``filament_map`` is written as ``filament_map`` under ``filament_map_mode``
+    "Manual", with ``filament_volume_map`` beside it (#2166): only when it names one
+    extruder per filament of the file, since the slicer indexes it by filament."""
     if nozzle_stats is not None:
         settings["extruder_nozzle_stats"] = list(nozzle_stats)
         settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
     if nozzle_volume_type is not None:
         settings["nozzle_volume_type"] = list(nozzle_volume_type)
+    if filament_map is not None and len(filament_map.extruders) == len(
+        settings.get("filament_colour") or filament_map.extruders
+    ):
+        settings["filament_map"] = list(filament_map.extruders)
+        settings["filament_map_mode"] = "Manual"
+        settings["filament_volume_map"] = list(filament_map.volumes)
 
 
 #: Bambu Studio's full project_settings.config is ~80 KB; more is not one, but a zip bomb.
@@ -1086,6 +1108,7 @@ def state_nozzles(
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
     filament_colour: Sequence[str] | None = None,
+    filament_map: FilamentMap | None = None,
 ) -> bytes:
     """``payload`` stating the nozzles as :func:`replate_3mf` does, and the spools'
     ``filament_colour`` (#476), changed in nothing else: an author's file is printed
@@ -1108,7 +1131,7 @@ def state_nozzles(
             name = info.filename
             if name == PROJECT_SETTINGS_NAME:
                 settings = json.loads(_read_capped(archive, name, MAX_SETTINGS_BYTES))
-                _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
+                _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
                 if filament_colour is not None and len(filament_colour) == len(
                     settings.get("filament_colour") or []
                 ):

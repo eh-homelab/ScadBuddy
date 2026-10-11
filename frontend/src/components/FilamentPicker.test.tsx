@@ -11,10 +11,12 @@ function Harness({
   options,
   copies = 1,
   onChange,
+  offeredTrays,
 }: {
   options: FilamentOptions
   copies?: number
   onChange?: (plan: SlotChoice[]) => void
+  offeredTrays?: ReadonlySet<number>
 }) {
   const [plan, setPlan] = useState<SlotChoice[]>(options.suggested ?? [])
   return (
@@ -22,6 +24,7 @@ function Harness({
       options={options}
       plan={plan}
       copies={copies}
+      offeredTrays={offeredTrays}
       onChange={(next) => {
         setPlan(next)
         onChange?.(next)
@@ -30,11 +33,11 @@ function Harness({
   )
 }
 
-function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1) {
+function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1, offeredTrays?: ReadonlySet<number>) {
   const onChange = vi.fn()
   return {
     onChange,
-    ...renderPage(<Harness options={options} copies={copies} onChange={onChange} />),
+    ...renderPage(<Harness options={options} copies={copies} onChange={onChange} offeredTrays={offeredTrays} />),
   }
 }
 
@@ -75,16 +78,35 @@ describe('FilamentPicker', () => {
     expect(screen.queryByText(/mounted\./)).toBeNull()
   })
 
-  it('with the track switch, a side is only where the spool rests', async () => {
+  // #2166 — with the switch any spool reaches either nozzle: the plan says where each
+  // prints, so no side is shown at all.
+  it('with the track switch, shows no side', async () => {
     const { user } = open(switched)
     await expand(user, 2)
 
-    expect(within(slot(2)).getByTestId('side-9')).toHaveTextContent('rests on R')
-    expect(within(slot(2)).getByTestId('side-9')).toHaveAttribute(
-      'title',
-      'Rests on the right inlet; the Filament Track Switch can feed it to either nozzle.',
-    )
+    expect(within(slot(2)).queryByTestId('side-9')).toBeNull()
+    expect(screen.queryByTestId('slot-side-1')).toBeNull()
     expect(within(slot(2)).getByTestId('spool-9')).toBeEnabled()
+  })
+
+  // #2164 — the tray itself is offered only once the question about it was answered no.
+  it('holds a tray-only row back until it is offered', async () => {
+    const tray = {
+      spool_id: -52,
+      material: 'PLA',
+      color_name: "what's in AMS-D slot 4",
+      colour: '#27272C',
+      tray_only: true,
+    }
+    const options = { ...fixtures.filamentOptions, spools: [...(fixtures.filamentOptions.spools ?? []), tray] }
+    const first = open(options)
+    await expand(first.user, 2)
+    expect(screen.queryByTestId('spool--52')).toBeNull()
+    first.unmount()
+
+    const { user } = open(options, 1, new Set([-52]))
+    await expand(user, 2)
+    expect(within(slot(2)).getByTestId('spool--52')).toBeInTheDocument()
   })
 
   it('heads each slot with its colour, number, material and the grams it needs', () => {

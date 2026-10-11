@@ -47,6 +47,10 @@ class Scope(StrEnum):
     #: ``can_manage_archives``: photo upload and delete, and pulling a timelapse off
     #: the printer (Bambuddy ``auth.py:194-196`` at v1.2.5.6).
     MANAGE_ARCHIVES = "Manage Archives"
+    #: ``can_manage_inventory``: spool writes, here only assigning a spool to the tray
+    #: a person confirmed it is in (#2164; Bambuddy ``auth.py`` maps
+    #: ``INVENTORY_UPDATE`` to it).
+    MANAGE_INVENTORY = "Manage Inventory"
 
 
 def not_configured(detail: str) -> ApiError:

@@ -19,6 +19,8 @@ print run states each side's flow in the 3MF, as Bambu Studio does (#484,
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue
@@ -91,6 +93,9 @@ class PrintChoices(BaseModel):
     process_name: str | None = None
     bed_type: str = Field(default=DEFAULT_BED, max_length=64)
     filament_overrides: dict[int, PresetRef] = Field(default_factory=dict)
+    #: Advanced (#2166): a slot printed on the side chosen by hand, "L" or "R", in place
+    #: of the side ScadBuddy plans for it (``nozzle_plan``). A slot not named is planned.
+    sides: dict[int, Literal["L", "R"]] = Field(default_factory=dict)
 
 
 class Resolved(BaseModel):
@@ -247,7 +252,9 @@ def resolve(
     colours: list[str | None] = [None] * width
     for slot in options.slots:
         idx = slot.slot_id - 1
-        option = by_id.get(plan.spool_for(slot.slot_id) or -1)
+        spool_id = plan.spool_for(slot.slot_id)
+        # Not ``or -1``: a negative id is a tray chosen for itself (#2164).
+        option = by_id.get(spool_id) if spool_id is not None else None
         colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"
         if option is None:
             # Not a preset problem, so Advanced cannot fix it: the slot needs a spool.

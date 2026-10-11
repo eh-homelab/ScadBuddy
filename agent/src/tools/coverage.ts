@@ -185,6 +185,26 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'like the rest of the rack picker; an agent prints through print_output, which takes the ' +
       'remembered algorithm, and a tool for changing it is a follow-up.',
   },
+  ...(
+    [
+      'POST /api/v1/print/outputs/{output_id}/preview-slice',
+      'POST /api/v1/print/library/{file_id}/preview-slice',
+      'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}',
+      'GET /api/v1/print/library/{file_id}/preview-slices/{job_id}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The print dialog's background reslice (#2169), which shows grams, time and the nozzle plan beside " +
+      'the choices while a person changes them. An agent prints through print_output, whose run slices ' +
+      'anyway, and reads the plan from the print check.',
+  })),
+  {
+    operation: 'POST /api/v1/print/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',
+    reason:
+      "Records in Bambuddy which spool is in an untagged tray (#2164), sent only on a person's own answer " +
+      "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
+  },
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
