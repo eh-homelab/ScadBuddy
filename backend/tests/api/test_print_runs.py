@@ -390,6 +390,29 @@ def test_the_output_listing_says_which_outputs_failed_before_queueing(
     assert listed() is False
 
 
+def test_the_output_listing_answers_when_print_runs_are_unreadable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2137: a Postgres hiccup reading ``print_runs`` lists the outputs without the
+    flag rather than turning History, and every page that lists outputs, into a 500."""
+    output_id = prepared(client, model)
+
+    async def unreadable(output_ids: list[str]) -> set[str]:
+        raise psycopg.OperationalError("connection lost")
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(state.print_runs.store, "failed_before_queueing", unreadable)
+
+    listing = client.get(f"/api/v1/models/{model}/outputs")
+    single = client.get(f"/api/v1/outputs/{output_id}")
+
+    assert listing.status_code == 200, listing.text
+    assert output_id in {output["id"] for output in listing.json()}
+    assert all(output["failed_before_queueing"] is False for output in listing.json())
+    assert single.status_code == 200, single.text
+    assert single.json()["failed_before_queueing"] is False
+
+
 @respx.mock
 def test_a_failed_slice_is_the_runs_failure_in_bambuddys_words(
     client: TestClient, model: str
