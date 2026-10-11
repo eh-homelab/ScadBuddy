@@ -77,6 +77,10 @@ import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
 
+/** A 1×1 PNG, for the image routes whose pixels no test looks at. */
+const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   printer_id: null,
@@ -2760,6 +2764,23 @@ export const handlers = [
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
       headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #1289 — the per-colour breakdown: a placeholder image, with the legend in the
+  // route's headers as the backend sends it (a near-square grid, render/thumbnail.py).
+  http.get(`${base}/jobs/:id/colours.png`, ({ params }) => {
+    const job = state.jobs.get(String(params['id']))
+    if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    const colours = (job.colors ?? []).map((colour) => colour.toUpperCase())
+    if (colours.length === 0) return problem(404, 'The preview has no geometry')
+    if (colours.length > 16) return problem(422, `${colours.length} colours is more than a breakdown draws (16)`)
+    return HttpResponse.arrayBuffer(bytesOf(PLACEHOLDER_PNG).buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'X-ScadBuddy-Colours': colours.join(','),
+        'X-ScadBuddy-Colour-Columns': String(Math.ceil(Math.sqrt(colours.length))),
+      },
     })
   }),
 

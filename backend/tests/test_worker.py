@@ -290,6 +290,34 @@ async def test_the_second_signal_stops_now() -> None:
     assert stop_now.is_set()
 
 
+def test_the_projects_queue_is_a_choice() -> None:
+    assert worker_module.parse_queue(["--queue", "projects"]) == "projects"
+
+
+async def test_the_projects_queue_runs_the_projects_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: list[str] = []
+
+    async def run(settings: Settings, **kwargs: Any) -> None:
+        ran.append("projects")
+
+    monkeypatch.setattr(worker_module, "run_projects_worker", run)
+    await worker_module._main(cast(Settings, None), "projects")
+    assert ran == ["projects"]
+
+
+async def test_the_projects_worker_refuses_to_start_without_a_key(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        secret_key_file=None,
+    )
+    with pytest.raises(worker_module.ProjectsKeyMissingError, match="SCADBUDDY_SECRET_KEY_FILE"):
+        await worker_module.run_projects_worker(settings, health_port=None)
+
+
 @pytest.mark.parametrize("queue", ["render", "bambuddy"])
 async def test_both_workers_are_handed_the_second_signal(
     queue: worker_module.Queue, monkeypatch: pytest.MonkeyPatch
@@ -1008,13 +1036,14 @@ def test_a_symlinked_directory_counts_its_own_blocks_not_its_targets(tmp_path: P
 
 
 def test_a_refused_store_closes_the_projection_the_worker_opened(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
+    settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened: list[JobProjection] = []
 
     class Recording(JobProjection):
-        def open(self) -> None:
-            super().open()
+        def open(self, *, migrate_schema: bool = True) -> None:
+            assert not migrate_schema  # the worker never migrates (#601)
+            super().open(migrate_schema=migrate_schema)
             opened.append(self)
 
     def refuse(**_: object) -> NoReturn:
@@ -1027,13 +1056,41 @@ def test_a_refused_store_closes_the_projection_the_worker_opened(
     assert len(opened) == 1 and opened[0].pool.closed
 
 
+async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#601: on an unmigrated schema the worker waits for the API rather than
+    migrating; a stop ends the wait, and what it opened is closed."""
+    opened: list[JobProjection] = []
+
+    class Recording(JobProjection):
+        def open(self, *, migrate_schema: bool = True) -> None:
+            super().open(migrate_schema=migrate_schema)
+            opened.append(self)
+
+    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    stop = asyncio.Event()
+    worker = asyncio.create_task(worker_module.run_worker(settings, stop=stop, health_port=None))
+    for _ in range(600):
+        if opened:
+            break
+        await asyncio.sleep(0.05)
+    assert not worker.done()
+    stop.set()
+    await asyncio.wait_for(worker, timeout=30)
+    assert len(opened) == 1 and opened[0].pool.closed
+    with psycopg.connect(settings.database_url) as conn:
+        ledger = conn.execute("SELECT to_regclass('scadbuddy_migrations')").fetchone()
+    assert ledger == (None,)
+
+
 async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#674 gate: the seed copies trees, so it runs in a thread, as the API's does."""
     loops: list[asyncio.AbstractEventLoop | None] = []
 
-    def build(_settings: Settings) -> NoReturn:
+    def build(_settings: Settings, **_: object) -> NoReturn:
         try:
             loops.append(asyncio.get_running_loop())
         except RuntimeError:
@@ -1047,7 +1104,7 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
 
 
 async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
-    settings: Settings, tmp_path: Path
+    settings: Settings, pg_pool: PgPool, tmp_path: Path
 ) -> None:
     """Final review I1: as the API's boot does, so a BOSL2 render needs no network."""
     commit = "f47030c41d88d0676bca73be1c6b7ba58564f9dd"

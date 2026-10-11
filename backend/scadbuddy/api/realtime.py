@@ -67,6 +67,7 @@ from scadbuddy.core.events import (
     AnalyzerDecisionEvent,
     BusResync,
     Event,
+    FlowRunEvent,
     FontInstalled,
     JobEvent,
     JobProgress,
@@ -149,6 +150,8 @@ def topics_of(event: Event) -> list[str]:
             return ["outputs", f"model:{event.slug}"]
         case PrintEvent() | PrintRunEvent():
             return [f"print:{event.output_id}"]
+        case FlowRunEvent():
+            return ["workflow-runs", f"workflow-run:{event.run_id}"]
         case LibraryChanged():
             return ["libraries", f"model:{event.slug}"]
         case LibraryRemoved():
