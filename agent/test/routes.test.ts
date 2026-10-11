@@ -65,6 +65,7 @@ describe('route groups', () => {
     const served = new Set(app.routes.filter((r) => r.method !== 'ALL').map((r) => `${r.method} ${r.path}`))
     for (const endpoint of [
       'GET /api/v1/ai/status',
+      'GET /api/v1/ai/templates/blank',
       'GET /api/v1/ai/chat',
       'GET /api/v1/ai/sessions',
       'POST /api/v1/ai/sessions',
