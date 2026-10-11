@@ -121,9 +121,7 @@ A part's mesh file is written with no `basematerials` and no colour of its own (
 object, one mesh): OpenSCAD keeps the innermost colour (§2 measured an imported 3MF's
 `basematerials` reaching the output), so a mesh that carried one would ignore the outer
 `color()` and `set_colour`. With the colour only in `color()`, `render/solids.py`'s
-per-colour re-render (which shadows `color`) still yields one closed solid per colour, so
-`render/solids.py`'s per-colour re-render (which shadows `color`) still yields one
-closed solid per colour. Ops apply to the object's union of parts, each part keeping
+per-colour re-render (which shadows `color`) still yields one closed solid per colour. Ops apply to the object's union of parts, each part keeping
 its `color()`.
 
 ## 4. Opening a mesh (`model_from_mesh`)
@@ -165,8 +163,7 @@ editing it as source"). The hash is of the text the compiler last wrote, recorde
 `scene.json` with every write, never a fresh `compile_scene` of the stored scene: a
 later release whose compiler emits different text must not read every existing mesh
 model as hand-edited. Each edit recompiles with the current compiler and records the
-new hash;
-each edit validates against the scene (ids exist, numbers in range).
+new hash; and each edit validates against the scene (ids exist, numbers in range).
 
 Edits (what callers send; they expand into ops):
 
