@@ -1714,6 +1714,16 @@ def test_a_peg_takes_the_colour_of_the_part_it_stands_on() -> None:
     assert isinstance(peg, Joint) and peg.role == "peg" and peg.colour == "#3A7D2C"
 
 
+def test_an_op_index_past_the_end_is_refused() -> None:
+    for edit in (
+        {"edit": "expose", "object": "o1", "op": 3, "field": "point.2", "name": "h"},
+        {"edit": "unexpose", "object": "o1", "op": 3, "field": "point.2"},
+        {"edit": "remove_op", "object": "o1", "op": 3},
+    ):
+        with pytest.raises(SceneEditError, match="has no op 3"):
+            apply_edits(garden(1), edits(edit), mesh_of)
+
+
 def test_expose_on_the_transform() -> None:
     result = apply_edits(
         garden(1), edits({"edit": "expose", "object": "o1", "op": None, "field": "scale.2", "name": "height_scale"}), mesh_of
@@ -1922,9 +1932,13 @@ def _replace(scene: Scene, index: int, *objects: SceneObject) -> Scene:
     return scene.model_copy(update={"objects": [*scene.objects[:index], *objects, *scene.objects[index + 1 :]]})
 
 
-def _section_area(mesh: trimesh.Trimesh, point: np.ndarray, normal: np.ndarray) -> float:
+def _section_area(obj: SceneObject, mesh: trimesh.Trimesh, point: np.ndarray, normal: np.ndarray) -> float:
+    """A part's section at the plane, counted only where the object's earlier cuts keep
+    it: a part cut away above the plane is no part a peg can stand on."""
     found = measure(mesh, point, normal)
-    return 0.0 if found is None else found.area
+    if found is None or not len(kept(found.centroid[None, :], _cuts(obj))):
+        return 0.0
+    return found.area
 
 
 def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
@@ -1958,7 +1972,7 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
         axis = tuple(-x for x in n) if spec.peg_on == "above" else n
         at = (float(section.centroid[0]), float(section.centroid[1]), float(section.centroid[2]))
         # The peg prints with the part the cut goes through most (on the carrot, the green neck).
-        widest = max(obj.parts, key=lambda part: _section_area(mesh_of(part.mesh), point, normal))
+        widest = max(obj.parts, key=lambda part: _section_area(obj, mesh_of(part.mesh), point, normal))
         joint = {"at": at, "axis": axis, "diameter": diameter, "depth": spec.depth, "clearance": spec.clearance, "key": spec.key, "colour": widest.colour}
         peg, socket = Joint(role="peg", **joint), Joint(role="socket", **joint)
         if spec.peg_on == "above":

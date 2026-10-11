@@ -185,7 +185,9 @@ change a jointed half's scale: the other half's cut and the joint's root are num
 their own, so one side would move without the other, and a joint's size would skip the
 fit check. Scale before splitting. `lay_flat`'s drop to the bed counts what ops add (a
 peg, an `add`), and `largest_flat` never picks a cut face carrying a peg, which would
-put the peg into the bed.
+put the peg into the bed. The peg's fit is checked once, when the split is made: a later
+edit to an earlier op that changes the section there (an `add` across the plane, a
+parameter on an earlier cut) is not checked again, and the render is the check.
 
 Exposed parameters and presets: an exposed name belongs to the op, not to the object's
 id or name, so `rename` and `transform` never change it. An edit that removes one
