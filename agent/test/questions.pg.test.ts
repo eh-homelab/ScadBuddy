@@ -460,7 +460,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     let failures = 1
     const audit = {
       hash: real.hash.bind(real),
-      record: (entry: Parameters<AuditLog['record']>[0]) => (failures-- > 0 ? Promise.reject(new Error('audit down')) : real.record(entry)),
+      // Only the first cancellation's write fails: another audit write may come first.
+      record: (entry: Parameters<AuditLog['record']>[0]) =>
+        entry.kind === 'question' && entry.action === 'cancelled' && failures-- > 0 ? Promise.reject(new Error('audit down')) : real.record(entry),
     }
     const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
