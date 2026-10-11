@@ -8,6 +8,7 @@ import math
 import re
 import shutil
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -207,6 +208,8 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         names: dict[str, str] = {}
         # Each painted copy is a part of its own: its faces are its painting's (#1965).
         painted: list[ColourPart] = []
+        # Each copy's negative part, cut out of the plate's object by the slicer.
+        negatives: list[ColourPart] = []
         for placed in plate.items:
             if placed.piece_key not in parts:
                 raise _unknown_piece(placed.piece_key)
@@ -220,6 +223,10 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
             for part in layouts[placed.piece_key].plates[0].parts:
                 mesh = part.mesh.copy()
                 mesh.apply_transform(matrix)
+                if part.negative:
+                    # Named no filament: it prints nothing.
+                    negatives.append(replace(part, mesh=mesh))
+                    continue
                 colour = part.colour.upper()
                 for used in [colour, *(part.paint.used() if part.paint is not None else [])]:
                     if used.upper() not in colours:
@@ -233,16 +240,31 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                 names.setdefault(colour, part.name)
         ordered = sorted(by_colour, key=colours.index)
         joined = [ColourPart(colours.index(c), names[c], c, _joined(by_colour[c])) for c in ordered]
-        plates.append(
-            PlateParts(
-                (*joined, *painted),
-                tuple(colours.index(part.colour) + 1 for part in (*joined, *painted)),
+        printed = (*joined, *painted)
+        extruders = tuple(colours.index(part.colour) + 1 for part in printed)
+        # A negative part takes the plate's first extruder: the slicer needs one, and it
+        # prints nothing with it.
+        cut = (
+            tuple(
+                replace(part, material_index=extruders[0] - 1, colour=colours[extruders[0] - 1])
+                for part in negatives
             )
+            if printed
+            else ()
         )
+        plates.append(PlateParts((*printed, *cut), (*extruders, *(extruders[0] for _ in cut))))
     if not plates:
         raise _refuse("the layout has no plates")
     everything = [part for plate in plates for part in plate.parts]
-    layout = PlateLayout(plates, colours, [], bounding_box(everything), [])
+    # What the result reports (its parts, colours, plates) is what prints.
+    shown = [
+        PlateParts(
+            tuple(p for p in plate.parts if not p.negative),
+            tuple(e for p, e in zip(plate.parts, plate.extruders, strict=True) if not p.negative),
+        )
+        for plate in plates
+    ]
+    layout = PlateLayout(shown, colours, [], bounding_box(everything), [])
     thumbnails, warnings = await plates_thumbnails(
         [plate.parts for plate in plates], config=deps.config, executor=deps.thumbnail_executor
     )

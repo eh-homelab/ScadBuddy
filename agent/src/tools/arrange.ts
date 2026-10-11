@@ -77,12 +77,17 @@ export const arrangeTools: Tool[] = [
         .optional()
         .describe("The template the result is filed under: one of the outputs'; required with library files alone"),
       // The ceilings are backend/scadbuddy/core/config.py's READ_MAX_*_CEILING: the
-      // generated schema carries no bounds, so they are repeated here.
+      // generated schema carries no bounds, so they are repeated here. Triangles have
+      // none, and 0 is no limit.
       read_budget: z
         .object({
           max_objects: z.number().int().min(1).max(2000),
           max_visits: z.number().int().min(1).max(200_000),
-          max_triangles: z.number().int().min(1).max(10_000_000),
+          max_triangles: z
+            .number()
+            .int()
+            .min(0)
+            .describe('Only lowers the Settings limit; 0 (no limit) applies only where Settings has none'),
           max_paint_digits: z.number().int().min(1).max(50_000_000),
         })
         .partial()

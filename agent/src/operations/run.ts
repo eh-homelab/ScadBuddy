@@ -63,7 +63,7 @@ function temporalUnavailable(): CommandOutcome {
       status: 503,
       title: 'Service Unavailable',
       type: TEMPORAL_UNAVAILABLE_PROBLEM,
-      detail: "ScadBuddy cannot reach Temporal, where the agent's commands run. Nothing was done; try again shortly.",
+      detail: "ScadBuddy's background service is not answering. Nothing was done; try again shortly.",
     },
     retryAfter: 5,
   }
