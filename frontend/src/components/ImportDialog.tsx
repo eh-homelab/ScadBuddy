@@ -121,6 +121,9 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
             className={inputClass}
           />
         </label>
+        {/* A form of two fields with no submit button ignores Enter, and the Import
+            button sits in the dialog's footer, outside the form (#2114). */}
+        <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
       </form>
       {error && (
         <p role="alert" className="mt-3 text-[13px] text-warn">
