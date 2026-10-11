@@ -255,3 +255,78 @@ def test_a_based_sibling_write_whose_commit_fails_is_undone_and_refused(
     assert not (paths.model_dir(SLUG) / "new.scad").exists()
     monkeypatch.undo()
     assert client.get(f"/api/v1/models/{SLUG}").json()["version"] == based
+
+
+# ── #1067: any file at a revision, and a README written against a base ───────
+
+
+def test_any_text_file_is_read_as_it_was_at_a_revision(client: TestClient) -> None:
+    upload(client)
+    first = put(client, "parts.scad", PARTS).json()["version"]
+    put(client, "parts.scad", "module bar(w) {}\n")
+    route = f"/api/v1/models/{SLUG}/versions/{first}/files"
+
+    then = client.get(f"{route}/parts.scad")
+
+    assert then.status_code == 200, then.text
+    assert then.text == PARTS
+    assert "immutable" in then.headers["cache-control"]
+    assert client.get(f"/api/v1/models/{SLUG}/versions/{first[:7]}/files/model.scad").text == MAIN
+    assert client.get(f"{route}/nope.scad").status_code == 404
+    assert client.get(f"{route}/.git/config").status_code == 422
+    assert (
+        client.get(f"/api/v1/models/{SLUG}/versions/{'f' * 40}/files/parts.scad").status_code == 404
+    )
+
+
+def test_a_binary_file_at_a_revision_is_a_415(client: TestClient, paths: DataPaths) -> None:
+    upload(client)
+    (paths.model_dir(SLUG) / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")
+    version = put(client, "parts.scad", PARTS).json()["version"]
+
+    response = client.get(f"/api/v1/models/{SLUG}/versions/{version}/files/logo.png")
+    assert response.status_code == 415, response.text
+
+
+def put_readme(client: TestClient, content: str, **extra: Any) -> Any:
+    return client.put(
+        f"/api/v1/models/{SLUG}/readme", json={"content": content, **extra}, headers=press()
+    )
+
+
+def test_a_readme_written_against_a_stale_base_is_a_conflict_and_writes_nothing(
+    client: TestClient, paths: DataPaths
+) -> None:
+    base = upload(client)["version"]
+    moved = put_readme(client, "# One\n").json()["version"]
+
+    stale = put_readme(client, "# Two\n", base=base)
+
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["current"] == moved
+    assert (paths.model_dir(SLUG) / "README.md").read_text() == "# One\n"
+
+    fresh = put_readme(client, "# Two\n", base=moved[:7], message="Retitle the README")
+    assert fresh.status_code == 200, fresh.text
+    assert (paths.model_dir(SLUG) / "README.md").read_text() == "# Two\n"
+    latest = client.get(f"/api/v1/models/{SLUG}/versions").json()[0]
+    assert latest["commit"] == fresh.json()["version"]
+    assert latest["message"] == "Retitle the README"
+
+
+def test_a_based_readme_whose_commit_fails_is_undone_and_refused(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    based = upload(client)["version"]
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    history = state.catalogue.history
+    assert history is not None
+
+    def fail(*_args: object) -> str | None:
+        raise GitError("commit failed", "fatal: unable to write")
+
+    monkeypatch.setattr(history, "_commit_locked", fail)
+    refused = put_readme(client, "# New\n", base=based)
+
+    assert refused.status_code == 500, refused.text
+    assert not (paths.model_dir(SLUG) / "README.md").exists()

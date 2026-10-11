@@ -122,13 +122,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'get_source_file and sees the image path in it.',
   },
   {
-    operation: 'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
-    reason:
-      "Serves the file a go-to-definition lands in to the source editor's read-only view (#185). The " +
-      'editor asks for the path openscad-lsp named; an agent has no definition to follow and reads a ' +
-      "model's own files through get_source and get_source_file.",
-  },
-  {
     operation: 'GET /api/v1/analyzers',
     reason: ANALYZERS_LATER,
   },
