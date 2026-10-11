@@ -28,8 +28,8 @@ today), mesh repair beyond what reading already refuses, sculpting or vertex edi
   (`color("red") cube(10)` and a blue sphere), then `difference(){ import("src.3mf");
   translate([0,0,5]) cube(100); }` exported to 3MF with `Status: NoError`, 264 facets;
   the same with `import("src.stl")`. The imported file's `basematerials` colours reach
-  the output (`#FF0000`, `#0000FF` bases present). That image is one nightly older than
-  the pinned `dev.2026-10-05`; the `requires_openscad` test in §10 re-measures it on the
+  the output (`#FF0000`, `#0000FF` bases present). That image is an older nightly than
+  the pinned `dev.2026-10-05` (2026.10.05); the `requires_openscad` test in §10 re-measures it on the
   pinned image, and spec 2026-09-22 §3 gains the fact when it passes.
 - **Library 3MFs are already read faithfully.** `render/objects3mf.py` `read_objects`
   returns each object as closed meshes per colour (`ReadObject.parts`, `ColourPart`),
@@ -130,8 +130,10 @@ Sources:
   (once per sha256; the same refusals Arrange gives: sliced, past the cap, unreadable),
   so a file Arrange has listed is neither downloaded nor parsed again.
 - **Upload**: `POST /api/v1/models/from-mesh`, multipart, streamed into the claim store
-  with `ClaimStore.hold_file` as media uploads are; `.3mf`, `.stl`, `.obj`; at most
-  `MAX_DOWNLOAD_BYTES`. STL and OBJ become one object of one part in the default colour.
+  with `ClaimStore.hold_file` as media uploads are; `.3mf` and `.stl` only (the formats
+  `read_objects` and `bambu3mf.stl_3mf` read); at most `MAX_DOWNLOAD_BYTES`. An STL
+  becomes one object of one part in the default colour. OBJ is out of phase 1: nothing
+  reads it today, and its groups and `.mtl` materials need rules of their own (#959).
 - **Output** (`output_id`): the output's own 3MF on the volume.
 
 Run: read the objects (`read_objects` under a `ReadBudget`), write each part as
@@ -160,13 +162,21 @@ Edits (what callers send; they expand into ops):
 | edit | effect |
 |---|---|
 | `transform {object, translate?, rotate?, scale?}` | sets the object's transform |
-| `split_at_plane {object, point, normal, joint?}` | the plane is in world coordinates; it is mapped into the object's own frame through the inverse transform. The object becomes two (`<id>` keeps `cut keep:below`, a new one `cut keep:above`), both keeping the parent's ops. With `joint {diameter?, depth, clearance, key, peg_on: above\|below}`: the section at the plane is measured with trimesh at edit time; the peg sits at the section's centroid and the diameter defaults to 60 % of the largest inscribed circle; refused when the circle is smaller than `diameter + 2*clearance + 0.8 mm` (two 0.4 mm walls). The measured position and size are stored in the ops, so compiling stays pure |
-| `lay_flat {object, face}` | the face (an index into the transformed mesh, as the viewer reports it, or `"largest_flat"`) is turned to face −Z; the rotation is written into the transform and the object dropped to Z=0 |
+| `split_at_plane {object, point, normal, joint?}` | the plane is in world coordinates. With `M` the transform's linear part (object frame to world) and `t` its translation, the point maps as `M⁻¹(p − t)` and the normal as `Mᵀn`, renormalised (a plane's normal transforms by the inverse-transpose, which matters once the scale is non-uniform). The object becomes two (`<id>` keeps `cut keep:below`, a new one `cut keep:above`), both keeping the parent's ops. With `joint {diameter?, depth, clearance, key, peg_on: above\|below}`: the section at the plane is measured with trimesh at edit time; the peg sits at the section's centroid and the diameter defaults to 60 % of the largest inscribed circle; refused when the circle is smaller than `diameter + 2*clearance + 0.8 mm` (two 0.4 mm walls). The measured position and size are stored in the ops, so compiling stays pure |
+| `lay_flat {object, normal \| "largest_flat"}` | `normal` is a world-space direction (the viewer sends the normal of the face clicked on the preview; no face index, since the preview is the rendered mesh after ops and its triangles change with each render). The object is rotated so that direction points to −Z, the rotation written into the transform and the object dropped to Z=0. `"largest_flat"` picks the largest coplanar facet of the object's part meshes after its ops' cuts (trimesh `facets`), which is what a cut face usually is |
 | `add`, `subtract {object, primitive, size, transform}` | appends the op |
 | `custom {object, scad}` | appends the op |
 | `set_colour {object, part, colour}` | a part's colour |
 | `delete`, `duplicate`, `rename {object, …}` | as named |
-| `expose {object, op, field, name}` | makes an op field a customizer parameter |
+| `expose {object, op, field, name}` | makes an op field a customizer parameter; `unexpose` reverses it |
+
+Exposed parameters and presets: an exposed name belongs to the op, not to the object's
+id or name, so `rename` and `transform` never change it. An edit that removes one
+(`unexpose`, deleting its op or object) is refused while a saved preset (`saved_presets`)
+or a `model.json` preset names it, since a render naming an unknown parameter fails
+(`render/runner.py` `UnknownParameterError`), unless the edit carries
+`drop_from_presets: true`, which removes that key from those presets in the same
+operation. Outputs keep the parameters they were rendered with, at their own revision.
 
 Measuring (sections, inscribed circles, faces) runs in `asyncio.to_thread` under a
 `ReadBudget`, with the kind's `run_timeout` sized for the cap.
@@ -248,7 +258,8 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
 ## 10. Testing
 
 - Unit: `compile_scene` golden files per op; every edit, including world-to-object plane
-  mapping under rotate and scale; peg sizing and its refusal; `expose` naming; the
+  mapping under rotation and non-uniform scale (the normal by `Mᵀ`); `lay_flat` by
+  normal and `largest_flat` after a cut; the preset refusal and `drop_from_presets`; peg sizing and its refusal; `expose` naming; the
   hand-edit 409.
 - Paint transfer: on a synthetic painted mesh, an op-free object keeps 100 % of its
   codes verbatim; a cut object keeps every uncut face's code verbatim and gives cut faces
