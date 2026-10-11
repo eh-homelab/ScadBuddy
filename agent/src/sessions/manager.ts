@@ -84,7 +84,7 @@ import {
 import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { forkHistory, transcriptCut } from './forkPoint.js'
+import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
@@ -2354,22 +2354,10 @@ export class SessionManager {
       // A fork copies the SDK transcript, which only a classic session has.
       mode: 'classic',
     }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
-    if (options.audit) {
-      await this.deps.audit?.record({
-        kind: 'resource',
-        action: 'session_fork',
-        surface: options.audit.surface,
-        actor: principal,
-        clientIp: options.audit.clientIp,
-        sessionId: childId,
-        outcome: 'ok',
-        detail: `forked from ${id}${options.upTo === undefined ? '' : ` up to ${options.upTo}`}`,
-        startedAt,
-        finishedAt: new Date(),
-      })
-    }
-    // The images those results name (#782), before the events that name them.
-    await this.blobs.copy(id, childId)
+    // The images the copied events name (#782, #2150), before the events that name them: the
+    // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
+    // copy every image of every ancestor.
+    await this.blobs.copy(id, childId, blobNames(history))
     // Its workspace files (#2329), so the fork carries on with what the parent had.
     await this.files.copy(id, childId)
     await this.events.append(childId, [
@@ -2386,6 +2374,22 @@ export class SessionManager {
       ...history.map((e) => ({ ...e, sessionId: childId })),
       event({ type: 'session.status', sessionId: childId, status: 'idle' }),
     ])
+    // Recorded once the child is complete (#2159): a fork that failed after the insert has only
+    // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
+    if (options.audit) {
+      await this.deps.audit?.record({
+        kind: 'resource',
+        action: 'session_fork',
+        surface: options.audit.surface,
+        actor: principal,
+        clientIp: options.audit.clientIp,
+        sessionId: childId,
+        outcome: 'ok',
+        detail: `forked from ${id}${options.upTo === undefined ? '' : ` up to ${options.upTo}`}`,
+        startedAt,
+        finishedAt: new Date(),
+      })
+    }
     return child
   }
 

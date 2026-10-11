@@ -441,7 +441,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(body.value.title === undefined ? {} : { title: body.value.title }),
         ...(body.value.done ? { done: true as const } : {}),
         ...(body.value.archived === undefined ? {} : { archived: body.value.archived }),
-      })
+      }, { surface: 'http', clientIp: deps.remoteAddress(c) })
       return c.json({ session: sessionView(session, BROWSER_USER) })
     }),
   )
