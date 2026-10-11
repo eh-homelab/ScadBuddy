@@ -44,6 +44,7 @@ from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
 from scadbuddy_durable.gate.names import (
     CANCEL_INPUT_UPDATE,
+    END_SIGNAL,
     INTERRUPT_SIGNAL,
     PENDING_INPUT_QUERY,
     RESPOND_UPDATE,
@@ -406,6 +407,29 @@ async def test_interrupt_ends_the_turn_even_while_the_worker_is_down(
     assert harness.stand_in.ran == []
 
 
+async def test_end_completes_an_idle_session(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#1056: a session marked done ends its workflow."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hi")
+    await settled(connect, sid)
+    await handle.signal(END_SIGNAL, {})
+    await asyncio.wait_for(handle.result(), 30)
+
+
+async def test_end_during_a_turn_completes_the_session_after_it(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    await _parked(handle)
+    await handle.signal(END_SIGNAL, {})
+    await handle.execute_update(CANCEL_INPUT_UPDATE, {"reason": "done"})
+    assert await settled(connect, sid) == "idle"
+    await asyncio.wait_for(handle.result(), 30)
+
+
 async def test_the_handler_set_is_the_gates_and_the_plugins(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
@@ -418,13 +442,14 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     signals = {s.name for s in definition.signal_definitions}
     queries = {q.name for q in definition.query_definitions}
     assert {"send_message", "respond", "cancel_input"} <= updates
-    assert "interrupt" in signals
+    assert {"interrupt", "end"} <= signals
     assert {"pending_input", "segment_context", "turn"} <= queries
     ours = {
         "send_message",
         "respond",
         "cancel_input",
         "interrupt",
+        "end",
         "pending_input",
         "segment_context",
         "turn",

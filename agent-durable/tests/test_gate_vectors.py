@@ -79,6 +79,7 @@ def test_the_file_carries_this_ports_bounds_and_names() -> None:
         "respond": names.RESPOND_UPDATE,
         "cancel_input": names.CANCEL_INPUT_UPDATE,
         "interrupt": names.INTERRUPT_SIGNAL,
+        "end": names.END_SIGNAL,
         "refused_type": names.GATE_REFUSED,
     }
 

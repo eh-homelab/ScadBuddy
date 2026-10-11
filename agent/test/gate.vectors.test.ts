@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { durableRequestId, parseRequestId } from '../src/gate/ids.js'
-import { CANCEL_INPUT_UPDATE, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
+import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { roleOf } from '../src/gate/role.js'
 import { type GateEntry, RESPONSE_MAX, RespondRefusal, type Role, validateRespond } from '../src/gate/validate.js'
 import { ANSWER_MAX } from '../src/harness/questions.js'
@@ -69,6 +69,7 @@ describe('the pending-input vectors', () => {
       respond: RESPOND_UPDATE,
       cancel_input: CANCEL_INPUT_UPDATE,
       interrupt: INTERRUPT_SIGNAL,
+      end: END_SIGNAL,
       refused_type: GATE_REFUSED,
     })
     expect(doc.vectors.length).toBeGreaterThan(20)
