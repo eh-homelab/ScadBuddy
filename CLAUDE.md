@@ -120,6 +120,10 @@ runs live only against a real backend (`SCADBUDDY_EVAL_BACKEND_URL`, the image; 
 skips without one), and its render is checked `verify.sh`-style on the saved output's
 3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
 #1924).
+Every scenario runs in both session modes (#2320): `test/evals.durable.e2e.test.ts` replays
+them through a real durable session (`evals/durable.ts`: the Python worker, Temporal, the
+agent-tools worker; skips without uv, Temporal or Postgres), and `pnpm evals` takes
+`SCADBUDDY_EVAL_MODE=classic|durable|both` (default both).
 
 Durable sessions (`agent-durable/`, Python 3.12, uv; the `agent-durable` CI job, #1056):
 
