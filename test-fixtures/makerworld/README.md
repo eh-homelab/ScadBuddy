@@ -18,7 +18,9 @@ kept here unchanged only to test that ScadBuddy reads real files correctly. Most
 under MakerWorld's Standard Digital File License or MakerWorld Exclusive License
 (https://makerworld.com/en/makerworld-licenses), which do not grant redistribution;
 the maintainer chose to include them. A designer who wants a file removed: open an
-issue and it will be.
+issue. Deleting it from the tree only stops new checkouts from using it: the LFS object
+stays in history and in GitHub's LFS store until history is rewritten and GitHub
+support purges the object, and a removal will do both.
 
 | File | Title | Designer | Licence | Size | Covers |
 |---|---|---|---|---|---|
@@ -30,7 +32,7 @@ issue and it will be.
 | `2069-fidget-cubes-mc-edition.3mf` | Fidget Cubes MC Edition | PiNK_3DP | Standard Digital File License | 1.3 MB | painted and 47 coloured parts in one object |
 | `688-carrot-garden.3mf` | Carrot Garden | 3DPmom | Standard Digital File License | 1.8 MB | painted, four objects: Carrot Garden, the leaf-to-body joint scenario of #2146 |
 | `448-articulated-pumpkin.3mf` | Articulated Pumpkin | Fil&Form3D | Standard Digital File License | 10.3 MB | two colours by part, 758k triangles: the Articulated Pumpkin 300% stem scenario of #2146 |
-| `1943-mini-articulated-ankylosaurs-keychain-version.3mf` | Mini Articulated Ankylosaurs | Keychain Version | Flexi JIMGA | Standard Digital File License | 6.6 MB | negative parts and paint: the file Arrange refused (negative part) |
+| `1943-mini-articulated-ankylosaurs-keychain-version.3mf` | Mini Articulated Ankylosaurs \| Keychain Version | Flexi JIMGA | Standard Digital File License | 6.6 MB | negative parts and paint: the file Arrange refused (negative part) |
 | `2154-plane-launcher-for-lightweight-glider.3mf` | Plane Launcher for Lightweight Glider | Tieq | Standard Digital File License | 1.0 MB | a negative part, no paint |
 | `2302-love-letter-box.3mf` | Love letter box | ondisek00 | Standard Digital File License | 1.8 MB | a modifier part, seven objects on three plates |
 | `2485-5g-lizard-5g.3mf` | 5g蜥蜴 lizard-关节可动蜥蜴-仅5g | 魔趣MOQU | Standard Digital File License | 2.7 MB | a support blocker and paint |
