@@ -754,13 +754,14 @@ async def test_a_stop_stops_the_run_while_the_database_is_down(
         await _parked(handle)
         await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
 
-        async def stopped() -> None:
+        async def stopped() -> bool:
             async for event in follow_agent(harness.client, handle.id):
                 if event["type"] == "cancelled":
-                    return
+                    return True
+            return False
 
         # The run stops while the cancel cannot be written; the turn's end then retries it.
-        await asyncio.wait_for(stopped(), 20)
+        assert await asyncio.wait_for(stopped(), 20)
         await asyncio.wait_for(outage.tried.wait(), 30)
         outage.release.set()
         assert await settled(connect, sid, timeout=120) == "idle"
