@@ -223,7 +223,7 @@ class _Archive:
                 past = (
                     f"stores more than {3 * (limit or 0):,} vertices, three for every"
                     " triangle allowed"
-                    if "vertices" in str(error)
+                    if error.kind == "vertices"
                     else f"stores more than {limit or 0:,} triangles"
                 )
                 raise OverBudgetError(self.budget.refusal("max_triangles", past)) from None

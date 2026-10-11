@@ -923,7 +923,12 @@ class ArchiveTooLargeError(ValueError):
 
 class TooManyTrianglesError(ValueError):
     """A model file holds more triangles, or more vertices than they could name, than
-    the parse was allowed (:func:`parse_model`'s ``max_triangles``)."""
+    the parse was allowed (:func:`parse_model`'s ``max_triangles``); ``kind`` says
+    which."""
+
+    def __init__(self, message: str, kind: Literal["triangles", "vertices"]) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 #: The chunk every untrusted entry is inflated in.
@@ -1032,7 +1037,8 @@ class _MeshTarget:
             if self._max_vertices is not None and self._vertices > self._max_vertices:
                 raise TooManyTrianglesError(
                     f"stores more than {self._max_vertices:,} vertices, three for every"
-                    " triangle allowed"
+                    " triangle allowed",
+                    "vertices",
                 )
             self._points.extend(
                 (float(attrs.get("x", 0)), float(attrs.get("y", 0)), float(attrs.get("z", 0)))
@@ -1041,7 +1047,9 @@ class _MeshTarget:
             self._skipping = 1
             self._triangles += 1
             if self._max_triangles is not None and self._triangles > self._max_triangles:
-                raise TooManyTrianglesError(f"stores more than {self._max_triangles:,} triangles")
+                raise TooManyTrianglesError(
+                    f"stores more than {self._max_triangles:,} triangles", "triangles"
+                )
             self._faces.extend(
                 (int(attrs.get("v1", 0)), int(attrs.get("v2", 0)), int(attrs.get("v3", 0)))
             )
