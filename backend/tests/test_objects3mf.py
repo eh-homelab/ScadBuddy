@@ -18,9 +18,12 @@ from scadbuddy.render.bambu3mf import (
     write_plates_3mf,
 )
 from scadbuddy.render.geometry import NoSuchPlateError
+from scadbuddy.render.glb import bounding_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PlateLayout
 from scadbuddy.render.objects3mf import (
+    OverBudgetError,
     UnreadableObjectsError,
+    check_stl,
     read_objects,
     read_plate_parts,
     write_piece,
@@ -151,7 +154,7 @@ def test_a_component_transform_applies() -> None:
     assert tuple(np.round(obj.parts[0].mesh.extents, 3)) == (40, 20, 10)
 
 
-def test_a_modifier_is_dropped_and_a_negative_part_refused() -> None:
+def test_a_modifier_is_dropped() -> None:
     payload = bambu_project(
         items=[at(0, 0)],
         parts={
@@ -162,12 +165,43 @@ def test_a_modifier_is_dropped_and_a_negative_part_refused() -> None:
     [obj] = read_objects(payload)
     assert [p.colour for p in obj.parts] == ["#FF0000"]
     assert obj.notes and "modifier" in obj.notes[0]
-    negative = bambu_project(
+
+
+def _cut_project() -> bytes:
+    """A 20x10x5 body with a 5 mm cube cut out of it, and the cube sticking out above."""
+    cutter = _box(5, 5, 8)
+    cutter.apply_translation((2, 2, 0))
+    return bambu_project(
         items=[at(0, 0)],
-        parts={1: (_box(20, 10, 5), "normal_part", None), 2: (_box(5, 5, 5), "negative_part", 1)},
+        parts={1: (_box(20, 10, 5), "normal_part", None), 2: (cutter, "negative_part", 2)},
     )
-    with pytest.raises(UnreadableObjectsError, match="negative"):
-        read_objects(negative)
+
+
+def test_a_negative_part_is_carried_with_its_object_for_the_slicer() -> None:
+    [obj] = read_objects(_cut_project())
+    body, cut = obj.parts
+    assert not body.negative and cut.negative
+    assert tuple(np.round(cut.mesh.extents, 3)) == (5, 5, 8)
+    # It prints nothing: the box is the body's, and it names no filament of its own.
+    assert tuple(round(v, 3) for v in bounding_box(obj.parts).size) == (20, 10, 5)
+    assert cut.colour == body.colour
+
+
+def test_a_plate_read_leaves_a_negative_part_out() -> None:
+    read = read_plate_parts(_cut_project(), 1)
+    assert [p.negative for p in read.parts] == [False]
+    assert tuple(np.round(read.parts[0].mesh.extents, 3)) == (20, 10, 5)
+
+
+def test_a_piece_keeps_its_negative_part(tmp_path: Path) -> None:
+    [obj] = read_objects(_cut_project())
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    box = write_piece(piece, obj)
+    assert tuple(round(v, 3) for v in box.size) == (20, 10, 5)
+    parts = PlateLayout.load(piece / LAYOUT_NAME).plates[0].parts
+    assert [p.negative for p in parts] == [False, True]
+    assert len(parts[1].mesh.faces) == len(obj.parts[1].mesh.faces)
 
 
 def test_a_painted_object_is_one_part_carrying_its_painting() -> None:
@@ -589,3 +623,93 @@ def test_triangles_past_the_budget_are_refused() -> None:
     assert read_objects(_fan_out(1, 8), budget=budget)
     with pytest.raises(UnreadableObjectsError, match="more than 8 triangles"):
         read_objects(_fan_out(1, 9), budget=budget)
+
+
+def test_an_archive_of_any_size_is_read_by_what_its_models_hold() -> None:
+    # A real Bambu project carries thumbnails and attachments beside its models; their
+    # size says nothing of what reading its objects costs, so it refuses nothing.
+    payload = bambu_project(items=[at(0, 0)], parts={1: (_box(20, 10, 5), "normal_part", 1)})
+    buffer = io.BytesIO(payload)
+    with (
+        zipfile.ZipFile(buffer, "a", zipfile.ZIP_DEFLATED) as archive,
+        archive.open("Auxiliaries/huge.bin", "w", force_zip64=True) as entry,
+    ):
+        chunk = bytes(1024 * 1024)
+        for _ in range(300):  # past the 256 MB the whole archive was once capped at
+            entry.write(chunk)
+    [obj] = read_objects(io.BytesIO(buffer.getvalue()))
+    assert obj.count == 1
+
+
+def test_a_model_storing_more_triangles_than_the_budget_stops_as_it_is_parsed() -> None:
+    # Part 2 is never placed, so nothing expands it; storing it is what costs memory.
+    payload = bambu_project(items=[at(0, 0)], parts={1: (_box(20, 10, 5), "normal_part", 1)})
+    two = _zip(
+        {
+            "3D/3dmodel.model": (
+                f'<model unit="millimeter" xmlns="{CORE}"><resources>'
+                f"{_mesh_xml(_box(1, 1, 1), 1)}{_mesh_xml(_box(1, 1, 1), 2)}"
+                '</resources><build><item objectid="1"/></build></model>'
+            )
+        }
+    )
+    assert read_objects(payload, budget=ReadBudget(max_triangles=12))
+    assert read_objects(two, budget=ReadBudget(max_triangles=24))
+    with pytest.raises(OverBudgetError, match=r"stores more than 23 triangles.*the file is"):
+        read_objects(two, budget=ReadBudget(max_triangles=23))
+
+
+def test_model_files_past_what_the_triangle_budget_allows_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("scadbuddy.render.read_budget.MODEL_BYTES_OVERHEAD", 4096)
+    small = ReadBudget(max_triangles=12, max_paint_digits=1)
+    padding = "<metadata name='note'>" + "x" * 8192 + "</metadata>"
+    padded = _zip(
+        {
+            "3D/3dmodel.model": (
+                f'<model unit="millimeter" xmlns="{CORE}">{padding}<resources>'
+                f'{_mesh_xml(_box(1, 1, 1), 1)}</resources><build><item objectid="1"/>'
+                "</build></model>"
+            )
+        }
+    )
+    with pytest.raises(OverBudgetError) as refused:
+        read_objects(padded, budget=small)
+    message = str(refused.value)
+    # What limits it (the budget and its setting) and how large the file is.
+    assert "inflate to 9," in message and "past the 7,169 bytes" in message
+    assert "max_triangles read budget" in message and "SCADBUDDY_READ_MAX_TRIANGLES" in message
+    assert f"(the file is {len(padded):,} bytes; its model files 9," in message
+    assert read_objects(padded, budget=ReadBudget(max_triangles=100, max_paint_digits=1))
+
+
+def test_a_text_stl_past_what_its_triangles_could_take_is_refused() -> None:
+    text = io.BytesIO(b"solid big\n" + b" " * 2000 + b"\nendsolid big\n")
+    check_stl(text, ReadBudget(max_triangles=10))  # 5,120 bytes allowed
+    with pytest.raises(OverBudgetError, match="is a text STL of 2,"):
+        check_stl(text, ReadBudget(max_triangles=3))
+    assert text.tell() == 0
+
+
+def test_vertices_are_budgeted_over_the_whole_file() -> None:
+    # Nine vertices and one triangle: within three vertices for each allowed triangle
+    # at a budget of 3, past it at 2, and said as vertices, not triangles.
+    vertices = "".join(f'<vertex x="{i}" y="0" z="{i % 2}"/>' for i in range(9))
+    payload = _one_triangle_model(vertices)
+    assert read_objects(payload, budget=ReadBudget(max_triangles=3))
+    with pytest.raises(OverBudgetError, match="stores more than 6 vertices"):
+        read_objects(payload, budget=ReadBudget(max_triangles=2))
+
+
+def _one_triangle_model(vertices: str) -> bytes:
+    return _zip(
+        {
+            "3D/3dmodel.model": (
+                f'<model unit="millimeter" xmlns="{CORE}"><resources><object id="1"'
+                f' type="model"><mesh><vertices>{vertices}</vertices><triangles>'
+                '<triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources>'
+                '<build><item objectid="1"/></build></model>'
+            )
+        }
+    )

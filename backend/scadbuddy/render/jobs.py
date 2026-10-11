@@ -210,6 +210,7 @@ class PlateLayout:
                         "colour": part.colour,
                         "file": source.file,
                         "solid": source.solid,
+                        **({"negative": True} if part.negative else {}),
                     }
                     for part, source in zip(plate.parts, sources, strict=True)
                 ],
@@ -247,7 +248,14 @@ class PlateLayout:
                 )
                 mesh, paint = split.mesh, split.paint
             return (
-                ColourPart(entry["material_index"], entry["name"], entry["colour"], mesh, paint),
+                ColourPart(
+                    entry["material_index"],
+                    entry["name"],
+                    entry["colour"],
+                    mesh,
+                    paint,
+                    negative=bool(entry.get("negative", False)),
+                ),
                 source,
             )
 
@@ -493,6 +501,8 @@ async def plates_thumbnails(
     documents: a multi-plate render (spec §6.4) is still one job to bound. All or
     none, as the 3MF writer takes them."""
     loop = asyncio.get_running_loop()
+    # Covers show what prints: a negative part is cut out.
+    plates = [[part for part in parts if not part.negative] for parts in plates]
     faces = sum(len(part.mesh.faces) for parts in plates for part in parts)
 
     def render_all() -> list[PlateThumbnails]:

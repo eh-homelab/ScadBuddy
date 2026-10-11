@@ -60,6 +60,7 @@ describe('startTracing', () => {
     ['an operation’s follow', '/api/v1/operations/op1'],
     ['an agent operation’s follow', '/api/v1/ai/operations/op1'],
     ['a render job’s fallback poll', '/api/v1/jobs/j1'],
+    ['Arrange’s backfill follow of an output', '/api/v1/outputs/o1'],
   ])('sends a poll (%s) unsampled, so the backend drops it too', async (_name, url) => {
     const seen = capture(new URL(url, location.href).pathname)
     stop = startTracing()
@@ -84,10 +85,33 @@ describe('startTracing', () => {
     expect(seen[0]).toMatch(TRACEPARENT)
   })
 
+  it('samples an output’s own files: only the output read itself is the poll', async () => {
+    const seen = capture('/api/v1/outputs/o1/plates')
+    stop = startTracing()
+    await fetch('/api/v1/outputs/o1/plates')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a parentless write to a poll’s path: only a GET is a poll', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.delete('/api/v1/print/runs/r1', ({ request }) => {
+        seen.push(request.headers.get('traceparent'))
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    stop = startTracing()
+    await fetch('/api/v1/print/runs/r1', { method: 'DELETE' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
   it('samples a poll’s path inside an action: the action decides', async () => {
     const seen = capture('/api/v1/print/library/7/progress')
     stop = startTracing()
     await traceAction('print', {}, () => fetch('/api/v1/print/library/7/progress'))
+    expect(seen).toHaveLength(1)
     expect(seen[0]).toMatch(TRACEPARENT)
   })
 

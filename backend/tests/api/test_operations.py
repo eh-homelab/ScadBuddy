@@ -433,9 +433,13 @@ def test_only_a_failed_connect_says_nothing_was_done(
     assert response.json()["type"].endswith("/temporal-unavailable")
     assert ("Nothing was done" in response.text) is nothing_done
     assert response.json()["may_have_started"] is not nothing_done
+    detail = response.json()["detail"]
     if not nothing_done:
-        assert "Idempotency-Key" in response.json()["detail"]
-    assert ("cannot reach" in response.text) is not isinstance(error, TemporalBusyError)
+        # The client re-sends the same key on `may_have_started`; the person reads why.
+        assert "a retry picks this request up" in detail
+    assert "Temporal" not in detail and "Idempotency-Key" not in detail
+    # Only a service that did not answer says so; a busy one answered.
+    assert ("answer" in detail) is not isinstance(error, TemporalBusyError)
 
 
 def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
