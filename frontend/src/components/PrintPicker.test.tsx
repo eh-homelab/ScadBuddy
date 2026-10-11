@@ -2257,6 +2257,40 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
   })
 
+  // #2249: a failed read of another plate's filaments holds Print, says so, and retries.
+  it('holds Print after a failed filament read, says why, and reads again on Retry', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        fail ? HttpResponse.json({ detail: 'Bambuddy is down.' }, { status: 503 }) : undefined,
+      ),
+    )
+    const reads = watch('GET', '/filaments')
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+
+    const warning = await screen.findByTestId('filaments-unavailable')
+    expect(warning).toHaveTextContent(
+      'ScadBuddy could not read the filament inventory: Bambuddy is down. Print is unavailable until it loads.',
+    )
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+
+    fail = false
+    const before = reads.urls.length
+    await user.click(within(warning).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(reads.urls.length).toBe(before + 1))
+    expect(reads.urls.at(-1)).toContain('plate_id=2')
+    await waitFor(() => expect(screen.queryByTestId('filaments-unavailable')).toBeNull())
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
   it("names a one-plate output's plate, with nothing to choose (#986)", async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true, name: 'Gear + Axle' }])),
@@ -3174,6 +3208,33 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
     expect(within(list).getByText('ironing_type').nextElementSibling).toHaveTextContent('top')
     expect(within(list).queryByRole('textbox')).toBeNull()
     expect(within(list).queryByRole('combobox')).toBeNull()
+  })
+
+  // #2112: every key a template may set has a name; brim width has its unit.
+  it('names the brim width, in millimetres', async () => {
+    renderPicker({ printSettings: { brim_width: '5', brim_type: 'outer_only' } })
+    await loaded()
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    expect(within(list).getByText('Brim width').nextElementSibling).toHaveTextContent('5 mm')
+    expect(within(list).queryByText('brim_width')).toBeNull()
+  })
+
+  // #2112: a sequence picked in the step above replaces the template's, so the list says so.
+  it("marks the template's print sequence overridden once one is picked above", async () => {
+    const { user } = renderPicker({ printSettings: { print_sequence: 'by layer' } })
+    await loaded()
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    const value = () => within(list).getByText('Print sequence').nextElementSibling
+    expect(value()).toHaveTextContent(/^by layer$/)
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Print sequence' }), 'by object')
+    expect(value()).toHaveTextContent('by layer (overridden above)')
+    expect(value()?.querySelector('del')).toHaveTextContent('by layer')
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Print sequence' }), '')
+    expect(value()).toHaveTextContent(/^by layer$/)
   })
 
   it('shows nothing for a template with none', async () => {

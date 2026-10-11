@@ -216,7 +216,7 @@ export function PrintPicker({
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
-  const { filaments, plan, setPlan, planChanged, filamentError, planReady } = useFilamentPlan(
+  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
     source,
     choices,
     plate,
@@ -766,9 +766,15 @@ export function PrintPicker({
               )}
 
               {filamentError && (
-                <p className="text-[12px] text-warn" data-testid="filaments-unavailable">
-                  ScadBuddy could not read the filament inventory: {filamentError}
-                </p>
+                <div className="flex items-center gap-3" data-testid="filaments-unavailable">
+                  <p className="text-[12px] text-warn">
+                    ScadBuddy could not read the filament inventory: {filamentError} Print is unavailable
+                    until it loads.
+                  </p>
+                  <Button size="sm" onClick={retryFilaments}>
+                    Retry
+                  </Button>
+                </div>
               )}
               {!picker.advanced && (
                 <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
@@ -954,7 +960,12 @@ export function PrintPicker({
 
                   <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
 
-                  {given?.kind === 'output' && <SlicerDefaults settings={printSettings} />}
+                  {given?.kind === 'output' && (
+                    <SlicerDefaults
+                      settings={printSettings}
+                      overridden={printSequence !== null ? ['print_sequence'] : []}
+                    />
+                  )}
 
                   <PrintOptionsDisclosure
                     subject={subject}
