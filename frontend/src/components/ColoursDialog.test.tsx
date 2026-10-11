@@ -91,6 +91,8 @@ describe('ColoursDialog', () => {
     // Closed and opened again: the same view is asked for again, and this time it draws.
     rerender(<ColoursDialog open={false} {...props} />)
     rerender(<ColoursDialog open {...props} />)
+    // The retry shows as drawing, not as the failure it is retrying.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(await screen.findByRole('list', { name: 'Tiles, row by row' })).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })

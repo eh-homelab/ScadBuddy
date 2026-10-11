@@ -74,6 +74,7 @@ describe('route groups', () => {
       'GET /api/v1/ai/sessions/:id/events',
       'POST /api/v1/ai/sessions/:id/interrupt',
       'POST /api/v1/ai/sessions/:id/handoff',
+      'DELETE /api/v1/ai/sessions/:id/handoff',
       'POST /api/v1/ai/approvals/:id/:verb{approve|deny}',
       'GET /api/v1/ai/audit',
       'PUT /api/v1/ai/audit/settings',

@@ -348,6 +348,25 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(await res.json()).toMatchObject({ owner: { kind: 'browser', id: 'browser' } })
   })
 
+  it("withdraws a session's handoff offer, which the panel's snapshot showed (#1284)", async () => {
+    const { session } = await m.start(browser, { origin: 'chat', title: 'mine' })
+    await waitIdle(session.id)
+    await m.handoff(session.id, browser, agentA)
+    const listed = (await m.snapshot(browser)) as { sessions: { sessionId: string; offer: unknown }[] }
+    expect(listed.sessions.find((s) => s.sessionId === session.id)?.offer).toMatchObject({
+      to: { kind: 'bearer', id: 'token:a' },
+      until: expect.any(String),
+    })
+
+    const cancel = () => app.request(`/api/v1/ai/sessions/${session.id}/handoff`, { method: 'DELETE', headers: UI })
+    const res = await cancel()
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ cancelled: true, session: { id: session.id, offer: null } })
+    expect((await m.get(session.id, browser)).offer).toBeNull()
+    // Nothing left to withdraw.
+    expect(await (await cancel()).json()).toMatchObject({ cancelled: false })
+  })
+
   it('answers 503 without sessions (no database)', async () => {
     const off = createApp(deps({ sessions: undefined }))
     expect((await off.request('/api/v1/ai/sessions', { headers: UI_READ })).status).toBe(503)

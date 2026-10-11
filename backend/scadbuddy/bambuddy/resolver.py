@@ -24,7 +24,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue
-from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning, _label
+from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning, spool_label
 from scadbuddy.bambuddy.models import (
     FlowType,
     NozzleChoice,
@@ -307,7 +307,7 @@ def resolve(
                             kind="no-preset",
                             slot_id=slot.slot_id,
                             message=(
-                                f"{_label(option)} has no {size} mm preset of its own, so "
+                                f"{spool_label(option)} has no {size} mm preset of its own, so "
                                 f"Bambu's Generic {option.material} is used."
                             ),
                         )
@@ -318,7 +318,7 @@ def resolve(
                     kind="no-preset",
                     slot_id=slot.slot_id,
                     message=(
-                        f"{_label(option)} has no slicer preset for a {size} mm nozzle. "
+                        f"{spool_label(option)} has no slicer preset for a {size} mm nozzle. "
                         "Pick one under Advanced."
                     ),
                 )

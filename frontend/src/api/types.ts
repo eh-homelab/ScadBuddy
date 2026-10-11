@@ -9,7 +9,7 @@
  * `schema.d.ts` is not committed (#492): typecheck, test and build regenerate it
  * first, so after a backend change `tsc` points at whatever broke.
  */
-import type { Origin, SessionStatus } from '../agent/chat/protocol'
+import type { Origin, Owner, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
 
 type Schemas = components['schemas']
@@ -33,6 +33,8 @@ export type ModelSummary = Schemas['ModelRecord']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
 export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
+/** #1290 — one `.scad` file of a model's directory, `model.scad` (`main`) first. */
+export type SourceFile = Schemas['SourceFile']
 export type Diagnostic = Schemas['Diagnostic']
 
 export type PastedSource = Schemas['PastedSource']
@@ -171,6 +173,7 @@ export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
 /** #1298 — what each hotend on a printer's rack has printed; never a serial. */
 export type PrinterRackUsage = Schemas['PrinterRackUsage']
 export type RackHotendUsage = Schemas['RackHotendUsage']
+export type RackSpoolUse = Schemas['RackSpoolUse']
 /** #907, #1862 — Bambu's print sequence, a per-print process override. */
 export type PrintSequence = NonNullable<Schemas['PrintRunRequest']['print_sequence']>
 export type OutputPlate = Schemas['OutputPlate']
@@ -371,6 +374,8 @@ export interface AiSessionView {
   /** #1885 — archived by its owner: out of the panel's list, and read-only. Absent from an older agent. */
   archived?: boolean
   archived_at?: string | null
+  /** #1284 — a live handoff offer: to whom, until when. */
+  offer?: { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string } | null
 }
 
 /**
