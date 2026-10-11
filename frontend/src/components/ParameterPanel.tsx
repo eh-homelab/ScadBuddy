@@ -37,7 +37,10 @@ interface Props {
    * has a height of its own (the full-screen flyout).
    */
   growsWithPage?: boolean
-  /** #1286 — the render was refused for font families that are not installed: flagged on their fields. */
+  /**
+   * #1286 — the render was refused for font families that are not installed: flagged
+   * on their fields. One object per refusal: its identity scopes a field's install error (#2215).
+   */
   missingFonts?: MissingFonts
   /** One of them was installed from its field. */
   onFontInstalled?: (installed: InstalledFamily) => void
@@ -175,6 +178,7 @@ export function ParameterPanel({
                     sampleText={sampleText}
                     extruder={extruderOf(param.name)}
                     missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
+                    fontRefusal={missingFonts}
                     onFontInstalled={onFontInstalled}
                     onChange={(next) => onChange(param.name, next)}
                   />
@@ -197,6 +201,7 @@ export function ParameterPanel({
                   sampleText={sampleText}
                   extruder={extruderOf(param.name)}
                   missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
+                  fontRefusal={missingFonts}
                   onFontInstalled={onFontInstalled}
                   onChange={(next) => onChange(param.name, next)}
                 />

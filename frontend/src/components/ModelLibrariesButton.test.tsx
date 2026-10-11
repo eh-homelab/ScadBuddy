@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -664,13 +664,22 @@ describe('ModelLibrariesButton, live (#269)', () => {
       const checks = asked.length
       const reads = modelReads
 
-      // Another model's pin: this model is read again, its pins are the same, nothing is checked.
+      // Another model's pin: this model is read again, its pins are the same, nothing is
+      // checked, since every include resolves. Waits for the re-read to be shown (#2219).
+      const read = vi.spyOn(api, 'getModel')
+      const listed = vi.spyOn(api, 'listLibraries')
       emitRealtime('library.changed', ['libraries', 'model:cable-label'], {
         slug: 'cable-label',
         name: 'BOSL2',
       })
       await waitFor(() => expect(modelReads).toBeGreaterThan(reads))
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await waitFor(() => expect(listed).toHaveBeenCalled())
+      await act(async () => {
+        await Promise.all([read.mock.results.at(-1)?.value, listed.mock.results.at(-1)?.value])
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+      read.mockRestore()
+      listed.mockRestore()
       expect(asked).toHaveLength(checks)
 
       // This model's pin: checked again.
@@ -680,6 +689,39 @@ describe('ModelLibrariesButton, live (#269)', () => {
         name: 'BOSL2',
       })
       await waitFor(() => expect(asked).toHaveLength(checks + 1))
+    })
+
+    it("checks an unresolved include again on another model's pin signal (#2219)", async () => {
+      const installed = {
+        ...unresolvedBosl2,
+        suggestion: {
+          ...unresolvedBosl2.suggestion,
+          source: 'installed',
+          commit: 'abc1234',
+          has_file: true,
+          pinned_by: 'cable-label',
+        },
+      }
+      const asked = reports(
+        { ...clean, unresolved: 1, includes: [unresolvedBosl2] },
+        { ...clean, unresolved: 1, includes: [installed] },
+      )
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      const include = await within(dialog).findByRole('listitem', { name: '<BOSL2/std.scad>' })
+      expect(include).not.toHaveTextContent('as cable-label pins it')
+      const checks = asked.length
+
+      emitRealtime('library.changed', ['libraries', 'model:cable-label'], {
+        slug: 'cable-label',
+        name: 'BOSL2',
+      })
+      await waitFor(() => expect(asked).toHaveLength(checks + 1))
+      expect(
+        await within(dialog).findByText(/BOSL2, as cable-label pins it, would provide it/),
+      ).toBeInTheDocument()
     })
 
     it('says it is checking again while a re-check runs, keeping the last report', async () => {

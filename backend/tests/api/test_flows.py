@@ -244,6 +244,42 @@ def test_an_answer_reaches_the_run_once(client: TestClient) -> None:
     assert again.status_code == 409
 
 
+def test_an_answer_is_sealed_before_the_operation_records_it(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#2221: the operation's input (its history) and its `operations` row carry the
+    answer sealed under the run's key, never its text."""
+    definition = register(
+        client, script("a = await wait_for_human('Swap to pink?', 600)", "return a['answer']")
+    )
+    run_id = start(client, definition["id"], "w").json()["id"]
+    view = until(client, run_id, lambda v: v["status"] == "waiting" and v["pending"])
+    secret = "pink-but-only-the-lid-7f3e"
+    answered = client.post(
+        f"/api/v1/workflow-runs/{run_id}/answer",
+        json={"call_id": view["pending"][0]["call_id"], "answer": secret},
+        headers={"Idempotency-Key": "a1"},
+    )
+    assert answered.status_code == 200, answered.text
+    done = until(client, run_id, lambda v: v["status"] == "succeeded")
+    assert done["run"]["result"] == f"result: '{secret}'"
+    with psycopg.connect(pg_conninfo) as conn:
+        [(request,)] = conn.execute(
+            "SELECT request::text FROM operations WHERE kind = 'flow_answer'"
+        ).fetchall()
+    assert "answer_sealed" in request
+    assert secret not in request
+
+
+def test_an_answer_to_a_run_with_no_key_is_404(client: TestClient) -> None:
+    response = client.post(
+        f"/api/v1/workflow-runs/{uuid.uuid4()}/answer",
+        json={"call_id": "c", "answer": "x"},
+        headers={"Idempotency-Key": "n"},
+    )
+    assert response.status_code == 404
+
+
 def test_an_answer_to_a_call_not_waiting_is_stale(client: TestClient) -> None:
     definition = register(client, script("await wait_for_human('q?', 600)"))
     run_id = start(client, definition["id"], "w").json()["id"]

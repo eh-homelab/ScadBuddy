@@ -117,6 +117,7 @@ class StandInTools:
         self.memory_context: str | None = None
         self.memory: list[tuple[str, str]] = []
         self.memory_fails = False
+        self.tier_refuses = False
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -190,12 +191,17 @@ class StandInTools:
         async def turn_tools() -> dict[str, Any]:
             return {"tools": self.turn_offered}
 
-        # As turnTools.ts tiers http_request: a GET is read, anything else outward.
+        # As httpRequest.ts httpTierOf tiers http_request: no method, a GET or a HEAD is
+        # read, anything else outward.
         def tier(args: dict[str, Any]) -> str:
-            return "read" if args.get("method") == "GET" else "outward"
+            return "read" if args.get("method", "GET") in ("GET", "HEAD") else "outward"
 
         @activity.defn(name="turn_tool_tier")
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, str]:
+            if self.tier_refuses:
+                raise ApplicationError(
+                    "the plugin did not answer", type="ToolError", non_retryable=True
+                )
             return {"tier": tier(args["input"])}
 
         @activity.defn(name="memory_recall")

@@ -1090,6 +1090,12 @@ def test_a_library_print_into_a_project_is_filed_there_and_remembered(
     assert settings["filament_colour"] == ["#688197"]
     uploads = _state(client).uploads
     assert [copy.id for copy in asyncio.run(uploads.for_output("library:89"))] == [141]
+    # Recorded by the real print, not seeded: the listing must not read that copy as an
+    # output's, whatever key `send.upload_copy` filed it under.
+    root = recording("library-files-root.json")
+    listing_routes([{**root[0], "id": 141}, {**root[0], "id": 89}])
+    listed = client.get("/api/v1/print/library").json()["files"]
+    assert {row["id"]: row["output_id"] for row in listed} == {141: None, 89: None}
     remembered = asyncio.run(uploads.project_target(7))
     assert remembered is not None
     assert remembered.model_copy(update={"nozzle_plan": None}) == ProjectTarget(

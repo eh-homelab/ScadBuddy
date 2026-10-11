@@ -24,6 +24,7 @@ from scadbuddy.bambuddy.linking import (
     ARCHIVE_OVERLAP,
     ARCHIVE_PAGE,
     LIBRARY_LINK_BACKSTOP,
+    LIBRARY_SCANS_PER_CALL,
     MAX_ARCHIVE_PAGES,
     SCAN_AFTER,
     SCAN_BEFORE,
@@ -675,6 +676,49 @@ async def test_a_library_item_gone_from_bambuddy_has_its_file_scanned_by_hash_on
     assert scan.call_count == 1
     await scan_library_by_hash(bambuddy, uploads, links, 89)
     assert scan.call_count == 1
+
+
+@respx.mock
+async def test_one_call_scans_a_bounded_number_of_library_files_and_leaves_the_rest(
+    bambuddy: BambuddyClient,
+    links: PrintLinkStore,
+    uploads: BambuddyUploadStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2120: the prints list waits for these scans, so many items gone at once (a
+    queue cleared in Bambuddy) are scanned `LIBRARY_SCANS_PER_CALL` files per call;
+    the rest stay pending and are scanned by the next calls."""
+    files = range(100, 100 + 2 * LIBRARY_SCANS_PER_CALL + 1)
+    for file_id in files:
+        await links.record_sends(
+            PrintSubject.library(file_id),
+            [PrintSend(queue_item_id=file_id, plate_id=1, printer_id=1)],
+        )
+        respx.get(f"{API}/queue/{file_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "gone"})
+        )
+    scanned: list[int] = []
+
+    async def scan(
+        client: BambuddyClient,
+        uploads: BambuddyUploadStore,
+        links: PrintLinkStore,
+        file_id: int,
+    ) -> None:
+        scanned.append(file_id)
+
+    monkeypatch.setattr(linking_module, "scan_library_by_hash", scan)
+
+    await link_library_prints(bambuddy, links, uploads=uploads)
+
+    assert len(scanned) == LIBRARY_SCANS_PER_CALL
+    assert await _pending(links) == set(files) - set(scanned)
+
+    await link_library_prints(bambuddy, links, uploads=uploads)
+    await link_library_prints(bambuddy, links, uploads=uploads)
+
+    assert sorted(scanned) == list(files)
+    assert await _pending(links) == set()
 
 
 @respx.mock

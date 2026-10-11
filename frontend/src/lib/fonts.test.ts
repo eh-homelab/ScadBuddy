@@ -3,6 +3,7 @@ import { ApiError } from '../api/client'
 import type { CatalogueFont } from '../api/types'
 import {
   cssFontFamily,
+  foldFamily,
   formatFontValue,
   googleFontsCssUrl,
   installedAsCatalogue,
@@ -165,5 +166,12 @@ describe('a font the render was refused for (#1286)', () => {
   it('matches a family as fontconfig does, ignoring blanks as well as case', () => {
     const problem = { parameters: ['font'], families: ['Roboto Slab', 'Pacifico'] }
     expect(missingFamiliesOf(problem, 'font', 'RobotoSlab:style=Bold')).toEqual(['Roboto Slab'])
+  })
+})
+
+describe('foldFamily (#2216)', () => {
+  it('folds a family as the backend\u2019s normalise_family does: case and blanks ignored', () => {
+    expect(foldFamily('Roboto Slab')).toBe('robotoslab')
+    expect(foldFamily('RobotoSlab')).toBe(foldFamily('roboto slab'))
   })
 })

@@ -242,6 +242,20 @@ describe('archive (#1885)', () => {
     expect(screen.queryByText(/This chat is archived/)).toBeNull()
   })
 
+  it('drops a chat unarchived elsewhere from a still-open Archived view (#2118)', async () => {
+    const { user } = await ownChat()
+    await user.click(within(picker()).getByRole('button', { name: `Archive ${OWN}` }))
+    await waitFor(() => expect(composerBox()).toBeDisabled())
+    await user.click(within(picker()).getByRole('button', { name: 'Archived' }))
+    const archived = await within(picker()).findByRole('list', { name: 'Archived chats' })
+    expect(within(archived).getByText(OWN)).toBeInTheDocument()
+
+    // Unarchived from the composer's note, with the Archived view still mounted.
+    await user.click(screen.getByRole('button', { name: 'Unarchive' }))
+    await waitFor(() => expect(composerBox()).toBeEnabled())
+    expect(await within(picker()).findByText('No archived chats.')).toBeInTheDocument()
+  })
+
   it('offers no Archive while a turn runs', async () => {
     const { user } = renderShell({ stepMs: 60_000 })
     await user.click(screen.getByRole('button', { name: 'Assistant' }))

@@ -1,6 +1,7 @@
 import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { getRealtime, type RealtimeEvent } from './realtime'
+import { definitive, READ_RETRIES, readBackoffMs } from './useRenderJob'
 
 /** The wait's limit passed with the job still going. */
 export class JobStillRunning extends Error {
@@ -21,7 +22,7 @@ function settled(job: Job): boolean {
  * followed is still seen), and on a `pollMs` timer only while the socket is
  * unavailable. `onJob` sees every read that has not settled. An aborted `signal`
  * rejects with its reason; `waitMs` passing rejects with `JobStillRunning`; a failed
- * read rejects with its error.
+ * read is retried as `followUntil` does.
  */
 export function waitForJob(
   jobId: string,
@@ -44,7 +45,11 @@ export function waitForJob(
  * it is still seen), and on a `pollMs` timer only while the socket is unavailable.
  * `onRead` sees every read that is not done. An aborted `signal` rejects with its
  * reason; `waitMs` passing rejects with `stillRunning()`, after one read if none has
- * answered yet (waiting at most `pollMs` more for it); a failed read rejects with its error.
+ * answered yet (waiting at most `pollMs` more for it). A failed read is tried again
+ * with `useRenderJob`'s backoff (#2125): a network blip or a 502 during a rollout says
+ * nothing about the job, which goes on in the backend. It rejects with its error only
+ * after `READ_RETRIES` failures in a row, or at once when the error is `definitive`
+ * (a 4xx: the job is gone, or this is refused).
  */
 export function followUntil<T>(
   topic: string,
@@ -75,6 +80,9 @@ export function followUntil<T>(
     let poll: ReturnType<typeof setTimeout> | undefined
     /** Bounds that one look: fetch has no timeout, so a read can hang (#2045 review). */
     let grace: ReturnType<typeof setTimeout> | undefined
+    /** Failed reads in a row, and the timer that tries the last one again. */
+    let failures = 0
+    let retry: ReturnType<typeof setTimeout> | undefined
     const giveUp = () => end(() => reject(opts.stillRunning()))
     const limit =
       opts.waitMs === undefined
@@ -105,13 +113,23 @@ export function followUntil<T>(
         const value = await opts.read()
         if (ended) return
         answered = true
+        failures = 0
         if (opts.done(value)) end(() => resolve(value))
         else {
           opts.onRead?.(value)
           if (expired) giveUp()
         }
       } catch (cause) {
-        end(() => reject(cause as Error))
+        if (ended) return
+        if (definitive(cause) || failures >= READ_RETRIES) end(() => reject(cause as Error))
+        else {
+          // Keep following: the next event reads it too, and this read is tried again.
+          clearTimeout(retry)
+          retry = setTimeout(() => {
+            retry = undefined
+            void read()
+          }, readBackoffMs(failures++))
+        }
       } finally {
         reading = false
         if (again) {
@@ -140,6 +158,7 @@ export function followUntil<T>(
       clearTimeout(poll)
       clearTimeout(limit)
       clearTimeout(grace)
+      clearTimeout(retry)
       signal?.removeEventListener('abort', onAbort)
       settle()
     }
