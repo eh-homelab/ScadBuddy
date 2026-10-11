@@ -225,7 +225,7 @@ export function SettingsPage() {
   const loaded = Boolean(settings)
   useEffect(() => {
     if (!loaded || hash.length < 2) return
-    document.getElementById(decodeURIComponent(hash.slice(1)))?.scrollIntoView?.({ block: 'start' })
+    document.getElementById(sectionId(hash))?.scrollIntoView?.({ block: 'start' })
   }, [loaded, hash])
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
@@ -1362,4 +1362,17 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
       </dl>
     </details>
   )
+}
+
+/**
+ * The section a URL hash names. A malformed escape (a truncated or hand-edited link,
+ * `#%E0%A4%A`) makes `decodeURIComponent` throw, which inside the effect took the whole
+ * page down (#2113); the raw text is used instead, which simply matches no section.
+ */
+function sectionId(hash: string): string {
+  try {
+    return decodeURIComponent(hash.slice(1))
+  } catch {
+    return hash.slice(1)
+  }
 }
