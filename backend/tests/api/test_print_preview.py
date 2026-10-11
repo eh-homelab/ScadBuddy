@@ -116,6 +116,33 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
 
 
 @respx.mock
+def test_a_background_slice_with_a_project_chosen_files_nothing_in_the_project(
+    client: TestClient, model: str
+) -> None:
+    """The dialog slices on every change; a copy in a project's folder is that project's
+    record and is never removed (#317), so the preview's copy goes to the inbox."""
+    output_id = prepared(client, model)
+    folder = respx.get(f"{API}/library/folders/by-project/7").mock(
+        return_value=httpx.Response(200, json=[{"id": 9, "name": "Kids' room", "project_id": 7}])
+    )
+    upload = upload_route()
+    run_routes()
+    Job().routes()
+    sliced_routes()
+
+    started = client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice",
+        json={**body(), "project_id": 7},
+        headers=press(),
+    )
+
+    assert started.status_code == 200, started.text
+    assert upload.call_count == 1
+    assert upload.calls.last.request.url.params.get("folder_id") != "9"
+    assert not folder.called
+
+
+@respx.mock
 def test_an_unknown_background_slice_is_a_404(client: TestClient, model: str) -> None:
     output_id = prepared(client, model)
     assert client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/12345").status_code == 404

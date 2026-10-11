@@ -90,7 +90,13 @@ async def start_preview(
     subject: str,
 ) -> PreviewStarted:
     """Lay out, upload and slice what ``request`` would print, as the run does, and
-    record the slice for ``subject``; the first plate when every plate prints."""
+    record the slice for ``subject``; the first plate when every plate prints.
+
+    The copy goes to the inbox even when a project is chosen: the dialog slices on every
+    change, and a copy filed in a project's folder is that project's record, never
+    removed (#317), so trying spools would fill the project. A print into the project
+    then slices its own copy."""
+    request = request.model_copy(update={"project_id": None})
     prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
     planned = await plan_run(client, source, settings, request, PreparedPlates.of(prepared))
     if not planned.plates:

@@ -316,8 +316,8 @@ def bambuddy_kinds_over(
                     meta=meta,
                     uploads=uploads,
                     settings=settings,
-                    # As the run's check computes them, so the slice is the run's own.
-                    stem=naming.stem if chosen_project(body, settings) is not None else None,
+                    # The preview's copy goes to the inbox, never a project's folder.
+                    stem=None,
                     print_settings=naming.print_settings,
                 )
             return _json(
