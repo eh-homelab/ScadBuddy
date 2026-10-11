@@ -3690,6 +3690,7 @@ def test_the_carrot_neck_anchored_in_green_prints_as_one_piece(tmp_path: Path) -
     # from a little below the lowest painted face to a little above it, so a leaf's own
     # thin section is never taken for it.
     codes = json.loads((tmp_path / small.parts[0].mesh.replace(".3mf", ".paint.json")).read_text())["codes"]
+    assert len(codes) == len(mesh.faces)  # the codes are the faces', in order
     painted = np.array([bool(code) for code in codes])
     leaves_from = float(mesh.triangles_center[painted][:, 2].min())
     sections = {
@@ -3697,7 +3698,9 @@ def test_the_carrot_neck_anchored_in_green_prints_as_one_piece(tmp_path: Path) -
         for z in np.arange(leaves_from - 8.0, leaves_from + 4.0, 0.5)
     }
     z, neck = min(((z, s) for z, s in sections.items() if s is not None and s.inside), key=lambda zs: zs[1].room)
-    assert leaves_from - 8.0 <= z <= leaves_from + 4.0
+    # A neck, not just any section: narrower than the body a few millimetres below it.
+    below = measure(mesh, np.array([0.0, 0.0, z - 6.0]), np.array([0.0, 0.0, 1.0]))
+    assert below is not None and neck.room < below.room
     # Ingest places an object by translation only, so object to world is that shift
     # (`_primitive` solves with the full matrix; this test relies on rotate 0, scale 1).
     m = small.transform
