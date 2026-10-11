@@ -5,8 +5,10 @@ For each segment, ``ScadBuddyRunner``:
 - reads the session (from the activity's workflow ID; only a durable one) and what
   its lineage may still spend. A segment with nothing left to spend ends the task as
   ``budget_exhausted``, without a model call;
-- opens the first usable credential (``credentials.usable_credentials``), so the
-  workflow never holds it, and nothing of it enters history;
+- opens the usable credentials (``credentials.usable_credentials``), so the workflow
+  never holds one, and nothing of them enters history; the segment runs on the first,
+  and on the next whenever a failure was the credential's (``fallback.py``), as a
+  classic turn falls back (``harness/fallback.ts``);
 - runs the segment with the plugin's ``ClaudeAgentSdkRunner``, built for this segment
   with that credential's environment and the remaining budget as its cap;
 - adds what the segment cost to ``ai_sessions.cost_usd`` and one to ``turns``. Every
@@ -56,8 +58,9 @@ from temporalio import activity
 from temporalio.claude_agent_sdk import ClaudeAgentSdkRunner, SegmentInput, SegmentOutput
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy_durable.credentials import credential_env, usable_credentials
+from scadbuddy_durable.credentials import Credential, credential_env, usable_credentials
 from scadbuddy_durable.secrets import Kek
+from scadbuddy_durable.session.fallback import credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
     SEGMENT_CONTEXT_QUERY,
@@ -324,6 +327,66 @@ class ScadBuddyRunner:
             found = {r[0]: Image(r[0], r[1], bytes(r[2])) for r in await cur.fetchall()}
         return [found[n] for n in names if n in found]
 
+    async def _on_credentials(
+        self,
+        session: str,
+        workflow_id: str,
+        inp: SegmentInput,
+        attempt: int,
+        credentials: list[Credential],
+        left: float,
+        extra: dict[str, Any],
+        settings: TurnSettings,
+    ) -> SegmentOutput:
+        """Runs the segment on each usable credential in priority order, moving on only
+        when the failure was the credential's (``fallback.credentials_fault``), as a classic
+        turn does; each credential at most once per attempt. What a failed one spent is
+        counted, and the next runs on what is left."""
+        for i, credential in enumerate(credentials):
+            runner = self._make(
+                cwd=self._cwd,
+                env={**worker_env_blanked(), **ENGINE_ENV, **credential_env(credential)},
+                max_budget_usd=left,
+                extra_options=extra,
+                **({"model": settings.model} if settings.model else {}),
+            )
+            try:
+                return await runner.run(inp, attempt)
+            except Exception as err:
+                # Never the text: like the codec's sealed failures, it is the session's content.
+                logger.warning(
+                    "segment of %s failed (attempt %d, %s): %s, %d bytes of text",
+                    workflow_id,
+                    attempt,
+                    credential.label,
+                    type(err).__name__,
+                    len(error_text(err).encode()),
+                )
+                if credentials_fault(err) and i + 1 < len(credentials):
+                    cost = _cost(err)
+                    if cost > 0:
+                        left -= cost
+                        async with self._connect() as conn:
+                            await conn.execute(
+                                "UPDATE ai_sessions SET cost_usd = cost_usd + %s,"
+                                " updated_at = now() WHERE id = %s",
+                                (cost, session),
+                            )
+                    logger.warning(
+                        "segment of %s continues on %s", workflow_id, credentials[i + 1].label
+                    )
+                    continue
+                if not final_failure(err):
+                    raise bounded_failure(err) from None
+                # Ends the turn with the reason, as the plugin's own final errors do.
+                return SegmentOutput(
+                    session_id=inp.session_id,
+                    is_error=True,
+                    error=bounded(str(err)),
+                    cost_usd=_cost(err),
+                )
+        raise AssertionError("unreachable: the last credential returns or raises")
+
     async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
         workflow_id = activity.info().workflow_id
         session = session_of(workflow_id)
@@ -368,33 +431,9 @@ class ScadBuddyRunner:
             extra["allowed_tools"] = [VIEW_IMAGES_TOOL]
         if self._plugin_dir and settings.own_plugin:
             extra["plugins"] = [{"type": "local", "path": self._plugin_dir}]
-        runner = self._make(
-            cwd=self._cwd,
-            env={**worker_env_blanked(), **ENGINE_ENV, **credential_env(credentials[0])},
-            max_budget_usd=budget - spent,
-            extra_options=extra,
-            **({"model": settings.model} if settings.model else {}),
+        out = await self._on_credentials(
+            session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings
         )
-        try:
-            out = await runner.run(inp, attempt)
-        except Exception as err:
-            # Never the text: like the codec's sealed failures, it is the session's content.
-            logger.warning(
-                "segment of %s failed (attempt %d): %s, %d bytes of text",
-                workflow_id,
-                attempt,
-                type(err).__name__,
-                len(error_text(err).encode()),
-            )
-            if not final_failure(err):
-                raise bounded_failure(err) from None
-            # Ends the turn with the reason, as the plugin's own final errors do.
-            out = SegmentOutput(
-                session_id=inp.session_id,
-                is_error=True,
-                error=bounded(str(err)),
-                cost_usd=_cost(err),
-            )
         if out.cost_usd > 0 or not out.is_error:
             async with self._connect() as conn:
                 await conn.execute(

@@ -64,15 +64,18 @@ PNG = base64.b64decode(
 )
 
 
-async def insert_gateway(conn: Conn, kek: Kek, base_url: str, secret: str = TOKEN) -> None:
+async def insert_gateway(
+    conn: Conn, kek: Kek, base_url: str, secret: str = TOKEN, priority: int = 0
+) -> None:
     cid = str(uuid.uuid4())
     aad = credential_aad(cid, "gateway", base_url)
     dek = os.urandom(32)
     await conn.execute(
         "INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed,"
-        " kek_id, last4, status) VALUES (%s, 0, 'gateway', %s, %s, %s, %s, '', 'active')",
+        " kek_id, last4, status) VALUES (%s, %s, 'gateway', %s, %s, %s, %s, '', 'active')",
         (
             cid,
+            priority,
             base_url,
             seal_bytes(dek, secret.encode(), aad),
             seal_bytes(kek.key, dek, f"dek:{aad}"),
@@ -516,3 +519,85 @@ async def test_the_own_plugin_loads_unless_settings_switched_it_off(
     await agent_db.execute("DELETE FROM ai_credentials")
     off = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")
     assert "plugins" not in off["extra_options"]
+
+
+class Refusing:
+    """make_runner for the runner: a segment on a credential in ``refused`` raises
+    ``error``; any other answers. Records each runner's token."""
+
+    def __init__(self, refused: set[str], error: BaseException) -> None:
+        self.refused = refused
+        self.error = error
+        self.tokens: list[str] = []
+        self.scripted = ScriptedClaude(lambda prompt, _: Final("done"), cost_per_segment=0.25)
+
+    def __call__(self, **kwargs: Any) -> Any:
+        token = kwargs["env"]["ANTHROPIC_AUTH_TOKEN"]
+        self.tokens.append(token)
+        if token in self.refused:
+            error = self.error
+
+            class Raises:
+                async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                    raise error
+
+            return Raises()
+        return self.scripted
+
+
+async def _two_credentials(conn: Conn) -> None:
+    await insert_gateway(conn, KEK, "http://127.0.0.1:9", secret=TOKEN)
+    await insert_gateway(conn, KEK, "http://127.0.0.1:10", secret=TOKEN + "-second", priority=1)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _result_error("API Error: 401 invalid x-api-key", status=401),
+        _result_error("API Error: 429 rate limited", status=429),
+        _result_error("API Error: 400 Your credit balance is too low", status=400),
+    ],
+)
+async def test_a_refused_credential_falls_back_to_the_next(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    error: BaseException,
+) -> None:
+    """As a classic turn does (harness/fallback.ts): the credential's own failure moves
+    the segment to the next credential, once each, instead of retrying the same key."""
+    await _two_credentials(agent_db)
+    refusing = Refusing({TOKEN}, error)
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+async def test_a_failure_of_the_request_does_not_try_another_credential(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await _two_credentials(agent_db)
+    refusing = Refusing({TOKEN}, _result_error("API Error: 400 bad tool schema", status=400))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            # The segment is retried (on the same key, as the plugin retries any failure).
+            for _ in range(100):
+                if len(refusing.tokens) >= 2:
+                    break
+                await asyncio.sleep(0.1)
+        finally:
+            await handle.terminate()
+    assert len(refusing.tokens) >= 2
+    assert set(refusing.tokens) == {TOKEN}
