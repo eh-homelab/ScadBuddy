@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -197,6 +198,10 @@ class AppState:
     #: asset's sanitising runs after it -- and a fetch that finds it full is refused at
     #: once, not queued.
     imports: ImportPermits = field(default_factory=lambda: ImportPermits(IMPORT_CONCURRENCY))
+    #: Set when the library worker stops (#2140): a sweep running in a thread checks it
+    #: between items and ends early, so the shutdown's join usually ends inside its bound
+    #: rather than leaving the thread on the stores the lifespan closes next.
+    sweeps_stop: threading.Event = field(default_factory=threading.Event)
     #: At most DEPENDENCY_CHECK_CONCURRENCY dependency reports at once.
     dependency_checks: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(DEPENDENCY_CHECK_CONCURRENCY)

@@ -188,7 +188,9 @@ def sweep_assets(state: AppState) -> list[str]:
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
-    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace)
+    removed = state.assets.sweep(
+        referenced, grace=state.config.asset_sweep_grace, stop=state.sweeps_stop
+    )
     state.metrics.assets_swept.inc(len(removed))
     if removed:
         logger.info("removed unused uploads", extra={"count": len(removed)})
@@ -262,7 +264,7 @@ async def _sweep_assets_logged(state: AppState) -> None:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
         removed = await asyncio.to_thread(sweep_assets, state)
-        if remote is not None and cutoff is not None:
+        if remote is not None and cutoff is not None and not state.sweeps_stop.is_set():
             await drop_swept_assets(state, removed, cutoff=cutoff)
             # What an earlier drop failed to remove, and what the store lost (a copy an
             # `ensure` dropped, a race with a delete): both converge here, per sweep.
@@ -368,17 +370,20 @@ async def _join_background(stop: threading.Event, *tasks: asyncio.Task[Any] | No
             await task
 
 
-async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
+async def _heartbeating[T](work: Coroutine[Any, Any, T], stop: threading.Event | None = None) -> T:
     """Run ``work`` in the current activity, heartbeating until it ends (review #1095
     2): a worker lost mid-sweep is then noticed within the heartbeat timeout. One the
     worker's stop cancels first gets `SWEEP_SHUTDOWN_JOIN` to end by itself (#1708),
-    so its thread is not left running while the lifespan closes its stores."""
+    so its thread is not left running while the lifespan closes its stores; ``stop``
+    is set first, asking a sweep that checks it to end early (#2140)."""
     running = asyncio.create_task(work)
     try:
         while not (await asyncio.wait({running}, timeout=HEARTBEAT_EVERY))[0]:
             activity.heartbeat()
     except asyncio.CancelledError:
         if activity.is_worker_shutdown():
+            if stop is not None:
+                stop.set()
             await _join_at_shutdown(running)
         raise
     finally:
@@ -411,7 +416,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[1])
     async def sweep_assets() -> None:
-        await _heartbeating(_sweep_assets_logged(state))
+        await _heartbeating(_sweep_assets_logged(state), state.sweeps_stop)
 
     @activity.defn(name=SWEEPS[2])
     async def sweep_blobs() -> None:

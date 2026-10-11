@@ -376,6 +376,35 @@ async def test_a_sweep_cancelled_at_shutdown_waits_for_its_thread_only_so_long(
         release.set()
 
 
+async def test_a_sweep_that_checks_the_stop_ends_inside_the_join(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2140: the shutdown sets the stop before its join, so a sweep that checks it
+    between items ends there, rather than running on past the bound."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    monkeypatch.setattr(main, "SWEEP_SHUTDOWN_JOIN", 5.0)
+    stop, entered = threading.Event(), threading.Event()
+
+    def sweeping() -> None:
+        entered.set()
+        while not stop.wait(0.01):
+            pass
+
+    async def work() -> None:
+        await asyncio.to_thread(sweeping)
+
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work(), stop))
+    assert await asyncio.to_thread(entered.wait, 5)
+    env.worker_shutdown()
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+        env.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+    assert stop.is_set()
+    assert "still running" not in caplog.text
+
+
 async def test_a_sweep_cancelled_while_the_worker_runs_stops_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
