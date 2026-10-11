@@ -290,7 +290,7 @@ async def test_an_outward_turn_tool_waits_for_approval(
         ("tool:scadbuddy_http__http_request", "approval")
     ]
     assert served.calls == []
-    decide = next(k for k in flow_kinds(outward.store) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
