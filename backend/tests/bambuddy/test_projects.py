@@ -8,6 +8,7 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy import projects
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.projects import (
     ProjectRequest,
@@ -96,6 +97,108 @@ async def test_creating_a_project_also_creates_its_folder(bambuddy: BambuddyClie
     assert (view.id, view.folder_id) == (7, 9)
     assert json.loads(created.calls.last.request.content)["name"] == "Reagan keychains"
     assert json.loads(folder.calls.last.request.content)["project_id"] == 7
+
+
+def _not_found(detail: str = "Project not found") -> httpx.Response:
+    return httpx.Response(404, json={"detail": detail})
+
+
+@pytest.fixture
+def no_commit_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(projects, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
+
+
+@respx.mock
+async def test_a_folder_refused_for_a_project_not_yet_committed_is_made_once_it_is(
+    bambuddy: BambuddyClient, no_commit_waits: None
+) -> None:
+    """#2065: Bambuddy answers ``POST /projects/`` before its commit (the route only
+    flushes; ``get_db`` commits after the response is sent), so the folder that follows
+    can be refused with 404 "Project not found". The project is read back until it is
+    visible, and the folder is made then."""
+    respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json={"id": 7, "name": "Fidget", "status": "active"})
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    folder = respx.post(f"{API}/library/folders/").mock(
+        side_effect=[
+            _not_found(),
+            httpx.Response(200, json={"id": 9, "name": "Fidget", "project_id": 7}),
+        ]
+    )
+    read = respx.get(f"{API}/projects/7").mock(
+        side_effect=[
+            _not_found(),
+            httpx.Response(200, json={"id": 7, "name": "Fidget", "status": "active"}),
+        ]
+    )
+
+    view = await ensure_project(bambuddy, ProjectRequest(name="Fidget"))
+    assert (view.id, view.folder_id) == (7, 9)
+    assert folder.call_count == 2
+    assert read.call_count == 2
+
+
+@respx.mock
+async def test_a_project_bambuddy_never_kept_says_so_rather_than_no_such_resource(
+    bambuddy: BambuddyClient, no_commit_waits: None
+) -> None:
+    """When the delayed commit fails (SQLite's "database is locked") the project never
+    exists. That is said plainly, as a gateway problem the user can retry by creating
+    the project again; nothing was linked to it."""
+    respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json={"id": 7, "name": "Fidget", "status": "active"})
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    folder = respx.post(f"{API}/library/folders/").mock(return_value=_not_found())
+    read = respx.get(f"{API}/projects/7").mock(return_value=_not_found())
+
+    with pytest.raises(ApiError) as caught:
+        await ensure_project(bambuddy, ProjectRequest(name="Fidget"))
+    assert caught.value.status == 502
+    assert "did not keep it" in caught.value.detail
+    assert "Create the project again" in caught.value.detail
+    assert folder.call_count == 1
+    assert read.call_count == len(projects.COMMIT_WAITS)
+
+
+@respx.mock
+async def test_a_linked_project_that_is_gone_is_not_waited_for(
+    bambuddy: BambuddyClient, no_commit_waits: None
+) -> None:
+    """Only a project created in this call can be uncommitted. A linked one that 404s
+    is really gone: Bambuddy's refusal is passed on at once, never retried."""
+    respx.get(f"{API}/projects/1").mock(
+        return_value=httpx.Response(200, json=recording("projects.json")[0])
+    )
+    respx.get(f"{API}/library/folders/by-project/1").mock(return_value=httpx.Response(200, json=[]))
+    folder = respx.post(f"{API}/library/folders/").mock(return_value=_not_found())
+
+    with pytest.raises(ApiError) as caught:
+        await ensure_project(bambuddy, ProjectRequest(project_id=1))
+    assert caught.value.status == 404
+    assert folder.call_count == 1
+
+
+@respx.mock
+async def test_another_refusal_of_a_new_projects_folder_is_not_waited_for(
+    bambuddy: BambuddyClient, no_commit_waits: None
+) -> None:
+    """A different 404 ("Parent folder not found") is not the commit race."""
+    respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json={"id": 7, "name": "Fidget", "status": "active"})
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    folder = respx.post(f"{API}/library/folders/").mock(
+        return_value=_not_found("Parent folder not found")
+    )
+    read = respx.get(f"{API}/projects/7")
+
+    with pytest.raises(ApiError) as caught:
+        await ensure_project(bambuddy, ProjectRequest(name="Fidget"))
+    assert caught.value.status == 404
+    assert folder.call_count == 1
+    assert not read.called
 
 
 @respx.mock
