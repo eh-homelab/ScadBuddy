@@ -61,6 +61,14 @@ export type TurnServer = {
    * saved bodies, the headless browser).
    */
   pinned?: boolean
+  /** A long-lived client the server owns (the headless browser's process): never closed after a use. */
+  keepOpen?: boolean
+  /** Why a call must not run at all, by its input (the browser's filename and origin rules); undefined: it may. */
+  refusal?(harnessName: string, input: unknown): string | undefined
+  /** Whether a tool the server lists is offered (the browser's fixed deny list, Settings → Plugins). */
+  offers?(tool: string): boolean
+  /** Once an outward call's approval is verified, before it runs (an approved origin is remembered). */
+  approved?(harnessName: string, input: unknown, requestId: string): Promise<void>
 }
 
 export type TurnServers = {
@@ -76,7 +84,13 @@ export type TurnServers = {
   release(): void | Promise<void>
 }
 
-export type TurnContext = { session: string; owner: Owner; signal: AbortSignal }
+export type TurnContext = {
+  session: string
+  owner: Owner
+  signal: AbortSignal
+  /** The call being made, for a server built for it (the browser's grant names its approval). */
+  call?: { requestId: string; toolUseId: string }
+}
 
 export type TurnToolsDeps = {
   sessions: SessionOwners
@@ -135,7 +149,7 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
   try {
     return await use(client)
   } finally {
-    await client.close().catch(() => {})
+    if (!server.keepOpen) await client.close().catch(() => {})
   }
 }
 
@@ -143,7 +157,7 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
 async function listed(server: TurnServer, signal: AbortSignal) {
   return withClient(server, async (client) => {
     const { tools } = await client.listTools(undefined, { signal })
-    return tools.map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+    return tools.filter((tool) => server.offers?.(tool.name) ?? true).map((tool) => ({ tool, name: harnessToolName(tool.name) }))
   })
 }
 
@@ -210,6 +224,8 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const signal = Context.current().cancellationSignal
       return withServers(deps, { session, owner, signal }, async (set) => {
         const { server, harnessName } = await resolve(set, tool, signal)
+        // A call that will be refused is not parked: its activity says why.
+        if (server.refusal?.(harnessName, input) !== undefined) return { tier: 'read' as const }
         return { tier: server.tierOf(harnessName, input) }
       })
     },
@@ -235,7 +251,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const principal = turnPrincipal(owner, tiers ? { tiers: [...tiers] } : undefined)
     const fields = inputObject(input)
     const signal = context.cancellationSignal
-    return withServers(deps, { session, owner, signal }, async (set) => {
+    return withServers(deps, { session, owner, signal, call: { requestId, toolUseId } }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
       const { server, tool, harnessName } = await resolve(set, name, signal)
       const tier = server.tierOf(harnessName, input)
@@ -261,13 +277,18 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         await record('refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
+      const refused = server.refusal?.(harnessName, input)
+      if (refused !== undefined) await refuse(refused, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
         await refuse(`${name} needs the "${tier}" tier, which this session's turn does not hold`, TOOL_ERROR)
       }
       // As runAsActivity: the approval is checked as the call runs, bound to this call's input.
       const binding = deps.audit ? { inputHash: deps.audit.hash(name, fields) } : undefined
-      if (tier === 'outward' && !(await deps.approvals?.approved(requestId, binding))) {
-        await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
+      if (tier === 'outward') {
+        if (!(await deps.approvals?.approved(requestId, binding))) {
+          await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
+        }
+        await server.approved?.(harnessName, input, requestId)
       }
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>

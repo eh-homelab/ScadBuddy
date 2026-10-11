@@ -81,10 +81,17 @@ async def test_an_offset_is_written_once(agent_db: Conn) -> None:
 @pytest.mark.requires_postgres
 async def test_finish_turn_writes_once(agent_db: Conn, connect: object) -> None:
     sid = await insert_session(agent_db, budget=2.0)
-    await agent_db.execute("UPDATE ai_sessions SET cost_usd = 0.5, turns = 3 WHERE id = %s", (sid,))
+    await agent_db.execute(
+        "UPDATE ai_sessions SET cost_usd = 0.5, turns = 3, durable_turn_id = gen_random_uuid()"
+        " WHERE id = %s",
+        (sid,),
+    )
     acts = SessionActivities(connect)  # type: ignore[arg-type]
     args = FinishTurn(session_id=sid, turn_id="t", outcome="failed", message="it broke")
     assert await acts.finish_turn(args)
+    # The turn is over: a headless-browser grant made in it dies with it (#2320).
+    cur = await agent_db.execute("SELECT durable_turn_id FROM ai_sessions WHERE id = %s", (sid,))
+    assert await cur.fetchone() == (None,)
     assert not await acts.finish_turn(args)  # a retry writes nothing twice
     log = await events(agent_db, sid)
     assert [e["type"] for e in log] == ["session.result", "error", "session.status"]

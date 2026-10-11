@@ -32,6 +32,8 @@ export type TurnServerDeps = {
         limits?: Partial<HttpLimits>
       }
     | undefined
+  /** More servers for the turn: the headless browser and its grant tool (turnBrowser.ts). */
+  extra?: ((context: TurnContext) => Promise<TurnServer[]>) | undefined
 }
 
 export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Promise<TurnServers> {
@@ -77,6 +79,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         pinned: true,
       })
     }
+    if (deps.extra) servers.push(...(await deps.extra(context)))
     return {
       servers,
       problems: forwarded?.problems ?? [],

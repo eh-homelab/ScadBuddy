@@ -192,7 +192,7 @@ export class DurableTurns {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, updated_at = now() FROM prior
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now() FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND ${POOL_COST} < ${POOL_BUDGET}
@@ -203,6 +203,8 @@ export class DurableTurns {
         turn.author.kind,
         turn.author.id,
         turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
+        // The running turn, which a headless-browser grant dies with (#2320).
+        turn.turnId,
       ],
     )
     if (!claimed) return undefined
@@ -309,7 +311,7 @@ export class DurableTurns {
   /** Gives back a claim whose message the workflow refused (Ruling 7), to the status it had. */
   async #giveBack(id: string, prior: SessionStatus): Promise<void> {
     const released = await this.#sql`
-      UPDATE ai_sessions SET status = ${prior}, updated_at = now() WHERE id = ${id} AND status = 'running'`
+      UPDATE ai_sessions SET status = ${prior}, durable_turn_id = NULL, updated_at = now() WHERE id = ${id} AND status = 'running'`
     if (released.count > 0) await this.#events.append(id, [event({ type: 'session.status', sessionId: id, status: prior })])
   }
 

@@ -54,6 +54,7 @@ import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
+import { BrowserHost, type HeadlessBrowserDeps, turnBrowserServers } from './temporal/turnBrowser.js'
 import { turnServers } from './temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
@@ -283,6 +284,25 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
+// The headless browser's deployment (#349, #983), for classic and durable turns alike.
+const headlessBrowserDeps: HeadlessBrowserDeps = {
+  backendUrl: config.backendUrl,
+  livePublicUrl: async () => {
+    try {
+      const { data, response } = await backend.GET('/api/v1/settings')
+      if (!data) console.warn(`headless browser: GET /api/v1/settings answered ${response.status}; the stored public_url is left out this turn`)
+      return data?.public_url ?? undefined
+    } catch (err) {
+      console.warn(`headless browser: could not read the stored public_url, left out this turn: ${String(err)}`)
+      return undefined
+    }
+  },
+  ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
+  ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
+  ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
+  sandbox: chromiumSandbox,
+  probe: (origins) => uiOriginProbe.probe(origins),
+}
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -322,24 +342,7 @@ const sessions =
         // SCADBUDDY_ALLOWED_ORIGINS, or the backend when none is configured;
         // SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what else a human may let it
         // open (harness/browserOrigins.ts).
-        headlessBrowser: {
-          backendUrl: config.backendUrl,
-          livePublicUrl: async () => {
-            try {
-              const { data, response } = await backend.GET('/api/v1/settings')
-              if (!data) console.warn(`headless browser: GET /api/v1/settings answered ${response.status}; the stored public_url is left out this turn`)
-              return data?.public_url ?? undefined
-            } catch (err) {
-              console.warn(`headless browser: could not read the stored public_url, left out this turn: ${String(err)}`)
-              return undefined
-            }
-          },
-          ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
-          ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
-          ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
-          sandbox: chromiumSandbox,
-          probe: (origins) => uiOriginProbe.probe(origins),
-        },
+        headlessBrowser: headlessBrowserDeps,
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
@@ -419,6 +422,8 @@ const workerDataConverter = dataConverter
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
 // own queue, HOST_QUEUE, served by `hostWorker` below.
 const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
+// The headless browsers this replica runs for durable sessions' pinned calls.
+const browserHost = new BrowserHost({ paths })
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -434,6 +439,18 @@ const turnToolDeps = temporal
         },
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, 'durable-turns'), audit },
+        ...(database
+          ? {
+              extra: turnBrowserServers({
+                sql: database.sql,
+                paths,
+                host: browserHost,
+                headless: headlessBrowserDeps,
+                ...(settings ? { settings } : {}),
+                builtIn: () => builtInTools.policy(),
+              }),
+            }
+          : {}),
       }),
       hostQueue: HOST_QUEUE,
       approvals: new PgApprovalRecords(temporal.sql),
@@ -633,6 +650,7 @@ async function stop(): Promise<void> {
   await Promise.all([
     temporalWorker?.stop(),
     hostWorker?.stop(),
+    browserHost.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])
   stopSessionWake?.()

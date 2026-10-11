@@ -454,10 +454,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
     approval; no browser or answer tools)), a durable turn's other tools (#2320,
     `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins
-    through the forwarder, `http_request`): `turn_tools` lists them per turn as
+    through the forwarder, `http_request`, and `turnBrowser.ts`'s headless browser and
+    its grant tool): `turn_tools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
     and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
-    the servers again and checks tier, principal and approval as it runs; and `AgentOperation` (`workflows.ts`, bundled by
+    the servers again and checks tier, principal and approval as it runs (a server whose
+    state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
+    `agent-tools.<hostname>`, which each agent also polls); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
     the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`

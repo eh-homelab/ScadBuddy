@@ -71,6 +71,28 @@ plugins. This one is built by the harness, not read from a plugin, and `env -i` 
 the server and Chromium start with `HOME`, `TMPDIR` and `PLAYWRIGHT_BROWSERS_PATH` only
 (measured: `/proc/<pid>/environ` in the tests and in the image).
 
+### In a durable session
+
+A durable session (spec 2026-10-01 §6) has the same browser (#2320; this supersedes plan
+5c Ruling 15, which left it out). Its tools run as Temporal activities on the TS agent,
+not in a Claude Code process, so the agent starts the same server itself
+([`turnBrowser.ts`](../../agent/src/temporal/turnBrowser.ts) `BrowserHost`):
+`materializeHeadlessBrowser()` and `assertHeadlessPlugin()` as above, then the written
+`.mcp.json`'s command over stdio. The server lives for the session on the replica that
+started it and is closed after ten idle minutes (`BROWSER_IDLE_MS`). Its tools are turn
+tools named `plugin_playwright_playwright__browser_*`, so their harness names, tiers and
+Settings → Plugins overrides are the classic ones. Every call is pinned to that replica:
+each agent also polls `agent-tools.<hostname>`, and the listing names that queue for
+each browser tool.
+
+Each call gets the same checks as a classic turn's seam. The deny list and any disabled
+tools are not offered, and are refused if named anyway. `browserInputGuard` refuses a
+bad filename or a refused origin before the call parks. An origin a human may allow
+makes the call outward. Once that call is approved, the origin is remembered under the
+call's own approved `ai_input_responses` row (`rememberDurableOrigin`). The grant tool
+is `scadbuddy_browser__authorize_request` there too (see "Approving one outward
+request").
+
 ## Tools and tiers
 
 The server's 25 core tools, minus five, each with an explicit tier
@@ -281,6 +303,14 @@ built:
    grant used in the same statement. A third click is refused again.
 
 So an interrupt, a handoff, a new turn or the end of the turn voids an unused grant.
+
+In a durable session (#2320) the approval is the call's own approved
+`ai_input_responses` row, which the workflow's gate wrote and the activity checked
+against this exact input. The turn is `ai_sessions.durable_turn_id`, set when the turn
+is claimed and cleared by `finish_turn`, the release of a refused start, and the durable
+sweep. `recordDurableGrant()` writes the grant with `request_id` instead of
+`approval_id`. `GRANT_SQL`'s durable branch lets it through only while the session is
+durable, is running or parked, and its `durable_turn_id` is the grant's turn.
 
 **A grant binds the method and path, not the body or query string** (review of #518).
 The approver sees only those two, so for print and send the printer, plate and options

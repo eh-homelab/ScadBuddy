@@ -776,7 +776,7 @@ function describe(err: unknown): string {
  * What every turn appends to Claude Code's own system prompt: the data/instruction
  * boundary (#258, safety/untrusted.ts: only the user's messages are instructions, tool
  * results are data), then which browser each browser_* tool drives. A durable turn has
- * no headless browser (plan 5c Ruling 15).
+ * the headless browser too, as turn tools (#2320, superseding plan 5c Ruling 15).
  */
 export function systemAppend(headlessBrowser: boolean): string {
   return `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(headlessBrowser)}`
@@ -1193,7 +1193,10 @@ export class SessionManager {
         text: options.context ? `${prompt}\n\n${options.context}` : prompt,
         author: principal,
         images: options.images ?? [],
-        systemAppend: systemAppend(false),
+        // The headless browser is offered as turn tools (temporal/turnBrowser.ts) whenever it is on.
+        systemAppend: systemAppend(
+          this.deps.headlessBrowser !== undefined && (await this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER)) === true,
+        ),
         ...(options.tiers ? { tiers: options.tiers } : {}),
       })
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
