@@ -7,6 +7,7 @@ scripts and to coerce their arguments.
 
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 from pydantic import BaseModel
 from temporalio import workflow
@@ -120,6 +121,17 @@ def _refusal(err: ActivityError) -> BaseException:
     return err
 
 
+def _segment(value: Any, what: str) -> str:
+    """`value` as one path segment of an internal route. A script names slugs and ids, so
+    one must never reach another route: `/` and `\\` are refused rather than quoted
+    (the server decodes `%2F` before routing), as are `.`, `..` and the empty string,
+    and everything else (`?`, `#`, `%`) is percent-quoted."""
+    text = str(value)
+    if text in ("", ".", "..") or "/" in text or "\\" in text:
+        raise ValueError(f"{what} {text!r} is not a valid {what}")
+    return quote(text, safe="")
+
+
 def outward_activity_id(fn: str, call_id: str) -> str:
     """An outward send's activity id, the one thing a Reset preview reads of it: its
     input is sealed (plan Ruling 14)."""
@@ -134,7 +146,20 @@ async def _send(
     suffix: str = "",
     outward: str | None = None,
 ) -> Any:
-    """Send one command; `outward` names the gated host function whose effect it is."""
+    """Send one command; `outward` names the gated host function whose effect it is.
+    Returns the route's body."""
+    return (await _post(call_id, path, body, suffix=suffix, outward=outward)).body
+
+
+async def _post(
+    call_id: str,
+    path: str,
+    body: dict[str, Any],
+    *,
+    suffix: str = "",
+    outward: str | None = None,
+) -> RouteAnswer:
+    """`_send`, with the route's status as well as its body."""
     owner: StepOwner = workflow.instance()
     key = route_key(owner.run_id, workflow.info().run_id, call_id + suffix)
     try:
@@ -148,7 +173,7 @@ async def _send(
         )
     except ActivityError as err:
         raise _refusal(err) from None
-    return answer.body
+    return answer
 
 
 async def _follow(path: str, settled: list[str], timeout: timedelta) -> dict[str, Any]:
@@ -167,18 +192,24 @@ async def _follow(path: str, settled: list[str], timeout: timedelta) -> dict[str
 
 
 async def _render(call_id: str, slug: str, params: dict[str, Any]) -> RenderResult:
-    accepted = await _send(call_id, f"/api/v1/models/{slug}/render", {"params": params})
-    job = await _follow(f"/api/v1/jobs/{accepted['job_id']}", _JOB_SETTLED, timedelta(hours=2))
+    path = f"/api/v1/models/{_segment(slug, 'slug')}/render"
+    accepted = await _send(call_id, path, {"params": params})
+    job_path = f"/api/v1/jobs/{_segment(accepted['job_id'], 'job id')}"
+    job = await _follow(job_path, _JOB_SETTLED, timedelta(hours=2))
     return RenderResult(job_id=job["id"], status=job["status"], error=job.get("error"))
 
 
 async def _save(call_id: str, slug: str, job_id: str, name: str | None, *, suffix: str = "") -> str:
     """`POST /models/{slug}/outputs`: its 201 output, or its 202 operation followed."""
     body = {"job_id": job_id, **({"name": name} if name is not None else {})}
-    answer = await _send(call_id, f"/api/v1/models/{slug}/outputs", body, suffix=suffix)
-    if "kind" in answer and answer.get("status") in ("running", "succeeded", "failed"):
+    path = f"/api/v1/models/{_segment(slug, 'slug')}/outputs"
+    sent = await _post(call_id, path, body, suffix=suffix)
+    answer = sent.body
+    if sent.status == 202:
         operation = await _follow(
-            f"/api/v1/operations/{answer['id']}", _RUN_SETTLED, timedelta(minutes=30)
+            f"/api/v1/operations/{_segment(answer['id'], 'operation id')}",
+            _RUN_SETTLED,
+            timedelta(minutes=30),
         )
         if operation["status"] == "failed":
             raise RouteRefusedError((operation.get("error") or {}).get("detail") or "not saved")
@@ -225,7 +256,8 @@ async def approved_print(call: str, path: str, request: dict[str, Any]) -> Print
     accepted = await _send(call_id, path, body, outward="queue_print")
     run = accepted
     if run["status"] not in _RUN_SETTLED:
-        run = await _follow(f"/api/v1/print/runs/{run['id']}", _RUN_SETTLED, timedelta(hours=24))
+        run_path = f"/api/v1/print/runs/{_segment(run['id'], 'run id')}"
+        run = await _follow(run_path, _RUN_SETTLED, timedelta(hours=24))
     return PrintOutcome(
         run_id=run["id"],
         status=run["status"],
@@ -240,7 +272,8 @@ async def approved_arrange(call: str, request: dict[str, Any]) -> ArrangeResult:
     call_id = call
     await _approved(call_id)
     accepted = await _send(call_id, "/api/v1/outputs/arrange", request, outward="arrange")
-    job = await _follow(f"/api/v1/jobs/{accepted['id']}", _JOB_SETTLED, timedelta(hours=2))
+    job_path = f"/api/v1/jobs/{_segment(accepted['id'], 'job id')}"
+    job = await _follow(job_path, _JOB_SETTLED, timedelta(hours=2))
     result = ArrangeResult(job_id=job["id"], status=job["status"], error=job.get("error"))
     if job["status"] == "done":
         name = request.get("name")
@@ -278,7 +311,7 @@ async def queue_print(
     if file_id is not None:
         path = f"/api/v1/print/library/{int(file_id)}/run"
     else:
-        path = f"/api/v1/print/outputs/{output_id}/run"
+        path = f"/api/v1/print/outputs/{_segment(output_id, 'output id')}/run"
     call_id = str(workflow.uuid4())
     outcome: PrintOutcome = await _gated(
         "queue_print", runner, approved_print, call_id, call=call_id, path=path, request=request

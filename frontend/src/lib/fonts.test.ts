@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../api/client'
 import type { CatalogueFont } from '../api/types'
 import {
   cssFontFamily,
   formatFontValue,
   googleFontsCssUrl,
   installedAsCatalogue,
+  missingFamiliesOf,
+  missingFonts,
   orderFonts,
   parseFontValue,
   preferredStyle,
@@ -125,5 +128,42 @@ describe('style choice', () => {
     expect(preferredStyle(['Bold', 'Regular', 'Italic'])).toBe('Regular')
     expect(preferredStyle(['Book', 'Bold'])).toBe('Book')
     expect(preferredStyle([])).toBe('')
+  })
+})
+
+describe('a font the render was refused for (#1286)', () => {
+  const refused = new ApiError({
+    title: 'Unprocessable Content',
+    status: 422,
+    detail: "parameter 'font' names font family 'Roboto', which is not installed",
+    parameters: ['font', 'label_font'],
+    families: ['Roboto', 'Pacifico'],
+  })
+
+  it('reads the parameters and families of the 422', () => {
+    expect(missingFonts(refused)).toEqual({ parameters: ['font', 'label_font'], families: ['Roboto', 'Pacifico'] })
+  })
+
+  it('is nothing for any other refusal', () => {
+    expect(missingFonts(new ApiError(422, 'Unknown parameter'))).toBeUndefined()
+    expect(
+      missingFonts(new ApiError({ title: 'Unprocessable Content', status: 422, parameters: ['colour'] })),
+    ).toBeUndefined()
+    expect(missingFonts(new ApiError({ title: 'Bad Gateway', status: 502, parameters: ['font'], families: ['Roboto'] }))).toBeUndefined()
+    expect(missingFonts(new Error('offline'))).toBeUndefined()
+  })
+
+  it('gives each field the families its own value names', () => {
+    const problem = missingFonts(refused)!
+    expect(missingFamiliesOf(problem, 'font', 'roboto:style=Bold')).toEqual(['Roboto'])
+    expect(missingFamiliesOf(problem, 'label_font', 'Pacifico')).toEqual(['Pacifico'])
+    expect(missingFamiliesOf(problem, 'other', 'Roboto')).toEqual([])
+    // A spelling the server normalised past matching: the field still says what is missing.
+    expect(missingFamiliesOf(problem, 'font', 'Robot\\o')).toEqual(['Roboto', 'Pacifico'])
+  })
+
+  it('matches a family as fontconfig does, ignoring blanks as well as case', () => {
+    const problem = { parameters: ['font'], families: ['Roboto Slab', 'Pacifico'] }
+    expect(missingFamiliesOf(problem, 'font', 'RobotoSlab:style=Bold')).toEqual(['Roboto Slab'])
   })
 })

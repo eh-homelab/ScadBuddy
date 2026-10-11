@@ -21,10 +21,10 @@ and support blockers or enforcers print nothing and are dropped, with a note.
 
 The file is untrusted: the archive is bounded as the print path bounds it
 (:data:`~scadbuddy.render.bambu3mf.MAX_UNCOMPRESSED_BYTES`), every entry is read
-capped, and at most :data:`MAX_OBJECTS` distinct objects are read. Components may
-name one object many times, so what the file expands to is bounded too: at most
-:data:`MAX_VISITS` objects visited and :data:`MAX_TRIANGLES` triangles produced, however
-few bytes asked for them.
+capped, and every read spends against a :class:`~scadbuddy.render.read_budget.ReadBudget`
+(#2087): distinct objects, and, since components may name one object many times, what the
+file expands to (objects visited, triangles produced, paint digits carried), however few
+bytes asked for them. Past one, the refusal names it and how to raise it.
 """
 
 from __future__ import annotations
@@ -61,10 +61,9 @@ from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PartSource, PlateLayout
 from scadbuddy.render.paint import PaintCodeError, states
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart, Paint, normalise_colour
 
-#: The most distinct objects one file is read as: Arrange takes 200 objects a request.
-MAX_OBJECTS = 200
 #: The one mesh file a library piece keeps, every colour a material of it: the shape of
 #: a render's split 3MF, which `PlateLayout.load` reads.
 PIECE_MESH_NAME = "object.3mf"
@@ -84,18 +83,6 @@ _UNITS = {
 _DROPPED = {"modifier_part", "support_blocker", "support_enforcer"}
 #: A component chain deeper than this is not a file any slicer writes.
 _MAX_DEPTH = 8
-#: The most objects one read visits, components included: a few KB of components that
-#: each name the same object many times would otherwise expand without bound.
-MAX_VISITS = 20_000
-#: The most triangles one read produces, every instance of a mesh counted: about what a
-#: model file at the archive cap can hold, so a real file never reaches it.
-MAX_TRIANGLES = 5_000_000
-#: The most ``paint_color`` digits one read carries, every instance of a painted mesh
-#: counted, as `MAX_TRIANGLES` counts its faces (#1965): each placed copy of a painted
-#: mesh carries its codes into its piece and the output. Four digits a face at the
-#: triangle cap; a real project averages about two (library file 688: 26,884 digits over
-#: 13,873 faces).
-MAX_PAINT_DIGITS = 20_000_000
 
 
 class UnreadableObjectsError(ValueError):
@@ -272,6 +259,7 @@ class _Reader:
     #: Bambu Studio's settings, when the file is a Bambu project.
     settings: dict[str, _ObjectSettings] | None
     filaments: list[str]
+    budget: ReadBudget = field(default_factory=ReadBudget)
     visits: int = 0
     triangles: int = 0
     paint_digits: int = 0
@@ -283,10 +271,12 @@ class _Reader:
         self.visits += visits
         self.triangles += triangles
         self.paint_digits += paint_digits
-        if self.visits > MAX_VISITS or self.triangles > MAX_TRIANGLES:
-            raise UnreadableObjectsError("the 3MF expands to too many objects or triangles to read")
-        if self.paint_digits > MAX_PAINT_DIGITS:
-            raise UnreadableObjectsError("the 3MF expands to too much painting to read")
+        if self.visits > self.budget.max_visits:
+            raise UnreadableObjectsError(self.budget.refusal("max_visits"))
+        if self.triangles > self.budget.max_triangles:
+            raise UnreadableObjectsError(self.budget.refusal("max_triangles"))
+        if self.paint_digits > self.budget.max_paint_digits:
+            raise UnreadableObjectsError(self.budget.refusal("max_paint_digits"))
 
     def colour_of(self, extruder: int) -> str:
         return self.filaments[extruder - 1] if extruder <= len(self.filaments) else STL_COLOUR
@@ -499,10 +489,12 @@ class _Reader:
         return parts, notes
 
 
-def read_objects(payload: bytes) -> list[ReadObject]:
-    """Every object ``payload``'s build places, each with its count, in build order.
-    Raises :class:`UnreadableObjectsError` for a file whose objects cannot be read."""
-    return _opened(payload, _read)
+def read_objects(payload: bytes, budget: ReadBudget | None = None) -> list[ReadObject]:
+    """Every object ``payload``'s build places, each with its count, in build order,
+    read within ``budget`` (the defaults when None). Raises
+    :class:`UnreadableObjectsError` for a file whose objects cannot be read."""
+    spend = budget or ReadBudget()
+    return _opened(payload, lambda archive: _read(archive, spend))
 
 
 @dataclass(frozen=True)
@@ -513,14 +505,15 @@ class PlateRead:
     plates: int
 
 
-def read_plate_parts(payload: bytes, plate: int = 1) -> PlateRead:
+def read_plate_parts(payload: bytes, plate: int = 1, budget: ReadBudget | None = None) -> PlateRead:
     """The parts of ``payload``'s plate ``plate``, one per colour in the order colours
     appear, placed where the file places them: what a library file's preview and mesh
     checks read, as an output's read its own 3MF (#1753). Plates are Bambu Studio's
     (``model_settings.config``); a file that lists none is one plate. Refused as
     :func:`read_objects` refuses; a plate the file lacks is
     :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
-    return _opened(payload, lambda archive: _read_plate(archive, plate))
+    spend = budget or ReadBudget()
+    return _opened(payload, lambda archive: _read_plate(archive, plate, spend))
 
 
 def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
@@ -539,11 +532,11 @@ def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
     return plates
 
 
-def _read_plate(archive: _Archive, plate: int) -> PlateRead:
+def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     model = _root_model_name(archive)
     items = _build_items(archive, model)
     config = _model_settings(archive)
-    reader = _Reader(archive, _object_settings(config), _filament_colours(archive))
+    reader = _Reader(archive, _object_settings(config), _filament_colours(archive), budget)
     plates = _plates(config)
     count = len(plates) or 1
     if (plates and plate not in plates) or (not plates and plate != 1):
@@ -602,11 +595,11 @@ def _build_items(archive: _Archive, model: str) -> list[ET.Element]:
     ]
 
 
-def _read(archive: _Archive) -> list[ReadObject]:
+def _read(archive: _Archive, budget: ReadBudget) -> list[ReadObject]:
     model = _root_model_name(archive)
     items = _build_items(archive, model)
     reader = _Reader(
-        archive, _object_settings(_model_settings(archive)), _filament_colours(archive)
+        archive, _object_settings(_model_settings(archive)), _filament_colours(archive), budget
     )
     groups: dict[tuple[str, str, tuple[float, ...]], tuple[np.ndarray, int]] = {}
     for item in items:
@@ -616,8 +609,8 @@ def _read(archive: _Archive) -> list[ReadObject]:
         if key in groups:
             groups[key] = (groups[key][0], groups[key][1] + 1)
             continue
-        if len(groups) == MAX_OBJECTS:
-            raise UnreadableObjectsError(f"the 3MF places more than {MAX_OBJECTS} distinct objects")
+        if len(groups) == budget.max_objects:
+            raise UnreadableObjectsError(budget.refusal("max_objects"))
         groups[key] = (matrix, 1)
     objects: list[ReadObject] = []
     for (path, object_id, _), (matrix, count) in groups.items():

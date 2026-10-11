@@ -952,8 +952,8 @@ session: their bytes go to `ai_session_blobs` through `SessionBlobs.put`, named
 `<sha256>.<ext>`, and the staging rows are deleted. The session's own lifetime governs
 them from then on (deleting the session cascades). A durable session (#1056) reads
 images from that table by name in an activity, so no image enters a Temporal payload.
-Every image a turn starts with, whatever brought it (an attachment, a backend
-reference over `sessions_send`, an old tab's inline image), is also stored in
+Every image a turn starts with, whatever brought it (an attachment, or a backend
+reference over `sessions_send`), is also stored in
 `ai_session_blobs` before the `user.turn` event is logged (`sessions/manager.ts`
 `sentImages`; an attachment's later move then finds its row there). The event keeps
 the previews, each with its image's name, and an MCP transcript (`sessions_get`) only
@@ -966,9 +966,12 @@ Nothing logs or traces the bytes.
 
 **The socket.** The chat socket takes frames up to 256 KiB (`CHAT_FRAME_MAX`), the
 same as the tab socket (`BRIDGE_FRAME_MAX`), and at most 32 unhandled frames per
-connection. For one release it still parses inline images from a tab loaded before
-#1941, but only within that cap. A larger frame closes the socket with 1009, and the
-old tab reconnects without that message.
+connection. A message carries images only as attachment ids; it never carries image
+bytes (#1959). A tab loaded before #1941 still sends its images inline: within the cap
+the message is refused as `invalid`, asking the user to reload the page
+(`sessions/clientProtocol.ts` `STALE_TAB_IMAGES`), before anything reads the images or
+starts a turn. A larger frame closes the socket with 1009, and the old tab reconnects
+without that message.
 
 ## Audit log (#258)
 

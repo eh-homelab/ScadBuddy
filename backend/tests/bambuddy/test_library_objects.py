@@ -20,6 +20,7 @@ from scadbuddy.bambuddy.library_objects import NotArrangeableError, read_library
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.jobs import LAYOUT_NAME
 from scadbuddy.render.objects3mf import read_objects
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.split import ColourPart
 from scadbuddy.store.local import LocalBlobStore
 from tests.bambuddy.conftest import BASE_URL
@@ -64,9 +65,9 @@ def parses(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """One entry per 3MF parse, so a test can say none happened."""
     calls: list[int] = []
 
-    def counted(payload: bytes) -> Any:
+    def counted(payload: bytes, budget: ReadBudget | None = None) -> Any:
         calls.append(len(payload))
-        return read_objects(payload)
+        return read_objects(payload, budget)
 
     monkeypatch.setattr(library_objects, "read_objects", counted)
     return calls
@@ -130,6 +131,50 @@ async def test_a_refusal_is_kept_with_the_file(
         assert refused.value.reason == "the file is not a 3MF archive"
         assert str(refused.value) == "file-89.3mf: the file is not a 3MF archive"
     assert download.call_count == 1
+
+
+@respx.mock
+async def test_a_refusal_under_a_smaller_budget_is_read_again_under_a_larger_one(
+    bambuddy: BambuddyClient, tmp_path: Path, parses: list[int]
+) -> None:
+    # #2087: the project is 24 triangles. Refused within 10, kept; a request allowed
+    # more reads it again rather than taking the smaller budget's word for it.
+    download = library_file(88, _project(tmp_path))
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    small = ReadBudget(max_triangles=10)
+    with pytest.raises(NotArrangeableError) as refused:
+        await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache, budget=small)
+    assert "max_triangles read budget" in refused.value.reason
+    found = await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache)
+    assert [obj.library_file_id for obj in found.objects] == [88]
+    assert download.call_count == 2 and len(parses) == 2
+
+
+@respx.mock
+async def test_a_refusal_answers_a_budget_it_covers_without_a_read(
+    bambuddy: BambuddyClient, tmp_path: Path, parses: list[int]
+) -> None:
+    download = library_file(88, _project(tmp_path))
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    for budget in (ReadBudget(max_triangles=20), ReadBudget(max_triangles=10)):
+        with pytest.raises(NotArrangeableError, match="max_triangles read budget"):
+            await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache, budget=budget)
+    assert download.call_count == 1 and len(parses) == 1
+
+
+@respx.mock
+async def test_a_kept_list_answers_any_budget(
+    bambuddy: BambuddyClient, tmp_path: Path, parses: list[int]
+) -> None:
+    # Keeping it cost the read already: a smaller budget is about work not yet done.
+    download = library_file(88, _project(tmp_path))
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    first = await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache)
+    again = await read_library_objects(
+        bambuddy, 88, blobs=blobs, cache=cache, budget=ReadBudget(max_triangles=1)
+    )
+    assert again.objects == first.objects
+    assert download.call_count == 1 and len(parses) == 1
 
 
 @respx.mock

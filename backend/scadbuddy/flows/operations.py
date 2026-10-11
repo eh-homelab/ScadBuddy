@@ -3,8 +3,16 @@
 
 Each records the decision in `workflow_run_decisions` first, then tells the harness with
 its own public Update (`provide_callback_result`, `tool_approval`) under the request id
-as the Update id, so a retried run resends the same Update. A decision the harness
-refuses is deleted again: no row says `approved` for a call that never ran.
+as the Update id, so a retried run resends the same Update. The row lives only as long
+as the Update can still land. A decision the harness refuses is deleted again, and so is
+one whose Update failed any other way (an RPC error, a deadline, the activity timing
+out): the operation's next attempt records it again and resends under the same Update
+id, which Temporal answers once. No row says `approved` for a call that never ran, and
+no row left by a failed send blocks the answer that would resolve the call.
+
+A row whose send never got to fail (the worker died in between) is the same decision a
+retry brings, so `check` lets that decision through to resend; any other decision for
+the call is refused as answered.
 """
 
 from __future__ import annotations
@@ -60,6 +68,23 @@ def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
 
 
+def _wanted(kind: str, request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The outcome and response a request asks for, as its row records them."""
+    if kind == "answer":
+        return "answered", {"answer": str(request["answer"])}
+    reason = request.get("reason")
+    return (
+        "approved" if bool(request["approved"]) else "denied",
+        {} if reason is None else {"reason": str(reason)},
+    )
+
+
+def _same(existing: Decision, kind: str, request: dict[str, Any]) -> bool:
+    """Whether a recorded row is the decision `request` asks for (a resend), not another."""
+    outcome, response = _wanted(kind, request)
+    return existing.kind == kind and existing.outcome == outcome and existing.response == response
+
+
 def flow_kinds(store: FlowStore) -> list[OperationKind]:
     """Both kinds over `store`; the `projects` worker serves them."""
 
@@ -81,21 +106,31 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         if described.run_id != run.workflow_run_id:
             raise _stale()
         rid = request_id(run, call_id)
-        if await store.get_decision(rid) is not None:
+        existing = await store.get_decision(rid)
+        if existing is not None and not _same(existing, kind, request):
             raise _resolved()
-        return {"request_id": rid, "workflow_id": run.workflow_id}
+        return {
+            "request_id": rid,
+            "workflow_id": run.workflow_id,
+            "workflow_run_id": run.workflow_run_id,
+        }
 
     async def record(request: dict[str, Any], checked: dict[str, Any], decision: Decision) -> None:
         if not await store.record_decision(decision):
             raise _resolved()
 
+    async def forget(rid: str) -> None:
+        """Undo a recorded decision whose Update did not land; never masks the failure."""
+        try:
+            await store.delete_decision(rid)
+        except Exception:
+            activity.logger.exception("could not delete the unsent flow decision %s", rid)
+
     def _decision(request: dict[str, Any], checked: dict[str, Any], **fields: Any) -> Decision:
-        rid = str(checked["request_id"])
-        workflow_run_id = rid.split(":")[2]
         return Decision(
-            request_id=rid,
+            request_id=str(checked["request_id"]),
             run_id=str(request["run_id"]),
-            workflow_run_id=workflow_run_id,
+            workflow_run_id=str(checked["workflow_run_id"]),
             call_id=str(request["call_id"]),
             responder="browser",
             **fields,
@@ -105,8 +140,8 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         return await check("answer", request)
 
     async def run_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        response = {"answer": str(request["answer"])}
-        decision = _decision(request, checked, kind="answer", outcome="answered", response=response)
+        outcome, response = _wanted("answer", request)
+        decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
         await record(request, checked, decision)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         try:
@@ -114,7 +149,7 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
                 decision.call_id, result=response, update_id=decision.request_id
             )
         except CallbackResultError as err:
-            await store.delete_decision(decision.request_id)
+            await forget(decision.request_id)
             if err.error_type == "MalformedCallbackResult":
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "The run cannot take that answer."
@@ -122,6 +157,9 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
             if err.error_type == "CallbackAlreadyResolved":
                 raise _resolved() from None
             raise _stale() from None
+        except BaseException:
+            await forget(decision.request_id)
+            raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:
@@ -130,13 +168,8 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
     async def run_decide(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         approved = bool(request["approved"])
         reason = request.get("reason")
-        decision = _decision(
-            request,
-            checked,
-            kind="approval",
-            outcome="approved" if approved else "denied",
-            response={} if reason is None else {"reason": str(reason)},
-        )
+        outcome, response = _wanted("approval", request)
+        decision = _decision(request, checked, kind="approval", outcome=outcome, response=response)
         await record(request, checked, decision)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         try:
@@ -147,10 +180,13 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
                 update_id=decision.request_id,
             )
         except ToolApprovalError as err:
-            await store.delete_decision(decision.request_id)
+            await forget(decision.request_id)
             if err.error_type == "ToolApprovalAlreadyResolved":
                 raise _resolved() from None
             raise _stale() from None
+        except BaseException:
+            await forget(decision.request_id)
+            raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": decision.outcome}
 
     async def check_reset(request: dict[str, Any]) -> dict[str, Any]:

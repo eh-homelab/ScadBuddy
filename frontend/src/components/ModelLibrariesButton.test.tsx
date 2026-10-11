@@ -621,6 +621,100 @@ describe('ModelLibrariesButton, live (#269)', () => {
       expect(within(includes).getByText(/The check stopped short/)).toBeInTheDocument()
     })
 
+    it('names the model an installed suggestion is pinned by, and says when its checkout lacks the file', async () => {
+      reports({
+        ...clean,
+        unresolved: 1,
+        includes: [
+          {
+            ...unresolvedBosl2,
+            suggestion: {
+              ...unresolvedBosl2.suggestion,
+              source: 'installed',
+              commit: 'abc1234',
+              has_file: false,
+              pinned_by: 'cable-label',
+            },
+          },
+        ],
+      })
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      const include = await within(dialog).findByRole('listitem', { name: '<BOSL2/std.scad>' })
+      expect(include).toHaveTextContent(
+        'BOSL2, as cable-label pins it, would provide it (its checkout here has no such file).',
+      )
+    })
+
+    it("does not check again on another model's pin signal, only on this model's (#2193)", async () => {
+      const asked = reports(clean)
+      let modelReads = 0
+      server.events.on('request:end', ({ request }) => {
+        if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/models/name-keychain') {
+          modelReads += 1
+        }
+      })
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      await within(dialog).findByText('The source has no include or use.')
+      const checks = asked.length
+      const reads = modelReads
+
+      // Another model's pin: this model is read again, its pins are the same, nothing is checked.
+      emitRealtime('library.changed', ['libraries', 'model:cable-label'], {
+        slug: 'cable-label',
+        name: 'BOSL2',
+      })
+      await waitFor(() => expect(modelReads).toBeGreaterThan(reads))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(asked).toHaveLength(checks)
+
+      // This model's pin: checked again.
+      await withBosl2()
+      emitRealtime('library.changed', ['libraries', 'model:name-keychain'], {
+        slug: 'name-keychain',
+        name: 'BOSL2',
+      })
+      await waitFor(() => expect(asked).toHaveLength(checks + 1))
+    })
+
+    it('says it is checking again while a re-check runs, keeping the last report', async () => {
+      let release: () => void = () => {}
+      const held = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let calls = 0
+      server.use(
+        http.post('/api/v1/models/:slug/dependencies', async () => {
+          calls += 1
+          if (calls === 1) return HttpResponse.json({ ...clean, includes: [unresolvedBosl2], unresolved: 1 })
+          await held
+          return HttpResponse.json(clean)
+        }),
+      )
+      const { user } = renderPage(
+        <ModelLibrariesButton slug="name-keychain" name="Name Keychain" />,
+      )
+      const dialog = await openDialog(user)
+      const includes = within(dialog).getByRole('region', { name: 'Includes' })
+      const include = await within(includes).findByRole('listitem', { name: '<BOSL2/std.scad>' })
+      expect(within(includes).queryByText('Checking again')).not.toBeInTheDocument()
+
+      await user.click(within(include).getByRole('button', { name: 'Pin BOSL2' }))
+      expect(await within(includes).findByText('Checking again')).toBeInTheDocument()
+      expect(includes).toHaveAttribute('aria-busy', 'true')
+      expect(within(includes).getByRole('listitem', { name: '<BOSL2/std.scad>' })).toBeInTheDocument()
+
+      release()
+      expect(await within(includes).findByText('The source has no include or use.')).toBeInTheDocument()
+      expect(within(includes).queryByText('Checking again')).not.toBeInTheDocument()
+      expect(includes).toHaveAttribute('aria-busy', 'false')
+    })
+
     it('says so when the check fails, and the rest of the dialog still works', async () => {
       server.use(
         http.post('/api/v1/models/:slug/dependencies', () =>

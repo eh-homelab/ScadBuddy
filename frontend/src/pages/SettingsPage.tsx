@@ -1090,6 +1090,7 @@ export function SettingsPage() {
                   </p>
                 </div>
               )}
+              {runtimeRows('projects')}
             </>,
           )}
 

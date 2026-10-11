@@ -31,6 +31,7 @@ yq '.jobs[].steps[] | select(.id == "edit") | .run' "$workflow" > "$work/edit.sh
 
 export IMAGE=ghcr.io/eh-homelab/scadbuddy
 export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
+export AGENT_DURABLE_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent-durable
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
@@ -42,12 +43,15 @@ export VERSION=sha-2222222
 DIGEST="sha256:$(printf '2%.0s' {1..64})"
 REVISION="$(printf '2%.0s' {1..40})"
 AGENT_DIGEST="sha256:$(printf '4%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST
+AGENT_DURABLE_DIGEST="sha256:$(printf '5%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
 pinned="$IMAGE:$VERSION@$DIGEST"
 agent_pinned="$AGENT_IMAGE:$VERSION@$AGENT_DIGEST"
+durable="$AGENT_DURABLE_IMAGE:sha-3333333@sha256:$(printf '6%.0s' {1..64})"
+durable_pinned="$AGENT_DURABLE_IMAGE:$VERSION@$AGENT_DURABLE_DIGEST"
 failures=0
 
 fail() {
@@ -196,6 +200,50 @@ if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$agent")"; then
 else
   grep -q 'expected exactly one agent image line, found 2' "$work/log" \
     || fail "two agent lines: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# 7b. agent-durable (#1056) is optional: without its line the API and agent
+#     deploy alone (case 2), and the step says so.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^durable=none$' "$work/out" || fail "no durable: durable output is not none"
+else
+  fail "no durable: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 7c. With its line, it is pinned to its own digest, and the agent's pattern
+#     (a prefix of it) leaves it alone.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$durable")"; then
+  has_line "$pinned" "$MANIFEST" || fail "with durable: api image not pinned"
+  has_line "$agent_pinned" "$MANIFEST" || fail "with durable: agent image not pinned"
+  has_line "$durable_pinned" "$MANIFEST" || fail "with durable: durable image not pinned"
+  grep -q '^durable=pinned$' "$work/out" || fail "with durable: durable output is not pinned"
+else
+  fail "with durable: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 7d. With its line but no published image (a build from before 5e): an error,
+#     never a stale durable pin beside a new agent.
+if AGENT_DURABLE_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$durable")"; then
+  fail "durable, no image: step passed, expected an error"
+else
+  grep -q 'no image was published' "$work/log" \
+    || fail "durable, no image: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# 7e. A durable image line with no tag or digest is a near miss, not "not run".
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$AGENT_DURABLE_IMAGE")"; then
+  fail "bare durable: step passed, expected an error"
+else
+  grep -q 'has an image line for' "$work/log" \
+    || fail "bare durable: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# 7f. Two durable lines are an error.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$durable" "$durable")"; then
+  fail "two durable lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one agent-durable image line, found 2' "$work/log" \
+    || fail "two durable lines: wrong error: $(grep '::error' "$work/log")"
 fi
 
 # `dashboard_fails <name> <expected-error> <overlay-line>...`: the API and agent

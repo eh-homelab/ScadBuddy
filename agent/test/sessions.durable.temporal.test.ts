@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url'
 import type { Client } from '@temporalio/client'
 import type { Sql } from 'postgres'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AttachmentStore } from '../src/attachments/store.js'
 import type { Database } from '../src/db.js'
+import { ChatConnection } from '../src/routes/chat.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../src/safety/untrusted.js'
 import { DurableTurns } from '../src/sessions/durable.js'
@@ -13,6 +15,8 @@ import { type DescribeSession, DurableRunningSweep, durableDescriber } from '../
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { UserImage } from '../src/sessions/images.js'
 import { type SessionManager, type SessionRecord, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import type { ServerEvent } from '../src/sessions/protocol.js'
+import { frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
@@ -185,6 +189,32 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const [row] = await db.sql<{ status: string; turn_id: string | null }[]>`SELECT status, turn_id FROM ai_sessions WHERE id = ${session.id}`
     // Durable turns take no turn_id/lease claim (Ruling 7).
     expect(row).toEqual({ status: 'running', turn_id: null })
+  }, 60_000)
+
+  it("takes a turn's images from the chat socket's attachments, by name (#1959: the only way a panel sends them)", async () => {
+    const m = await durableManager()
+    const attachments = new AttachmentStore(db.sql)
+    const { id } = await attachments.put(browser, IMAGE)
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e), { attachments, snapshotMs: 60_000 })
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    await connection.receive(
+      JSON.stringify(
+        clientMessage({ type: 'user.message', text: 'look', context: { route: '/' }, images: [{ kind: 'attachment', id }] }),
+      ),
+    )
+    connection.close()
+    expect(out.filter((e) => e.type === 'error')).toEqual([])
+    // receive() returns once the turn has started; its events reach `out` later, so the row names the session.
+    const [session] = await db.sql<{ id: string; mode: string }[]>`SELECT id, mode FROM ai_sessions`
+    expect(session?.mode).toBe('durable')
+    const { messages } = await recorded(session!.id)
+    expect(messages).toEqual([expect.objectContaining({ images: [{ name: PNG_NAME, mediaType: 'image/png' }] })])
+    const [blob] = await db.sql<{ name: string }[]>`SELECT name FROM ai_session_blobs WHERE session_id = ${session!.id}`
+    expect(blob?.name).toBe(PNG_NAME)
+    // Moved into the session (attachments/store.ts `claim`).
+    expect(await db.sql`SELECT 1 FROM ai_attachments WHERE id = ${id}`).toHaveLength(0)
   }, 60_000)
 
   it("reads the turn's end from the log, and refuses a send while a turn runs", async () => {
