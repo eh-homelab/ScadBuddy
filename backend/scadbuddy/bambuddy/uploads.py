@@ -343,6 +343,19 @@ class BambuddyUploadStore:
         """Forget every project's remembered printer and nozzle (#599)."""
         await asyncio.to_thread(self._forget_project_targets, None)
 
+    async def folderless(self, name: str, parent_id: int | None) -> list[int]:
+        """The projects created here as ``name`` under ``parent_id`` whose folder is not
+        linked yet (#2263), newest first."""
+        return await asyncio.to_thread(self._folderless, name, parent_id)
+
+    async def remember_folderless(self, project_id: int, name: str, parent_id: int | None) -> None:
+        """Record a project Bambuddy has just created, before its folder is made."""
+        await asyncio.to_thread(self._remember_folderless, project_id, name, parent_id)
+
+    async def forget_folderless(self, project_id: int) -> None:
+        """The project has its folder; forgetting one not recorded is not an error."""
+        await asyncio.to_thread(self._forget_folderless, project_id)
+
     # The blocking bodies, run in a worker thread by the coroutines above.
 
     def _project_targets(self) -> dict[int, ProjectTarget]:
@@ -389,6 +402,29 @@ class BambuddyUploadStore:
                     Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
                 ),
             )
+
+    def _folderless(self, name: str, parent_id: int | None) -> list[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT project_id FROM folderless_projects"
+                " WHERE name = %s AND parent_id IS NOT DISTINCT FROM %s"
+                " ORDER BY created_at DESC, project_id DESC",
+                (name, parent_id),
+            ).fetchall()
+        return [row["project_id"] for row in rows]
+
+    def _remember_folderless(self, project_id: int, name: str, parent_id: int | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO folderless_projects (project_id, name, parent_id)"
+                " VALUES (%s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
+                " SET name = EXCLUDED.name, parent_id = EXCLUDED.parent_id",
+                (project_id, name, parent_id),
+            )
+
+    def _forget_folderless(self, project_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM folderless_projects WHERE project_id = %s", (project_id,))
 
     def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
