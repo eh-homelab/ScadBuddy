@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { principalLabel } from '../agent/chat/labels'
 import { useAssistantOpener } from '../agent/chat/opener'
@@ -355,6 +355,15 @@ function AgentAuthor({ agent, short }: { agent: NonNullable<ModelVersion['agent'
   const opener = useAssistantOpener()
   const [problem, setProblem] = useState('')
   const [opening, setOpening] = useState(false)
+  // A realtime refresh can replace the row while the session is read; the chat still
+  // opens, but nothing is set on a row that is gone.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const who = principalLabel(agent.principal)
   const badge = 'rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted'
   const session = agent.session
@@ -367,13 +376,14 @@ function AgentAuthor({ agent, short }: { agent: NonNullable<ModelVersion['agent'
       await api.getAiSession(id)
       opener.openSession(id)
     } catch (cause) {
+      if (!mounted.current) return
       setProblem(
         cause instanceof ApiError && cause.status === 404
           ? 'That chat is gone, or is not one you can open.'
           : 'Could not open that chat.',
       )
     } finally {
-      setOpening(false)
+      if (mounted.current) setOpening(false)
     }
   }
 

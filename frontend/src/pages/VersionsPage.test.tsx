@@ -292,6 +292,25 @@ describe('VersionsPage, item context (#975)', () => {
       expect(openSession).not.toHaveBeenCalled()
     })
 
+    it('says it could not open the chat when the agent fails, and opens nothing', async () => {
+      agentMade({ principal: 'browser', session: 'sess-made' })
+      server.use(
+        http.get('/api/v1/ai/sessions/:id', () =>
+          HttpResponse.json(
+            { title: 'Service Unavailable', status: 503, detail: 'no database' },
+            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const openSession = vi.fn()
+      const { user } = render('name-keychain', withOpener(openSession))
+      const [newest] = await rows()
+
+      await user.click(within(newest as HTMLElement).getByRole('button', { name: /^Agent, for you/ }))
+      expect(await within(newest as HTMLElement).findByRole('status')).toHaveTextContent('Could not open that chat.')
+      expect(openSession).not.toHaveBeenCalled()
+    })
+
     it('is only text without the assistant, or without a session to open', async () => {
       agentMade({ principal: 'anonymous:3f2a', session: null })
       render('name-keychain', withOpener(vi.fn()))
