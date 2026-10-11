@@ -16,8 +16,9 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.core.paths import DataPaths
 from tests.api.test_print_filaments import prepared, queue_route
-from tests.api.test_print_run_choices import body, run_print, run_routes
+from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
 from tests.api.test_send import BASE, configure, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
@@ -122,9 +123,7 @@ def test_an_unknown_background_slice_is_a_404(client: TestClient, model: str) ->
     assert client.get("/api/v1/print/library/5/preview-slices/12345").status_code == 404
 
 
-def _preview_then_change(
-    client: TestClient, model: str, change: str
-) -> tuple[str, respx.Route]:
+def _preview_then_change(client: TestClient, model: str, change: str) -> tuple[str, respx.Route]:
     """A background slice, then Bambuddy's job 9 or its file changed by ``change``."""
     output_id = prepared(client, model)
     upload_route()
@@ -210,3 +209,18 @@ def test_a_key_without_manage_inventory_is_named(client: TestClient) -> None:
 
     assert response.status_code >= 400
     assert "Manage Inventory" in response.text
+
+
+def test_a_plate_clicked_in_the_dialog_is_previewed_on_its_own(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2169: the pane shows the plate clicked, read from the output's 3MF."""
+    output_id = two_plate_output(client, model, paths)
+
+    # ``add_plate`` adds a plate with nothing on it, so plate 1 holds the model.
+    plate = client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=1")
+    assert plate.status_code == 200, plate.text
+    assert plate.headers["content-type"] == "model/gltf-binary"
+    assert plate.content[:4] == b"glTF"
+    assert client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=2").status_code == 422
+    assert client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=9").status_code == 404

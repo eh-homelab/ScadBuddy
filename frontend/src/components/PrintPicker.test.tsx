@@ -2138,6 +2138,38 @@ describe('PrintPicker · Superseded reads', () => {
 })
 
 describe('PrintPicker · Plates of a 3MF', () => {
+  // #2169 — a plate clicked loads into the docked preview pane; one chosen to print too.
+  it('shows the plate clicked, or the one chosen to print, in the preview pane', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Lid' },
+          { index: 2, has_thumbnail: true, name: 'Base' },
+        ]),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const plates = await screen.findByTestId('plate-choice')
+    // The pane is remounted for each plate, so it is found afresh each time.
+    const label = () => within(screen.getByTestId('preview-pane')).getByTestId('preview-label')
+    expect(label()).toHaveTextContent('Showing Lid')
+
+    await user.click(within(plates).getByTestId('preview-plate-2'))
+    expect(label()).toHaveTextContent('Showing Base')
+    expect(within(screen.getByTestId('preview-pane')).getByRole('img', { name: 'The plate' })).toHaveAttribute(
+      'src',
+      expect.stringContaining('/plates/2/'),
+    )
+    // Looking at a plate does not choose it to print.
+    expect(within(plates).getByRole('radio', { name: /Lid/ })).toBeChecked()
+
+    await user.click(within(plates).getByRole('radio', { name: 'All plates' }))
+    expect(label()).toHaveTextContent('Showing Lid')
+    await user.click(within(plates).getByRole('radio', { name: /Base/ }))
+    expect(label()).toHaveTextContent('Showing Base')
+  })
+
   it('does not ask which plate of a one-plate output to print', async () => {
     renderPicker()
     await loaded()

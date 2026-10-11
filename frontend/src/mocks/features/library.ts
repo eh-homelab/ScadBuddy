@@ -135,9 +135,11 @@ export const handlers = [
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
   http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
   // #1723 — a plate's mesh, in the file's own colours (the H2C file's green and black).
-  http.get(`${base}/print/library/:id/preview.glb`, ({ params }) => {
+  http.get(`${base}/print/library/:id/preview.glb`, ({ params, request }) => {
     const colours = Number(params['id']) === H2C_FILE ? ['#3F8E43', '#1A1A1A'] : ['#0047BB', '#FF1493']
-    const glb = keychainGlb(colours, { x: 60, y: 60, z: 8 })
+    // #2169 — each plate a shape of its own, so the pane visibly changes plate.
+    const plate = Number(new URL(request.url).searchParams.get('plate') ?? '1')
+    const glb = keychainGlb(colours, plate === 1 ? { x: 60, y: 60, z: 8 } : { x: 30, y: 90, z: 20 })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
       headers: { 'Content-Type': 'model/gltf-binary' },
     })

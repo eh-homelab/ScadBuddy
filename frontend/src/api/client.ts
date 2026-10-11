@@ -1133,7 +1133,9 @@ export const api = {
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
   /** #1723 — the output's preview mesh, every part in its colour. */
-  outputPreviewGlbUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/preview.glb`,
+  /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
+  outputPreviewGlbUrl: (id: string, plate?: number) =>
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
 
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),

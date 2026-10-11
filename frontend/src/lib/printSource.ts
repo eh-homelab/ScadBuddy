@@ -37,8 +37,11 @@ export interface SourceApi {
   getFilaments: (query: FilamentQuery) => Promise<FilamentOptions>
   getPlates: () => Promise<OutputPlate[]>
   plateThumbnailUrl: (index: number) => string
-  /** #1723 — the mesh the 3D preview shows: an output's whole, a library file's plate. */
-  previewUrl: (plate: number) => string
+  /**
+   * #1723 — the mesh the 3D preview shows: a library file's plate; an output's whole, or
+   * with `onePlate` (#2169) just that plate of its 3MF.
+   */
+  previewUrl: (plate: number, onePlate?: boolean) => string
   /**
    * `signal` stops waiting on the run (the dialog went away); the run itself goes on.
    * `within` keeps the POST, retries included, in a traced action.
@@ -121,7 +124,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       getFilaments: (query) => api.getFilaments(id, query),
       getPlates: () => api.getOutputPlates(id),
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
-      previewUrl: () => api.outputPreviewGlbUrl(id),
+      previewUrl: (plate, onePlate) => (onePlate ? api.outputPreviewGlbUrl(id, plate) : api.outputPreviewGlbUrl(id)),
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
       check: (body) => api.checkPrint(id, body),
       preview: (body) => api.previewSlice(id, body),

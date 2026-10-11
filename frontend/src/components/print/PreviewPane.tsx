@@ -24,6 +24,8 @@ type Props = {
   url: string | null
   /** The plate's thumbnail. */
   thumbnailUrl: string | null
+  /** Which plate is shown (#2169), or null for a file of one unnamed plate. */
+  label?: string | null
   slots: readonly SlotNeed[]
   spools: readonly SpoolOption[]
   plan: readonly SlotChoice[]
@@ -46,6 +48,7 @@ type Props = {
 export function PreviewPane({
   url,
   thumbnailUrl,
+  label = null,
   slots,
   spools,
   plan,
@@ -72,6 +75,11 @@ export function PreviewPane({
 
   return (
     <aside className="flex min-w-0 flex-col gap-3" data-testid="preview-pane" aria-label="Preview">
+      {label && (
+        <p className="text-[13px] text-ink" data-testid="preview-label">
+          <span className="text-muted">Showing</span> {label}
+        </p>
+      )}
       <div className="relative h-[260px] overflow-hidden rounded-[6px] border border-line bg-surface-2 lg:h-[320px]">
         {url && canDraw3d() ? (
           <PlateScene url={url} colors={shownColors} cutAt={null} onHeight={onHeight} background={background()} />

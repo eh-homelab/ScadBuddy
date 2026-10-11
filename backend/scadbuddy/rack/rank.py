@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from scadbuddy.bambuddy.extruders import RACK_SIDE
+from scadbuddy.bambuddy.filament_ids import filament_material
 from scadbuddy.bambuddy.filaments import (
     FilamentWarning,
     SpoolOption,
@@ -94,7 +95,8 @@ class RackCandidate:
     high_flow: bool
     nozzle_type: str
     color: str | None
-    #: The filament the hotend last ran (``nozzle_rack[].filament_type``), "" unknown.
+    #: The filament the hotend last ran: ``bambuddy.filament_ids`` names its
+    #: ``filament_id``, else ``nozzle_rack[].filament_type``; "" unknown.
     filament_type: str
     material: str | None
     prints: int
@@ -279,7 +281,9 @@ def _rank(
                 high_flow=entry.high_flow,
                 nozzle_type=entry.nozzle_type,
                 color=have,
-                filament_type=entry.filament_type,
+                # Named from its Bambu filament id where it has one (#2170), else the
+                # type the printer reports.
+                filament_type=filament_material(entry.filament_id) or entry.filament_type,
                 material=nozzle_material(entry.nozzle_type),
                 prints=use.prints,
                 print_seconds=use.print_seconds,

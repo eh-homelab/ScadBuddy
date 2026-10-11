@@ -559,7 +559,24 @@ export function PrintPicker({
    * the run would refuse. A run of the same choices queues that slice.
    */
   const sliceable = check.current && check.verdict !== null && (check.verdict.errors ?? []).length === 0
-  const previewSlice = usePreviewSlice(source, sliceable && !allPlates ? checkRequest : null)
+  /**
+   * #2169 — the plate the docked pane shows: the one chosen to print, or one clicked to
+   * look at. "All plates" shows plate 1 until another is clicked.
+   */
+  const [clickedPlate, setClickedPlate] = useState<number | null>(null)
+  const previewPlate = clickedPlate ?? (plate === 'all' ? 1 : plate)
+  useEffect(() => {
+    setClickedPlate(null)
+  }, [plate, currentKey])
+  const multiPlate = picker.plates.length > 1
+  const previewLabel = plateLabel(picker.plates, previewPlate)
+  // The plate the pane shows, sliced on its own: the run's own slice of it when it is
+  // the plate chosen to print.
+  const previewRequest =
+    checkRequest && (allPlates || previewPlate !== plate)
+      ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
+      : checkRequest
+  const previewSlice = usePreviewSlice(source, sliceable ? previewRequest : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
@@ -835,7 +852,15 @@ export function PrintPicker({
               {/* #986 — one plate has no choice to make, but its name still says what prints. */}
               {picker.plates.length === 1 && picker.plates[0]?.name && (
                 <p className="text-[13px]" data-testid="single-plate">
-                  <span className="text-muted">Plate:</span> {picker.plates[0].name}
+                  <span className="text-muted">Plate:</span>{' '}
+                  <button
+                    type="button"
+                    onClick={() => setClickedPlate(1)}
+                    className="underline decoration-dotted underline-offset-2 hover:text-accent"
+                    title="Show it in the preview"
+                  >
+                    {picker.plates[0].name}
+                  </button>
                 </p>
               )}
 
@@ -845,6 +870,8 @@ export function PrintPicker({
                   value={plate}
                   onChange={picker.setPlate}
                   thumbnailUrl={sourceApi(source).plateThumbnailUrl}
+                  previewed={previewPlate}
+                  onPreview={setClickedPlate}
                 />
               )}
 
@@ -963,8 +990,10 @@ export function PrintPicker({
             </div>
             <div className="min-w-0 lg:sticky lg:top-0 lg:self-start">
               <PreviewPane
-                url={source ? sourceApi(source).previewUrl(plate === 'all' ? 1 : plate) : null}
-                thumbnailUrl={source ? sourceApi(source).plateThumbnailUrl(plate === 'all' ? 1 : plate) : null}
+                key={previewPlate}
+                url={source ? sourceApi(source).previewUrl(previewPlate, multiPlate) : null}
+                thumbnailUrl={source ? sourceApi(source).plateThumbnailUrl(previewPlate) : null}
+                label={multiPlate || picker.plates[0]?.name ? previewLabel : null}
                 slots={filaments?.slots ?? []}
                 spools={filaments?.spools ?? []}
                 plan={plan}

@@ -91,4 +91,24 @@ test.describe('print dialog on the H2C', () => {
     expect(box && flow && box.y > flow.y).toBe(true)
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
   })
+
+  // #2169 — a plate clicked loads into the pane; one chosen to print does too.
+  test('a plate clicked is the one the preview shows', async ({ page }) => {
+    await page.goto('/library')
+    await page.getByRole('button', { name: /^MakerWorld/ }).click()
+    await page.getByTestId('library-print-67').click()
+    const dialog = page.getByRole('dialog', { name: 'Print' })
+    const label = dialog.getByTestId('preview-label')
+    await expect(label).toHaveText('Showing Plate 1')
+    const plates = dialog.getByTestId('plate-choice')
+    const mesh = page.waitForRequest((request) => request.url().includes('/print/library/67/preview.glb?plate=2'))
+    await plates.getByTestId('preview-plate-2').click()
+    await mesh
+    await expect(label).toHaveText('Showing Plate 2')
+    await expect(plates.getByRole('radio', { name: /Plate 1/ })).toBeChecked()
+    await plates.getByRole('radio', { name: 'All plates' }).check()
+    await expect(label).toHaveText('Showing Plate 1')
+    await plates.getByRole('radio', { name: /Plate 2/ }).check()
+    await expect(label).toHaveText('Showing Plate 2')
+  })
 })
