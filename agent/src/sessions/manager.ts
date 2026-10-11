@@ -90,7 +90,7 @@ import { UnpricedSpend } from './unpricedSpend.js'
 import { type ImagePreview, previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
-import type { DurableGate } from '../gate/durable.js'
+import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
@@ -920,6 +920,7 @@ export class SessionManager {
       events: this.events,
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
+      endDurable: (id) => this.endDurable(id),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -966,11 +967,12 @@ export class SessionManager {
    * audit row names; not_found for a session the principal may not see, or a
    * body that is not (or no longer) in the session's directory on this replica.
    */
-  async httpBody(id: string, saved: string, principal: Owner): Promise<{ meta: SavedMeta; bytes: Buffer }> {
+  /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
+  async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
     const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
-    return body
+    return { id: saved, ...body }
   }
 
   /** Newest first. */
@@ -1279,6 +1281,19 @@ export class SessionManager {
       'unavailable',
       'this session is durable, and this agent service has no Temporal or secret key to run it; try again once it has',
     )
+  }
+
+  /** Tells a durable session's workflow it was marked done (#1056), or refuses `unavailable`. */
+  private async endDurable(id: string): Promise<void> {
+    if (!this.durable) {
+      throw new SessionError('unavailable', 'this session is durable, and this agent service has no Temporal to end it; try again once it has')
+    }
+    try {
+      await this.durable.end(id)
+    } catch (err) {
+      if (err instanceof DurableUnavailable) throw new SessionError('unavailable', err.message)
+      throw err
+    }
   }
 
   /** Gives back a claim no turn ran on (a resume that could not start). */
@@ -2156,7 +2171,9 @@ export class SessionManager {
 
   /**
    * Ends the live offer of a session: its owner withdraws it, its target
-   * declines it. Resolves false when there was none.
+   * declines it. Resolves false when there was none. The browser user is only
+   * ever an owner here, since a handoff to it transfers at once and is never
+   * offered: declining by the target serves MCP principals (`sessions_cancel_handoff`).
    */
   async cancelHandoff(id: string, actor: Owner): Promise<boolean> {
     const session = await this.get(id, actor)

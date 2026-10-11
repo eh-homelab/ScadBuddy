@@ -25,14 +25,24 @@ interface Props {
  * follows the model's changes, so a file the agent adds shows up here.
  */
 export function SourceFileTabs({ slug, current, canEdit, children }: Props) {
-  const files = useAsync(() => api.listSourceFiles(slug), [slug], [`model:${slug}`])
+  // The model's revision is read before the list, so New file can send it as `base`:
+  // PUT both creates and replaces, and a file of the same name added since (by the
+  // agent, or another tab) is then a 409 rather than overwritten.
+  const files = useAsync(
+    async () => {
+      const version = (await api.getModel(slug)).version ?? undefined
+      return { list: await api.listSourceFiles(slug), version }
+    },
+    [slug],
+    [`model:${slug}`],
+  )
   const navigate = useNavigate()
   const [adding, setAdding] = useState(false)
   const [typed, setTyped] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const names = (files.data ?? []).map((file) => file.name)
+  const names = (files.data?.list ?? []).map((file) => file.name)
   // Nothing to switch between and nothing to add: no row at all.
   if (!files.data || (names.length < 2 && !canEdit && !children)) return null
 
@@ -53,13 +63,25 @@ export function SourceFileTabs({ slug, current, canEdit, children }: Props) {
     setBusy(true)
     setError(null)
     try {
-      await api.writeSourceFile(slug, name, `// ${name}: bring it into model.scad with include <${name}> or use <${name}>.\n`)
+      await api.writeSourceFile(
+        slug,
+        name,
+        `// ${name}: bring it into model.scad with include <${name}> or use <${name}>.\n`,
+        files.data?.version,
+      )
       files.refresh()
       setAdding(false)
       setTyped('')
       void navigate(sourceFilePath(slug, name))
     } catch (caught) {
-      setError(caught instanceof ApiError ? caught.detail : 'Could not create the file. Try again.')
+      if (caught instanceof ApiError && caught.status === 409 && caught.problem['current']) {
+        // The model moved on since the list was read: nothing was written. Re-read it,
+        // so a file of this name added meanwhile shows up and the name is refused.
+        files.refresh()
+        setError('This model was changed elsewhere since its files were listed, so nothing was created. Check the name and try again.')
+      } else {
+        setError(caught instanceof ApiError ? caught.detail : 'Could not create the file. Try again.')
+      }
     } finally {
       setBusy(false)
     }

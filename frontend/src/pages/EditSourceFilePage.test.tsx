@@ -108,6 +108,34 @@ describe('EditSourceFilePage (#1290)', () => {
     )
   })
 
+  it("does not carry one file's changed-elsewhere state over to the next (#2231)", async () => {
+    await api.replaceSource('name-keychain', keychainSource)
+    await api.writeSourceFile('name-keychain', 'other.scad', '// other\n')
+    const { user } = renderAt('/m/name-keychain/source/helper.scad')
+    await waitFor(() => expect(screen.getByLabelText('OpenSCAD source')).toHaveValue(HELPER))
+    await api.writeSourceFile('name-keychain', 'helper.scad', '// theirs\n')
+    await retype(user, '// mine\n')
+    await saveFile(user)
+    expect(await screen.findByTestId('file-changed-elsewhere')).toBeInTheDocument()
+
+    // Off to another file, leaving the refused edit behind.
+    await user.click((await files()).getByRole('link', { name: 'other.scad' }))
+    await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByRole('heading', { name: 'other.scad' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('OpenSCAD source')).toHaveValue('// other\n'))
+    expect(screen.queryByTestId('file-changed-elsewhere')).not.toBeInTheDocument()
+
+    // A save here goes against the revision other.scad was read at, so it is
+    // refused once the model moves on, rather than using helper.scad's Keep editing base.
+    const write = vi.spyOn(api, 'writeSourceFile')
+    await api.writeSourceFile('name-keychain', 'helper.scad', '// theirs again\n')
+    await retype(user, '// edited other\n')
+    await saveFile(user)
+    expect(await screen.findByTestId('file-changed-elsewhere')).toHaveTextContent('since you opened other.scad')
+    expect(await api.getDefinitionFile('name-keychain', { path: 'other.scad' })).toBe('// other\n')
+    write.mockRestore()
+  })
+
   it('reloads the file when asked, dropping the edit', async () => {
     // A model with a revision, so the save carries a base.
     await api.replaceSource('name-keychain', keychainSource)
@@ -151,6 +179,21 @@ describe('EditSourceFilePage (#1290)', () => {
       ]),
     )
     expect(await api.getDefinitionFile('name-keychain', { path: 'parts.scad' })).toMatch(/include <parts.scad>/)
+  })
+
+  it('creates against the revision the list was read at, so a racing create is refused (#2231)', async () => {
+    await api.replaceSource('name-keychain', keychainSource)
+    const { user } = renderAt('/m/name-keychain/source')
+    await files()
+    await user.click(screen.getByRole('button', { name: 'New file' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New source file' })
+    await user.type(within(dialog).getByLabelText('File name'), 'parts')
+    // The agent adds parts.scad after the list was read.
+    await api.writeSourceFile('name-keychain', 'parts.scad', '// the agent\n')
+    await user.click(within(dialog).getByRole('button', { name: 'Create' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('changed elsewhere')
+    expect(await api.getDefinitionFile('name-keychain', { path: 'parts.scad' })).toBe('// the agent\n')
   })
 
   it('deletes the file after asking, and goes back to model.scad', async () => {

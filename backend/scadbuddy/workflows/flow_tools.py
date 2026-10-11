@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.flow_entries import run_callback, run_gated
     from scadbuddy.workflows.flow_models import ProjectionWrite
     from scadbuddy.workflows.flow_routes import (
+        API_URL_MISSING,
         FLOW_ROUTE_FOLLOW,
         FLOW_ROUTE_SEND,
         ROUTE_REFUSED,
@@ -116,7 +117,7 @@ OUTWARD_PREFIX = "outward-"
 
 def _refusal(err: ActivityError) -> BaseException:
     cause = err.cause
-    if isinstance(cause, ApplicationError) and cause.type in {ROUTE_REFUSED, "ApiUrlMissing"}:
+    if isinstance(cause, ApplicationError) and cause.type in {ROUTE_REFUSED, API_URL_MISSING}:
         return RouteRefusedError(cause.message)
     return err
 
@@ -229,7 +230,7 @@ async def render(slug: str, params: dict[str, Any]) -> RenderResult:
 @agent.tool_defn(inherently_safe=True)
 async def save_output(slug: str, job_id: str, name: str) -> str:
     """Save render job `job_id` of template `slug` as an output named `name`; returns
-    the output id that `print` takes."""
+    the output id that `queue_print` takes."""
     call_id = str(workflow.uuid4())
     async with step("save_output", call_id, outward=False):
         return await _save(call_id, slug, job_id, name)

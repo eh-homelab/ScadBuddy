@@ -1114,6 +1114,21 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: true })
   })
 
+  it('a pin goes ahead when the read before it fails outright, and leaves pinned_before out (#2124)', async () => {
+    let put = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.error()),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => {
+        put = true
+        return HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })
+      }),
+    )
+    const result = await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(put).toBe(true)
+    expect(firstText(result)).not.toHaveProperty('pinned_before')
+  })
+
   it('pin_library refuses a non-catalogue URL and points to the outward tool', async () => {
     let put = false
     server.use(

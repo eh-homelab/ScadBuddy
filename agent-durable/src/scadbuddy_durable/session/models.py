@@ -26,6 +26,11 @@ TURN_QUERY = "turn"
 BUDGET_EXHAUSTED = "budget_exhausted: the chat used its budget"
 # A task fails after this many segments (the plugin's max_segments, Ruling 3).
 MAX_SEGMENTS = 50
+# A segment that keeps failing ends its turn after this many attempts, about 25 minutes
+# of the server's backoff (1 s doubling to 100 s), instead of retrying without end (#2243).
+SEGMENT_ATTEMPTS = 20
+# The most characters of a failed turn's message that reach FinishTurn and its event.
+MESSAGE_MAX = 500
 
 
 @dataclass

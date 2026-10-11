@@ -15,6 +15,7 @@ describe('loadConfig', () => {
       temporalAddress: undefined,
       temporalNamespace: 'scadbuddy',
       temporalSearchAttributes: false,
+      payloadDir: undefined,
     })
   })
 
@@ -32,6 +33,7 @@ describe('loadConfig', () => {
         SCADBUDDY_TEMPORAL_ADDRESS: 'temporal-frontend:7233',
         SCADBUDDY_TEMPORAL_NAMESPACE: 'scadbuddy-dev',
         SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'true',
+        SCADBUDDY_PAYLOAD_DIR: '/data/payloads',
       }),
     ).toEqual({
       databaseUrl: 'postgresql://u:p@db:5432/scadbuddy',
@@ -45,6 +47,7 @@ describe('loadConfig', () => {
       temporalAddress: 'temporal-frontend:7233',
       temporalNamespace: 'scadbuddy-dev',
       temporalSearchAttributes: true,
+      payloadDir: '/data/payloads',
     })
   })
 

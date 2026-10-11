@@ -1,6 +1,8 @@
 import { trace } from '@opentelemetry/api'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ATTENTION_PATH, RUNNING_PATH } from '../agent/attention'
+import { AI_STATUS_PATH } from '../agent/chat/availability'
 import { api, printRunPoll } from '../api/client'
 import { queuedResult } from '../mocks/choices'
 import { server } from '../mocks/server'
@@ -9,7 +11,7 @@ import { TRACER_NAME, messageTraceparent, traceAction } from './traceAction'
 import { startTracing } from './tracing'
 
 const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
-/** Spec §6: a request outside an action is a parentless CLIENT span, propagated unsampled. */
+/** Spec §6: a poll outside an action is a parentless CLIENT span, propagated unsampled. */
 const UNSAMPLED = /^00-[0-9a-f]{32}-[0-9a-f]{16}-00$/
 const CROSS_ORIGIN = 'https://fonts.googleapis.com/css2'
 
@@ -40,12 +42,53 @@ describe('startTracing', () => {
     expect(seen[0]).toMatch(TRACEPARENT)
   })
 
-  it('sends a request outside any action (a poll) unsampled, so the backend drops it too', async () => {
-    const seen = capture('/api/v1/jobs/x')
+  it('samples a request outside any action, so a page’s loads reach the backend traced (#2187)', async () => {
+    const seen = capture('/api/v1/print/library/7/choices')
     stop = startTracing()
-    await fetch('/api/v1/jobs/x')
+    await fetch('/api/v1/print/library/7/choices')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it.each([
+    ['the attention badge', ATTENTION_PATH],
+    ['the running-session check', RUNNING_PATH],
+    ['the assistant availability', AI_STATUS_PATH],
+    ['an output print’s progress', '/api/v1/print/outputs/abc/progress'],
+    ['a library print’s progress', '/api/v1/print/library/7/progress'],
+    ['a print run’s follow', '/api/v1/print/runs/r1'],
+    ['an operation’s follow', '/api/v1/operations/op1'],
+    ['an agent operation’s follow', '/api/v1/ai/operations/op1'],
+    ['a render job’s fallback poll', '/api/v1/jobs/j1'],
+  ])('sends a poll (%s) unsampled, so the backend drops it too', async (_name, url) => {
+    const seen = capture(new URL(url, location.href).pathname)
+    stop = startTracing()
+    await fetch(url)
     expect(seen).toHaveLength(1)
     expect(seen[0]).toMatch(UNSAMPLED)
+  })
+
+  it('samples the sessions list when it is not the running check', async () => {
+    const seen = capture('/api/v1/ai/sessions')
+    stop = startTracing()
+    await fetch('/api/v1/ai/sessions?status=closed')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a job’s own files: only the job read itself is the poll', async () => {
+    const seen = capture('/api/v1/jobs/j1/preview.glb')
+    stop = startTracing()
+    await fetch('/api/v1/jobs/j1/preview.glb')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a poll’s path inside an action: the action decides', async () => {
+    const seen = capture('/api/v1/print/library/7/progress')
+    stop = startTracing()
+    await traceAction('print', {}, () => fetch('/api/v1/print/library/7/progress'))
+    expect(seen[0]).toMatch(TRACEPARENT)
   })
 
   it('never injects traceparent into a cross-origin request', async () => {

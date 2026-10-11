@@ -8,7 +8,7 @@ import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, agentB, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // /api/v1/ai/sessions (routes/sessions.ts) over a scripted runner: the routes'
 // own behaviour (guard, status codes, the SSE replay). The real SDK path is
@@ -365,6 +365,16 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect((await m.get(session.id, browser)).offer).toBeNull()
     // Nothing left to withdraw.
     expect(await (await cancel()).json()).toMatchObject({ cancelled: false })
+  })
+
+  it("refuses to withdraw an offer on a session the browser user does not own (#1284)", async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 'theirs' })
+    await waitIdle(session.id)
+    await m.handoff(session.id, agentA, agentB)
+    const res = await app.request(`/api/v1/ai/sessions/${session.id}/handoff`, { method: 'DELETE', headers: UI })
+    expect(res.status).toBe(403)
+    // The offer stands.
+    expect((await m.get(session.id, agentA)).offer).toMatchObject({ to: { kind: 'bearer', id: 'token:b' } })
   })
 
   it('answers 503 without sessions (no database)', async () => {

@@ -8,6 +8,7 @@
     "respond": "respond",
     "cancel_input": "cancel_input",
     "interrupt": "interrupt",
+    "end": "end",
     "refused_type": "GateRefused"
   },
   "vectors": [

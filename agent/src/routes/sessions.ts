@@ -58,11 +58,14 @@ import { ready, type RouteModule } from './module.js'
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
-//   DELETE /api/v1/ai/sessions/:id/handoff        → {cancelled, session}: withdraw the session's live
-//                                                 handoff offer, or decline one made to the browser
-//                                                 user (#1284; manager.ts `cancelHandoff`, as MCP's
-//                                                 sessions_cancel_handoff). `cancelled` is false when
-//                                                 there was none (it expired, or was accepted)
+//   DELETE /api/v1/ai/sessions/:id/handoff        → {cancelled, session}: withdraw the live handoff
+//                                                 offer of a session the browser user owns (#1284;
+//                                                 manager.ts `cancelHandoff`, as MCP's
+//                                                 sessions_cancel_handoff); 403 for anyone else's.
+//                                                 Nothing is ever offered *to* the browser user: a
+//                                                 handoff to it transfers at once, so the manager's
+//                                                 target-declines branch serves MCP callers only. `cancelled` is
+//                                                 false when there was none (it expired, or was accepted)
 //   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true, archived?} → {session}: rename
 //                                                 it, mark it done (#795), or archive or unarchive it
 //                                                 (#1885; sessions/edits.ts). Owner-only (403); done is
@@ -356,7 +359,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get(
     `${base}/:id/http/:saved`,
     route('read', async (c, sessions) => {
-      const { meta, bytes } = await sessions.httpBody(idOf(c), c.req.param('saved') ?? '', BROWSER_USER)
+      const { id: saved, meta, bytes } = await sessions.httpBody(idOf(c), c.req.param('saved') ?? '', BROWSER_USER)
       // Untrusted bytes from whatever server answered (#1292). Plain text and JSON
       // are shown as text; everything else, HTML and SVG included, only downloads.
       // Nothing in either may run, and no other site may embed it.
@@ -366,7 +369,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         'X-Content-Type-Options': 'nosniff',
         'Content-Security-Policy': "default-src 'none'; sandbox",
         'Cross-Origin-Resource-Policy': 'same-origin',
-        'Content-Disposition': `${viewable ? 'inline' : 'attachment'}; filename="response-${c.req.param('saved')!.slice(0, 8)}.${viewable ? 'txt' : 'bin'}"`,
+        'Content-Disposition': `${viewable ? 'inline' : 'attachment'}; filename="response-${saved.slice(0, 8)}.${viewable ? 'txt' : 'bin'}"`,
         'Cache-Control': 'private, no-store',
       })
     }),

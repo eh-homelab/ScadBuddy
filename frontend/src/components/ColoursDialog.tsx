@@ -28,21 +28,29 @@ export function ColoursDialog({ open, jobId, colors, onClose }: Props) {
   const key = `${jobId}:${view}`
   const [drawn, setDrawn] = useState<{ key: string; breakdown: ColourBreakdown; url: string } | null>(null)
   const [failed, setFailed] = useState<{ key: string; message: string } | null>(null)
+  // The view being asked for while the dialog is open. When it changes (the dialog
+  // opens again, or the view goes back to one that failed), an old failure of that
+  // view is dropped here, during the render, so the retry shows as drawing from its
+  // first paint; an effect would clear it only after one frame of the old alert.
+  const attempt = open && jobId ? key : null
+  const [asked, setAsked] = useState<string | null>(null)
+  if (attempt !== asked) {
+    setAsked(attempt)
+    if (attempt !== null && failed?.key === attempt) setFailed(null)
+  }
 
   useEffect(() => {
     if (!open || !jobId) return
     const stop = new AbortController()
-    const asked = `${jobId}:${view}`
-    // A retry of a view that failed shows as drawing, not as the old failure.
-    setFailed((f) => (f?.key === asked ? null : f))
+    const want = `${jobId}:${view}`
     api.getJobColours(jobId, view, stop.signal).then(
       (breakdown) => {
         if (stop.signal.aborted) return
-        setDrawn({ key: asked, breakdown, url: URL.createObjectURL(breakdown.image) })
+        setDrawn({ key: want, breakdown, url: URL.createObjectURL(breakdown.image) })
       },
       (cause: unknown) => {
         if (stop.signal.aborted) return
-        setFailed({ key: asked, message: cause instanceof ApiError ? cause.detail : 'The colours could not be drawn.' })
+        setFailed({ key: want, message: cause instanceof ApiError ? cause.detail : 'The colours could not be drawn.' })
       },
     )
     return () => stop.abort()

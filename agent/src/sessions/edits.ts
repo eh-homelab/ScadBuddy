@@ -30,6 +30,8 @@ export type SessionEditsDeps = {
   events: Pick<EventLog, 'append' | 'committed'>
   get: (id: string, principal: Owner) => Promise<SessionRecord>
   audit?: AuditLog
+  /** Ends a durable session's workflow (#1056); refuses when it cannot be told. */
+  endDurable: (id: string) => Promise<void>
 }
 
 /** Why a `done` summary dismissed by an archive ended, on its card and its audit row. */
@@ -76,9 +78,6 @@ export class SessionEdits {
          WHERE id = ${id} AND owner_kind = ${principal.kind} AND owner_id = ${principal.id}
          FOR UPDATE`
       if (!before) throw await this.changedOwner(id)
-      if (done && before.mode !== 'classic') {
-        throw new SessionError('busy', `session ${id} is durable; it ends with its workflow, not here (#1056)`)
-      }
       if (done && before.busy) {
         throw new SessionError('busy', `session ${id} is running a turn; Stop it first, then mark it done`)
       }
@@ -100,6 +99,8 @@ export class SessionEdits {
                                   ELSE archived_at END,
                updated_at = now()
          WHERE id = ${id}`
+      // Told inside the transaction: a workflow that cannot be told leaves the row as it was.
+      if (done && before.mode !== 'classic' && before.was !== 'done') await this.deps.endDurable(id)
       const events: ServerEvent[] = []
       if (done && before.was !== 'done') events.push(event({ type: 'session.status', sessionId: id, status: 'done' }))
       let gone: Dismissed[] = []

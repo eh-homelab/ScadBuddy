@@ -88,24 +88,33 @@ async def step(
         )
     )
     error: str | None = None
+    closing = False
     try:
         yield
+    except GeneratorExit:
+        # The call's coroutine is closed after its workflow was evicted, maybe while
+        # another workflow's event loop is current: a write here would be a command of
+        # that workflow (its nondeterminism). The replay that resumes this run writes
+        # the step's end.
+        closing = True
+        raise
     except BaseException as err:
         error = type(err).__name__
         raise
     finally:
-        await project(
-            ProjectionWrite(
-                run_id=owner.run_id,
-                workflow_run_id=workflow.info().run_id,
-                step=started.model_copy(
-                    update={
-                        "status": "failed" if error is not None else "succeeded",
-                        "ended_at": workflow.now(),
-                        "ended_history_length": workflow.info().get_current_history_length(),
-                        "error": error,
-                    }
-                ),
-                waiting_remove=call_id if parked is not None else None,
+        if not closing:
+            await project(
+                ProjectionWrite(
+                    run_id=owner.run_id,
+                    workflow_run_id=workflow.info().run_id,
+                    step=started.model_copy(
+                        update={
+                            "status": "failed" if error is not None else "succeeded",
+                            "ended_at": workflow.now(),
+                            "ended_history_length": workflow.info().get_current_history_length(),
+                            "error": error,
+                        }
+                    ),
+                    waiting_remove=call_id if parked is not None else None,
+                )
             )
-        )
