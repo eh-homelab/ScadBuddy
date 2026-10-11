@@ -53,7 +53,7 @@ describe('feedBlocks (#782)', () => {
 describe('toolStatus (#782)', () => {
   const statusOf = (items: FeedItem[], id: string): ToolStatus => toolStatus(items.find((i) => i.id === id) as Tool, items)
 
-  it('is done or failed from the result, whatever else names the call', () => {
+  it('is done or failed from the result once it ran', () => {
     expect(statusOf([done('t1')], 't1')).toBe('done')
     expect(statusOf([done('t1', false)], 't1')).toBe('failed')
     expect(statusOf([done('t1'), approval('a1', 't1', 'approved')], 't1')).toBe('done')
@@ -69,6 +69,25 @@ describe('toolStatus (#782)', () => {
     for (const state of ['denied', 'expired', 'cancelled', 'closed'] as const) {
       expect(statusOf([tool('t1'), approval('a1', 't1', state)], 't1')).toBe('not_run')
     }
+  })
+
+  // #2149: Claude Code records an is_error result for a denied call too.
+  it('did not run when its approval was not given, even with an error result', () => {
+    for (const state of ['denied', 'expired', 'cancelled', 'closed'] as const) {
+      expect(statusOf([done('t1', false), approval('a1', 't1', state)], 't1')).toBe('not_run')
+    }
+  })
+
+  // #2149: Stop while a call runs: Claude Code records a refusal as its result.
+  it('stopped when the turn was interrupted while it was the last step', () => {
+    const interrupted: FeedItem = { kind: 'error', id: 'e1', message: 'the turn was interrupted', code: 'interrupted' }
+    expect(statusOf([done('t1', false), interrupted], 't1')).toBe('stopped')
+    expect(statusOf([done('t1', false), done('t2', false), interrupted], 't1')).toBe('stopped')
+    // A call that failed before the assistant went on failed; the later Stop is another step's.
+    expect(statusOf([done('t1', false), text('m1'), interrupted], 't1')).toBe('failed')
+    // Another error is not a Stop.
+    expect(statusOf([done('t1', false), { kind: 'error', id: 'e2', message: 'down' }], 't1')).toBe('failed')
+    expect(statusOf([done('t1'), interrupted], 't1')).toBe('done')
   })
 
   it('waits for the user while its question is open', () => {

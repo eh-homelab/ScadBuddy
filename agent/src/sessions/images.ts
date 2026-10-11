@@ -6,9 +6,10 @@ import { z } from 'zod'
 // The panel uploads each one (#1941, routes/attachments.ts, checked with
 // UserImageSchema below) and its `user.message` names them by id (inline images
 // are refused, #1959). An image is the full image, base64, for the model, and a
-// small preview the panel made of it. The model gets the full images as `image` content blocks in the turn's user message
-// (`userPrompt`), so they are kept only where Claude Code keeps the turn: the
-// SDK transcript (ai_session_entries), which resume reads and no watcher is sent.
+// small preview the panel made of it. The model gets the full images as `image`
+// content blocks in the turn's user message (`userPrompt`), so they are kept
+// only where Claude Code keeps the turn: the SDK transcript
+// (ai_session_entries), which resume reads and no watcher is sent.
 // The `user.turn` event, which the event log keeps and every watcher replays,
 // carries the previews only (`previewsOf`), and an MCP transcript only their
 // count (tools/sessions.ts `condense`). Nothing logs or traces the bytes, and a
