@@ -34,6 +34,8 @@ import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
 import { PgTabRelay } from './bridge/relay.js'
+import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
+import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
@@ -186,6 +188,9 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 // browser_* calls for a tab connected to another replica (#1916, bridge/relay.ts),
 // on the listener's connection: made before start(), so its first LISTEN covers it.
 const tabRelay = database && events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
+// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts),
+// on the same connection, for the same reason.
+const mcpRelay = database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
@@ -212,7 +217,13 @@ const toolServices: ToolServices = {
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
 // one through `ai_browser_pairings` (spec §8.5).
-const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined, relay: tabRelay })
+const tabs = new TabHub({
+  pairings: database ? new PostgresPairingStore(database.sql) : undefined,
+  relay: tabRelay,
+  // A durable session's browser_* calls run on whichever replica took the
+  // activity, so the tab its chat socket paired is read from Postgres (#2086).
+  sessionTabs: database ? new PostgresSessionTabStore(database.sql) : undefined,
+})
 toolServices.browser = tabs
 // What each session touched (#931, sessions/touched.ts), from its tool calls.
 if (database) {
@@ -510,6 +521,7 @@ const app = createApp({
     authSettings,
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
+    relay: mcpRelay,
   },
   mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
