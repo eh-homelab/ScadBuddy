@@ -1194,6 +1194,7 @@ export class SessionManager {
         author: principal,
         images: options.images ?? [],
         systemAppend: systemAppend(false),
+        ...(options.tiers ? { tiers: options.tiers } : {}),
       })
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
@@ -1532,7 +1533,14 @@ export class SessionManager {
           this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
             ? this.deps.ownPlugin
             : undefined
-        const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
+        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        const pluginTiers = harnessTierOf({
+          remotePlugins,
+          tierOf,
+          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
+          pluginPaths: [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])],
+          allowedPluginPaths: packages?.allowedPaths ?? [],
+        })
         eventTierOf = (name, input) => raised(name, browserTierOf(name) ?? pluginTiers(name, input))
         // A plugin left out of this turn is said so in the session, not only in the log.
         const unavailable = (message: string) =>
@@ -1543,7 +1551,6 @@ export class SessionManager {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
-        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
         for (const problem of packages?.problems ?? []) {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)

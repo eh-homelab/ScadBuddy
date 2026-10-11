@@ -125,6 +125,14 @@ describe('buildHarnessOptions', () => {
     expect(harnessTierOf({})('Skill')).toBeUndefined()
   })
 
+  it("offers Skill and Agent, at read, for a package's skills and agents with the own plugin off (#2320)", () => {
+    const options = buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy'] })
+    expect(options.tools).toEqual(['Skill', 'Agent'])
+    const tiers = harnessTierOf({ pluginPaths: ['../plugins/scadbuddy'] })
+    expect(['Skill', 'Agent', 'Task'].map((t) => tiers(t))).toEqual(['read', 'read', 'read'])
+    expect(harnessTierOf({ allowedPluginPaths: ['/x'] })('Skill')).toBe('read')
+  })
+
   it('passes the session options through (#300)', () => {
     const store = { append: () => Promise.resolve(), load: () => Promise.resolve(null) }
     const options = buildHarnessOptions({

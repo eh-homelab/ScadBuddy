@@ -2,12 +2,13 @@ import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { AuditLog } from '../audit/log.js'
-import { harnessPrincipal } from '../auth/principal.js'
+import { type Tier, TIERS } from '../auth/principal.js'
 import type { Owner } from '../sessions/protocol.js'
 import { effectiveTool, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
+import { turnPrincipal } from '../tools/harness.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
@@ -32,7 +33,8 @@ import { flowOf, type FlowRuns } from './flowRuns.js'
 
 /** Where a durable session's owner is read; undefined for any other session. */
 export interface SessionOwners {
-  ownerOf(sessionId: string): Promise<Owner | undefined>
+  /** The owner, and the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320). */
+  ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null }) | undefined>
 }
 
 export class PgSessionOwners implements SessionOwners {
@@ -42,20 +44,39 @@ export class PgSessionOwners implements SessionOwners {
     this.sql = sql
   }
 
-  async ownerOf(sessionId: string): Promise<Owner | undefined> {
-    const [row] = await this.sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
-      SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
-    return row ? { kind: row.owner_kind, id: row.owner_id, label: row.owner_label } : undefined
+  async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null }) | undefined> {
+    const [row] = await this.sql<
+      {
+        owner_kind: Owner['kind']
+        owner_id: string
+        owner_label: string
+        turn_tiers: { by?: { kind?: string; id?: string }; tiers?: unknown } | null
+      }[]
+    >`
+      SELECT owner_kind, owner_id, owner_label, turn_tiers FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
+    if (!row) return undefined
+    // Only the sender's own tiers, while it still owns the session (a handoff since
+    // leaves the new owner its default), and only tiers there are.
+    const sent = row.turn_tiers
+    const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
+    const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
+    return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers }
   }
 }
+
+/** What an approval was given for: the call's input hash, which keys the tool and its input. */
+export type ApprovalBinding = { inputHash: string }
 
 /**
  * The gate's recorded decisions (spec §6.6): whether `ai_input_responses` holds an
  * `approved` outcome for a durable call's request id, which resolve_input writes
- * before the workflow lets the call through.
+ * before the workflow lets the call through, given for this very call (#2088): the
+ * approval's audit row, written in the same transaction, carries the input hash
+ * describe_call computed for the parked call (the approvals' HMAC key over the tool's
+ * name and its input), so an approval never authorises another tool or other input.
  */
 export interface ApprovalRecords {
-  approved(requestId: string): Promise<boolean>
+  approved(requestId: string, call?: ApprovalBinding): Promise<boolean>
 }
 
 export class PgApprovalRecords implements ApprovalRecords {
@@ -65,10 +86,14 @@ export class PgApprovalRecords implements ApprovalRecords {
     this.#sql = sql
   }
 
-  async approved(requestId: string): Promise<boolean> {
+  async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
+    // Without the call's hash nothing can be matched, so nothing is approved.
+    if (call === undefined) return false
     const rows = await this.#sql`
-      SELECT 1 FROM ai_input_responses
-      WHERE request_id = ${requestId} AND kind = 'approval' AND outcome = 'approved'`
+      SELECT 1 FROM ai_input_responses r
+      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
+      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
+        AND a.input_hash = ${call.inputHash}`
     return rows.length > 0
   }
 }
@@ -83,6 +108,11 @@ export type ToolActivityDeps = {
   flows?: FlowRuns | undefined
   /** The recorded answers an `answer` tool returns (gate/answers.ts); those tools refuse without it. */
   answers?: AnswerReader | undefined
+  /**
+   * What an owner holds now (auth/tokens.ts `liveTokenTiers`): a turn's tiers are cut to
+   * it, and a flow's token starter runs with it (#2320). Undefined: not kept anywhere.
+   */
+  currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
   heartbeatMs?: number
 }
@@ -135,7 +165,7 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
 }
 
 /** The durable session the current activity's workflow is, and its owner; refused otherwise. */
-async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner }> {
+async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[] }> {
   const { workflowExecution } = Context.current().info
   const session = sessionOf(workflowExecution?.workflowId)
   // A lookup that throws (the database is away) is left to the activity's retries.
@@ -146,11 +176,19 @@ async function durableSession(what: string, sessions: SessionOwners): Promise<{ 
       UNKNOWN_SESSION,
     )
   }
-  return { session, owner }
+  const { turnTiers, ...who } = owner
+  return { session, owner: who, ...(turnTiers ? { turnTiers } : {}) }
 }
 
 /** Who a call runs as, in which session if any, and the id its gate entry is recorded under. */
-type Caller = { owner: Owner; session: string | undefined; requestId: string; approvals: ApprovalRecords | undefined }
+type Caller = {
+  owner: Owner
+  session: string | undefined
+  requestId: string
+  approvals: ApprovalRecords | undefined
+  /** The tiers the call runs with; undefined: the owner's default (`harnessPrincipal`). */
+  tiers: readonly Tier[] | undefined
+}
 
 /** A flow run's call: its starter, no session, and the run's decisions as its approvals. */
 async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, toolUseId: string): Promise<Caller> {
@@ -163,7 +201,24 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
     throw ApplicationFailure.nonRetryable(`${tool.name}: no flow run ${flow} is recorded`, UNKNOWN_FLOW)
   }
   const runId = Context.current().info.workflowExecution?.runId ?? ''
-  return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals: deps.flows }
+  // A token starter's run acts with what its token holds now, as its sessions' turns do (#2320).
+  const tiers = owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner)
+  return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals: deps.flows, tiers }
+}
+
+/**
+ * The tiers a durable turn's call runs with (#2320): those its sender sent it with
+ * (`turn_tiers`), cut to what the owner holds now, so a token revoked or lowered since
+ * the turn was sent takes effect at once. None recorded: the owner's default.
+ */
+async function turnTiers(
+  owner: Owner,
+  sent: readonly Tier[] | undefined,
+  deps: ToolActivityDeps,
+): Promise<readonly Tier[] | undefined> {
+  if (!sent || owner.kind === 'browser') return undefined
+  const now = await deps.currentTiers?.(owner)
+  return now ? sent.filter((t) => now.includes(t)) : sent
 }
 
 async function runAsActivity(
@@ -180,11 +235,11 @@ async function runAsActivity(
   if (flow !== undefined) {
     caller = await flowCaller(tool, flow, deps, toolUseId)
   } else {
-    const { session, owner } = await durableSession(tool.name, deps.sessions)
+    const { session, owner, turnTiers: sent } = await durableSession(tool.name, deps.sessions)
     // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
     const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
     if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
-    caller = { owner, session, requestId, approvals: deps.approvals }
+    caller = { owner, session, requestId, approvals: deps.approvals, tiers: await turnTiers(owner, sent, deps) }
   }
   const { owner, session, requestId } = caller
   // `gate: 'workflow'` below skips preparing an approval because the workflow parked
@@ -192,8 +247,15 @@ async function runAsActivity(
   // the namespace can name a workflow after a durable session (security review of 5b).
   // Gated as the tool runs now (#1953): a tier Settings raised to outward needs the
   // approval too, whatever tier the durable worker's manifest declared it at.
+  //
+  // One read decides the call (#2088): the tier and disabled state are resolved here, as
+  // the call runs, never taken from the workflow's decision to park it, and that same
+  // resolution is handed to runToolWithOutcome (`effective`), which does not read them
+  // again. So a tool raised to outward after the workflow let it through unparked has no
+  // approval and is refused NotApproved; one disabled after its approval is refused as
+  // disabled; and no second read can disagree with the one that was checked.
   const effective = await effectiveTool(tool, deps.services)
-  if (effective.gated && !(await caller.approvals?.approved(requestId))) {
+  const refuse = async (detail: string, message: string, type: string): Promise<never> => {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({
@@ -208,13 +270,27 @@ async function runAsActivity(
       inputHash: deps.audit.hash(tool.name, parsed),
       inputSummary: deps.audit.summarise(tool.name, parsed),
       outcome: 'refused',
-      detail: 'no approval is recorded for this call',
+      detail,
       startedAt: now,
       finishedAt: now,
     })
-    throw ApplicationFailure.nonRetryable(`${tool.name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
+    throw ApplicationFailure.nonRetryable(message, type)
   }
-  const principal = harnessPrincipal(owner)
+  if (effective.disabled) {
+    const message = `${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`
+    await refuse(message, message, TOOL_ERROR)
+  }
+  // The approval binds to this call's tool and input (ApprovalRecords): the hash
+  // describe_call gave the parked call, computed again from what this call was given.
+  const binding = deps.audit ? { inputHash: deps.audit.hash(tool.name, (input ?? {}) as Record<string, unknown>) } : undefined
+  if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
+    await refuse(
+      'no approval is recorded for this call',
+      `${tool.name} needs an approval, and none is recorded for this call`,
+      NOT_APPROVED,
+    )
+  }
+  const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
   const services = deps.services
   const heartbeat = setInterval(() => context.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
   const startedAt = new Date()
@@ -230,6 +306,7 @@ async function runAsActivity(
       signal: context.cancellationSignal,
       lookup,
       gate: 'workflow',
+      effective,
     })
   } finally {
     clearInterval(heartbeat)
