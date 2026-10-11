@@ -1,7 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AuditPage } from '../../agent/audit'
+import type * as embed from '../../lib/embed'
+import { downloadBlob } from '../../lib/embed'
 import { AUDIT_FIXTURES } from '../../mocks/features/audit'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
@@ -12,9 +15,17 @@ const availability = vi.hoisted(() => ({ available: true }))
 vi.mock('../../agent/chat/availability', () => ({
   useAiAvailability: () => availability,
 }))
+// Loads the file the way the real one does; saving it is lib/embed's own test.
+vi.mock('../../lib/embed', async (original) => ({
+  ...(await original<typeof embed>()),
+  downloadBlob: vi.fn(async (load: () => Promise<Blob>) => {
+    await load()
+  }),
+}))
 
 beforeEach(() => {
   availability.available = true
+  vi.mocked(downloadBlob).mockClear()
   resetMockState()
 })
 
@@ -139,17 +150,55 @@ describe('AiAuditSection', () => {
         }),
       ),
     )
+    const fetched: string[] = []
+    server.use(
+      http.get(`/api/v1/ai/sessions/${SESSION}/http/${SAVED}`, ({ request }) => {
+        fetched.push(new URL(request.url).pathname)
+        return new HttpResponse('{"big":true}', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+      }),
+    )
     renderPage(<AiAuditSection />)
     await waitFor(() => expect(rows()).toHaveLength(3))
     const [saved, inline, odd] = rows()
-    expect(within(saved!).getByRole('link', { name: 'View / download body' })).toHaveAttribute(
-      'href',
-      `/api/v1/ai/sessions/${SESSION}/http/${SAVED}`,
-    )
+    // A button through downloadBlob, never a plain link: Bambuddy's frame drops those.
+    expect(within(saved!).queryByRole('link')).not.toBeInTheDocument()
+    await userEvent.click(within(saved!).getByRole('button', { name: 'Download body' }))
+    await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(expect.any(Function), 'http-response-0b7d4c3e'))
+    expect(fetched).toEqual([`/api/v1/ai/sessions/${SESSION}/http/${SAVED}`])
     // The summary line stays words, without the id.
     expect(saved).toHaveTextContent('https://example.com · HTTP 200 · 2000000 bytes')
-    expect(within(inline!).queryByRole('link')).not.toBeInTheDocument()
-    expect(within(odd!).queryByRole('link')).not.toBeInTheDocument()
+    expect(within(inline!).queryByRole('button', { name: 'Download body' })).not.toBeInTheDocument()
+    expect(within(odd!).queryByRole('button', { name: 'Download body' })).not.toBeInTheDocument()
+  })
+
+  it('says so when a saved body is no longer kept (#1292)', async () => {
+    const SESSION = '5a1c3e2b-7d4f-4e6a-9b8c-0d1e2f3a4b5c'
+    const SAVED = '0b7d4c3e-5f6a-4b8c-9d0e-1f2a3b4c5d6e'
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            {
+              ...AUDIT_FIXTURES[3]!,
+              id: '9',
+              kind: 'http',
+              action: 'GET',
+              tier: 'read',
+              outcome: 'ok',
+              session_id: SESSION,
+              input_summary: `{"method":"GET","host":"example.com","status":200,"saved":"${SAVED}"}`,
+            },
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+      http.get(`/api/v1/ai/sessions/${SESSION}/http/${SAVED}`, () => new HttpResponse(null, { status: 404 })),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    await userEvent.click(screen.getByRole('button', { name: 'Download body' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no longer kept')
   })
 
   it("shows each turn's cost, and flags one Claude Code never priced (#1922)", async () => {

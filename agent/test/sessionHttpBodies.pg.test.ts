@@ -71,6 +71,8 @@ describe.skipIf(skip !== undefined)(`saved HTTP response bodies${skip ? ` (skipp
     expect(res.headers.get('content-type')).toBe('text/plain; charset=utf-8')
     expect(res.headers.get('content-disposition')).toBe(`inline; filename="response-${SAVED.slice(0, 8)}.txt"`)
     expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(res.headers.get('cross-origin-resource-policy')).toBe('same-origin')
+    expect(res.headers.get('cache-control')).toBe('private, no-store')
     expect(res.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox")
     expect(await res.text()).toBe('{"a":1}')
   })

@@ -12,6 +12,7 @@ import {
   saveAuditRetention,
 } from '../../agent/audit'
 import { useAiAvailability } from '../../agent/chat/availability'
+import { downloadBlob } from '../../lib/embed'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
@@ -199,18 +200,56 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
           {text}
         </p>
       )}
-      {body && (
-        <a
-          href={body}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="mt-0.5 inline-block text-[12px] text-accent underline"
-          title="Plain text and JSON open as text; anything else downloads. The body is kept while the session's 10 newest saved responses include it."
-        >
-          View / download body
-        </a>
-      )}
+      {body && <SavedBody url={body} />}
     </li>
+  )
+}
+
+/**
+ * Downloads a saved response body (#1292) through lib/embed's `downloadBlob`: a plain
+ * link would start the download inside Bambuddy's sandboxed frame, which has no
+ * `allow-downloads`, and Chromium drops it without a word (#612).
+ */
+function SavedBody({ url }: { url: string }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function load(): Promise<Blob> {
+    const res = await fetch(url)
+    if (res.status === 404) throw new Error("That body is no longer kept: only the session's 10 newest saved responses are.")
+    if (!res.ok) throw new Error(`The body could not be read (HTTP ${res.status}).`)
+    return res.blob()
+  }
+
+  async function download() {
+    setBusy(true)
+    setError(null)
+    try {
+      await downloadBlob(load, `http-response-${url.slice(url.lastIndexOf('/') + 1, url.lastIndexOf('/') + 9)}`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The body could not be downloaded.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-0.5 text-[12px]">
+      <button
+        type="button"
+        onClick={() => void download()}
+        disabled={busy}
+        className="text-accent underline disabled:opacity-60"
+        title="The body is kept while the session's 10 newest saved responses include it."
+      >
+        Download body
+      </button>
+      {error && (
+        <span role="alert" className="ml-2 text-warn">
+          {error}
+        </span>
+      )}
+    </div>
   )
 }
 
