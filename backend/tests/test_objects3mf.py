@@ -377,6 +377,48 @@ def test_a_core_3mf_is_coloured_by_its_materials() -> None:
     assert tuple(np.round(joined.extents, 3)) == (100, 100, 100)
 
 
+MATERIAL = "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
+
+
+def _two_tone(group: str) -> bytes:
+    """A box whose triangles name group 1, half its index 0 and half its index 1."""
+    mesh = _box(10, 10, 10)
+    half = len(mesh.faces) // 2
+    vertices = "".join(f'<vertex x="{v[0]}" y="{v[1]}" z="{v[2]}"/>' for v in mesh.vertices)
+    triangles = "".join(
+        f'<triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}" pid="1" p1="{0 if i < half else 1}"/>'
+        for i, f in enumerate(mesh.faces)
+    )
+    root = (
+        f'<model xmlns="{CORE}" xmlns:m="{MATERIAL}"><resources>{group}'
+        f'<object id="2" name="Cube" type="model"><mesh><vertices>{vertices}'
+        f"</vertices><triangles>{triangles}</triangles></mesh></object></resources>"
+        '<build><item objectid="2"/></build></model>'
+    )
+    return _zip({"3D/3dmodel.model": root})
+
+
+def test_a_core_3mf_is_coloured_by_its_colour_group() -> None:
+    """#2147: a tool that colours triangles by ``m:colorgroup`` arranges in its colours,
+    not as one grey."""
+    group = (
+        '<m:colorgroup id="1"><m:color color="#FF0000FF"/><m:color color="#0000FF"/></m:colorgroup>'
+    )
+    [obj] = read_objects(_two_tone(group))
+    assert sorted(p.colour for p in obj.parts) == ["#0000FF", "#FF0000"]
+
+
+def test_a_texture_coloured_3mf_is_refused_rather_than_read_grey() -> None:
+    """#2147: a texture's colours cannot be read, so the user is told, as for a part
+    painted in PrusaSlicer."""
+    group = (
+        '<m:texture2dgroup id="1" texid="9"><m:tex2coord u="0" v="0"/>'
+        '<m:tex2coord u="1" v="1"/></m:texture2dgroup>'
+    )
+    with pytest.raises(UnreadableObjectsError, match="texture"):
+        read_objects(_two_tone(group))
+
+
 def test_triangles_are_grouped_by_colour_in_the_order_their_colours_first_come() -> None:
     """Many materials, interleaved: the grouping is one sort, not a pass per colour."""
     colours = [f"#{i:06X}" for i in range(0, 3000 * 0x10, 0x10)]
