@@ -67,6 +67,7 @@ import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
+import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
 import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -233,6 +234,16 @@ if (database) {
     console.error('session resources: could not record a call:', (err as Error).message),
   )
 }
+// The assistant's workspace (#2329, workspace/store.ts): a session's files, or an
+// /mcp caller's own outside a session, in ai_session_files. The workspace_* tools
+// and http_request's save_to_workspace write it; a principal's files are swept
+// 24 h after their last write.
+const workspace = database ? new SessionFiles(database.sql, { settings }) : undefined
+if (workspace) toolServices.workspace = workspace
+const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('workspace sweep failed:', (err as Error).message),
+})
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -337,6 +348,8 @@ const sessions =
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
+        // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
+        ...(workspace ? { workspace } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -562,6 +575,7 @@ async function stop(): Promise<void> {
   stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()
+  stopWorkspaceSweep?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted

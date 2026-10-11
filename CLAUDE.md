@@ -481,6 +481,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     the rows) is the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
+  - The workspace (#2329, `docs/ai/operating.md` §13): `src/workspace/store.ts`
+    `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
+    with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,
+    swept 24 h after its last write) and a checked `path`; caps
+    `workspace_file_max_bytes`/`workspace_max_bytes`. Reached as
+    `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
+    with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
+    `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
+    Never a file on the pod.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
