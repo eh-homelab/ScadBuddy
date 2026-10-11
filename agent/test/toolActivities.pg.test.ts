@@ -28,7 +28,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const owners = new PgSessionOwners(db.sql)
       expect(await owners.ownerOf(session.id)).toBeUndefined()
       await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${session.id}`
-      expect(await owners.ownerOf(session.id)).toEqual(browser)
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null })
+      // The tiers its current turn was sent with (#2320).
+      await db.sql`UPDATE ai_sessions SET turn_tiers = ${['read', 'write']} WHERE id = ${session.id}`
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: ['read', 'write'] })
       await expect(db.sql`UPDATE ai_sessions SET mode = 'other' WHERE id = ${session.id}`).rejects.toThrow()
     })
 

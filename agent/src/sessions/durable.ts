@@ -6,6 +6,7 @@ import {
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
+import type { Tier } from '../auth/principal.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { type SessionImage, imageOfBlock, SessionBlobs } from './blobs.js'
 import type { EventLog } from './eventLog.js'
@@ -90,6 +91,8 @@ export type DurableTurn = {
   images: readonly UserImage[]
   /** What the engine appends to Claude Code's own system prompt (Ruling 15). */
   systemAppend: string
+  /** The sender's tiers, for a turn sent through the sessions_* tools (`turn_tiers`, #2320). */
+  tiers?: readonly Tier[] | undefined
 }
 
 export type DurableTurnsDeps = {
@@ -189,12 +192,13 @@ export class DurableTurns {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', updated_at = now() FROM prior
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, updated_at = now() FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND ${POOL_COST} < ${POOL_BUDGET}
        RETURNING prior.prior_status, prior.durable_offset`,
-      [id, turn.author.kind, turn.author.id],
+      // The turn's tool activities run with these, cut to what the owner holds then (#2320).
+      [id, turn.author.kind, turn.author.id, turn.tiers ? [...turn.tiers] : null],
     )
     if (!claimed) return undefined
     let seq = 0

@@ -191,6 +191,18 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(row).toEqual({ status: 'running', turn_id: null })
   }, 60_000)
 
+  it("records the tiers a turn was sent with, for its tool activities, and none for a browser turn (#2320)", async () => {
+    const m = await durableManager()
+    const token = { kind: 'bearer' as const, id: 'token:t', label: 'MCP token' }
+    const { session } = await m.start(token, { origin: 'mcp', prompt: 'hi', tiers: ['read', 'write'] })
+    const tiers = async () =>
+      (await db.sql<{ turn_tiers: string[] | null }[]>`SELECT turn_tiers FROM ai_sessions WHERE id = ${session.id}`)[0]?.turn_tiers
+    expect(await tiers()).toEqual(['read', 'write'])
+    const { session: own } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
+    const [row] = await db.sql<{ turn_tiers: string[] | null }[]>`SELECT turn_tiers FROM ai_sessions WHERE id = ${own.id}`
+    expect(row?.turn_tiers).toBeNull()
+  }, 60_000)
+
   it("takes a turn's images from the chat socket's attachments, by name (#1959: the only way a panel sends them)", async () => {
     const m = await durableManager()
     const attachments = new AttachmentStore(db.sql)

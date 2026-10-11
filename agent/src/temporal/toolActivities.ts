@@ -2,12 +2,13 @@ import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { AuditLog } from '../audit/log.js'
-import { harnessPrincipal } from '../auth/principal.js'
+import type { Tier } from '../auth/principal.js'
 import type { Owner } from '../sessions/protocol.js'
 import { effectiveTool, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
+import { turnPrincipal } from '../tools/harness.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
@@ -32,7 +33,8 @@ import { flowOf, type FlowRuns } from './flowRuns.js'
 
 /** Where a durable session's owner is read; undefined for any other session. */
 export interface SessionOwners {
-  ownerOf(sessionId: string): Promise<Owner | undefined>
+  /** The owner, and the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320). */
+  ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null }) | undefined>
 }
 
 export class PgSessionOwners implements SessionOwners {
@@ -42,10 +44,12 @@ export class PgSessionOwners implements SessionOwners {
     this.sql = sql
   }
 
-  async ownerOf(sessionId: string): Promise<Owner | undefined> {
-    const [row] = await this.sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
-      SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
-    return row ? { kind: row.owner_kind, id: row.owner_id, label: row.owner_label } : undefined
+  async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null }) | undefined> {
+    const [row] = await this.sql<
+      { owner_kind: Owner['kind']; owner_id: string; owner_label: string; turn_tiers: Tier[] | null }[]
+    >`
+      SELECT owner_kind, owner_id, owner_label, turn_tiers FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
+    return row ? { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers: row.turn_tiers } : undefined
   }
 }
 
@@ -93,6 +97,11 @@ export type ToolActivityDeps = {
   flows?: FlowRuns | undefined
   /** The recorded answers an `answer` tool returns (gate/answers.ts); those tools refuse without it. */
   answers?: AnswerReader | undefined
+  /**
+   * What an owner holds now (auth/tokens.ts `liveTokenTiers`): a turn's tiers are cut to
+   * it, and a flow's token starter runs with it (#2320). Undefined: not kept anywhere.
+   */
+  currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
   heartbeatMs?: number
 }
@@ -145,7 +154,7 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
 }
 
 /** The durable session the current activity's workflow is, and its owner; refused otherwise. */
-async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner }> {
+async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[] }> {
   const { workflowExecution } = Context.current().info
   const session = sessionOf(workflowExecution?.workflowId)
   // A lookup that throws (the database is away) is left to the activity's retries.
@@ -156,11 +165,19 @@ async function durableSession(what: string, sessions: SessionOwners): Promise<{ 
       UNKNOWN_SESSION,
     )
   }
-  return { session, owner }
+  const { turnTiers, ...who } = owner
+  return { session, owner: who, ...(turnTiers ? { turnTiers } : {}) }
 }
 
 /** Who a call runs as, in which session if any, and the id its gate entry is recorded under. */
-type Caller = { owner: Owner; session: string | undefined; requestId: string; approvals: ApprovalRecords | undefined }
+type Caller = {
+  owner: Owner
+  session: string | undefined
+  requestId: string
+  approvals: ApprovalRecords | undefined
+  /** The tiers the call runs with; undefined: the owner's default (`harnessPrincipal`). */
+  tiers: readonly Tier[] | undefined
+}
 
 /** A flow run's call: its starter, no session, and the run's decisions as its approvals. */
 async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, toolUseId: string): Promise<Caller> {
@@ -173,7 +190,24 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
     throw ApplicationFailure.nonRetryable(`${tool.name}: no flow run ${flow} is recorded`, UNKNOWN_FLOW)
   }
   const runId = Context.current().info.workflowExecution?.runId ?? ''
-  return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals: deps.flows }
+  // A token starter's run acts with what its token holds now, as its sessions' turns do (#2320).
+  const tiers = owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner)
+  return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals: deps.flows, tiers }
+}
+
+/**
+ * The tiers a durable turn's call runs with (#2320): those its sender sent it with
+ * (`turn_tiers`), cut to what the owner holds now, so a token revoked or lowered since
+ * the turn was sent takes effect at once. None recorded: the owner's default.
+ */
+async function turnTiers(
+  owner: Owner,
+  sent: readonly Tier[] | undefined,
+  deps: ToolActivityDeps,
+): Promise<readonly Tier[] | undefined> {
+  if (!sent || owner.kind === 'browser') return undefined
+  const now = await deps.currentTiers?.(owner)
+  return now ? sent.filter((t) => now.includes(t)) : sent
 }
 
 async function runAsActivity(
@@ -190,11 +224,11 @@ async function runAsActivity(
   if (flow !== undefined) {
     caller = await flowCaller(tool, flow, deps, toolUseId)
   } else {
-    const { session, owner } = await durableSession(tool.name, deps.sessions)
+    const { session, owner, turnTiers: sent } = await durableSession(tool.name, deps.sessions)
     // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
     const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
     if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
-    caller = { owner, session, requestId, approvals: deps.approvals }
+    caller = { owner, session, requestId, approvals: deps.approvals, tiers: await turnTiers(owner, sent, deps) }
   }
   const { owner, session, requestId } = caller
   // `gate: 'workflow'` below skips preparing an approval because the workflow parked
@@ -245,7 +279,7 @@ async function runAsActivity(
       NOT_APPROVED,
     )
   }
-  const principal = harnessPrincipal(owner)
+  const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
   const services = deps.services
   const heartbeat = setInterval(() => context.heartbeat(), deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS)
   const startedAt = new Date()

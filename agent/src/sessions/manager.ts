@@ -1194,6 +1194,7 @@ export class SessionManager {
         author: principal,
         images: options.images ?? [],
         systemAppend: systemAppend(false),
+        ...(options.tiers ? { tiers: options.tiers } : {}),
       })
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn

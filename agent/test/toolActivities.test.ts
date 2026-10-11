@@ -277,6 +277,21 @@ describe('tool activities', () => {
     }
   })
 
+  it("runs a turn sent with its sender's tiers with those tiers, cut to what the owner holds now (#2320)", async () => {
+    const sent = { ...BEARER, turnTiers: ['read', 'write', 'outward'] as const }
+    const h = harness({ currentTiers: async () => ['read', 'write', 'outward'] }, TOOLS, sent)
+    const content = await env(`session-${SESSION}`, 'tool-toolu_approved').run(h.activities.send!, { to: 'x' })
+    expect(text(content)).toContain('"sent": "x"')
+    // The token was cut to read since the turn was sent.
+    const cut = harness({ currentTiers: async () => ['read'] }, TOOLS, sent)
+    const refused = await failure(env(`session-${SESSION}`, 'tool-toolu_approved').run(cut.activities.send!, { to: 'x' }))
+    expect(refused.message).toContain('needs the "outward" tier')
+    // A turn sent with no tiers keeps the owner's default: a token owner reads only.
+    const plain = harness({}, TOOLS, BEARER)
+    const read = await failure(env(`session-${SESSION}`, 'tool-toolu_approved').run(plain.activities.send!, { to: 'x' }))
+    expect(read.message).toContain('needs the "outward" tier')
+  })
+
   it("aborts the tool's signal when the activity is cancelled", async () => {
     const h = harness({ heartbeatMs: 5 })
     const e = env()
@@ -339,10 +354,17 @@ describe('flow runs in tool activities', () => {
     expect(text(content)).toContain('"sent": "printer"')
   })
 
-  it('holds a token starter to its read tier, as its durable sessions are', async () => {
-    const h = harness({ flows: flowRuns(BEARER) })
-    const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'x' }))
-    expect(refused.message).toContain('needs the "outward" tier')
+  it("runs a token starter's call with the tiers its token holds now (#2320)", async () => {
+    const live = harness({ flows: flowRuns(BEARER), currentTiers: async () => ['read', 'write', 'outward'] })
+    const content = await env(FLOW, 'tool-call_ok').run(live.activities.send!, { to: 'x' })
+    expect(text(content)).toContain('"sent": "x"')
+    // A revoked token holds nothing, and a starter whose tiers are kept nowhere reads only.
+    const revoked = harness({ flows: flowRuns(BEARER), currentTiers: async () => [] })
+    expect((await failure(env(FLOW, 'tool-call_ok').run(revoked.activities.whoami!, {}))).message).toContain('needs the "read" tier')
+    const unknown = harness({ flows: flowRuns(BEARER), currentTiers: async () => undefined })
+    expect((await failure(env(FLOW, 'tool-call_ok').run(unknown.activities.send!, { to: 'x' }))).message).toContain(
+      'needs the "outward" tier',
+    )
   })
 
   it('refuses a flow with no run recorded, or with no store to read it from, and runs nothing', async () => {
