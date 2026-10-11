@@ -294,29 +294,46 @@ def _matching(found: dict[int, list[bool]], chosen: dict[int, FlowType]) -> set[
     return {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows}
 
 
-def _offered_side(status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]) -> int | None:
-    """The one side :func:`slicer_nozzle_stats` offers the slicer, or ``None`` when it
-    leaves the slicer to choose.
+#: :func:`_offer`'s answer when either side may print (#2181).
+BOTH: Literal["both"] = "both"
+
+
+def _offer(
+    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
+) -> int | Literal["both"] | None:
+    """Which side :func:`slicer_nozzle_stats` offers the slicer: one side, :data:`BOTH`,
+    or ``None`` when it leaves the slicer to choose. The one place that decides it, so
+    the stats and :func:`_offered_side` cannot disagree (#2227).
 
     When both sides have a nozzle of the flow chosen for them and those flows differ,
     the High Flow side is offered. Left to choose, the slicer put a one-colour print on
     the Standard right every time, so a High Flow choice for the left changed nothing;
     offered only the left (["High Flow#1", "Standard#0"]) it sliced High Flow, at the
     filament's High Flow speed and retraction (live slices on Bambuddy, 2026-10-06,
-    #484). A multi-colour print then goes to that side alone, as #834 sends one."""
+    #484). A multi-colour print then goes to that side alone, as #834 sends one. When
+    those flows are the same, both are offered (#2181)."""
     if status is None or not two_nozzles(status):
         return None
     chosen = _flows(nozzles)
     found = _found(status, nozzles)
     matching = _matching(found, chosen)
-    if len(matching) == 2 and chosen[LEFT] != chosen[RIGHT]:
-        return LEFT if chosen[LEFT] == "high_flow" else RIGHT
+    if len(matching) == 2:
+        if chosen[LEFT] != chosen[RIGHT]:
+            return LEFT if chosen[LEFT] == "high_flow" else RIGHT
+        return BOTH
     for has in (matching, {e for e, flows in found.items() if flows}):
         if len(has) == 1:
             return has.pop()
         if has:
             return None
     return None
+
+
+def _offered_side(status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]) -> int | None:
+    """The one side :func:`_offer` offers, or ``None`` when it offers both or leaves the
+    slicer to choose: either way the slice may use either side."""
+    offer = _offer(status, nozzles)
+    return offer if isinstance(offer, int) else None
 
 
 def slicer_nozzle_stats(
@@ -344,7 +361,7 @@ def slicer_nozzle_stats(
     count only and sliced Standard.
 
     When both sides have a nozzle of the flow chosen for them, and those flows differ,
-    the High Flow side is offered (:func:`_offered_side`). When both have it in the same
+    the High Flow side is offered (:func:`_offer`). When both have it in the same
     flow, both are offered (#2181): left as it was, a library file made for one extruder
     offered the slicer one side, and queue 268 sliced both colours onto the left. When
     both have the size in neither's chosen flow, or neither side has the size, or the
@@ -353,16 +370,13 @@ def slicer_nozzle_stats(
     the printer reports no size for counts as not having it; only the other side is
     then offered.
     """
-    offered = _offered_side(status, nozzles)
+    offer = _offer(status, nozzles)
+    if offer is None:
+        return None
     chosen = _flows(nozzles)
-    if offered is None:
-        if status is None or not two_nozzles(status):
-            return None
-        if len(_matching(_found(status, nozzles), chosen)) < 2:
-            return None
-        return [f"{VOLUME_TYPE[chosen[extruder]]}#1" for extruder in SLICER_ORDER]
     return [
-        f"{VOLUME_TYPE[chosen[extruder]]}#{int(extruder == offered)}" for extruder in SLICER_ORDER
+        f"{VOLUME_TYPE[chosen[extruder]]}#{int(offer == BOTH or extruder == offer)}"
+        for extruder in SLICER_ORDER
     ]
 
 
