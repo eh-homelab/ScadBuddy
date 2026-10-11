@@ -145,7 +145,7 @@ def test_one_name_with_two_values_is_refused() -> None:
         )
 
 
-@pytest.mark.parametrize("name", ["o1", "o12_parts", "sb_key", "1x", "with space", "$fn"])
+@pytest.mark.parametrize("name", ["o1", "o12_parts", "sb_key", "1x", "with space", "$fn", "each", "if", "undef", "PI"])
 def test_reserved_or_invalid_exposed_names_are_refused(name: str) -> None:
     with pytest.raises(ValidationError):
         Exposed(expose=name, value=1)
@@ -202,7 +202,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 SCENE_NAME = "scene.json"
 MESHES_DIR = "meshes"
 #: What a generated module or helper is named; an exposed parameter may not shadow one.
-RESERVED = r"(?!o[0-9]+(?:_|$))(?!sb_)"
+#: Nor an OpenSCAD keyword or constant, which would not parse as an assignment's name.
+KEYWORDS = (
+    "if", "else", "for", "let", "each", "module", "function", "include", "use", "assert",
+    "echo", "intersection_for", "true", "false", "undef", "PI",
+)
+RESERVED = r"(?!o[0-9]+(?:_|$))(?!sb_)" + rf"(?!(?:{'|'.join(KEYWORDS)})$)"
 IDENT = rf"^{RESERVED}[A-Za-z_][A-Za-z0-9_]*$"
 COLOUR = r"^#[0-9A-F]{6}$"
 MESH_PATH = r"^meshes/o[0-9]+-p[0-9]+\.3mf$"
@@ -266,6 +271,9 @@ class Joint(_Strict):
     clearance: Num
     key: Literal["none", "flat", "hex"] = "flat"
     role: Literal["peg", "socket"]
+    #: A peg's colour: the part's the cut went through, so the peg prints with the
+    #: piece it stands on. None: the object's first part's.
+    colour: str | None = Field(default=None, pattern=COLOUR)
 
 
 class Primitive(_Strict):
@@ -370,7 +378,7 @@ def text_sha256(text: str) -> str:
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run --frozen pytest tests/meshmodel/test_scene.py -q`
-Expected: PASS. If `test_a_scene_round_trips_through_json` fails because `Num` parsed `{"expose":…}` as a float, add `Field(union_mode="left_to_right")` is not needed: pydantic's smart union picks `Exposed` for an object; check the failure text before changing anything.
+Expected: PASS. pydantic's smart union parses `{"expose": …, "value": …}` as `Exposed` and a number as `float`, so `Num` needs no `union_mode`; if the round trip fails, read the failure before changing the type.
 
 - [ ] **Step 5: Lint, type-check and commit**
 
@@ -817,7 +825,7 @@ def _wrap(obj: SceneObject, index: int, op: Op, inner: list[str]) -> list[str]:
         place = f"translate({_vec(op.at)}) multmatrix({_rot(frame(op.axis))})"
         d, h, c = _n(op.diameter), _n(op.depth), _n(op.clearance)
         if op.role == "peg":
-            return ["union() {", *nested, f'  color("{colour}") {place} sb_key({d}, {h}, "{op.key}");', "}"]
+            return ["union() {", *nested, f'  color("{op.colour or colour}") {place} sb_key({d}, {h}, "{op.key}");', "}"]
         return [
             "difference() {",
             *nested,
@@ -1680,6 +1688,32 @@ def test_expose_and_unexpose() -> None:
     assert removed_parameters(exposed, back) == ["cut_height"]
 
 
+def test_a_jointed_cut_a_joint_and_a_jointed_scale_cannot_be_exposed() -> None:
+    jointed = apply_edits(garden(1), edits(split(depth=5)), mesh_of)
+    for refused in (
+        {"edit": "expose", "object": "o1", "op": 0, "field": "point.2", "name": "cut_height"},
+        {"edit": "expose", "object": "o1", "op": 1, "field": "diameter", "name": "peg"},
+        {"edit": "expose", "object": "o2", "op": None, "field": "scale.2", "name": "tall"},
+        {"edit": "transform", "object": "o2", "scale": [1, 1, 2]},
+    ):
+        with pytest.raises(SceneEditError):
+            apply_edits(jointed, edits(refused), mesh_of)
+
+
+def test_a_peg_takes_the_colour_of_the_part_it_stands_on() -> None:
+    two = garden(1).model_copy(update={"objects": [garden(1).objects[0].model_copy(update={"parts": [
+        Part(id="p1", mesh="meshes/o1-p1.3mf", colour="#F08A24"),
+        Part(id="p2", mesh="meshes/o1-p2.3mf", colour="#3A7D2C"),
+    ]})]})
+    body = trimesh.creation.cylinder(radius=10, height=30, sections=64)
+    body.apply_translation((0, 0, 15))
+    stem = trimesh.creation.revolve(np.array([[0, 30], [3, 30], [3, 45], [0, 45]], dtype=float), sections=64)
+    meshes = {"meshes/o1-p1.3mf": body, "meshes/o1-p2.3mf": stem}
+    result = apply_edits(two, edits(split(depth=4)), meshes.__getitem__)
+    peg = result.objects[1].ops[-1]
+    assert isinstance(peg, Joint) and peg.role == "peg" and peg.colour == "#3A7D2C"
+
+
 def test_expose_on_the_transform() -> None:
     result = apply_edits(
         garden(1), edits({"edit": "expose", "object": "o1", "op": None, "field": "scale.2", "name": "height_scale"}), mesh_of
@@ -1888,6 +1922,11 @@ def _replace(scene: Scene, index: int, *objects: SceneObject) -> Scene:
     return scene.model_copy(update={"objects": [*scene.objects[:index], *objects, *scene.objects[index + 1 :]]})
 
 
+def _section_area(mesh: trimesh.Trimesh, point: np.ndarray, normal: np.ndarray) -> float:
+    found = measure(mesh, point, normal)
+    return 0.0 if found is None else found.area
+
+
 def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
     index = _find(scene, edit.object)
     obj = scene.objects[index]
@@ -1918,7 +1957,9 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
             )
         axis = tuple(-x for x in n) if spec.peg_on == "above" else n
         at = (float(section.centroid[0]), float(section.centroid[1]), float(section.centroid[2]))
-        joint = {"at": at, "axis": axis, "diameter": diameter, "depth": spec.depth, "clearance": spec.clearance, "key": spec.key}
+        # The peg prints with the part the cut goes through most (on the carrot, the green neck).
+        widest = max(obj.parts, key=lambda part: _section_area(mesh_of(part.mesh), point, normal))
+        joint = {"at": at, "axis": axis, "diameter": diameter, "depth": spec.depth, "clearance": spec.clearance, "key": spec.key, "colour": widest.colour}
         peg, socket = Joint(role="peg", **joint), Joint(role="socket", **joint)
         if spec.peg_on == "above":
             upper = upper.model_copy(update={"ops": [*upper.ops, peg]})
@@ -2039,9 +2080,33 @@ def _exposing(name: str | None) -> Callable[[object], object]:
     return change
 
 
+def _jointed(obj: SceneObject) -> bool:
+    return any(isinstance(op, Joint) for op in obj.ops)
+
+
+def _refuse_breaking_a_joint(obj: SceneObject, edit: ExposeEdit) -> None:
+    """A parameter that moves a jointed cut, sizes a joint or scales a jointed half would
+    move one side without the other (the other half's cut, the joint's root are their
+    own literal numbers) or skip the fit check `_split` made: refused (review of #2388)."""
+    if edit.op is None:
+        if edit.field.startswith("scale") and _jointed(obj):
+            raise SceneEditError(f"{obj.id} is half of a jointed pair; scaling one half alone breaks the fit")
+        return
+    op = obj.ops[edit.op]
+    if isinstance(op, Joint):
+        raise SceneEditError("a joint's numbers are measured from the section when it is cut; split again to change them")
+    if isinstance(op, Cut) and any(
+        isinstance(other, Joint) and abs(float(np.dot(np.asarray(other.at) - _floats(op.point), unit(op.normal)))) < 1e-6
+        for other in obj.ops
+    ):
+        raise SceneEditError("this cut carries a joint, and its other half and the joint would not move with it")
+
+
 def _expose(scene: Scene, edit: ExposeEdit | UnexposeEdit) -> Scene:
     index = _find(scene, edit.object)
     obj = scene.objects[index]
+    if isinstance(edit, ExposeEdit) and (edit.op is None or edit.op < len(obj.ops)):
+        _refuse_breaking_a_joint(obj, edit)
     change = _exposing(edit.name if isinstance(edit, ExposeEdit) else None)
     if edit.op is None:
         updated = obj.model_copy(update={"transform": _set_field(obj.transform, edit.field, change)})
@@ -2068,6 +2133,8 @@ def _one(scene: Scene, edit: BaseModel, mesh_of: MeshOf) -> Scene:
     obj = scene.objects[index]
     if isinstance(edit, TransformEdit):
         t = obj.transform
+        if edit.scale is not None and _jointed(obj) and _floats(edit.scale) != _floats(t.scale):
+            raise SceneEditError(f"{obj.id} is half of a jointed pair; scale the object before splitting it")
         transform = Transform(
             translate=edit.translate if edit.translate is not None else t.translate,
             rotate=edit.rotate if edit.rotate is not None else t.rotate,
@@ -3219,7 +3286,7 @@ git commit -m "feat(agent): mesh model tools — create from a mesh, read, edit 
 **Interfaces:**
 - Consumes: Tasks 1–7.
 
-`make.py` builds the demo from scratch and is how its files are made and re-made: a two-colour "carrot" (orange body r=10 h=30, green neck r=3 and leaves r=6 above it), read into a scene with `scene_from_objects`, split at z=32 with a flat-keyed joint (peg on the body, depth 4, clearance 0.2), the leaves laid on their side, and `cut_height` exposed on the body's cut. It writes `scene.json`, `model.scad` and `meshes/` beside itself. Run it with the backend's environment: `cd backend && uv run --frozen python ../models/mesh-joint-demo/make.py`.
+`make.py` builds the demo from scratch and is how its files are made and re-made: a two-colour "carrot" (orange body r=10 h=30, green neck r=3 and leaves r=6 above it), read into a scene with `scene_from_objects`, split at z=32 with a flat-keyed joint (peg on the body, depth 4, clearance 0.2), the leaves laid on their side, and the leaves' X position exposed as `leaves_x`. It writes `scene.json`, `model.scad` and `meshes/` beside itself. Run it with the backend's environment: `cd backend && uv run --frozen python ../models/mesh-joint-demo/make.py`.
 
 - [ ] **Step 1: Write `make.py`**
 
@@ -3227,7 +3294,7 @@ git commit -m "feat(agent): mesh model tools — create from a mesh, read, edit 
 # models/mesh-joint-demo/make.py
 """Build this template from scratch (#2146): a two-colour carrot made with trimesh, read
 into a scene, split at the neck with a keyed peg on the body and the socket in the
-leaves, the leaves laid on their side, the cut height exposed. Run from backend/:
+leaves, the leaves laid on their side, where the leaves sit exposed. Run from backend/:
 `uv run --frozen python ../models/mesh-joint-demo/make.py`."""
 
 from __future__ import annotations
@@ -3279,7 +3346,8 @@ def main() -> None:
     dropped = scene.objects[1].transform.translate[2]
     scene = apply_edits(scene, edits.validate_python([
         {"edit": "transform", "object": "o2", "translate": [25, 0, dropped]},
-        {"edit": "expose", "object": "o1", "op": 0, "field": "point.2", "name": "cut_height"},
+        # Where the leaves sit on the bed: a parameter that cannot break the joint.
+        {"edit": "expose", "object": "o2", "op": None, "field": "translate.0", "name": "leaves_x"},
     ]), mesh_of)
     scene, text = compiled(scene)
     (HERE / SCENE_NAME).write_text(dump_scene(scene))
@@ -3290,15 +3358,15 @@ if __name__ == "__main__":
     main()
 ```
 
-Exposing `cut_height` on `o1`'s cut alone makes the bottom's cut a parameter while the top's stays at 32: that is the demo's point (the customizer moves where the bottom ends); say so in the README.
+A jointed cut cannot be exposed (Task 7, `_refuse_breaking_a_joint`): moving one side of it would leave the peg floating or the halves overlapping. The demo exposes where the leaves sit instead.
 
 - [ ] **Step 2: Run it and commit its output**, plus `model.json` (`{"name": "Mesh joint demo", "description": "A mesh opened as a scene: cut at the neck, joined with a keyed peg and socket, the leaves laid on their side (#2146).", "tags": ["mesh", "demo"]}`) and a README saying what the template shows and that `make.py` regenerates it.
 
 - [ ] **Step 3: Write `verify.sh`**
 
 Follow `models/battery-crate/verify.sh`'s frame (`set -euo pipefail`, `cd "$(dirname "$0")"`, `BASE_IMAGE`, every `docker run` with `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` on the same line). It:
-1. renders `model.scad` with the defaults and with `-D cut_height=31` in `$BASE_IMAGE` (`openscad --backend=Manifold -o out.3mf model.scad`), failing on any `WARNING:` or `ERROR:` in stderr;
-2. checks on the host (Python, as battery-crate's checker does, reading the 3MF's XML) that the output has the two colours `#F08A24` and `#3A7D2C`;
+1. renders `model.scad` with the defaults and with `-D leaves_x=40` in `$BASE_IMAGE` (`openscad --backend=Manifold -o out.3mf model.scad`), failing on any `WARNING:` or `ERROR:` in stderr;
+2. checks each 3MF on the host (stdlib Python reading the XML, as battery-crate's checker does) for the two colours `#F08A24` and `#3A7D2C`, and counts each colour's pieces: triangles of one material joined by shared vertices (union-find over `v1`/`v2`/`v3`), expecting orange 1 (the body) and green 2 (the neck stub with its peg, and the leaves). A peg that came loose from its base, or a part that fell apart, is an extra piece;
 3. when `SCADBUDDY_PIPELINE_IMAGE` is set, runs `python -m scadbuddy.meshmodel.check models/mesh-joint-demo` in it to assert `sha256(model.scad) == scene.generated_sha256` and `compile_scene(scene) == model.scad`; otherwise prints `pipeline check: skipped`.
 
 For step 3 add `backend/scadbuddy/meshmodel/check.py`:
@@ -3428,5 +3496,5 @@ git commit -m "docs(plugin): authoring mesh models (#2146)"
 ## Self-review
 
 - **Spec coverage (phases 1–2):** §3 representation → Tasks 1, 3; §3.3 colourless meshes → Task 5 (`test_a_part_file_is_a_colourless_closed_3mf`), Task 9; §4 sources (library, upload, output), cap, provenance, nothing to Bambuddy → Tasks 5, 6, 8; OBJ refused → Task 8 (`test_an_obj_upload_is_refused`); §5 edits, hash check, presets → Tasks 7, 8; §6 kinds on `library`, tools, flows (`tool(name, args)` needs nothing new) → Tasks 8, 10; §10 tests for phases 1–2 → Tasks 1–11; §11 phases 1–2 acceptance → Tasks 8, 9, 11. Deferred, stated in the header: §7, §8, §9, the eval scenario.
-- **Deviation from the spec, stated:** §4 says the library read reuses `library_objects.py`. Its pieces are `piece_mesh` 3MFs with `basematerials`, which §3.3 forbids in a part file, so `mesh_model_create` reuses only its fetch (`LibrarySource.fetch_3mf`), its reader (`read_objects`) and its refusals. Model-level `scene: true` is not written into `model.json`: a model is a mesh model when it has `scene.json`; `model.json` keeps `mesh_source` so the origin survives an eject. `drop_from_presets` drops from saved presets; the model's own `model.json` presets are refused with "edit them first". Beyond the spec: `lay_flat`'s drop to the bed counts pegs and `add` shapes, and `largest_flat` never picks a cut face carrying a peg (found while planning: otherwise the peg goes into the bed); spec §5 should say so, in this PR or Task 7's.
+- **Deviation from the spec, stated:** §4 says the library read reuses `library_objects.py`. Its pieces are `piece_mesh` 3MFs with `basematerials`, which §3.3 forbids in a part file, so `mesh_model_create` reuses only its fetch (`LibrarySource.fetch_3mf`), its reader (`read_objects`) and its refusals. Model-level `scene: true` is not written into `model.json`: a model is a mesh model when it has `scene.json`; `model.json` keeps `mesh_source` so the origin survives an eject. `drop_from_presets` drops from saved presets; the model's own `model.json` presets are refused with "edit them first". Beyond the spec, and added to spec §5 in this PR: `lay_flat`'s drop to the bed counts pegs and `add` shapes, and `largest_flat` never picks a cut face carrying a peg (otherwise the peg goes into the bed); a peg takes the colour of the part the cut goes through; a jointed cut, a joint's numbers and a jointed half's scale cannot be exposed or (scale) changed (review of #2388: one side would move without the other).
 - **Type consistency:** `compiled(scene) -> tuple[Scene, str]` (Task 8) is used by Task 11's `make.py`; `mesh_of(path) -> trimesh.Trimesh` everywhere; `Exposed(expose, value)` in Tasks 1, 3, 7, 10 (zod `num`).

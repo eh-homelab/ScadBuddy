@@ -178,6 +178,15 @@ Edits (what callers send; they expand into ops):
 | `delete`, `duplicate`, `rename {object, …}` | as named |
 | `expose {object, op, field, name}` | makes an op field a customizer parameter; `unexpose` reverses it |
 
+Joints stay whole (review of #2388): a peg takes the colour of the part the cut goes
+through most, so it prints with the piece it stands on. A parameter may not move a cut
+that carries a joint, size a joint, or scale a jointed half, and `transform` may not
+change a jointed half's scale: the other half's cut and the joint's root are numbers of
+their own, so one side would move without the other, and a joint's size would skip the
+fit check. Scale before splitting. `lay_flat`'s drop to the bed counts what ops add (a
+peg, an `add`), and `largest_flat` never picks a cut face carrying a peg, which would
+put the peg into the bed.
+
 Exposed parameters and presets: an exposed name belongs to the op, not to the object's
 id or name, so `rename` and `transform` never change it. An edit that removes one
 (`unexpose`, deleting its op or object) is refused while a saved preset (`saved_presets`)
