@@ -1,9 +1,10 @@
+import { renameSync, writeFileSync } from 'node:fs'
 import { readdir, readFile, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { type SessionFiles, WorkspaceError, type WorkspaceRef } from '../workspace/store.js'
 import type { HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk'
-import { PLAIN_FILE_NAME, TOOL_PREFIX } from './headlessBrowser.js'
+import { type DownloadBudget, NO_DOWNLOADS, PLAIN_FILE_NAME, TOOL_PREFIX } from './headlessBrowser.js'
 
 // The headless browser's downloads, into the session's workspace (#2329 part 2).
 //
@@ -22,6 +23,17 @@ import { PLAIN_FILE_NAME, TOOL_PREFIX } from './headlessBrowser.js'
 //
 // The model is told what landed, as the hook's `additionalContext`, by path,
 // size and sha256 (never the URL: workspace_list shows the source).
+//
+// The caps hold WHILE a download happens, not only when it is drained, so no
+// download can fill the pod's disk: before every browser call a PreToolUse hook
+// (`downloadBudgetHook`) writes the call's budget (the per-file cap, the room
+// left in the workspace, how many downloads a call and a turn may make), and
+// the request guard holds every download to it. A navigation the browser would
+// download is refused before it reaches the disk when its Content-Length, or
+// the body actually read, is over the cap; a download that starts anyway (one
+// made by page script, say) is watched on the disk, cancelled and deleted once
+// it passes the budget; and one past the count is cancelled at once. Each
+// refusal is reported here like a finished download, with its reason.
 
 /** Where downloads land in the workspace. */
 export const DOWNLOADS_PREFIX = 'downloads'
@@ -31,7 +43,63 @@ export const DOWNLOAD_WAIT_MS = 10_000
 
 const ENTRY = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(bin|json|pending)$/
 
-export type DownloadTarget = { files: Pick<SessionFiles, 'write' | 'limits'>; ref: WorkspaceRef }
+export type DownloadTarget = { files: Pick<SessionFiles, 'write' | 'limits' | 'usage'>; ref: WorkspaceRef }
+
+/** How many downloads one browser call, and one turn, may make. */
+export const MAX_DOWNLOADS_PER_CALL = 5
+export const MAX_DOWNLOADS_PER_TURN = 20
+
+/** Writes the budget the request guard reads, whole (a rename), so it never reads half of one. */
+export function writeDownloadBudget(file: string, budget: DownloadBudget): void {
+  const tmp = `${file}.tmp`
+  writeFileSync(tmp, JSON.stringify(budget))
+  renameSync(tmp, file)
+}
+
+/**
+ * The PreToolUse hook that, before every headless-browser call, writes what
+ * the call may download: the workspace's per-file cap and the room left in it
+ * (its quota less what it holds), at most MAX_DOWNLOADS_PER_CALL downloads,
+ * and for the turn at most MAX_DOWNLOADS_PER_TURN and the room there was at its
+ * first call. The request guard holds every download to it while it runs
+ * (headlessBrowser.ts `redirectGuardSource`). A budget that cannot be read
+ * from the workspace is written as none: nothing downloads.
+ */
+export function downloadBudgetHook(budgetFile: string, target: DownloadTarget, options: { onError?: (err: unknown) => void } = {}): HookCallbackMatcher {
+  let call = 0
+  let turnMaxBytes: number | undefined
+  return {
+    matcher: `^${TOOL_PREFIX}`,
+    hooks: [
+      async (input) => {
+        if (input.hook_event_name !== 'PreToolUse' || !input.tool_name.startsWith(TOOL_PREFIX)) return {}
+        call++
+        try {
+          const [limits, usage] = await Promise.all([target.files.limits(), target.files.usage(target.ref)])
+          const room = Math.max(0, limits.workspaceMaxBytes - usage.bytes)
+          turnMaxBytes ??= room
+          writeDownloadBudget(budgetFile, {
+            call,
+            fileMaxBytes: Math.min(limits.fileMaxBytes, room),
+            callMaxBytes: room,
+            callMaxCount: MAX_DOWNLOADS_PER_CALL,
+            turnMaxBytes,
+            turnMaxCount: MAX_DOWNLOADS_PER_TURN,
+          })
+        } catch (err) {
+          options.onError?.(err)
+          try {
+            writeDownloadBudget(budgetFile, { ...NO_DOWNLOADS, call })
+          } catch (inner) {
+            // The file materialize wrote, NO_DOWNLOADS, or an older budget stays.
+            options.onError?.(inner)
+          }
+        }
+        return {}
+      },
+    ],
+  }
+}
 
 export type DrainedFile = { path: string; size_bytes: number; sha256: string; media_type: string }
 export type Drained = {
@@ -76,7 +144,7 @@ function numbered(name: string, n: number): string {
   return `${stem.slice(0, 128 - ext.length - String(n).length - 1)}-${n}${ext}`
 }
 
-type Meta = { url?: unknown; name?: unknown; error?: unknown }
+type Meta = { url?: unknown; name?: unknown; error?: unknown; refused?: unknown }
 
 async function entries(dir: string): Promise<{ ended: string[]; running: number }> {
   let names: string[]
@@ -123,6 +191,10 @@ export async function drainDownloads(
     try {
       const meta = JSON.parse(await readFile(metaFile, 'utf8')) as Meta
       name = downloadName(typeof meta.name === 'string' ? meta.name : '')
+      if (typeof meta.refused === 'string' && meta.refused) {
+        drained.refused.push({ name, reason: `stopped by the download limits: ${meta.refused}` })
+        continue
+      }
       if (typeof meta.error === 'string' && meta.error) {
         drained.refused.push({ name, reason: 'the download failed in the browser' })
         continue

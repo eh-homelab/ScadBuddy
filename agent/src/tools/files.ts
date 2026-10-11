@@ -703,7 +703,7 @@ export const fileTools: Tool[] = [
     ],
     handler: async ({ slug, file_path, content, workspace_path, workspace_sha256, message, base, force, response }, ctx) => {
       const path = writable(file_path)
-      const { text, info } = await textSource(ctx, { text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
+      const { text, info } = await textSource(ctx, { upload: 'write_file', text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
       const previous = await revisionOf(ctx.backend, slug)
       if (base !== undefined && (previous === null || !previous.startsWith(base))) return conflict(base, previous)
       return save(ctx, { slug, path, content: text, message, base: base ?? null, previous, force, response, from: info })

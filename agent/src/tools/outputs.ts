@@ -249,7 +249,7 @@ export const outputTools: Tool[] = [
     routes: ['PUT /api/v1/outputs/{output_id}/thumbnail'],
     title: ({ output_id }) => `Set the picture of output ${output_id}`,
     handler: async ({ output_id, png_base64, workspace_path, workspace_sha256 }, ctx) => {
-      const source = await binarySource(ctx, { base64: png_base64, base64Name: 'png_base64', path: workspace_path, sha256: workspace_sha256 })
+      const source = await binarySource(ctx, { upload: 'set_output_thumbnail', base64: png_base64, base64Name: 'png_base64', path: workspace_path, sha256: workspace_sha256 })
       const answer = await command(ctx, `set thumbnail of ${output_id}`, (headers) =>
         ctx.backend.PUT('/api/v1/outputs/{output_id}/thumbnail', {
           params: { path: { output_id } },

@@ -204,6 +204,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * What the request guard lets the browser download (#2329), written by the
+ * harness before every browser call (browserDownloads.ts `writeDownloadBudget`)
+ * and read by the guard at each download. `call` names the call, so the guard's
+ * per-call count and bytes start again when it changes.
+ */
+export type DownloadBudget = {
+  call: number | null
+  /** One download's most: the workspace file cap, or the room left, whichever is less. */
+  fileMaxBytes: number
+  /** All of one call's downloads: the room left in the workspace. */
+  callMaxBytes: number
+  callMaxCount: number
+  /** All of the turn's downloads (the server lives one query). */
+  turnMaxBytes: number
+  turnMaxCount: number
+}
+
+/** No download at all: the budget before the harness writes one, and without a workspace. */
+export const NO_DOWNLOADS: DownloadBudget = { call: null, fileMaxBytes: 0, callMaxBytes: 0, callMaxCount: 0, turnMaxBytes: 0, turnMaxCount: 0 }
+
 /** Only `name.ext`-like names: no directory part, no leading dot (and `..` is refused besides). Downloads are named by it too (browserDownloads.ts). */
 export const PLAIN_FILE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/
 
@@ -335,6 +356,8 @@ export type HeadlessBrowserPlugin = {
   outputDir: string
   /** Where the request guard saves downloads until the harness drains them into the workspace (browserDownloads.ts). */
   downloadsDir: string
+  /** The download budget the request guard reads (browserDownloads.ts `writeDownloadBudget`); none allowed until written. */
+  budgetFile: string
   origins: BrowserOrigins
   /** The origins approved in this session, as the harness and the request guard see them. */
   approved: ReadonlySet<string>
@@ -414,10 +437,17 @@ export function redirectGuardSource(options: {
   approvedFile: string
   /** Where each page's downloads are saved for the harness to drain (browserDownloads.ts); none when unset. */
   downloadsDir?: string
+  /**
+   * The download budget the harness rewrites before each browser call
+   * (browserDownloads.ts `writeDownloadBudget`); without one, no download may run.
+   */
+  budgetFile?: string
+  /** The server's output directory, where it keeps a copy of each download; a refused one's is removed. */
+  outputDir?: string
 }): string {
   return `'use strict'
 // Written by agent/src/harness/headlessBrowser.ts (redirectGuardSource); do not edit.
-const { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } = require('node:fs')
+const { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } = require('node:fs')
 const { randomUUID } = require('node:crypto')
 const { join } = require('node:path')
 const UI = ${JSON.stringify(options.ui)}
@@ -425,6 +455,8 @@ const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}
 const SESSION = ${JSON.stringify(options.sessionId)}
 const APPROVED_FILE = ${JSON.stringify(options.approvedFile)}
 const DOWNLOADS = ${JSON.stringify(options.downloadsDir ?? null)}
+const BUDGET_FILE = ${JSON.stringify(options.budgetFile ?? null)}
+const OUTPUT_DIR = ${JSON.stringify(options.outputDir ?? null)}
 const INSTALLED = Symbol.for('scadbuddy.requestGuard')
 const WATCHED = Symbol.for('scadbuddy.downloads')
 const originOf = (url) => {
@@ -507,7 +539,28 @@ async function guard(route) {
     return refuse(route, 502, 'The request to ' + originOf(to.url) + ' failed.')
   }
   const status = response.status()
-  if (status < 300 || status >= 400) return route.fulfill({ response })
+  if (status < 300 || status >= 400) {
+    // A navigation the browser would download is held to the download cap here,
+    // before a byte of it reaches the disk: by its Content-Length, then by the
+    // body route.fetch actually read (a missing or lying length).
+    if (request.isNavigationRequest() && downloadLike(response.headers())) {
+      const limit = budget().fileMaxBytes
+      const declared = Number(response.headers()['content-length'])
+      let size = Number.isFinite(declared) ? declared : 0
+      if (size <= limit) {
+        try {
+          size = Math.max(size, (await response.body()).length)
+        } catch {
+          size = Infinity
+        }
+      }
+      if (size > limit) {
+        refusedDownload(request.url(), nameOf(request.url(), response.headers()), 'over the ' + limit + '-byte download limit (the workspace file limit, or the room left in the workspace)')
+        return refuse(route, 413, 'Blocked: this download is larger than the ' + limit + ' bytes the session workspace can take.')
+      }
+    }
+    return route.fulfill({ response })
+  }
   const location = response.headers()['location']
   if (location === undefined) return route.fulfill({ response })
   let next = null
@@ -518,28 +571,179 @@ async function guard(route) {
   if (!getNavigation) return refuse(route, 403, 'Blocked: a redirect of a non-navigation request.')
   return moveTo(route, next.url)
 }
+// The download budget the harness writes before every browser call
+// (browserDownloads.ts writeDownloadBudget): the per-file cap, the room left in
+// the workspace for this call and this turn, and how many downloads a call and a
+// turn may make. Re-read each time; missing or unreadable, nothing may download.
+const NO_BUDGET = { call: null, fileMaxBytes: 0, callMaxBytes: 0, callMaxCount: 0, turnMaxBytes: 0, turnMaxCount: 0 }
+const budget = () => {
+  if (BUDGET_FILE === null) return NO_BUDGET
+  try {
+    const b = JSON.parse(readFileSync(BUDGET_FILE, 'utf8'))
+    const n = (v) => (typeof v === 'number' && v >= 0 ? v : 0)
+    return {
+      call: b.call ?? null,
+      fileMaxBytes: n(b.fileMaxBytes),
+      callMaxBytes: n(b.callMaxBytes),
+      callMaxCount: n(b.callMaxCount),
+      turnMaxBytes: n(b.turnMaxBytes),
+      turnMaxCount: n(b.turnMaxCount),
+    }
+  } catch {
+    return NO_BUDGET
+  }
+}
+// What Chromium renders rather than downloads; anything else, or an attachment, is a download.
+const RENDERED = /^\\s*(text\\/|image\\/|video\\/|audio\\/|application\\/(json|xml|xhtml\\+xml|javascript|ecmascript)\\b|[a-z]+\\/[^;]*\\+(json|xml)\\b)/i
+const downloadLike = (headers) =>
+  /^\\s*attachment/i.test(headers['content-disposition'] || '') || !RENDERED.test(headers['content-type'] || '')
+const nameOf = (url, headers) => {
+  const m = /filename\\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(headers['content-disposition'] || '')
+  if (m) return m[1]
+  try {
+    return decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || 'download'
+  } catch {
+    return 'download'
+  }
+}
+// A download refused before or while it ran, reported to the harness like one
+// that ended, so the model is told why (browserDownloads.ts).
+const refusedDownload = (url, name, refused) => {
+  if (DOWNLOADS === null) return
+  try {
+    const base = join(DOWNLOADS, randomUUID())
+    mkdirSync(DOWNLOADS, { recursive: true })
+    writeFileSync(base + '.json.tmp', JSON.stringify({ url, name, error: null, refused }))
+    renameSync(base + '.json.tmp', base + '.json')
+  } catch {}
+}
+// The server saves every download in its output directory too, under its
+// suggested name made safe (@playwright/mcp 0.0.83 Tab._downloadStarted,
+// sanitizeForFilePath). A refused one's copy is removed, now and once more
+// after its copy would have ended.
+const serverName = (s) => {
+  const clean = (x) => x.replace(/[\\x00-\\x2C\\x2E-\\x2F\\x3A-\\x40\\x5B-\\x60\\x7B-\\x7F]+/g, '-')
+  const dot = s.lastIndexOf('.')
+  return dot === -1 ? clean(s) : clean(s.substring(0, dot)) + '.' + clean(s.substring(dot + 1))
+}
+const dropServerCopy = (suggested) => {
+  if (OUTPUT_DIR === null || !suggested) return
+  const file = join(OUTPUT_DIR, serverName(suggested))
+  const drop = () => rmSync(file, { force: true })
+  drop()
+  setTimeout(drop, 1000).unref()
+}
+// This server lives for one query, so these totals are the turn's.
+const tally = { call: undefined, callCount: 0, callBytes: 0, turnCount: 0, turnBytes: 0, live: new Map() }
+const sizeOf = (file) => {
+  let size = 0
+  for (const f of [file, file + '.crdownload']) {
+    try {
+      size = Math.max(size, statSync(f).size)
+    } catch {}
+  }
+  return size
+}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+// Why a download of \`size\` bytes may not go on, or null, counting the others still running.
+const overBudget = (id, size, b) => {
+  let others = 0
+  for (const [key, value] of tally.live) if (key !== id) others += value
+  if (size > b.fileMaxBytes) return 'over the ' + b.fileMaxBytes + '-byte workspace file limit'
+  if (tally.callBytes + others + size > b.callMaxBytes) return 'past the ' + b.callMaxBytes + ' bytes the workspace has room for in this call'
+  if (tally.turnBytes + others + size > b.turnMaxBytes) return 'past the ' + b.turnMaxBytes + ' bytes of downloads a turn may make'
+  return null
+}
+// Watches the bytes Chromium writes (the download's artifact file) while it
+// runs, and answers why it was stopped, or null once it ended within budget.
+const watch = async (id, download, b) => {
+  // Playwright's own artifact path (client Artifact initializer); until it ends, the only way to see its size.
+  const artifact = download._artifact && download._artifact._initializer ? download._artifact._initializer.absolutePath : null
+  let ended = false
+  // failure() waits for the end, and works where path() does not (the server's connection counts as remote).
+  const finished = download.failure().then(
+    (error) => error,
+    (e) => String((e && e.message) || e),
+  )
+  finished.then(() => (ended = true))
+  while (!ended) {
+    if (artifact) {
+      const size = sizeOf(artifact)
+      tally.live.set(id, size)
+      const why = overBudget(id, size, b)
+      if (why) return why
+    }
+    await Promise.race([finished, sleep(50)])
+  }
+  const error = await finished
+  if (error) return { failed: error }
+  // The copy the harness drains is measured again once saved (watchDownloads).
+  return null
+}
+// Counts a saved download against the budget; why it is over, or null.
+const settle = (id, file, b) => {
+  const size = sizeOf(file)
+  const why = overBudget(id, size, b)
+  if (why) return why
+  tally.callBytes += size
+  tally.turnBytes += size
+  return null
+}
 // Each download is saved as <uuid>.bin, with <uuid>.pending while it runs and
-// <uuid>.json (its URL and suggested name, or its error) once it has ended, for
-// the harness to drain into the workspace (browserDownloads.ts). The server
-// keeps its own copy in its output directory, as it always did.
+// <uuid>.json (its URL and suggested name, or why it was refused or failed)
+// once it has ended, for the harness to drain into the workspace
+// (browserDownloads.ts). It is held to the budget while it runs: past it, it
+// is cancelled and its partial file deleted. The server keeps its own copy of
+// a finished one in its output directory, as it always did.
 const watchDownloads = (page) => {
   if (DOWNLOADS === null || page[WATCHED]) return
   page[WATCHED] = true
   page.on('download', async (download) => {
-    const base = join(DOWNLOADS, randomUUID())
+    const id = randomUUID()
+    const base = join(DOWNLOADS, id)
     try {
       mkdirSync(DOWNLOADS, { recursive: true })
       writeFileSync(base + '.pending', '')
-      let error = null
-      try {
-        await download.saveAs(base + '.bin')
-      } catch (e) {
-        error = String((e && e.message) || e)
+      const b = budget()
+      if (tally.call !== b.call) {
+        tally.call = b.call
+        tally.callCount = 0
+        tally.callBytes = 0
       }
-      writeFileSync(base + '.json.tmp', JSON.stringify({ url: download.url(), name: download.suggestedFilename(), error }))
+      let refused = null
+      let error = null
+      if (tally.callCount >= b.callMaxCount) refused = 'more than ' + b.callMaxCount + ' downloads in one browser call'
+      else if (tally.turnCount >= b.turnMaxCount) refused = 'more than ' + b.turnMaxCount + ' downloads in one turn'
+      else {
+        tally.callCount++
+        tally.turnCount++
+        const outcome = await watch(id, download, b)
+        if (outcome && typeof outcome === 'object') error = outcome.failed
+        else refused = outcome
+      }
+      if (refused !== null || error !== null) {
+        await download.cancel().catch(() => {})
+        await download.delete().catch(() => {})
+      } else {
+        // Left for Playwright to delete with the context: the server is still copying it.
+        try {
+          await download.saveAs(base + '.bin')
+          refused = settle(id, base + '.bin', b)
+        } catch (e) {
+          error = String((e && e.message) || e)
+        }
+      }
+      tally.live.delete(id)
+      if (refused !== null || error !== null) {
+        rmSync(base + '.bin', { force: true })
+        // The server's own copy, if it finished copying before the cancel (it names it as below).
+        dropServerCopy(download.suggestedFilename())
+      }
+      writeFileSync(base + '.json.tmp', JSON.stringify({ url: download.url(), name: download.suggestedFilename(), error, refused }))
       renameSync(base + '.json.tmp', base + '.json')
     } catch {
     } finally {
+      tally.live.delete(id)
       rmSync(base + '.pending', { force: true })
     }
   })
@@ -665,6 +869,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   const guardFile = path.join(dir, 'redirect-guard.cjs')
   const approvedFile = path.join(dir, 'approved-origins.json')
   const downloadsDir = path.join(dir, 'downloads')
+  const budgetFile = path.join(dir, 'download-budget.json')
   for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home, downloadsDir]) {
     mkdirSync(d, { recursive: true })
   }
@@ -676,9 +881,11 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   const approved = new Set((options.approvedOrigins ?? []).filter((o) => mayApprove(origins, o)))
   const writeApproved = () => writeFileSync(approvedFile, JSON.stringify([...approved]))
   writeApproved()
+  // No download until the harness writes a budget before a browser call (browserDownloads.ts).
+  writeFileSync(budgetFile, JSON.stringify(NO_DOWNLOADS))
   writeFileSync(
     guardFile,
-    redirectGuardSource({ ui: origins.ui, sessionId: options.sessionId, approvedFile, downloadsDir }),
+    redirectGuardSource({ ui: origins.ui, sessionId: options.sessionId, approvedFile, downloadsDir, budgetFile, outputDir }),
   )
   writeFileSync(
     configFile,
@@ -710,6 +917,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
     configFile,
     outputDir,
     downloadsDir,
+    budgetFile,
     origins,
     approved,
     approve(origin) {

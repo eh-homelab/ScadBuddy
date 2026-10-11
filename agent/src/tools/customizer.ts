@@ -480,7 +480,7 @@ export const customizerTools: Tool[] = [
     routes: ['POST /api/v1/models/{slug}/assets'],
     title: ({ slug, filename, workspace_path }) => `Upload ${filename ?? workspace_path ?? 'asset'} → ${slug}`,
     handler: async ({ slug, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
-      const source = await binarySource(ctx, { base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
+      const source = await binarySource(ctx, { upload: 'upload_asset', base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
       const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
       if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
       const type = name.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'

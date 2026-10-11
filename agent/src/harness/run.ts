@@ -13,7 +13,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
-import { downloadsHook } from './browserDownloads.js'
+import { downloadBudgetHook, downloadsHook } from './browserDownloads.js'
 import {
   assertHeadlessPlugin,
   browserInputGuard,
@@ -409,7 +409,13 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     browserPlugin = browser.pluginDir
     // Its downloads go into the session's workspace after each browser call (#2329).
     const downloads = run.headlessBrowser.downloads
-    if (downloads) downloadHooks = { PostToolUse: [downloadsHook(browser.downloadsDir, downloads)] }
+    // Before each one, the budget the request guard holds them to while they run.
+    if (downloads) {
+      downloadHooks = {
+        PreToolUse: [downloadBudgetHook(browser.budgetFile, downloads)],
+        PostToolUse: [downloadsHook(browser.downloadsDir, downloads)],
+      }
+    }
     tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
     guard = (name, input) => browserInputGuard(name, input, browser.origins, browser.approved)
     const inner = gate

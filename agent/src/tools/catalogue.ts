@@ -118,7 +118,7 @@ export const catalogueTools: Tool[] = [
     routes: ['POST /api/v1/models'],
     title: ({ name }) => `Create template → ${name}`,
     handler: async ({ source, workspace_path, workspace_sha256, ...rest }, ctx) => {
-      const { text, info } = await textSource(ctx, { text: source, textName: 'source', path: workspace_path, sha256: workspace_sha256 })
+      const { text, info } = await textSource(ctx, { upload: 'create_model', text: source, textName: 'source', path: workspace_path, sha256: workspace_sha256 })
       const body = { ...rest, source: text }
       return json(withSent(await command(ctx, `create model ${rest.name}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers })), info))
     },
@@ -163,7 +163,7 @@ export const catalogueTools: Tool[] = [
           ),
         )
       }
-      const { text, info } = await workspaceText(ctx, choice.workspace)
+      const { text, info } = await workspaceText(ctx, choice.workspace, 'import_model')
       const body = { name: name ?? modelNameOf(info.path), source: text, description: '', tags: [], force }
       return json(withSent(await command(ctx, `import ${info.path}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers })), info))
     },
@@ -288,7 +288,7 @@ export const catalogueTools: Tool[] = [
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/readme'],
     handler: async ({ slug, content, workspace_path, workspace_sha256 }, ctx) => {
-      const { text, info } = await textSource(ctx, { text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
+      const { text, info } = await textSource(ctx, { upload: 'set_readme', text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
       const answer = await command(ctx, `set README of ${slug}`, (headers) =>
         ctx.backend.PUT('/api/v1/models/{slug}/readme', { params: { path: { slug } }, body: { content: text }, headers }),
       )
@@ -338,7 +338,7 @@ export const catalogueTools: Tool[] = [
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/thumbnail'],
     handler: async ({ slug, png_base64, workspace_path, workspace_sha256 }, ctx) => {
-      const source = await binarySource(ctx, { base64: png_base64, base64Name: 'png_base64', path: workspace_path, sha256: workspace_sha256 })
+      const source = await binarySource(ctx, { upload: 'set_model_thumbnail', base64: png_base64, base64Name: 'png_base64', path: workspace_path, sha256: workspace_sha256 })
       const answer = await command(ctx, `set thumbnail of ${slug}`, (headers) =>
         ctx.backend.PUT('/api/v1/models/{slug}/thumbnail', {
           params: { path: { slug } },
@@ -368,7 +368,7 @@ export const catalogueTools: Tool[] = [
     routes: ['POST /api/v1/models/{slug}/media'],
     title: ({ slug, filename, workspace_path }) => `Add media ${filename ?? workspace_path ?? ''} → ${slug}`,
     handler: async ({ slug, workspace_path, workspace_sha256, content_base64, filename, caption }, ctx) => {
-      const source = await binarySource(ctx, { base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
+      const source = await binarySource(ctx, { upload: 'add_model_media', base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
       const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
       if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
       const type = 'info' in source ? source.info.mediaType : 'application/octet-stream'

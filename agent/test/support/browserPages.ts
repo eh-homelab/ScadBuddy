@@ -72,6 +72,8 @@ export type OutwardGate = (headers: IncomingHttpHeaders) => Promise<number>
 
 /** What the stand-in UI's "Download part" link downloads (`/files/part.stl?token=abc`). */
 export const DOWNLOAD_BODY = 'solid part\nendsolid part\n'
+/** The size of the downloads the tests hold over the cap (`/files/stream.bin`, `/files/lying.bin`, "Blob big"). */
+export const BIG_DOWNLOAD = 5000
 
 /** The stand-in UI; `otherOrigin` is what its probe and redirect point at. */
 export async function startUi(otherOrigin: string, gate: OutwardGate = () => Promise.resolve(403)): Promise<PageServer> {
@@ -95,6 +97,10 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <button id="agent-socket" onclick="const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/v1/ai/chat'); ws.onopen = () => document.getElementById('agent-socket-result').textContent = 'agent socket open'; ws.onerror = ws.onclose = () => document.getElementById('agent-socket-result').textContent = 'agent socket closed'">Agent socket</button>
   <p id="agent-socket-result">agent socket not run</p>
   <a id="download" href="/files/part.stl?token=abc">Download part</a>
+  <a id="download-stream" href="/files/stream.bin">Download stream</a>
+  <a id="download-lying" href="/files/lying.bin">Download lying</a>
+  <button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob([new Uint8Array(${BIG_DOWNLOAD})])); a.download = 'big.bin'; a.click()">Blob big</button>
+  <button id="blobs" onclick="for (let i = 0; i < 7; i++) { const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['small ' + i])); a.download = 'small-' + i + '.txt'; a.click() }">Blob many</button>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
 </body></html>`
   return serve(async (url, method, res, headers) => {
@@ -119,6 +125,23 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
     if (url === '/redirect-away') {
       res.writeHead(302, { location: `${otherOrigin}/` })
       res.end()
+      return
+    }
+    if (url === '/files/stream.bin') {
+      // Past the tests' cap, chunked: no Content-Length to judge it by.
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="stream.bin"' })
+      for (let sent = 0; sent < BIG_DOWNLOAD; sent += 1000) res.write(Buffer.alloc(1000, 0x61))
+      res.end()
+      return
+    }
+    if (url === '/files/lying.bin') {
+      // A Content-Length under the cap on a chunked body past it.
+      const socket = res.socket!
+      socket.write(
+        'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="lying.bin"\r\n' +
+          `Content-Length: 10\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n${BIG_DOWNLOAD.toString(16)}\r\n${'b'.repeat(BIG_DOWNLOAD)}\r\n0\r\n\r\n`,
+      )
+      socket.end()
       return
     }
     if (url.startsWith('/files/part.stl')) {

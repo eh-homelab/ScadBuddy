@@ -4,15 +4,19 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
+import { existsSync, readFileSync } from 'node:fs'
 import {
   describeDrained,
+  downloadBudgetHook,
   downloadName,
   downloadsHook,
   downloadSource,
   type DownloadTarget,
   drainDownloads,
+  MAX_DOWNLOADS_PER_CALL,
+  MAX_DOWNLOADS_PER_TURN,
 } from '../src/harness/browserDownloads.js'
-import { TOOL_PREFIX } from '../src/harness/headlessBrowser.js'
+import { NO_DOWNLOADS, TOOL_PREFIX } from '../src/harness/headlessBrowser.js'
 import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { DURABLE_TOOLS } from '../src/tools/manifest.js'
@@ -183,6 +187,7 @@ describe('headless-browser downloads', () => {
       ref: { kind: 'session', sessionId: 's' },
       files: {
         limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 5000 }),
+        usage: async () => ({ files: 0, bytes: 0 }),
         write: async (_ws, p, bytes, options) => {
           written.push({ path: p, source: options?.source })
           return { path: p, mediaType: 'model/stl', size: bytes.byteLength, sha256: 'b'.repeat(64), source: null, createdAt: new Date(), updatedAt: new Date() }
@@ -200,6 +205,42 @@ describe('headless-browser downloads', () => {
     expect(out.hookSpecificOutput.additionalContext).toContain(`downloads/p.stl (model/stl, 7 bytes, sha256 ${'b'.repeat(64)})`)
     expect(out.hookSpecificOutput.additionalContext).toContain('q.zip: not saved, the download failed in the browser')
     expect(await readdir(dir)).toEqual([])
+  })
+
+  it('are held to a budget the harness writes before every browser call: the room left in the workspace', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'budget-'))
+    const file = path.join(dir, 'download-budget.json')
+    let used = 4500
+    const target = {
+      ref: { kind: 'session', sessionId: 's' },
+      files: {
+        limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 5000 }),
+        usage: async () => ({ files: 1, bytes: used }),
+        write: async () => Promise.reject(new Error('unused')),
+      },
+    } as unknown as DownloadTarget
+    const hook = downloadBudgetHook(file, target)
+    const signal = new AbortController().signal
+    const before = (tool: string) => hook.hooks[0]!({ hook_event_name: 'PreToolUse', tool_name: tool } as never, undefined, { signal })
+    await before('mcp__scadbuddy__get_model')
+    expect(existsSync(file)).toBe(false)
+    await before(`${TOOL_PREFIX}browser_click`)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
+      call: 1,
+      fileMaxBytes: 500,
+      callMaxBytes: 500,
+      callMaxCount: MAX_DOWNLOADS_PER_CALL,
+      turnMaxBytes: 500,
+      turnMaxCount: MAX_DOWNLOADS_PER_TURN,
+    })
+    used = 1000
+    await before(`${TOOL_PREFIX}browser_click`)
+    // The turn keeps the room it started with; a call gets what is left now.
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ call: 2, fileMaxBytes: 1000, callMaxBytes: 4000, turnMaxBytes: 500 })
+    // A workspace it cannot read allows nothing.
+    target.files.usage = async () => Promise.reject(new Error('down'))
+    await before(`${TOOL_PREFIX}browser_click`)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ ...NO_DOWNLOADS, call: 3 })
   })
 
   it('wait for a running one, and say when it is still running', async () => {

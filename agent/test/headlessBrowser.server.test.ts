@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -14,7 +14,8 @@ import {
   materializeHeadlessBrowser,
   SERVER_NAME,
 } from '../src/harness/headlessBrowser.js'
-import { type DownloadTarget, drainDownloads } from '../src/harness/browserDownloads.js'
+import { type DownloadTarget, drainDownloads, writeDownloadBudget } from '../src/harness/browserDownloads.js'
+import type { DownloadBudget } from '../src/harness/headlessBrowser.js'
 import { DOWNLOAD_BODY, type Hit, type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
 
 // The pinned @playwright/mcp server itself, started exactly as the per-session
@@ -291,27 +292,106 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
     expect(fresh).not.toContain('seen=xx')
   }, 60_000)
 
-  it('saves a download for the harness, which moves it into the workspace without its query (#2329)', async () => {
-    const { call, plugin } = await connect(ui.origin)
-    await call('browser_navigate', { url: `${ui.origin}/` })
-    const snap = (await call('browser_snapshot')).text
-    expect((await call('browser_click', { element: 'Download part', target: refOf(snap, 'link', 'Download part') })).isError).toBe(false)
-    const written: { path: string; bytes: string; source: unknown }[] = []
-    const target: DownloadTarget = {
-      ref: { kind: 'session', sessionId: randomUUID() },
-      files: {
-        limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 5000 }),
-        write: async (_ws, p, bytes, options) => {
-          written.push({ path: p, bytes: Buffer.from(bytes).toString(), source: options?.source })
-          return { path: p, mediaType: 'model/stl', size: bytes.byteLength, sha256: '0'.repeat(64), source: null, createdAt: new Date(), updatedAt: new Date() }
+  describe('downloads (#2329)', () => {
+    const CAP = 1000
+    const budget = (over: Partial<DownloadBudget> = {}): DownloadBudget => ({
+      call: 1,
+      fileMaxBytes: CAP,
+      callMaxBytes: 4000,
+      callMaxCount: 5,
+      turnMaxBytes: 8000,
+      turnMaxCount: 20,
+      ...over,
+    })
+    function store() {
+      const written: { path: string; bytes: string; source: unknown }[] = []
+      const target: DownloadTarget = {
+        ref: { kind: 'session', sessionId: randomUUID() },
+        files: {
+          limits: async () => ({ fileMaxBytes: CAP, workspaceMaxBytes: 8000 }),
+          usage: async () => ({ files: 0, bytes: 0 }),
+          write: async (_ws, p, bytes, options) => {
+            written.push({ path: p, bytes: Buffer.from(bytes).toString(), source: options?.source })
+            return { path: p, mediaType: 'model/stl', size: bytes.byteLength, sha256: '0'.repeat(64), source: null, createdAt: new Date(), updatedAt: new Date() }
+          },
         },
-      },
+      }
+      return { written, target }
     }
-    const drained = await drainDownloads(plugin.downloadsDir, target, { waitMs: 15_000 })
-    expect(drained.refused).toEqual([])
-    expect(written).toEqual([{ path: 'downloads/part.stl', bytes: DOWNLOAD_BODY, source: { tool: 'browser', url: `${ui.origin}/files/part.stl` } }])
-    expect(await readdir(plugin.downloadsDir)).toEqual([])
-  }, 60_000)
+    async function clickOn(call: (name: string, args?: Record<string, unknown>) => Promise<{ text: string; isError: boolean }>, role: string, name: string) {
+      await call('browser_navigate', { url: `${ui.origin}/` })
+      const snap = (await call('browser_snapshot')).text
+      return call('browser_click', { element: name, target: refOf(snap, role, name) })
+    }
+    /** Every file under `dir`, with its size, so a test sees nothing over the cap stayed on the disk. */
+    async function sizes(dir: string): Promise<number[]> {
+      const names = await readdir(dir).catch(() => [] as string[])
+      return Promise.all(names.map(async (n) => (await stat(path.join(dir, n))).size))
+    }
+
+    it('saves one for the harness, which moves it into the workspace without its query', async () => {
+      const { call, plugin } = await connect(ui.origin)
+      writeDownloadBudget(plugin.budgetFile, budget())
+      expect((await clickOn(call, 'link', 'Download part')).isError).toBe(false)
+      const { written, target } = store()
+      const drained = await drainDownloads(plugin.downloadsDir, target, { waitMs: 15_000 })
+      expect(drained.refused).toEqual([])
+      expect(written).toEqual([{ path: 'downloads/part.stl', bytes: DOWNLOAD_BODY, source: { tool: 'browser', url: `${ui.origin}/files/part.stl` } }])
+      expect(await readdir(plugin.downloadsDir)).toEqual([])
+    }, 60_000)
+
+    it('downloads nothing before the harness writes a budget', async () => {
+      const { call, plugin } = await connect(ui.origin)
+      const clicked = await clickOn(call, 'link', 'Download part')
+      expect(clicked.text).toMatch(/HTTP status: 413/)
+      const { written, target } = store()
+      const drained = await drainDownloads(plugin.downloadsDir, target, { waitMs: 5_000 })
+      expect(written).toEqual([])
+      expect(drained.refused).toHaveLength(1)
+    }, 60_000)
+
+    it.each([
+      // The route reads the body, finds it over the cap, and answers 413: no download starts.
+      ['Download stream', 'a body past the cap with no Content-Length', [{ name: 'stream.bin', reason: expect.stringMatching(/over the 1000-byte download limit/) }]],
+      // Content-Length beside Transfer-Encoding does not parse (Node's HTTP client), so the route answers 502.
+      ['Download lying', 'a Content-Length under the cap on a body past it', []],
+    ])('refuses %s (%s) before a byte reaches the disk', async (link, _what, refused) => {
+      const { call, plugin } = await connect(ui.origin)
+      writeDownloadBudget(plugin.budgetFile, budget())
+      const clicked = await clickOn(call, 'link', link)
+      expect(clicked.text).toMatch(/HTTP status: (413|502)/)
+      const { written, target } = store()
+      const drained = await drainDownloads(plugin.downloadsDir, target, { waitMs: 5_000 })
+      expect(written).toEqual([])
+      expect(drained).toEqual({ saved: [], refused, running: 0 })
+      expect(await sizes(plugin.downloadsDir)).toEqual([])
+      expect((await sizes(plugin.outputDir)).filter((s) => s > CAP)).toEqual([])
+    }, 60_000)
+
+    it('cancels and deletes one made by page script that passes the cap on the disk', async () => {
+      const { call, plugin } = await connect(ui.origin)
+      writeDownloadBudget(plugin.budgetFile, budget())
+      await clickOn(call, 'button', 'Blob big')
+      const { written, target } = store()
+      const drained = await drainDownloads(plugin.downloadsDir, target, { waitMs: 15_000 })
+      expect(written).toEqual([])
+      expect(drained.refused).toEqual([{ name: 'big.bin', reason: `stopped by the download limits: over the ${CAP}-byte workspace file limit` }])
+      expect(await readdir(plugin.downloadsDir)).toEqual([])
+      await new Promise((r) => setTimeout(r, 1500))
+      expect((await sizes(plugin.outputDir)).filter((s) => s > CAP)).toEqual([])
+    }, 60_000)
+
+    it('lets a call make only so many', async () => {
+      const { call, plugin } = await connect(ui.origin)
+      writeDownloadBudget(plugin.budgetFile, budget({ callMaxCount: 5 }))
+      await clickOn(call, 'button', 'Blob many')
+      const { written, target } = store()
+      const drained = await drainDownloads(plugin.downloadsDir, target, { waitMs: 15_000 })
+      expect(written).toHaveLength(5)
+      expect(drained.refused).toHaveLength(2)
+      for (const r of drained.refused) expect(r.reason).toMatch(/more than 5 downloads in one browser call/)
+    }, 60_000)
+  })
 
   it('writes unnamed output to the output dir, named output to the cwd, and nothing outside', async () => {
     const { call, plugin, cwd, root } = await connect(ui.origin)

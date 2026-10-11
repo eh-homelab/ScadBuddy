@@ -226,11 +226,12 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
 
   describe('uploads from the workspace (#2329 part 2)', () => {
     type Seen = { method: string; path: string; type: string | null; form?: FormData; json?: unknown }
-    function upload(answer: (seen: Seen) => Response = () => Response.json({ ok: true })) {
+    function upload(answer: (seen: Seen) => Response = () => Response.json({ ok: true }), secrets: string[] = []) {
       const seen: Seen[] = []
       const c: ToolContext = {
         ...services({
           workspace: files,
+          secrets: async () => secrets,
           backend: createBackendClient(BACKEND, async (r) => {
             const req = r as Request
             const type = req.headers.get('content-type')
@@ -342,6 +343,51 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const refused = await runTool(tool('write_source_file'), { slug: 'box', name: 'b.scad', workspace_path: 'blob.scad', workspace_sha256: bin.sha256 }, c)
       expect(String(firstText(refused))).toMatch(/not UTF-8 text/)
       expect(seen).toHaveLength(4)
+    })
+
+    it('refuses every upload that carries a credential, from the workspace or inline, and never says which', async () => {
+      const SECRET = 'sk-ant-planted-0123456789'
+      const { c, seen } = upload(() => Response.json({ ok: true }), ['xy', SECRET])
+      // Text, and binary with the secret across the 1 MiB slice boundary the search reads in.
+      const text = await files.write(ws, 'leak.scad', Buffer.from(`// key ${SECRET}\ncube(1);\n`))
+      const binary = Buffer.concat([PNG, Buffer.alloc(16, 0), Buffer.from(SECRET), Buffer.alloc(4, 0)])
+      const big = new SessionFiles(db.sql, { limits: { fileMaxBytes: 3_000_000, workspaceMaxBytes: 10_000_000 } })
+      const across = Buffer.concat([Buffer.alloc(1024 * 1024 - 5, 1), Buffer.from(SECRET), Buffer.alloc(10, 1)])
+      const png = await files.write(ws, 'leak.png', binary)
+      const spanning = await big.write(ws, 'across.bin', across)
+      const fromText = { workspace_path: 'leak.scad', workspace_sha256: text.sha256 }
+      const fromPng = { workspace_path: 'leak.png', workspace_sha256: png.sha256 }
+      const calls: [string, Record<string, unknown>][] = [
+        ['upload_asset', { slug: 'box', ...fromPng }],
+        ['upload_asset', { slug: 'box', workspace_path: 'across.bin', workspace_sha256: spanning.sha256, filename: 'x.png' }],
+        ['upload_asset', { slug: 'box', filename: 'x.png', content_base64: binary.toString('base64') }],
+        ['set_model_thumbnail', { slug: 'box', ...fromPng }],
+        ['set_model_thumbnail', { slug: 'box', png_base64: binary.toString('base64') }],
+        ['set_output_thumbnail', { output_id: OUTPUT, ...fromPng }],
+        ['set_output_thumbnail', { output_id: OUTPUT, png_base64: binary.toString('base64') }],
+        ['add_model_media', { slug: 'box', ...fromPng }],
+        ['add_model_media', { slug: 'box', filename: 'p.png', content_base64: binary.toString('base64') }],
+        ['create_model', { name: 'Leak', ...fromText }],
+        ['create_model', { name: 'Leak', source: `// ${SECRET}` }],
+        ['import_model', fromText],
+        ['write_source_file', { slug: 'box', name: 'leak.scad', ...fromText }],
+        ['write_source_file', { slug: 'box', name: 'leak.scad', content: SECRET }],
+        ['write_file', { slug: 'box', file_path: 'parts.scad', ...fromText }],
+        ['write_file', { slug: 'box', file_path: 'parts.scad', content: `x ${SECRET} y` }],
+        ['set_readme', { slug: 'box', ...fromText }],
+        ['set_readme', { slug: 'box', content: SECRET }],
+      ]
+      for (const [name, args] of calls) {
+        const result = await runTool(tool(name), args, { ...c, gate: 'harness' })
+        const message = String(firstText(result))
+        expect(result.isError, `${name} ${JSON.stringify(Object.keys(args))}`).toBe(true)
+        expect(message).toMatch(new RegExp(`^${name}: refused, .* contains one of the agent's credentials`))
+        expect(message).not.toContain(SECRET)
+      }
+      expect(seen).toEqual([])
+      // Without the secret, the same file goes.
+      await runTool(tool('set_readme'), { slug: 'box', content: 'fine' }, c)
+      expect(seen).toHaveLength(1)
     })
 
     it('shows the path and sha256 on an approval card, never the bytes', () => {

@@ -76,8 +76,59 @@ function asToolError(err: unknown): never {
   throw err
 }
 
-/** The workspace file a call names, as it is now: there, and at the sha256 the call gave. */
-export async function workspaceFile(ctx: ToolContext, file: { path: string; sha256: string }): Promise<WorkspaceFileInfo> {
+// CREDENTIALS. workspace_read redacts the agent's secrets (ToolServices.secrets:
+// every saved Claude credential, and a classic turn's plugin tokens) from what
+// the model sees, but an upload sends the bytes themselves. A secret that reached
+// the workspace (an http_request body, a browser download, a saved file) could
+// otherwise be moved into a README, a source file or an asset and read back
+// unredacted through get_readme or read_file, or reach Bambuddy. So every upload
+// is searched for every secret first, the workspace file's bytes and inline
+// content alike, text and binary (a byte search), and refused when one is there.
+// The refusal names the upload and says a credential was found, never which.
+
+/** The secrets an upload must not carry, as bytes; shorter than four characters is not a secret (secrets.ts `redact`). */
+async function secretBytes(ctx: ToolContext): Promise<Buffer[]> {
+  const secrets = (await ctx.secrets?.()) ?? []
+  return [...new Set(secrets)].filter((s) => s.length >= 4).map((s) => Buffer.from(s, 'utf8'))
+}
+
+function holdsSecret(bytes: Uint8Array, secrets: readonly Buffer[]): boolean {
+  const haystack = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  return secrets.some((secret) => haystack.indexOf(secret) !== -1)
+}
+
+/** The refusal of an upload that carries a credential; it never says which. */
+function credentialFound(upload: string, what: string): ToolError {
+  return new ToolError(
+    `${upload}: refused, ${what} contains one of the agent's credentials (a saved Claude credential or a plugin token), ` +
+      'which may never be uploaded. Nothing was sent.',
+  )
+}
+
+/** Refuses inline bytes or text that carry a credential. */
+async function checkInline(ctx: ToolContext, upload: string, field: string, content: Uint8Array | string): Promise<void> {
+  const secrets = await secretBytes(ctx)
+  if (secrets.length === 0) return
+  const bytes = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
+  if (holdsSecret(bytes, secrets)) throw credentialFound(upload, `\`${field}\``)
+}
+
+/** Refuses a workspace file whose bytes carry a credential, read a slice at a time (a secret across two slices is found too). */
+async function checkWorkspaceFile(ctx: ToolContext, upload: string, info: WorkspaceFileInfo): Promise<void> {
+  const secrets = await secretBytes(ctx)
+  if (secrets.length === 0) return
+  const { files, ws } = storeOf(ctx)
+  const overlap = Math.max(...secrets.map((s) => s.length)) - 1
+  let tail = Buffer.alloc(0)
+  for await (const part of files.chunks(ws, info.path, info.sha256)) {
+    const window = Buffer.concat([tail, part])
+    if (holdsSecret(window, secrets)) throw credentialFound(upload, `the workspace file ${info.path}`)
+    tail = window.subarray(Math.max(0, window.length - overlap))
+  }
+}
+
+/** The workspace file a call names, as it is now: there, at the sha256 the call gave, and holding no credential. */
+export async function workspaceFile(ctx: ToolContext, file: { path: string; sha256: string }, upload: string): Promise<WorkspaceFileInfo> {
   const { files, ws } = storeOf(ctx)
   try {
     const info = await files.stat(ws, file.path)
@@ -87,14 +138,20 @@ export async function workspaceFile(ctx: ToolContext, file: { path: string; sha2
         `${info.path} changed since it was read: its sha256 is ${info.sha256}, not ${file.sha256}. Read or list it again; nothing was sent`,
       )
     }
+    // Sent later by sha256 (`chunks`), so the bytes searched are the bytes sent.
+    await checkWorkspaceFile(ctx, upload, info)
     return info
   } catch (err) {
     return asToolError(err)
   }
 }
 
-/** A workspace file's text, for a route that takes text: refused unless it is UTF-8 text. */
-export async function workspaceText(ctx: ToolContext, file: { path: string; sha256: string }): Promise<{ text: string; info: WorkspaceFileInfo }> {
+/** A workspace file's text, for a route that takes text: refused unless it is UTF-8 text with no credential in it. */
+export async function workspaceText(
+  ctx: ToolContext,
+  file: { path: string; sha256: string },
+  upload: string,
+): Promise<{ text: string; info: WorkspaceFileInfo }> {
   const { files, ws } = storeOf(ctx)
   try {
     const read = await files.read(ws, file.path)
@@ -104,6 +161,7 @@ export async function workspaceText(ctx: ToolContext, file: { path: string; sha2
         `${read.path} changed since it was read: its sha256 is ${read.sha256}, not ${file.sha256}. Read or list it again; nothing was sent`,
       )
     }
+    if (holdsSecret(read.bytes, await secretBytes(ctx))) throw credentialFound(upload, `the workspace file ${read.path}`)
     // The bytes decide, not the stored type: a .scad saved as octet-stream is still text.
     const text = decodeText(read.bytes)
     if (text === undefined) throw new ToolError(`${read.path} is not UTF-8 text (${read.mediaType}); nothing was sent`)
@@ -200,21 +258,28 @@ export function uploadInit<H extends Record<string, string>>(
 /** The file a binary upload sends: its base64 decoded, or the workspace file, checked. */
 export async function binarySource(
   ctx: ToolContext,
-  args: { base64: string | undefined; base64Name: string; path: string | undefined; sha256: string | undefined },
+  args: { upload: string; base64: string | undefined; base64Name: string; path: string | undefined; sha256: string | undefined },
 ): Promise<UploadSource> {
   const choice = inlineOrWorkspace(args.base64, args.base64Name, args.path, args.sha256)
-  if ('inline' in choice) return { bytes: decodeBase64(choice.inline, args.base64Name) }
-  return { info: await workspaceFile(ctx, choice.workspace) }
+  if ('inline' in choice) {
+    const bytes = decodeBase64(choice.inline, args.base64Name)
+    await checkInline(ctx, args.upload, args.base64Name, bytes)
+    return { bytes }
+  }
+  return { info: await workspaceFile(ctx, choice.workspace, args.upload) }
 }
 
 /** The text a text upload sends: given inline, or the workspace file's, decoded. `info` names the file it came from. */
 export async function textSource(
   ctx: ToolContext,
-  args: { text: string | undefined; textName: string; path: string | undefined; sha256: string | undefined },
+  args: { upload: string; text: string | undefined; textName: string; path: string | undefined; sha256: string | undefined },
 ): Promise<{ text: string; info?: WorkspaceFileInfo }> {
   const choice = inlineOrWorkspace(args.text, args.textName, args.path, args.sha256)
-  if ('inline' in choice) return { text: choice.inline }
-  return workspaceText(ctx, choice.workspace)
+  if ('inline' in choice) {
+    await checkInline(ctx, args.upload, args.textName, choice.inline)
+    return { text: choice.inline }
+  }
+  return workspaceText(ctx, choice.workspace, args.upload)
 }
 
 /** What a result says about the workspace file it sent. */

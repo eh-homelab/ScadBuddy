@@ -947,10 +947,15 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   (`import_model` from a file is still `outward`). A binary file is streamed from
   Postgres to the backend's multipart route a 1 MiB slice at a time
   (`SessionFiles.chunks`; the column is stored uncompressed, `20261011T1521Z_session_files_streaming.sql`);
-  a text file is decoded as UTF-8 and refused when it is not text.
+  a text file is decoded as UTF-8 and refused when it is not text. Every upload, from
+  the workspace or inline, text or binary (a byte search), is refused when it contains
+  one of the agent's credentials (`ToolServices.secrets`, below): `workspace_read`
+  redacts them, and an upload would otherwise carry them into a README, a source file,
+  an asset or Bambuddy. The refusal names the upload, never the credential.
 - Headless-browser downloads land in the workspace as `downloads/<name>`, source
-  `{tool: 'browser', url}` with the query dropped
-  ([headless-browser.md](headless-browser.md#downloads)).
+  `{tool: 'browser', url}` with the query dropped. The caps hold while a download
+  runs: the per-file cap and the room left in the workspace, at most 5 downloads a
+  browser call and 20 a turn ([headless-browser.md](headless-browser.md#downloads)).
 - `workspace_read` redacts every saved Claude credential's secret from text (and, in a
   classic turn, the turn's plugin tokens) before the model sees it
   (`ToolServices.secrets`, `main.ts`).

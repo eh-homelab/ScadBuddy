@@ -161,7 +161,9 @@ In order, from the model outwards:
    the server's suggestion made plain by the input guard's `filename` rule
    (`PLAIN_FILE_NAME`: no directory part, no leading dot, no `..`, at most 128
    characters), it is stored under `downloads/` in the workspace within the workspace's
-   caps, and its bytes are deleted from the disk once stored or refused.
+   caps, and its bytes are deleted from the disk once stored or refused. The caps hold
+   while it runs, not only once it is stored, so no download can fill the pod's disk
+   ([Downloads](#downloads), "Limits").
 
 ## Downloads
 
@@ -190,6 +192,34 @@ to 10 s for a download the call started:
 A download still running after the wait is drained by the next browser call. One that
 finishes after the turn's last browser call is not drained: it goes with the browser
 directory when the turn ends.
+
+### Limits, while a download runs
+
+Before every browser call a `PreToolUse` hook (`downloadBudgetHook`) writes
+`download-budget.json` in the browser directory: the per-file cap (the workspace's
+`workspace_file_max_bytes`, or the room left in the workspace if less), the room left
+in the workspace for the call, at most 5 downloads a call and 20 a turn, and for the
+turn the room there was at its first browser call. Until it is written (the file
+`materializeHeadlessBrowser` starts with), or when the workspace cannot be read, the
+budget is zero: nothing downloads. The request guard reads it at every download:
+
+- **At the route, before the disk.** A navigation whose response the browser would
+  download (`Content-Disposition: attachment`, or a type it does not render) is answered
+  `413` instead when its `Content-Length` is over the per-file cap, or when the body
+  `route.fetch` actually read is (a missing or lying length). A response that does not
+  parse (a `Content-Length` beside `Transfer-Encoding`) fails the fetch and is answered
+  `502`. No download starts.
+- **On the disk, while it runs.** A download that starts anyway (one page script makes
+  from a `blob:` URL, say) is watched through its Playwright artifact file every 50 ms;
+  past the per-file cap, the call's room or the turn's, it is cancelled and its partial
+  file deleted, as is the server's own copy in `output/`. Its finished copy is measured
+  again before the harness may drain it.
+- **By count.** The sixth download of a call, or the 21st of a turn, is cancelled at
+  once.
+
+Each refusal reaches the model through the drain, with its reason ("stopped by the
+download limits: …"). Not bounded: `route.fetch` holds a response's body in the server's
+memory until it ends or the fetch times out, as it does for every page.
 
 ## Beyond the backend: `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`
 
@@ -413,10 +443,17 @@ became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only 
   attachment` through the request guard is a download (fulfilled by the guard's
   `route.fetch`, it still downloads); the guard's `page.on('download')` saves it in
   `downloads/`, and `drainDownloads` stores it as `downloads/part.stl` with the URL's
-  query dropped and leaves the directory empty. Measured on 0.0.83 with
-  chromium-headless-shell 1246 on 2026-10-11 (server test "saves a download for the
-  harness"); the hook itself is unit-tested (`agent/test/workspace.test.ts`), not yet
-  through Claude Code.
+  query dropped and leaves the directory empty. Over the cap, a chunked body with no
+  `Content-Length` is answered 413 and a `Content-Length` beside `Transfer-Encoding`
+  502, with nothing on the disk; a `blob:` download past the cap is cancelled and
+  deleted; a call's sixth download is refused; and with no budget written nothing
+  downloads. Measured on 0.0.83 with chromium-headless-shell 1246 on 2026-10-11 (server
+  tests "downloads (#2329)"). Measured there too: `download.path()` throws ("Path is not
+  available when connecting remotely"), since the server's connection counts as remote,
+  so the guard waits on `download.failure()`; and deleting the artifact while the server
+  copies it fails the tool call, so a kept download's artifact is left to Playwright. The
+  hooks themselves are unit-tested (`agent/test/workspace.test.ts`), not yet through
+  Claude Code.
 - **`TMPDIR` must be short.** Chromium's profile goes under it and its `SingletonSocket`
   is a Unix socket (path limit about 107 bytes); under the session directory the launch
   fails with "Target page, context or browser has been closed". It is a folder per

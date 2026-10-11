@@ -88,7 +88,7 @@ export const sourceFileTools: Tool[] = [
     routes: ['PUT /api/v1/models/{slug}/files/{name}'],
     title: ({ slug, name }) => `Write ${name} → ${slug}`,
     handler: async ({ slug, name, content, workspace_path, workspace_sha256, message }, ctx) => {
-      const { text, info } = await textSource(ctx, { text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
+      const { text, info } = await textSource(ctx, { upload: 'write_source_file', text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
       if (codePoints(text) > MAX_SOURCE_CHARS) throw new ToolError(`${info?.path ?? 'content'} is over ${MAX_SOURCE_CHARS} characters`)
       const answer = await command(ctx, `write ${slug}/${name}`, (headers) =>
         ctx.backend.PUT('/api/v1/models/{slug}/files/{name}', {

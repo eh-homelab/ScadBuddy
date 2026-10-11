@@ -15,6 +15,7 @@ import {
   DISALLOWED_BROWSER_TOOLS,
   disallowedBrowserTools,
   materializeHeadlessBrowser,
+  NO_DOWNLOADS,
   originToApprove,
   PLAYWRIGHT_MCP_VERSION,
   playwrightMcpCli,
@@ -396,7 +397,18 @@ describe('the per-session plugin', () => {
     expect(guard).toContain(`const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}`)
     expect(guard).toContain('maxRedirects: 0')
     const approvedFile = path.join(dir, 'approved-origins.json')
-    expect(guard).toBe(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile, downloadsDir: path.join(dir, 'downloads') }))
+    expect(guard).toBe(
+      redirectGuardSource({
+        ui: [ORIGIN],
+        sessionId,
+        approvedFile,
+        downloadsDir: path.join(dir, 'downloads'),
+        budgetFile: path.join(dir, 'download-budget.json'),
+        outputDir: path.join(dir, 'output'),
+      }),
+    )
+    // No download may run until the harness writes a budget before a browser call.
+    expect(JSON.parse(readFileSync(path.join(dir, 'download-budget.json'), 'utf8'))).toEqual(NO_DOWNLOADS)
     // #2329: it saves each page's downloads where the harness drains them.
     expect(guard).toContain(`const DOWNLOADS = ${JSON.stringify(path.join(dir, 'downloads'))}`)
     expect(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile })).toContain('const DOWNLOADS = null')
