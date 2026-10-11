@@ -1,0 +1,467 @@
+{
+  "uid": "scadbuddy-printing",
+  "title": "ScadBuddy / Printing, Bambuddy and storage",
+  "description": "Print routes, every call to Bambuddy (by scope), the blob store, the worker cache and uploads.",
+  "tags": ["scadbuddy"],
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 42,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "1m",
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "ScadBuddy",
+      "tags": ["scadbuddy"],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false,
+      "icon": "external link",
+      "tooltip": "",
+      "url": ""
+    }
+  ],
+  "annotations": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "options": []
+      },
+      {
+        "name": "DS_TEMPO",
+        "label": "Tempo",
+        "description": "Trace panels need a Tempo datasource (clusters#1596 Phase 4); until one exists they show no data and the metric panels are unaffected.",
+        "type": "datasource",
+        "query": "tempo",
+        "current": { "text": "Tempo", "value": "tempo" },
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "options": []
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(scadbuddy_build_info, namespace)",
+        "query": {
+          "query": "label_values(scadbuddy_build_info, namespace)",
+          "refId": "namespace"
+        },
+        "current": { "text": "bambuddy", "value": "bambuddy" },
+        "includeAll": false,
+        "hide": 0,
+        "refresh": 2,
+        "regex": "",
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Print routes",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Mean latency",
+      "description": "Mean request time for the print, prints and farm routes (most proxy Bambuddy).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 1, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(10, sum by (method, route) (rate(scadbuddy_http_request_duration_seconds_sum{namespace=\"$namespace\", route!=\"other\", route=~\"(/api/v1)?/(print|prints|farm)(/.*)?\"}[$__rate_interval])) / sum by (method, route) (rate(scadbuddy_http_request_duration_seconds_count{namespace=\"$namespace\", route!=\"other\", route=~\"(/api/v1)?/(print|prints|farm)(/.*)?\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Errors",
+      "description": "4xx/5xx responses per second on those routes. A 502/504 there is usually Bambuddy.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 1, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (route, status) (rate(scadbuddy_http_requests_total{namespace=\"$namespace\", route!=\"other\", route=~\"(/api/v1)?/(print|prints|farm)(/.*)?\", status=~\"[45]..\"}[$__rate_interval]))",
+          "legendFormat": "{{status}} {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Prints followed",
+      "description": "Prints this process is following (FollowPrint attempts).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 16, "y": 1, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_print_follows_running{namespace=\"$namespace\"})",
+          "legendFormat": "following"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Bambuddy calls",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Slowest Bambuddy calls (API)",
+      "description": "Calls the API made to Bambuddy (bambuddy.<operation> client spans), with their scope and status. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 10, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-api\" && kind=client && span.scadbuddy.bambuddy.scope != nil} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Failed Bambuddy calls (API)",
+      "description": "Bambuddy calls with status error, by scope: a 401/403 names the scope the key lacks. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 8, "y": 10, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-api\" && kind=client && span.scadbuddy.bambuddy.scope != nil && status=error} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Bambuddy calls over 2 s (API)",
+      "description": "Bambuddy calls that took longer than 2 s: the photo and thumbnail proxies (#2289) show here. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 16, "y": 10, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-api\" && kind=client && span.scadbuddy.bambuddy.scope != nil && duration > 2s} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Slowest Bambuddy calls (worker)",
+      "description": "Bambuddy calls from the worker: the blob store's Bambuddy backend and print activities. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 18, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-worker\" && kind=client && span.scadbuddy.bambuddy.scope != nil} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Failed Bambuddy calls (worker)",
+      "description": "Worker-side Bambuddy calls with status error. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 8, "y": 18, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-worker\" && kind=client && span.scadbuddy.bambuddy.scope != nil && status=error} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Print activities",
+      "description": "Temporal activity spans for printing. They run inside the API process until #1060. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 16, "y": 18, "w": 8, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-api\" && span.temporalActivityID != nil} | select(span.temporalWorkflowID)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Blob store and cache",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Store operations",
+      "description": "Blob store calls per second by operation and outcome (ok, full, corrupt, missing).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 27, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (op, outcome) (rate(scadbuddy_store_operations_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{op}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Worker cache hit ratio",
+      "description": "Piece fetches answered from the worker's local cache.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 27, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(rate(scadbuddy_worker_cache_total{namespace=\"$namespace\", result=\"hit\"}[$__rate_interval])) / sum(rate(scadbuddy_worker_cache_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "hit ratio"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Store size against its caps",
+      "description": "Objects and bytes in the blob store against SCADBUDDY_STORE_MAX_* (0 is no limit, hidden).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 16, "y": 27, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_store_blobs{namespace=\"$namespace\"})",
+          "legendFormat": "objects"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_store_max_blobs{namespace=\"$namespace\"}) > 0",
+          "legendFormat": "max objects"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Store bytes",
+      "description": "Bytes in the blob store by kind, against SCADBUDDY_STORE_MAX_TOTAL_BYTES.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 35, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (kind) (scadbuddy_store_bytes{namespace=\"$namespace\"})",
+          "legendFormat": "{{kind}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_store_max_bytes{namespace=\"$namespace\"}) > 0",
+          "legendFormat": "max"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Worker disk",
+      "description": "The worker's local piece cache, and its data directory as kubelet counts it against the emptyDir sizeLimit.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 35, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max by (pod) (scadbuddy_worker_cache_bytes{namespace=\"$namespace\"})",
+          "legendFormat": "cache {{pod}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max by (pod) (scadbuddy_render_data_bytes{namespace=\"$namespace\"})",
+          "legendFormat": "data dir {{pod}}"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Render key fallback",
+      "description": "1 while render workers hold the full Bambuddy key (spec 2026-09-27 §9).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 16, "y": 35, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_store_render_key_fallback{namespace=\"$namespace\"})",
+          "legendFormat": "fallback"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Uploads (// file parameters)",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 43, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Stored uploads",
+      "description": "Files and bytes stored for // file parameters, against their caps (0 is no limit, hidden).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 44, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_assets_stored{namespace=\"$namespace\"})",
+          "legendFormat": "files"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_assets_max_count{namespace=\"$namespace\"}) > 0",
+          "legendFormat": "max files"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Upload bytes",
+      "description": "Bytes stored for // file parameters against SCADBUDDY_ASSET_MAX_TOTAL_BYTES.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 44, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_assets_bytes{namespace=\"$namespace\"})",
+          "legendFormat": "bytes"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max(scadbuddy_assets_max_bytes{namespace=\"$namespace\"}) > 0",
+          "legendFormat": "max"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Refused and swept",
+      "description": "Uploads refused (413) at a cap, and stored files the sweep removed.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 16, "y": 44, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_assets_rejected_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "refused"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_assets_swept_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "swept"
+        }
+      ]
+    }
+  ]
+}
