@@ -70,6 +70,36 @@ export async function startOtherOrigin(): Promise<PageServer> {
  */
 export type OutwardGate = (headers: IncomingHttpHeaders) => Promise<number>
 
+/** What the stand-in UI's "Download part" link downloads (`/files/part.stl?token=abc`). */
+export const DOWNLOAD_BODY = 'solid part\nendsolid part\n'
+/** The size of the downloads the tests hold over the cap (`/files/stream.bin`, `/files/lying.bin`, "Blob big"). */
+export const BIG_DOWNLOAD = 5000
+
+/**
+ * What the endless responses (`/files/endless.bin`, `/endless.html`) sent before
+ * the client closed the connection, by path: they never end on their own, so
+ * this is how far the request guard read. Each stops at ENDLESS_CEILING, so a
+ * broken guard fails a test rather than hanging it.
+ */
+export const endlessSent = new Map<string, number>()
+export const ENDLESS_CEILING = 512 * 1024 * 1024
+
+async function sendEndless(url: string, res: ServerResponse, headers: Record<string, string>): Promise<void> {
+  res.writeHead(200, headers)
+  const chunk = Buffer.alloc(64 * 1024, 0x61)
+  let sent = 0
+  let closed = false
+  res.on('close', () => (closed = true))
+  endlessSent.set(url, 0)
+  while (!closed && sent < ENDLESS_CEILING) {
+    const more = res.write(chunk)
+    sent += chunk.byteLength
+    endlessSent.set(url, sent)
+    if (!more) await new Promise((resolve) => (closed ? resolve(undefined) : (res.once('drain', resolve), res.once('close', resolve))))
+  }
+  res.end()
+}
+
 /** The stand-in UI; `otherOrigin` is what its probe and redirect point at. */
 export async function startUi(otherOrigin: string, gate: OutwardGate = () => Promise.resolve(403)): Promise<PageServer> {
   const page = `<!doctype html>
@@ -91,6 +121,12 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <p id="approve-result">approve not run</p>
   <button id="agent-socket" onclick="const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/v1/ai/chat'); ws.onopen = () => document.getElementById('agent-socket-result').textContent = 'agent socket open'; ws.onerror = ws.onclose = () => document.getElementById('agent-socket-result').textContent = 'agent socket closed'">Agent socket</button>
   <p id="agent-socket-result">agent socket not run</p>
+  <a id="download" href="/files/part.stl?token=abc">Download part</a>
+  <a id="download-stream" href="/files/stream.bin">Download stream</a>
+  <a id="download-lying" href="/files/lying.bin">Download lying</a>
+  <a id="download-endless" href="/files/endless.bin">Download endless</a>
+  <button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob([new Uint8Array(${BIG_DOWNLOAD})])); a.download = 'big.bin'; a.click()">Blob big</button>
+  <button id="blobs" onclick="for (let i = 0; i < 7; i++) { const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['small ' + i])); a.download = 'small-' + i + '.txt'; a.click() }">Blob many</button>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
 </body></html>`
   return serve(async (url, method, res, headers) => {
@@ -115,6 +151,42 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
     if (url === '/redirect-away') {
       res.writeHead(302, { location: `${otherOrigin}/` })
       res.end()
+      return
+    }
+    if (url === '/files/stream.bin') {
+      // Past the tests' cap, chunked: no Content-Length to judge it by.
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="stream.bin"' })
+      for (let sent = 0; sent < BIG_DOWNLOAD; sent += 1000) res.write(Buffer.alloc(1000, 0x61))
+      res.end()
+      return
+    }
+    if (url === '/cookie-set') {
+      res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': ['sb_a=1; Path=/', 'sb_b=2; Path=/'] })
+      res.end('<!doctype html><title>Cookie</title><p>set</p>')
+      return
+    }
+    if (url === '/files/endless.bin') {
+      await sendEndless(url, res, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="endless.bin"' })
+      return
+    }
+    if (url === '/endless.html') {
+      await sendEndless(url, res, { 'content-type': 'text/html' })
+      return
+    }
+    if (url === '/files/lying.bin') {
+      // A Content-Length under the cap on a chunked body past it.
+      const socket = res.socket!
+      socket.write(
+        'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="lying.bin"\r\n' +
+          `Content-Length: 10\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n${BIG_DOWNLOAD.toString(16)}\r\n${'b'.repeat(BIG_DOWNLOAD)}\r\n0\r\n\r\n`,
+      )
+      socket.end()
+      return
+    }
+    if (url.startsWith('/files/part.stl')) {
+      // A download (#2329): an attachment, its URL carrying a token in the query.
+      res.writeHead(200, { 'content-type': 'model/stl', 'content-disposition': 'attachment; filename="part.stl"' })
+      res.end(DOWNLOAD_BODY)
       return
     }
     if (url === '/api/v1/prints' && method === 'POST') {

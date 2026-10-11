@@ -1516,7 +1516,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     })
     const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
     await turn!.done
-    expect(extrasSeen).toEqual({ turnContext: expect.any(Function) })
+    expect(extrasSeen).toEqual({ turnContext: expect.any(Function), secrets: expect.any(Function) })
   })
 
   // #1333: the hub, the manager and the harness tools wired as main.ts wires them. A

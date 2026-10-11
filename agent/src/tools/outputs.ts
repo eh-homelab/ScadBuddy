@@ -6,6 +6,7 @@ import { CAMERA, cameraQuery, outputId, slug, VIEW, VIEW_SIZE, withQuery } from 
 import { blob, defineTool, image, json, type Tool } from './registry.js'
 import { backendPage, compositeKey, page, PAGED, pageInput, totalCount } from './pagination.js'
 import { getPlates, sourceOf, withSource } from './print.js'
+import { binarySource, fromWorkspace, uploadInit, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
 // images, plate fit, and the 3MF. Routes: backend/scadbuddy/api/{outputs,plates}.py.
@@ -230,6 +231,34 @@ export const outputTools: Tool[] = [
             },
             image,
           ),
+  }),
+
+  defineTool({
+    name: 'set_output_thumbnail',
+    description:
+      "Replace an output's thumbnail (the picture its card and the print dialog show) with a PNG, e.g. a render " +
+      'view you saved with workspace_save or a screenshot.' +
+      fromWorkspace('`png_base64`'),
+    input: z.object({
+      output_id: outputId,
+      png_base64: z.string().min(1).optional().describe('The PNG as base64'),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/outputs/{output_id}/thumbnail'],
+    title: ({ output_id }) => `Set the picture of output ${output_id}`,
+    handler: async ({ output_id, png_base64, workspace_path, workspace_sha256 }, ctx) => {
+      const source = await binarySource(ctx, { upload: 'set_output_thumbnail', base64: png_base64, base64Name: 'png_base64', path: workspace_path, sha256: workspace_sha256 })
+      const answer = await command(ctx, `set thumbnail of ${output_id}`, (headers) =>
+        ctx.backend.PUT('/api/v1/outputs/{output_id}/thumbnail', {
+          params: { path: { output_id } },
+          body: { file: 'thumbnail.png' },
+          ...uploadInit(ctx, source, { name: 'file', filename: 'thumbnail.png', type: 'image/png' }, headers),
+        }),
+      )
+      return json(withSent(answer ?? { status: 'set', output_id }, 'info' in source ? source.info : undefined))
+    },
   }),
 
   defineTool({

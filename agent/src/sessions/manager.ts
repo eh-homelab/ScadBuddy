@@ -576,7 +576,7 @@ export type SessionManagerDeps = {
     session: SessionRecord,
     turn: TurnPrincipal,
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
    * Settings → Plugins' overrides of the built-in tools (#1953,
@@ -1677,6 +1677,8 @@ export class SessionManager {
                   : {}),
                 dir: sessionBrowserDir(this.deps.paths, id),
                 tmpDir: sessionBrowserTmpDir(id),
+                // Its downloads land in the session's workspace (#2329, harness/browserDownloads.ts).
+                downloads: { files: this.files, ref: { kind: 'session' as const, sessionId: id } },
                 ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
               }
             : undefined
@@ -1727,6 +1729,8 @@ export class SessionManager {
                             : {}),
                           turnContext: () => traced.context(),
                           ...(builtIn ? { builtIn } : {}),
+                          // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
+                          secrets: () => secrets,
                         },
                       )
                     : {}),
