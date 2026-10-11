@@ -474,6 +474,21 @@ def test_a_listing_past_the_cap_is_cut_and_says_so(tmp_path: Path) -> None:
     )
 
 
+def test_a_cut_listing_is_the_first_paths_of_the_whole_tree(tmp_path: Path) -> None:
+    # os.walk yields a directory's own files before its subdirectories', so a cut taken
+    # in walk order would keep the root's "z.scad" over "b/1.scad", which sorts first.
+    (tmp_path / "a.scad").write_text("x\n", encoding="utf-8")
+    (tmp_path / "z.scad").write_text("x\n", encoding="utf-8")
+    (tmp_path / "b").mkdir()
+    for name in ("1.scad", "2.scad"):
+        (tmp_path / "b" / name).write_text("x\n", encoding="utf-8")
+
+    files, truncated = editor_files.list_files(tmp_path, limit=3)
+
+    assert truncated is True
+    assert [path for path, _ in files] == ["a.scad", "b/1.scad", "b/2.scad"]
+
+
 def test_a_pinned_librarys_files_are_listed_from_its_checkout(
     client: TestClient, model: str, library: Path, paths: DataPaths
 ) -> None:
