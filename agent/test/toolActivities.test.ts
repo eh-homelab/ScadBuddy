@@ -308,12 +308,13 @@ describe('flow runs in tool activities', () => {
   const RUN = '7e2a1c3b-4d5e-4f60-8a9b-0c1d2e3f4a5b'
   const FLOW = `flow-${RUN}`
 
-  function flowRuns(owner: Owner | undefined = BROWSER, asked: string[] = []): FlowRuns {
+  /** A run whose `call_ok` is approved, for the input the default audit hashes as `hash:send`. */
+  function flowRuns(owner: Owner | undefined = BROWSER, asked: string[] = [], hash = 'hash:send'): FlowRuns {
     return {
       startedBy: async (id) => (id === RUN ? owner : undefined),
-      approved: async (requestId) => {
+      approved: async (requestId, inputHash) => {
         asked.push(requestId)
-        return requestId.endsWith(':call_ok')
+        return requestId.endsWith(':call_ok') && inputHash === hash
       },
     }
   }
@@ -352,6 +353,21 @@ describe('flow runs in tool activities', () => {
     ])
     const content = await env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'printer' })
     expect(text(content)).toContain('"sent": "printer"')
+  })
+
+  it('runs an approved call only with the tool and input the approval was given for (#2318)', async () => {
+    const hash = (tool: string, input: Record<string, unknown>) => `${tool}:${JSON.stringify(input)}`
+    const approvedFor = hash('send', { to: 'printer' })
+    const h = harness({
+      flows: flowRuns(BROWSER, [], approvedFor),
+      audit: { record: async () => {}, hash, summarise: (tool) => tool },
+    })
+    const content = await env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'printer' })
+    expect(text(content)).toContain('"sent": "printer"')
+    // The same call id with other input: not what the person approved.
+    const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'elsewhere' }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('NotApproved')
   })
 
   it("runs a token starter's call with the tiers its token holds now (#2320)", async () => {

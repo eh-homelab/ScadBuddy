@@ -55,20 +55,25 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     expect(await flows.startedBy(randomUUID())).toBeUndefined()
   })
 
-  it("approves only a call whose decision is an approval that approved", async () => {
+  it("approves only a call whose decision is an approval that approved, for the same input", async () => {
     const id = await run({ kind: 'browser' })
-    const decide = async (call: string, kind: string, outcome: string) =>
+    const decide = async (call: string, kind: string, outcome: string, hash: string | null = 'h1') =>
       t.db.sql`
-        INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id, kind, outcome, responder)
-        VALUES (${flowRequestId(id, 'wr1', call)}, ${id}, 'wr1', ${call}, ${kind}, ${outcome}, 'browser')`
+        INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id, kind, outcome, responder, input_hash)
+        VALUES (${flowRequestId(id, 'wr1', call)}, ${id}, 'wr1', ${call}, ${kind}, ${outcome}, 'browser', ${hash})`
     await decide('c1', 'approval', 'approved')
     await decide('c2', 'approval', 'denied')
     await decide('c3', 'answer', 'answered')
-    expect(await flows.approved(flowRequestId(id, 'wr1', 'c1'))).toBe(true)
-    expect(await flows.approved(flowRequestId(id, 'wr1', 'c2'))).toBe(false)
-    expect(await flows.approved(flowRequestId(id, 'wr1', 'c3'))).toBe(false)
+    await decide('c5', 'approval', 'approved', null)
+    expect(await flows.approved(flowRequestId(id, 'wr1', 'c1'), 'h1')).toBe(true)
+    expect(await flows.approved(flowRequestId(id, 'wr1', 'c2'), 'h1')).toBe(false)
+    expect(await flows.approved(flowRequestId(id, 'wr1', 'c3'), 'h1')).toBe(false)
     // Another execution's (a Reset's) or a call never decided.
-    expect(await flows.approved(flowRequestId(id, 'wr2', 'c1'))).toBe(false)
-    expect(await flows.approved(flowRequestId(id, 'wr1', 'c4'))).toBe(false)
+    expect(await flows.approved(flowRequestId(id, 'wr2', 'c1'), 'h1')).toBe(false)
+    expect(await flows.approved(flowRequestId(id, 'wr1', 'c4'), 'h1')).toBe(false)
+    // #2318: another tool or input, no hash to compare, or a decision that recorded none.
+    expect(await flows.approved(flowRequestId(id, 'wr1', 'c1'), 'h2')).toBe(false)
+    expect(await flows.approved(flowRequestId(id, 'wr1', 'c1'))).toBe(false)
+    expect(await flows.approved(flowRequestId(id, 'wr1', 'c5'), 'h1')).toBe(false)
   })
 })
