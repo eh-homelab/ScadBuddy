@@ -9,7 +9,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -836,6 +836,31 @@ def test_a_record_names_the_revision_before_it_in_its_own_history(catalogue: Cat
     edited = catalogue.write_source("keychain", "cube(20);\n")
     assert edited.previous_version == first.version
     assert catalogue.record("keychain").previous_version == first.version
+
+
+def test_a_record_pairs_its_revision_with_that_revisions_parent_under_a_concurrent_commit(
+    catalogue: Catalogue,
+) -> None:
+    """#2158: a commit to the model landing between the record's reads must not pair
+    one revision with another's parent. One ``git log`` answers both."""
+    assert catalogue.history is not None
+    first = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    second = catalogue.write_source("keychain", "cube(20);\n")
+    real = ModelHistory._run
+    landed: list[str] = []
+
+    def racing(self: ModelHistory, *args: str, **kwargs: Any) -> Any:
+        completed = real(self, *args, **kwargs)
+        if args[0] == "log" and args[-1] == "keychain" and not landed:
+            landed.append("another writer")
+            catalogue.paths.model_source("keychain").write_text("cube(30);\n")
+            self.commit("Edit keychain source elsewhere", "keychain")
+        return completed
+
+    with patch.object(ModelHistory, "_run", autospec=True, side_effect=racing):
+        record = catalogue.record("keychain")
+    assert landed
+    assert (record.version, record.previous_version) == (second.version, first.version)
 
 
 def test_a_listing_leaves_previous_version_out(catalogue: Catalogue) -> None:
