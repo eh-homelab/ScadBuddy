@@ -171,6 +171,10 @@ def _matrix(text: str | None) -> np.ndarray:
         raise UnreadableObjectsError(f"transform {text!r} is not 12 numbers") from None
     if len(values) != 12:
         raise UnreadableObjectsError(f"transform {text!r} is not 12 numbers")
+    # float() reads "nan" and "inf": finite vertices would come out of such a transform
+    # non-finite, past the vertex check, and reach the packer and the plate check.
+    if not np.isfinite(values).all():
+        raise UnreadableObjectsError(f"transform {text!r} is not finite numbers")
     matrix[:3, :3] = np.array(values[:9]).reshape(3, 3).T
     matrix[:3, 3] = values[9:]
     return matrix
