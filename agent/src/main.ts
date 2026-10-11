@@ -516,6 +516,8 @@ const app = createApp({
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(attachments ? { attachments } : {}),
+  // The panel's Files (#2329, routes/sessionFiles.ts).
+  ...(workspace ? { workspace } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,

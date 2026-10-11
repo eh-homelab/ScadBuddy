@@ -130,6 +130,8 @@ export interface SessionState {
   archived?: boolean
   /** #1284 — a live handoff offer the agent's list reported: to whom, until when. */
   offer?: HandoffOffer | null
+  /** #2329 — how many `workspace.file` events arrived: the Files list reads again when it moves. */
+  workspaceChanges?: number
 }
 
 export type HandoffOffer = { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string }
@@ -501,6 +503,9 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           ...(event.memories === undefined ? {} : { memories: event.memories }),
         }),
       )
+
+    case 'workspace.file':
+      return patchSession(state, event.sessionId, (s) => ({ ...s, workspaceChanges: (s.workspaceChanges ?? 0) + 1 }))
 
     case 'error': {
       if (event.sessionId && BUDGET_CODES.has(event.code ?? '') && state.sessions[event.sessionId]) {

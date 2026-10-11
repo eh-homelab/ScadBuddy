@@ -556,3 +556,17 @@ describe('chatReducer', () => {
     expect(of('q4')).toBeUndefined()
   })
 })
+
+describe('workspace changes (#2329)', () => {
+  it('counts each workspace.file event, so the Files list reads again, and adds nothing to the feed', () => {
+    const state = run(
+      [
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 }),
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'deleted', by: you }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.workspaceChanges).toBe(2)
+    expect(state.sessions.s1?.items).toEqual(started.sessions.s1?.items)
+  })
+})

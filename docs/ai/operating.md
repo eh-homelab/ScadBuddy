@@ -921,8 +921,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
   10 minutes, `WORKSPACE_SWEEP_MS`).
-- Caps: 25 MB a file and 200 MB a workspace by default, the `ai_settings` keys
-  `workspace_file_max_bytes` and `workspace_max_bytes` (bytes; no route writes them yet).
+- Caps: 25 MiB a file and 200 MiB a workspace by default, the `ai_settings` keys
+  `workspace_file_max_bytes` and `workspace_max_bytes` (bytes), which Settings →
+  Assistant workspace writes through `PUT /api/v1/ai/settings/workspace`
+  `{file_max_bytes, workspace_max_bytes}` (1 MiB to 100 MiB a file, 1 MiB to 2 GiB a
+  workspace, the file cap no larger; each a `settings` audit row;
+  [`agent/src/routes/workspaceSettings.ts`](../../agent/src/routes/workspaceSettings.ts)).
   Each is read at every write. Size the database for them.
 - Tools, with their tiers: `workspace_list` and `workspace_read` (read),
   `workspace_write`, `workspace_edit` and `workspace_delete` (write), and
@@ -938,3 +942,30 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   says why.
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
   by the store and by the table. No Claude Code built-in reaches the workspace.
+- The panel's **Files** (part 3,
+  [`agent/src/routes/sessionFiles.ts`](../../agent/src/routes/sessionFiles.ts)) is a
+  session's workspace over HTTP, for the browser user, guarded as the session routes
+  are: reads need a session it may see (`uiReadProblem`), writes the UI's origin
+  (`uiRequestProblem`) and a session it owns that is not archived (403, 409).
+  - `GET /api/v1/ai/sessions/:id/files`: `{files, usage: {files, bytes}, limits:
+    {file_max_bytes, workspace_max_bytes}}`, each file with its `path`, `media_type`,
+    `size`, `sha256`, `source` and times.
+  - `GET /api/v1/ai/sessions/:id/files/<path>`: the bytes, always
+    `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, a sandboxing
+    CSP and `Cache-Control: private, no-store`. The stored media type is sent, except
+    HTML, SVG, XML and scripts, which go as `application/octet-stream`. The panel fetches
+    it and saves it through `downloadBlob`, or previews an image through a blob URL.
+  - `POST /api/v1/ai/sessions/:id/files`: multipart `file`, `path` and, to replace a
+    file, `expected_sha256` (the sha256 it has now) → `201 {file}` (`200` when it
+    replaced one). A path that exists without it, or with a stale one, is `409`; past
+    either cap, `413` (the body is capped at the file cap plus 64 KiB before it is read).
+    The file's `source` is `{kind: "upload", by: "browser", filename}`.
+  - `DELETE /api/v1/ai/sessions/:id/files/<path>[?expected_sha256=]`: `204`, `404` when
+    there is none, `409` on a stale sha256.
+
+  An upload or a delete is a `resource` audit row (`workspace_upload`, refusals
+  included, or `workspace_delete`) and appends a `workspace.file` event (`path`,
+  `change`, `by`, and an upload's `size`, `mediaType` and `sha256`) to the session's
+  log: the panel's Files list reads again on it. A running turn is not interrupted;
+  the panel adds `[workspace file <path>]` to the next message, and the model finds the
+  file with `workspace_list` / `workspace_read`.

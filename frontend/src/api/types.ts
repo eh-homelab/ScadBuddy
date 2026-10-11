@@ -355,6 +355,36 @@ export interface ImageSettings {
 }
 
 /**
+ * #2329 — the caps on the assistant's workspace, in bytes (agent
+ * `routes/workspaceSettings.ts`), with the bounds the form may save.
+ */
+export interface WorkspaceSettings {
+  file_max_bytes: number
+  workspace_max_bytes: number
+  min: number
+  file_max: number
+  workspace_max: number
+}
+
+/** #2329 — one file in a session's workspace (agent `routes/sessionFiles.ts`). */
+export interface WorkspaceFile {
+  path: string
+  media_type: string
+  size: number
+  sha256: string
+  /** Where it came from: an upload (`kind: 'upload'`), or the tool and its ids, or a URL. */
+  source: Record<string, string | number | boolean | null> | null
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkspaceFileList {
+  files: WorkspaceFile[]
+  usage: { files: number; bytes: number }
+  limits: { file_max_bytes: number; workspace_max_bytes: number }
+}
+
+/**
  * #1941 — an image the composer uploaded when it was attached (agent `POST
  * /api/v1/ai/attachments`, `src/routes/attachments.ts`): the id a message sends, and the
  * preview the transcript will show. Unsent, it expires after an hour.
