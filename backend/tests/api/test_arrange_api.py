@@ -348,6 +348,9 @@ def test_a_library_file_whose_output_was_deleted_is_a_404_naming_the_file(
     response = client.post("/api/v1/outputs/arrange", json={"objects": [{"library_file_id": 78}]})
     assert response.status_code == 404, response.text
     assert "library file 78" in response.json()["detail"]
+    # #2138: coded and named, so the agent can tell the model to leave the file out.
+    assert response.json()["code"] == "library_file_output_deleted"
+    assert response.json()["library_file_ids"] == [78]
 
 
 def two_colour_3mf(tmp_path: Path) -> bytes:

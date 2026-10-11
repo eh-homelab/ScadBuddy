@@ -8,6 +8,7 @@ images are proxied so the API key never reaches the browser.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import (
+    OutputsDep,
     PathsDep,
     PrintLinksDep,
     PrintProgressDep,
@@ -57,6 +59,7 @@ from scadbuddy.library.library_file_operations import (
     LibraryFilesRequest,
     LibraryRestoreResult,
 )
+from scadbuddy.library.outputs import OutputNotFoundError, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
@@ -76,23 +79,40 @@ FileIdPath = Annotated[int, Path(ge=1)]
 async def get_library(
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    outputs: OutputsDep,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
     file_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
     Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
-    A file ScadBuddy uploaded names its ``output_id`` (#1864). ``file_id`` in place of
-    ``folder_id`` lists the folder that file is in, which a deep link to a file opens
-    (#2165); a file Bambuddy no longer has is its 404."""
+    A file ScadBuddy uploaded names its ``output_id`` (#1864), while that output still
+    exists: the upload row outlives a deleted output, and a file whose output is gone is
+    any other library file (#2138). ``file_id`` in place of ``folder_id`` lists the
+    folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy
+    no longer has is its 404."""
     async with client_for(store.load()) as client:
         if file_id is not None and folder_id is None:
             folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
     made = await uploads.outputs_for_files(entry.id for entry in listing.files)
+    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
     for entry in listing.files:
-        entry.output_id = made.get(entry.id)
+        output_id = made.get(entry.id)
+        entry.output_id = output_id if output_id in live else None
     return listing
+
+
+def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
+    """Those of ``output_ids`` the output store still has."""
+    found: set[str] = set()
+    for output_id in output_ids:
+        try:
+            outputs.directory(output_id)
+        except OutputNotFoundError:
+            continue
+        found.add(output_id)
+    return found
 
 
 @router.post(

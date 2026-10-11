@@ -301,6 +301,9 @@ MAX_ARRANGE_COPIES = 2000
 #: sliced file, one past the download cap, one painted in PrusaSlicer or cut by a negative
 #: part. A part painted in Bambu Studio is arranged with its painting (#1965).
 LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
+#: The 404 for a library file recorded as a copy of an output since deleted (#2138):
+#: ``library_file_ids`` names it, so a caller can leave it out.
+LIBRARY_FILE_OUTPUT_DELETED = "library_file_output_deleted"
 
 
 class ArrangeObject(BaseModel):
@@ -378,6 +381,8 @@ async def resolve_library_files(
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
                 f"library file {file_id} is a copy of output {output_id}, which has been deleted",
+                code=LIBRARY_FILE_OUTPUT_DELETED,
+                library_file_ids=[file_id],
             ) from None
     objects = [
         o
