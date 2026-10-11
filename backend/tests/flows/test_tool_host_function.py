@@ -18,7 +18,7 @@ from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.manifest import use_manifest
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds
 from tests.flows.fake_api import Outward
-from tests.flows.flows_support import script
+from tests.flows.flows_support import Keys, script
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -106,7 +106,7 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
     assert served.calls == []
     preview = await outward_since(outward.client, parked, 1)
     assert preview.calls == []
-    decide = next(k for k in flow_kinds(outward.store) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.store, Keys()) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))

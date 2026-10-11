@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -152,3 +155,66 @@ async def test_the_cache_keeps_only_the_newest_views(
         library_file(file_id, out.read_bytes())
         await library_preview(bambuddy, cache, file_id, 1)
     assert len(list((cache / library_view.CACHE_DIRNAME).iterdir())) == 2
+
+
+def _view(tmp_path: Path, file_id: int, size: float) -> bytes:
+    out = tmp_path / f"{file_id}.3mf"
+    write_bambu_3mf([ColourPart(1, "Color 1", "#FF0000", _box(size, 10, 4))], out, thumbnails=None)
+    return out.read_bytes()
+
+
+@respx.mock
+async def test_the_cache_keeps_the_most_recently_used_views(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2160: a hit counts as use, so the view used most recently outlives a newer one."""
+    monkeypatch.setattr(library_view, "MAX_CACHED", 2)
+    cache = tmp_path / "cache"
+    views = cache / library_view.CACHE_DIRNAME
+    downloads = {
+        file_id: library_file(file_id, _view(tmp_path, file_id, 9 + file_id))
+        for file_id in (1, 2, 3)
+    }
+    await library_preview(bambuddy, cache, 1, 1)
+    await library_geometry(bambuddy, cache, 2, 1)
+    # Both written long ago, file 1's first.
+    for entry in views.iterdir():
+        age = 1000 if "geometry" in entry.name else 2000
+        os.utime(entry, ns=(time.time_ns() - age * 10**9,) * 2)
+
+    await library_preview(bambuddy, cache, 1, 1)  # a hit on the older view
+    await library_preview(bambuddy, cache, 3, 1)  # a third view prunes one
+
+    assert downloads[1].call_count == 1
+    names = sorted(entry.name for entry in views.iterdir())
+    assert len(names) == 2
+    assert not any("geometry" in name for name in names)  # file 2's, unused, went
+
+
+def test_a_prune_tolerates_files_another_prune_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2160: two prunes at once each list a file the other removes, before its stat or
+    before its unlink; neither fails."""
+    views = tmp_path / library_view.CACHE_DIRNAME
+    views.mkdir()
+    for index, name in enumerate(("old", "older", "oldest")):
+        (views / name).write_bytes(b"x")
+        os.utime(views / name, ns=(time.time_ns() - (index + 1) * 10**9,) * 2)
+    real_iterdir, real_stat = Path.iterdir, Path.stat
+
+    def iterdir(self: Path) -> Iterator[Path]:
+        yield from real_iterdir(self)
+        yield self / "gone-before-stat"
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        result = real_stat(self, follow_symlinks=follow_symlinks)
+        if self.name == "oldest":
+            os.unlink(self)  # gone after its stat, before its unlink
+        return result
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    monkeypatch.setattr(Path, "stat", stat)
+    library_view._store(views / "new", b"y", 2)
+    monkeypatch.undo()
+    assert sorted(entry.name for entry in views.iterdir()) == ["new", "old"]

@@ -11,6 +11,8 @@ route answers with is final: `RouteRefused`, carrying only the problem's `detail
 import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 import httpx
@@ -87,6 +89,22 @@ def _unanswered(response: httpx.Response) -> bool:
     return not isinstance(problem.get("detail"), str)
 
 
+def retry_after_s(value: str, now: datetime | None = None) -> float:
+    """A `Retry-After` header as seconds from `now`: either form RFC 9110 allows, a
+    delay or an HTTP-date (a proxy may send one). 0 for a date past, or a value that
+    is neither."""
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return max(0.0, (at - (now or datetime.now(UTC))).total_seconds())
+
+
 def api_client(base_url: str | None) -> httpx.AsyncClient | None:
     """The client on `SCADBUDDY_API_INTERNAL_URL`, or None without one."""
     if base_url is None:
@@ -135,8 +153,8 @@ class FlowRoutes:
                 await asyncio.sleep(RESEND_S)
                 continue
             if _unanswered(response):
-                after = response.headers.get("Retry-After", "")
-                await asyncio.sleep(max(RESEND_S, float(after) if after.isdigit() else 0.0))
+                after = retry_after_s(response.headers.get("Retry-After", ""))
+                await asyncio.sleep(max(RESEND_S, after))
                 continue
             if response.status_code >= 400:
                 raise _refused(response)

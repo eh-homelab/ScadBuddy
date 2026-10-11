@@ -9,6 +9,10 @@ import path from 'node:path'
 /** Characters of text sent unless the whole file is asked for. */
 export const PREVIEW_CHARS = 64 * 1024
 
+/** Bytes past which `full` is refused: the browser highlights the text on its
+ * main thread, so a multi-MB file would freeze the reviewer's page (#2151). */
+export const FULL_MAX_BYTES = 1024 * 1024
+
 export type PackageFileEntry = { path: string; size: number }
 
 export type PackageFileContent = {
@@ -19,6 +23,8 @@ export type PackageFileContent = {
   media_type: string
   /** `content` stops at PREVIEW_CHARS; ask with `full` for the rest. */
   truncated: boolean
+  /** Larger than FULL_MAX_BYTES: only the preview is ever sent, `full` or not. */
+  too_large: boolean
   content: string | null
 }
 
@@ -69,13 +75,15 @@ export function fileContent(rel: string, bytes: Buffer, full: boolean): PackageF
     }
   }
   const binary = text === null
-  const truncated = !full && text !== null && text.length > PREVIEW_CHARS
+  const tooLarge = !binary && bytes.length > FULL_MAX_BYTES
+  const truncated = (!full || tooLarge) && text !== null && text.length > PREVIEW_CHARS
   return {
     path: rel,
     size: bytes.length,
     binary,
     media_type: mediaTypeOf(rel, binary),
     truncated,
+    too_large: tooLarge,
     content: truncated ? text!.slice(0, PREVIEW_CHARS) : text,
   }
 }

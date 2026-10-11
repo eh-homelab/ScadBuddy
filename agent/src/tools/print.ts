@@ -5,7 +5,7 @@ import { ACCEPTING_MS, command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
@@ -249,7 +249,8 @@ export const printTools: Tool[] = [
       'one read: printers (and the one chosen), the installed nozzles, quality tiers and Bambu processes per ' +
       'nozzle size, filament presets per size, plate types with the one last printed on, the filament step ' +
       "(as get_print_filaments), the model's (or the file's) remembered choices, and its plates by index and " +
-      'name (what each holds; `null` when nothing names it; empty when they cannot be read), which ' +
+      'name (what each holds; `null` when nothing names it; empty, with `plates_error` saying why, when ' +
+      'they cannot be read: then report that rather than assume plate 1), which ' +
       'print_output takes as `plate_id`. What ' +
       'print_output fills omitted choices from.',
     input: withSource({ printer_id: z.number().int().optional() }),
@@ -268,12 +269,22 @@ export const printTools: Tool[] = [
     handler: async (args, ctx) => {
       const source = sourceOf(args)
       // #986 — a plate by what it holds, so the agent can say "the lid", not "plate 2". The plates
-      // are extra: an unreadable list is empty, as in the dialog, and never fails the choices.
+      // are extra: an unreadable list is empty, as in the dialog, and never fails the choices. But
+      // it says why (#2107): "no plates" and "a missing Bambuddy scope" are not the same answer.
+      let platesError: string | undefined
       const [choices, plates] = await Promise.all([
         getChoices(ctx, source, args.printer_id),
-        getPlates(ctx, source).catch(() => []),
+        getPlates(ctx, source).catch((err: unknown) => {
+          platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
+          console.warn(`get_print_choices: ${err instanceof Error ? err.message : String(err)}`)
+          return []
+        }),
       ])
-      return json({ ...choices, plates: plates.map(({ index, name }) => ({ index, name: name || null })) })
+      return json({
+        ...choices,
+        plates: plates.map(({ index, name }) => ({ index, name: name || null })),
+        ...(platesError === undefined ? {} : { plates_error: platesError }),
+      })
     },
   }),
 

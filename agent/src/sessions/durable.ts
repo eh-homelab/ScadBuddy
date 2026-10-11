@@ -178,8 +178,8 @@ export class DurableTurns {
 
   /**
    * Sends one user turn to the session's workflow. Undefined when the row cannot be
-   * claimed (another turn runs, the session is done or spent, another owner): the
-   * manager says why. Refused when the workflow refuses the message; a message not
+   * claimed (another turn runs, the session is done, archived or spent, another
+   * owner): the manager says why. Refused when the workflow refuses the message; a message not
    * accepted in time keeps the claim and is still a turn (Ruling 16).
    */
   async send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
@@ -187,12 +187,14 @@ export class DurableTurns {
     const blobs = blobsOf(turn.images)
     // The status before the claim, which a give-back restores (a refused send keeps `failed`).
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
+    // `archived_at` is tested here too: an archive that commits after the manager's check
+    // must not let a turn start on a chat the panel no longer lists (#2118).
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', updated_at = now() FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
-         AND ${POOL_COST} < ${POOL_BUDGET}
+         AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
        RETURNING prior.prior_status, prior.durable_offset`,
       [id, turn.author.kind, turn.author.id],
     )

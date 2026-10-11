@@ -22,6 +22,8 @@ export interface ParamWidgetProps {
   extruder?: number | null
   /** #1286 — for a `font` param: the families its value names that are not installed. */
   missingFonts?: string[]
+  /** The refusal `missingFonts` comes from, by identity (FontWidget `refusal`, #2215). */
+  fontRefusal?: object
   /** For a `font` param: one of `missingFonts` was installed from the field. */
   onFontInstalled?: (installed: InstalledFamily) => void
   onChange: (next: ParamValue) => void
@@ -36,6 +38,7 @@ export function ParamWidget({
   sampleText,
   extruder,
   missingFonts,
+  fontRefusal,
   onFontInstalled,
   onChange,
 }: ParamWidgetProps) {
@@ -66,6 +69,7 @@ export function ParamWidget({
           fonts={fonts}
           sampleText={sampleText}
           missing={missingFonts}
+          refusal={fontRefusal}
           onInstalled={onFontInstalled}
           onChange={onChange}
         />
