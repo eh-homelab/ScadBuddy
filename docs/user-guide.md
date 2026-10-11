@@ -176,6 +176,7 @@ stored on ScadBuddy's server and is never sent to the browser.
    | **Read Status** | listing printers, spools and AMS slots for the print picker and **Test connection** |
    | **Manage Projects** | only if you use the project picker |
    | **Manage Archives** | uploading and deleting print photos, and pulling a timelapse off the printer |
+   | **Manage Inventory** | only to record which spool is in a tray, when the print dialog asks and you answer yes |
 
 2. Open **Settings** in ScadBuddy. Under **Connection**, enter the **Bambuddy URL**
    and the **API key**, then press **Test connection**.

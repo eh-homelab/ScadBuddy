@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -51,7 +52,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, plates_of, stl_3mf
+from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,8 @@ class PrintSource(Protocol):
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
+        filament_map: FilamentMap | None = None,
+        tray_colours: Mapping[int, str] | None = None,
     ) -> PrintFile: ...
 
     async def record(
@@ -183,14 +186,21 @@ class _Fetched:
 
 
 async def _spool_colours(
-    client: BambuddyClient, colours: list[str], plan: FilamentPlan
+    client: BambuddyClient,
+    colours: list[str],
+    plan: FilamentPlan,
+    trays: Mapping[int, str] | None = None,
 ) -> list[str] | None:
     """One colour per filament of the file: the chosen spool's, or the file's own for a
     slot with no spool (#476). ``None`` when no spool is chosen at all, which leaves the
     file in its own colours."""
     if not plan.slots:
         return None
-    rgba = {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
+    rgba: dict[int, str | None] = {
+        spool.id: normalise_colour(spool.rgba) for spool in await client.spools()
+    }
+    # A tray chosen for itself (#2164) prints in the tray's colour.
+    rgba.update(trays or {})
     return [
         rgba.get(plan.spool_for(index + 1) or 0) or colour for index, colour in enumerate(colours)
     ]
@@ -304,6 +314,8 @@ class PrintPipeline:
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
+        filament_map: FilamentMap | None = None,
+        tray_colours: Mapping[int, str] | None = None,
     ) -> PrintFile:
         uploads, settings = PrintPipeline._stores(self)
         # A project's folder replaces the one from Settings for this send, which is what
@@ -325,9 +337,10 @@ class PrintPipeline:
             settings,
             printer_id=printer_id,
             nozzle_diameter=nozzle_size,
-            colours=await _spool_colours(client, list(self.colours), plan),
+            colours=await _spool_colours(client, list(self.colours), plan, tray_colours),
             nozzle_stats=nozzle_stats,
             nozzle_volume_type=nozzle_volume_type,
+            filament_map=filament_map,
         )
         file_id = await ensure_uploaded(
             client,

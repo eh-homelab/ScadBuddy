@@ -153,6 +153,7 @@ def high_flow_warnings(
     *,
     rack_picked: bool = False,
     laid_out: bool = True,
+    sides: frozenset[int] | None = None,
 ) -> list[FilamentWarning]:
     """A warning for each side the slice may use whose mounted nozzle is of the chosen
     size but not of the flow sliced there (#723, #797, #484), never a refusal.
@@ -176,12 +177,15 @@ def high_flow_warnings(
     every 3MF the run lays out does, an output's or a library file's alike
     (``PrintSource.states_nozzles``, #1752). A file nothing can be stated into (sliced
     already, another slicer's) prints as it is: the slicer may use either side, and it
-    slices as Standard (:func:`_sliced_flows`)."""
+    slices as Standard (:func:`_sliced_flows`).
+
+    ``sides``: the sides ScadBuddy's nozzle plan prints on (#2166), offered in place of
+    every side with the size."""
     if not nozzles:
         return []
     size = nozzles[0].size
     flows = _sliced_flows(nozzles, laid_out=laid_out)
-    offered = _offered_sides(status, nozzles) if laid_out else None
+    offered = (sides or _offered_sides(status, nozzles)) if laid_out else None
     return [
         high_flow_warning(extruder, flows[extruder])
         for extruder in (RIGHT, LEFT)

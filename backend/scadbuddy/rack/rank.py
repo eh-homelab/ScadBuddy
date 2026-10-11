@@ -94,6 +94,8 @@ class RackCandidate:
     high_flow: bool
     nozzle_type: str
     color: str | None
+    #: The filament the hotend last ran (``nozzle_rack[].filament_type``), "" unknown.
+    filament_type: str
     material: str | None
     prints: int
     print_seconds: int
@@ -277,6 +279,7 @@ def _rank(
                 high_flow=entry.high_flow,
                 nozzle_type=entry.nozzle_type,
                 color=have,
+                filament_type=entry.filament_type,
                 material=nozzle_material(entry.nozzle_type),
                 prints=use.prints,
                 print_seconds=use.print_seconds,

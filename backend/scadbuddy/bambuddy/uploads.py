@@ -63,6 +63,16 @@ class LibraryCopy(BaseModel):
     sliced: list[SlicedCopy] = Field(default_factory=list)
 
 
+class PreviewSlice(BaseModel):
+    """One of the print dialog's background slices (#2169), table
+    ``print_preview_slices``: the copy it sliced and with what, and the plate."""
+
+    job_id: int
+    library_file_id: int
+    preset_key: str
+    plate_id: int
+
+
 class ProjectTarget(BaseModel):
     """The printer and nozzle a Bambuddy project last printed on (#317)."""
 
@@ -149,6 +159,45 @@ class BambuddyUploadStore:
         (superseded and deleted since): a slice has nowhere to belong then.
         """
         await asyncio.to_thread(self._record_sliced, output_id, library_file_id, sliced)
+
+    async def record_preview(self, preview: PreviewSlice) -> None:
+        """Record one of the print dialog's background slices (#2169)."""
+        await asyncio.to_thread(self._record_preview, preview)
+
+    async def preview(self, job_id: int) -> PreviewSlice | None:
+        """The background slice ``job_id``, when the dialog started it (#2169)."""
+        return await asyncio.to_thread(self._preview, job_id)
+
+    async def previews_for(self, library_file_id: int, preset_key: str) -> list[int]:
+        """The background slices of this copy with these presets, newest first: what a
+        run may queue instead of slicing again (#2169)."""
+        return await asyncio.to_thread(self._previews_for, library_file_id, preset_key)
+
+    def _record_preview(self, preview: PreviewSlice) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO print_preview_slices (job_id, library_file_id, preset_key, plate_id)"
+                " VALUES (%s, %s, %s, %s) ON CONFLICT (job_id) DO NOTHING",
+                (preview.job_id, preview.library_file_id, preview.preset_key, preview.plate_id),
+            )
+
+    def _preview(self, job_id: int) -> PreviewSlice | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT job_id, library_file_id, preset_key, plate_id"
+                " FROM print_preview_slices WHERE job_id = %s",
+                (job_id,),
+            ).fetchone()
+        return PreviewSlice.model_validate(row) if row else None
+
+    def _previews_for(self, library_file_id: int, preset_key: str) -> list[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id FROM print_preview_slices"
+                " WHERE library_file_id = %s AND preset_key = %s ORDER BY created_at DESC",
+                (library_file_id, preset_key),
+            ).fetchall()
+        return [int(row["job_id"]) for row in rows]
 
     async def record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         """Keep the hash Bambuddy reports for one of the output's sliced files (#306)."""
