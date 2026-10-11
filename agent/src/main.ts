@@ -54,6 +54,7 @@ import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
+import { memoryActivities } from './temporal/memoryActivities.js'
 import { BrowserHost, type HeadlessBrowserDeps, turnBrowserServers } from './temporal/turnBrowser.js'
 import { turnServers } from './temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
@@ -424,19 +425,23 @@ const workerDataConverter = dataConverter
 const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
 // The headless browsers this replica runs for durable sessions' pinned calls.
 const browserHost = new BrowserHost({ paths })
+// The enabled remote plugins and every usable credential's secret, as a classic turn
+// reads them, for a durable turn's tools and its automatic memory.
+const durableRemotePlugins = plugins
+  ? async () => forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder)
+  : undefined
+const durableCredentialSecrets = async () => {
+  if (!credentials) return []
+  const pool = new CredentialPool({ repo: credentials, kek, audit })
+  return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)
+}
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
       servers: turnServers({
-        ...(plugins
-          ? { remotePlugins: async () => forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder) }
-          : {}),
+        ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         ...(settings ? { settings } : {}),
-        credentialSecrets: async () => {
-          if (!credentials) return []
-          const pool = new CredentialPool({ repo: credentials, kek, audit })
-          return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)
-        },
+        credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, 'durable-turns'), audit },
         ...(database
@@ -489,6 +494,17 @@ const temporalWorker =
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
+          // A durable turn's automatic Hindsight memory (#2320): recall at its start,
+          // retain at its end, as a classic turn's memory hooks do.
+          ...(sessions && durableRemotePlugins
+            ? memoryActivities({
+                sessions: new PgSessionOwners(temporal.sql),
+                events: sessions.events,
+                remotePlugins: durableRemotePlugins,
+                credentialSecrets: durableCredentialSecrets,
+                audit,
+              })
+            : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),

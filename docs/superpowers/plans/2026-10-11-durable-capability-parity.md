@@ -184,6 +184,10 @@ handing Claude Code the servers; durable gets the entries:
 - `memory_recall` (TS activity, turn start) returns the `<hindsight_memories>` block the
   classic `UserPromptSubmit` hook adds; appended to the prompt. `memory_retain` (turn end,
   before `finish_turn`) retains the turn's transcript. Supersedes #825.
+- As built: `agent/src/temporal/memoryActivities.ts` runs the classic hooks themselves
+  (the Stop hook reads a transcript rebuilt from `ai_session_events`); the workflow calls
+  both under the patch `memory-2320`, once each, and neither fails the turn
+  (`docs/ai/operating.md` §11).
 
 ## Phase 7 — tool images in durable (PR 7)
 

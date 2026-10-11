@@ -870,3 +870,34 @@ async def test_an_outward_turn_tool_call_parks_and_runs_once_approved(
     assert await settled(connect, sid) == "idle"
     assert harness.stand_in.ran == [("turn:notes__post", {"method": "POST", "body": "x"})]
     await _replays(harness, handle)
+
+
+async def test_a_turn_recalls_memories_into_its_prompt_and_retains_before_it_ends(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: Hindsight's block follows the prompt as a classic turn's recall hook adds
+    it, and the transcript is retained before the turn is written."""
+    harness.stand_in.memory_context = "<hindsight_memories>1. red</hindsight_memories>"
+    sid, handle = await harness.session(agent_db)
+    answer = await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["you said: hello there\n\n<hindsight_memories>1. red</hindsight_memories>"]
+    assert harness.stand_in.memory == [
+        ("memory_recall", answer.turn_id),
+        ("memory_retain", answer.turn_id),
+    ]
+    await _replays(harness, handle)
+
+
+async def test_a_failed_recall_or_retain_never_fails_the_turn(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    harness.stand_in.memory_fails = True
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["you said: hello there"]
+    assert [name for name, _ in harness.stand_in.memory] == ["memory_recall", "memory_retain"]
+    await _replays(harness, handle)

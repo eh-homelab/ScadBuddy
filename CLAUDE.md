@@ -460,7 +460,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
     the servers again and checks tier, principal and approval as it runs (a server whose
     state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
-    `agent-tools.<hostname>`, which each agent also polls); and `AgentOperation` (`workflows.ts`, bundled by
+    `agent-tools.<hostname>`, which each agent also polls), a durable turn's automatic
+    Hindsight memory (`memoryActivities.ts`, `memory_recall` before the prompt and
+    `memory_retain` before `finish_turn`: the classic hooks of `memory/hindsight.ts`,
+    the transcript rebuilt from the event log; never failing the turn); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
     the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
