@@ -64,7 +64,7 @@ import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, p
 import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { TabWait, WaitForTab } from '../tools/registry.js'
-import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
+import { type AuditContext, type AuditLog, type AuditSink, safeDetail } from '../audit/log.js'
 import { TurnAuditor, turnCostEntry } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
@@ -411,6 +411,61 @@ export const MEMORY_TEXT_MAX = 4000
 export function memoryText(text: string, secrets: readonly (string | undefined)[]): string {
   const clean = redact(text, secrets)
   return clean.length > MEMORY_TEXT_MAX ? `${clean.slice(0, MEMORY_TEXT_MAX)}… (${clean.length} characters)` : clean
+}
+
+/**
+ * One automatic recall or retain as the session records it: an audit row (never
+ * fails, audit/log.ts) and a `memory` panel event, both redacted. Classic turns
+ * (`SessionManager.memoryHooks`) and durable ones (temporal/memoryActivities.ts) alike.
+ */
+export async function recordMemoryActivity(
+  deps: { audit?: AuditSink | undefined; events: Pick<EventLog, 'append'> },
+  session: { id: string; owner: Owner },
+  turnId: string,
+  a: MemoryActivity,
+  secrets: readonly string[],
+): Promise<void> {
+    const id = session.id
+    const summary = {
+      bank: a.bank,
+      ...(a.documentId ? { document_id: a.documentId } : {}),
+      ...(a.count === undefined ? {} : { results: a.count }),
+      ...(a.tool ? { tool: a.tool } : {}),
+    }
+    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+    await Promise.all([
+      deps.audit?.record({
+        kind: 'memory',
+        action: a.action,
+        surface: 'harness',
+        actor: session.owner,
+        sessionId: id,
+        turnId,
+        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+        inputSummary: JSON.stringify(summary),
+        outcome: a.outcome === 'ok' ? 'ok' : 'error',
+        ...detail,
+        startedAt: a.startedAt,
+        finishedAt: a.finishedAt,
+      }),
+      deps.events.append(id, [
+        scrubForLog(
+          event({
+            type: 'memory',
+            sessionId: id,
+            turnId,
+            action: a.action,
+            bank: a.bank,
+            outcome: a.outcome,
+            ...(a.count === undefined ? {} : { count: a.count }),
+            ...detail,
+            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
+          }),
+          secrets,
+        ),
+      ]),
+    ])
 }
 
 export class SessionError extends Error {
@@ -1881,47 +1936,7 @@ export class SessionManager {
     a: MemoryActivity,
     secrets: readonly string[],
   ): Promise<void> {
-    const id = session.id
-    const summary = {
-      bank: a.bank,
-      ...(a.documentId ? { document_id: a.documentId } : {}),
-      ...(a.count === undefined ? {} : { results: a.count }),
-      ...(a.tool ? { tool: a.tool } : {}),
-    }
-    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-    await Promise.all([
-      this.deps.audit?.record({
-        kind: 'memory',
-        action: a.action,
-        surface: 'harness',
-        actor: session.owner,
-        sessionId: id,
-        turnId,
-        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-        inputSummary: JSON.stringify(summary),
-        outcome: a.outcome === 'ok' ? 'ok' : 'error',
-        ...detail,
-        startedAt: a.startedAt,
-        finishedAt: a.finishedAt,
-      }),
-      this.events.append(id, [
-        scrubForLog(
-          event({
-            type: 'memory',
-            sessionId: id,
-            turnId,
-            action: a.action,
-            bank: a.bank,
-            outcome: a.outcome,
-            ...(a.count === undefined ? {} : { count: a.count }),
-            ...detail,
-            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-          }),
-          secrets,
-        ),
-      ]),
-    ])
+    await recordMemoryActivity({ audit: this.deps.audit, events: this.events }, session, turnId, a, secrets)
   }
 
   /**

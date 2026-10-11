@@ -879,6 +879,27 @@ Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). 
 ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
 upstream's behaviour of retaining only the last result with no document id.
 
+**In a durable session** (#2320, superseding #825) the turn's Claude Code runs in
+`agent-durable`, which has none of ScadBuddy's hooks. So the agent builds the same hooks
+and calls them from two activities on `agent-tools`
+([`agent/src/temporal/memoryActivities.ts`](../../agent/src/temporal/memoryActivities.ts)),
+which the `DurableSession` workflow calls around each turn, behind the patch
+`memory-2320`:
+
+- `memory_recall` runs before the prompt is sent. It recalls against the user's words
+  in that turn's `user.turn` event, and returns the same `<hindsight_memories>` block.
+  The workflow appends that block to the prompt.
+- `memory_retain` runs after the turn's events are written and before `finish_turn`.
+  It runs the Stop hook over the session's transcript, rebuilt from its event log
+  (`transcriptOf`: user turns, the assistant's text, and the main agent's tool calls).
+  It upserts `conversation:<ScadBuddy session id>`.
+
+Each recall and retain gets the same audit row and `memory` event as in a classic
+turn. Neither is retried, and neither ever fails the turn: a failure is recorded and
+the turn goes on with no memories. Only the recalled block enters the workflow's history,
+sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
+retain before it is marked done (up to the 15 s retain limit).
+
 ## 12. The HTTP request tool (#827)
 
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
