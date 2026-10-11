@@ -17,7 +17,7 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
 
 ``library_print_choices`` (#313) held a library file's choices until #1754 copied them
 into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
-it is no longer read or written.
+#1963 dropped it.
 
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
