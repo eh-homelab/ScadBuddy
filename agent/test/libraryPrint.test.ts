@@ -114,6 +114,21 @@ describe('the library routes', () => {
     expect(firstText(await tool('get_print_choices').execute({ library_file_id: FILE }, ctx()))).toEqual({
       printer_id: 1,
       plates: [],
+      plates_error: expect.stringMatching(/get plates of library file .* failed \(HTTP 502\).*Bambuddy could not read the plates/s),
+    })
+  })
+
+  it("says why an output's plates could not be read, a missing scope included (#2107)", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, () => HttpResponse.json({ printer_id: 1 })),
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}/plates`, () =>
+        HttpResponse.json({ title: 'Forbidden', detail: 'the API key lacks the library:read scope' }, { status: 403 }),
+      ),
+    )
+    expect(firstText(await tool('get_print_choices').execute({ output_id: OUT }, ctx()))).toEqual({
+      printer_id: 1,
+      plates: [],
+      plates_error: expect.stringMatching(/get plates of .* failed \(HTTP 403\).*library:read scope/s),
     })
   })
 
