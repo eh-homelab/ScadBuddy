@@ -1,14 +1,19 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { PluginForwarder } from '../src/plugins/forwarder.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/install.js'
-import { packageServers, sharePackage, sharedName } from '../src/temporal/turnPackages.js'
+import { forwardPackageServers, type PackageServers } from '../src/plugins/packages/mcp.js'
+import { localPackageServers, sharePackage, sharedName } from '../src/temporal/turnPackages.js'
 import { turnServers } from '../src/temporal/turnServers.js'
+import { connectHttp } from '../src/temporal/turnTools.js'
+import { startFakeMcp } from './support/fakeMcp.js'
 
 // Plugin packages in a durable turn (#2320): shared on the payload volume by content
-// hash, checked rather than trusted, and their MCP servers offered as turn tools.
+// hash, checked rather than trusted, and their http MCP servers reached only through
+// the loopback forwarder, as a remote plugin's are (security review of #2324's sibling).
 
 async function fakePackage(mcp: unknown): Promise<LoadedPackage> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'turn-pkg-'))
@@ -21,6 +26,18 @@ async function fakePackage(mcp: unknown): Promise<LoadedPackage> {
 }
 
 const OWNER = { kind: 'browser' as const, id: 'browser', label: 'You' }
+const HEADER = 'Bearer pkg-header-secret-0123456789'
+const toLoopback = async () => ['127.0.0.1']
+
+let forwarder: PluginForwarder
+beforeAll(async () => {
+  forwarder = await PluginForwarder.start()
+})
+afterAll(async () => {
+  await forwarder.close()
+})
+
+const none = async (): Promise<PackageServers> => ({ plugins: [], problems: [], secrets: [], release: () => {} })
 
 describe('plugin packages in a durable turn', () => {
   it('shares a package by its content hash, once, and replaces a copy that does not match', async () => {
@@ -37,18 +54,66 @@ describe('plugin packages in a durable turn', () => {
     expect(() => sharedName('sha256:../../etc')).toThrow()
   })
 
-  it("offers a package's http servers under Claude Code's names, outward, and a local one only when allowed", async () => {
-    const pkg = await fakePackage({
-      mcpServers: {
-        api: { type: 'http', url: 'https://notes.example/mcp' },
-        local: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/s.mjs'] },
+  it("forwards a package's http server, never handing out its URL or header, and redacts both", async () => {
+    const mcp = await startFakeMcp({})
+    try {
+      const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url: mcp.url, headers: { Authorization: HEADER } } } })
+      const servers = await forwardPackageServers([pkg], forwarder, toLoopback)
+      expect(servers.problems).toEqual([])
+      const [plugin] = servers.plugins
+      expect(plugin?.name).toBe('plugin_notes_api')
+      expect(plugin?.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\//)
+      expect(plugin?.url).not.toContain(new URL(mcp.url).port)
+      expect(servers.secrets).toEqual(expect.arrayContaining([HEADER, plugin!.url]))
+      const client = await connectHttp(plugin!.url)
+      expect((await client.listTools()).tools.length).toBeGreaterThan(0)
+      await client.close()
+      // The forwarder added the header; the package's server got it, Claude Code never did.
+      expect(mcp.requests.some((r) => r.headers.authorization === HEADER)).toBe(true)
+      servers.release()
+    } finally {
+      await mcp.close()
+    }
+  })
+
+  it('refuses a metadata or link-local address before anything is registered', async () => {
+    for (const url of ['http://169.254.169.254/latest/meta-data', 'http://metadata.google.internal/mcp', 'https://notes.example/mcp']) {
+      const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url } } })
+      const resolve = async () => ['169.254.169.254']
+      const servers = await forwardPackageServers([pkg], forwarder, resolve)
+      expect(servers.plugins).toEqual([])
+      expect(servers.problems.join('\n')).toMatch(/metadata|link-local/)
+    }
+  })
+
+  it('follows no redirect: a 307 fails, and its target is never contacted', async () => {
+    const other = await startFakeMcp({ path: '/never' })
+    const mcp = await startFakeMcp({
+      intercept: (_req, res) => {
+        res.writeHead(307, { location: other.url }).end()
+        return true
       },
     })
+    try {
+      const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url: mcp.url } } })
+      const servers = await forwardPackageServers([pkg], forwarder, toLoopback)
+      await expect(connectHttp(servers.plugins[0]!.url)).rejects.toThrow()
+      expect(mcp.requests.length).toBeGreaterThan(0)
+      expect(other.requests).toEqual([])
+      servers.release()
+    } finally {
+      await mcp.close()
+      await other.close()
+    }
+  })
+
+  it('starts a local server only for a package approved with allow_refused', async () => {
+    const pkg = await fakePackage({ mcpServers: { local: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/s.mjs'] } } })
     const problems: string[] = []
-    const vetted = packageServers([pkg], problems)
-    expect(vetted.map((s) => s.name)).toEqual(['plugin_notes_api'])
-    expect(vetted[0]!.tierOf('mcp__plugin_notes_api__read', {})).toBe('outward')
-    expect(packageServers([{ ...pkg, allowed: true }], problems).map((s) => s.name)).toEqual(['plugin_notes_api', 'plugin_notes_local'])
+    expect(localPackageServers([pkg], problems)).toEqual([])
+    const allowed = localPackageServers([{ ...pkg, allowed: true }], problems)
+    expect(allowed.map((s) => s.name)).toEqual(['plugin_notes_local'])
+    expect(allowed[0]!.tierOf('mcp__plugin_notes_local__ping', {})).toBe('outward')
     expect(problems).toEqual([])
   })
 
@@ -64,7 +129,7 @@ describe('plugin packages in a durable turn', () => {
       problems: ['plugin package broken was not loaded: refused'],
       release: () => void released++,
     })
-    const servers = turnServers({ packages: { load, root } })
+    const servers = turnServers({ packages: { load, root, forward: none } })
     const signal = new AbortController().signal
     const call = await servers({ session: 's', owner: OWNER, signal })
     expect(call.packages).toBeUndefined()
@@ -80,7 +145,7 @@ describe('plugin packages in a durable turn', () => {
     await call.release()
     expect(released).toBe(2)
     // Without the payload volume nothing can be shared, and the session is told.
-    const unshared = await turnServers({ packages: { load, root: undefined } })({ session: 's', owner: OWNER, signal, listing: true })
+    const unshared = await turnServers({ packages: { load, root: undefined, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
     expect(unshared.packages).toEqual([])
     expect(unshared.problems.join('\n')).toContain('SCADBUDDY_PAYLOAD_DIR is not set')
   })

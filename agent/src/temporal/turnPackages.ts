@@ -7,8 +7,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { declaredConfigs } from '../harness/plugins.js'
 import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
 import type { LoadedPackage } from '../plugins/packages/install.js'
-import { harnessToolName } from '../plugins/registry.js'
-import { connectHttp, type TurnPackage, type TurnServer } from './turnTools.js'
+import { packageServerName } from '../plugins/packages/mcp.js'
+import { type TurnPackage, type TurnServer } from './turnTools.js'
 
 // Plugin packages in a durable session (#2320). A classic turn hands Claude Code each
 // enabled package's directory (sessions/manager.ts `packagePlugins`), materialised from
@@ -24,10 +24,12 @@ import { connectHttp, type TurnPackage, type TurnServer } from './turnTools.js'
 //     `strict_mcp_config`), and here each call goes through the gate. They carry the
 //     names Claude Code gives them (`plugin_<package>_<server>`), so their tiers are
 //     the classic turn's: no package tool is ScadBuddy's, so every one is outward.
-//     An http server is reached at its declared URL with its declared headers (vet.ts
-//     refuses `$` in both, and install.ts checks the URL's egress at every load); a
-//     local (stdio) server only for a package approved with `allow_refused`, started
-//     in the package's folder with only PATH, HOME and its own declared `env`.
+//     An http server is reached only through the loopback forwarder, as a remote
+//     plugin is and as a classic turn reaches it (plugins/packages/mcp.ts
+//     `forwardPackageServers`: the egress-checked address, no redirect, no OAuth
+//     discovery, the header added there); a local (stdio) server only for a package
+//     approved with `allow_refused`, started in the package's folder with only PATH,
+//     HOME and its own declared `env`.
 
 /** A durable turn's packages are shared under this folder of the payload volume. */
 export const SHARED_PACKAGES = 'plugins'
@@ -118,26 +120,22 @@ async function connectStdio(config: McpConfig, root: string): Promise<Client> {
   return client
 }
 
-/** Each loaded package's MCP servers as turn servers; what cannot be offered goes in `problems`. */
-export function packageServers(loaded: readonly LoadedPackage[], problems: string[]): TurnServer[] {
+/**
+ * The local MCP servers of the packages approved with `allow_refused`, as turn servers;
+ * their http servers come through the forwarder instead (turnServers.ts).
+ */
+export function localPackageServers(loaded: readonly LoadedPackage[], problems: string[]): TurnServer[] {
   const servers: TurnServer[] = []
   for (const pkg of loaded) {
     for (const { map } of declaredConfigs(pkg.dir).mcp) {
       for (const [server, config] of entries(map)) {
-        const name = `plugin_${harnessToolName(pkg.name)}_${harnessToolName(server)}`
+        if (!pkg.allowed || typeof config.command !== 'string') continue
+        const name = packageServerName(pkg.name, server)
         if (name.includes('__')) {
           problems.push(`plugin package ${pkg.name}: MCP server "${server}" has a name a durable session cannot offer`)
           continue
         }
-        const outward = () => 'outward' as const
-        if (typeof config.url === 'string' && config.command === undefined) {
-          const url = config.url
-          const headers = strings(config.headers)
-          servers.push({ name, connect: () => connectHttp(url, Object.keys(headers).length ? headers : undefined), tierOf: outward })
-        } else if (pkg.allowed && typeof config.command === 'string') {
-          servers.push({ name, connect: () => connectStdio(config, pkg.dir), tierOf: outward })
-        }
-        // Anything else was refused at load (harness/plugins.ts, vet.ts).
+        servers.push({ name, connect: () => connectStdio(config, pkg.dir), tierOf: () => 'outward' })
       }
     }
   }

@@ -553,10 +553,6 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     // started.
     options.strictMcpConfig = false
   }
-  // The same for a vetted package, so its http MCP servers start (#2320): with
-  // `strictMcpConfig` on, a package declaring one loaded with none, and its tools
-  // silently missing. `settingSources: []` still loads no MCP config from a file.
-  if (run.pluginPaths?.length) options.strictMcpConfig = false
   // The same, so an allowed package's MCP servers (local ones too) start; and
   // its skills' shell injection runs (see `builtinTools`).
   if (run.allowedPluginPaths?.length) {

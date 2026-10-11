@@ -780,9 +780,16 @@ turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
 socket, `POST /api/v1/ai/sessions` or the `sessions_*` tools (the comment on `sessions`
 in `main.ts`).
 
-A package declaring an http MCP server has it started in a classic turn
-(`strictMcpConfig` is off whenever a vetted package loads, `agent/src/harness/run.ts`; it
-was on before #2320, and Claude Code started no MCP server of such a package).
+A vetted package's http MCP servers are reached the way a remote plugin is, through the
+loopback forwarder
+([`agent/src/plugins/packages/mcp.ts`](../../agent/src/plugins/packages/mcp.ts)
+`forwardPackageServers`, #2320). Each is registered as a plugin named
+`plugin_<package>_<server>`, the name Claude Code gives a plugin's server. The forwarder
+connects to the address the egress check passed, follows no redirect, starts no OAuth
+discovery, adds the declared header itself (one at most) and marks results untrusted.
+Before #2320, Claude Code started none of them, because `strictMcpConfig` was on. A
+package approved with `allow_refused` still has its servers started by Claude Code as
+declared.
 
 **Durable sessions (#2320).** A durable turn's Claude Code runs in the `agent-durable`
 container, so the agent copies each loaded package to the payload volume both sidecars
@@ -792,11 +799,11 @@ lists its tools (`turn_tools`,
 segment runner hashes that copy again (`agent-durable/.../session/package_hash.py`, the
 same hash as `hash.ts`) and loads only a copy that matches the pin. Without
 `SCADBUDDY_PAYLOAD_DIR` a durable turn loads no package and says so in the session. A
-package's MCP servers run in the agent as turn tools, as a remote plugin's do, named
-`plugin_<package>_<server>` as Claude Code names them and outward: http ones at their
-declared URL and headers, and local ones only for a package approved with
-`allow_refused`, started in the package's folder with `PATH`, `HOME` and their declared
-`env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
+package's MCP servers run in the agent as turn tools, as a remote plugin's do. They are
+named `plugin_<package>_<server>` and are outward. http ones go through the same
+forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
+local one runs only for a package approved with `allow_refused`, started in the
+package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
 their own activities, and so wait for a human. A durable turn offers those two and parks
 each call for approval. It does not offer the others, and says so in the session. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set

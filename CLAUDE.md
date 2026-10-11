@@ -519,7 +519,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     use local git repos (`test/support/gitRepo.ts`). A durable turn (#2320) gets them
     from `<payload dir>/plugins/<content hash>/` (`temporal/turnPackages.ts`), which the
     segment runner re-hashes (`agent-durable/.../session/package_hash.py`, the same hash
-    as `hash.ts`); their MCP servers are turn tools, and only `Bash`/`PowerShell` of an
+    as `hash.ts`); their MCP servers are turn tools (http ones, in both modes, through the
+    forwarder: `plugins/packages/mcp.ts`), and only `Bash`/`PowerShell` of an
     allowed package's built-ins are offered there (each parked for approval).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway

@@ -5,9 +5,10 @@ import { HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
-import type { PackagesForRun } from '../plugins/packages/install.js'
+import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
+import type { PackageServers } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
-import { packageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
+import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
 import {
   connectHttp,
   connectInProcess,
@@ -46,7 +47,14 @@ export type TurnServerDeps = {
    * the segment runner under `packages.root` (turnPackages.ts) on a listing, and their
    * MCP servers offered as turn tools.
    */
-  packages?: { load: () => Promise<PackagesForRun>; root: string | undefined } | undefined
+  packages?:
+    | {
+        load: () => Promise<PackagesForRun>
+        root: string | undefined
+        /** Their http MCP servers through the loopback forwarder (plugins/packages/mcp.ts). */
+        forward: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
+      }
+    | undefined
   /** More servers for the turn: the headless browser and its grant tool (turnBrowser.ts). */
   extra?: ((context: TurnContext) => Promise<TurnServer[]>) | undefined
 }
@@ -96,10 +104,18 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     }
     const problems = [...(forwarded?.problems ?? [])]
     const loaded = deps.packages ? await deps.packages.load() : undefined
+    let forwardedPackages: PackageServers | undefined
     let shared: TurnPackage[] | undefined
     if (loaded) {
       problems.push(...loaded.problems)
-      servers.push(...packageServers(loaded.loaded, problems))
+      servers.push(...localPackageServers(loaded.loaded, problems))
+      // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
+      forwardedPackages = await deps.packages!.forward(loaded.loaded)
+      problems.push(...forwardedPackages.problems)
+      secrets.push(...forwardedPackages.secrets)
+      for (const plugin of forwardedPackages.plugins) {
+        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward' })
+      }
       if (context.listing) {
         shared = []
         const root = deps.packages!.root
@@ -133,6 +149,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       secrets,
       ...(shared ? { packages: shared } : {}),
       release: () => {
+        forwardedPackages?.release()
         loaded?.release()
         return forwarded?.release()
       },
