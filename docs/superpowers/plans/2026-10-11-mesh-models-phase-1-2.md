@@ -287,6 +287,10 @@ class Primitive(_Strict):
 
 class Add(Primitive):
     op: Literal["add"] = "add"
+    #: Its own colour: the shape takes over the space it fills from every other colour
+    #: (the carrot's green anchored into the orange body, #2146). None: the object's
+    #: first part's, unioned.
+    colour: str | None = Field(default=None, pattern=COLOUR)
 
 
 class Subtract(Primitive):
@@ -710,9 +714,19 @@ def test_add_and_subtract_place_centred_primitives() -> None:
     assert "difference() {" in text and "cube([2, 2, 2], center = true);" in text
 
 
+def test_a_coloured_add_carves_its_space_out_of_the_rest() -> None:
+    add = Add(primitive="cylinder", size=(8, 8, 12), transform=Transform(translate=(0, 0, 30)), colour="#0ACC38")
+    text = compile_scene(scene(carrot(ops=[add])))
+    shape = "translate([0, 0, 30]) rotate([0, 0, 0]) scale([1, 1, 1]) cylinder(h = 12, d = 8, center = true, $fn = 64);"
+    # Inside `module o1()`, so two spaces deeper than `_wrap` writes it.
+    assert f"    difference() {{\n      o1_parts();\n      {shape}\n    }}\n    color(\"#0ACC38\") {shape}" in text
+
+
 def test_a_custom_op_is_a_module_given_the_geometry_as_children() -> None:
     text = compile_scene(scene(carrot(ops=[Custom(scad="minkowski() { children(); sphere(0.5); }")])))
-    assert "module o1_op0() {\n  minkowski() { children(); sphere(0.5); }\n}" in text
+    assert "module o1_op0() {\nminkowski() { children(); sphere(0.5); }\n}" in text
+    multi = compile_scene(scene(carrot(ops=[Custom(scad='echo("a\nb");\nchildren();')])))
+    assert 'module o1_op0() {\necho("a\nb");\nchildren();\n}' in multi  # a string literal keeps its text
     assert "o1_op0() {\n    o1_parts();\n  }" in text
 
 
@@ -833,7 +847,19 @@ def _wrap(obj: SceneObject, index: int, op: Op, inner: list[str]) -> list[str]:
             "}",
         ]
     if isinstance(op, Add):
-        return ["union() {", *nested, f'  color("{colour}") {_placed(op.transform)} {_primitive(op)}', "}"]
+        shape = f"{_placed(op.transform)} {_primitive(op)}"
+        if op.colour is None:
+            return ["union() {", *nested, f'  color("{colour}") {shape}', "}"]
+        # Carved out of the rest first, so no two colours ever claim the same volume.
+        return [
+            "union() {",
+            "  difference() {",
+            *_indent(nested),
+            f"    {shape}",
+            "  }",
+            f'  color("{op.colour}") {shape}',
+            "}",
+        ]
     if isinstance(op, Subtract):
         return ["difference() {", *nested, f"  {_placed(op.transform)} {_primitive(op)}", "}"]
     assert isinstance(op, Custom)
@@ -846,7 +872,8 @@ def _modules(obj: SceneObject) -> list[str]:
     out.append("}")
     for index, op in enumerate(obj.ops):
         if isinstance(op, Custom):
-            out += [f"module {obj.id}_op{index}() {{", *_indent(op.scad.splitlines()), "}"]
+            # Unindented: indenting would put spaces inside a multi-line string in the snippet.
+            out += [f"module {obj.id}_op{index}() {{", *op.scad.splitlines(), "}"]
     body = [f"{obj.id}_parts();"]
     for index, op in enumerate(obj.ops):
         body = _wrap(obj, index, op, body)
@@ -1661,7 +1688,7 @@ def test_set_colour_add_subtract_custom_duplicate_remove_op() -> None:
         garden(1),
         edits(
             {"edit": "set_colour", "object": "o1", "part": "p1", "colour": "#3a7d2c"},
-            {"edit": "add", "object": "o1", "primitive": "cylinder", "size": [4, 4, 6], "at": [30, 0, 33]},
+            {"edit": "add", "object": "o1", "primitive": "cylinder", "size": [4, 4, 6], "at": [30, 0, 33], "colour": "#0acc38"},
             {"edit": "subtract", "object": "o1", "primitive": "cube", "size": [2, 2, 2]},
             {"edit": "custom", "object": "o1", "scad": "children();"},
             {"edit": "remove_op", "object": "o1", "op": 2},
@@ -1673,6 +1700,7 @@ def test_set_colour_add_subtract_custom_duplicate_remove_op() -> None:
     assert first.parts[0].colour == "#3A7D2C"
     assert [op.op for op in first.ops] == ["add", "subtract"]
     assert first.ops[0].transform.translate == (0.0, 0.0, 33.0)  # world (30, 0, 33) in the object's frame
+    assert first.ops[0].colour == "#0ACC38"
     assert copy.id == "o2" and copy.ops == first.ops
     assert value(copy.transform.translate[0]) == pytest.approx(50.0)
 
@@ -1695,9 +1723,20 @@ def test_a_jointed_cut_a_joint_and_a_jointed_scale_cannot_be_exposed() -> None:
         {"edit": "expose", "object": "o1", "op": 1, "field": "diameter", "name": "peg"},
         {"edit": "expose", "object": "o2", "op": None, "field": "scale.2", "name": "tall"},
         {"edit": "transform", "object": "o2", "scale": [1, 1, 2]},
+        # The same value, exposed: no change now, but a parameter later (review of #2388).
+        {"edit": "transform", "object": "o2", "scale": [{"expose": "s", "value": 1}, 1, 1]},
     ):
         with pytest.raises(SceneEditError):
             apply_edits(jointed, edits(refused), mesh_of)
+
+
+def test_split_with_a_joint_refuses_an_exposed_scale() -> None:
+    """Expose first, then split: the halves would inherit a scale no fit check covers."""
+    exposed = apply_edits(
+        garden(1), edits({"edit": "expose", "object": "o1", "op": None, "field": "scale.0", "name": "w"}), mesh_of
+    )
+    with pytest.raises(SceneEditError, match="unexpose the scale"):
+        apply_edits(exposed, edits(split(depth=5)), mesh_of)
 
 
 def test_a_peg_takes_the_colour_of_the_part_it_stands_on() -> None:
@@ -1846,6 +1885,8 @@ class _PrimitiveEdit(_Edit):
 
 class AddEdit(_PrimitiveEdit):
     edit: Literal["add"] = "add"
+    #: See `Add.colour`.
+    colour: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
 class SubtractEdit(_PrimitiveEdit):
@@ -1959,6 +2000,8 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
     upper = obj.model_copy(update={"id": upper_id, "name": f"{obj.name} (top)", "ops": [*obj.ops, Cut(point=p, normal=n, keep="above")]})
     if edit.joint is not None:
         spec = edit.joint
+        if any(isinstance(x, Exposed) for x in t.scale):
+            raise SceneEditError(f"{obj.id}'s scale is a parameter; unexpose the scale before splitting with a joint")
         if not section.inside:
             raise SceneEditError(f"the section of {obj.id} at that plane has its centre outside it (a ring); cut elsewhere")
         diameter = spec.diameter if spec.diameter is not None else round(1.2 * section.room, 2)
@@ -2063,7 +2106,7 @@ def _primitive(scene: Scene, edit: AddEdit | SubtractEdit) -> Scene:
         local = np.linalg.solve(m, np.asarray(edit.at) - translate)
         centre = (round(float(local[0]), 6), round(float(local[1]), 6), round(float(local[2]), 6))
     shape = {"primitive": edit.primitive, "size": edit.size, "transform": Transform(translate=centre, rotate=edit.rotate)}
-    op = Add(**shape) if isinstance(edit, AddEdit) else Subtract(**shape)
+    op = Add(**shape, colour=edit.colour.upper() if edit.colour else None) if isinstance(edit, AddEdit) else Subtract(**shape)
     return _replace(scene, index, obj.model_copy(update={"ops": [*obj.ops, op]}))
 
 
@@ -2147,7 +2190,9 @@ def _one(scene: Scene, edit: BaseModel, mesh_of: MeshOf) -> Scene:
     obj = scene.objects[index]
     if isinstance(edit, TransformEdit):
         t = obj.transform
-        if edit.scale is not None and _jointed(obj) and _floats(edit.scale) != _floats(t.scale):
+        if edit.scale is not None and _jointed(obj) and (
+            _floats(edit.scale) != _floats(t.scale) or any(isinstance(x, Exposed) for x in edit.scale)
+        ):
             raise SceneEditError(f"{obj.id} is half of a jointed pair; scale the object before splitting it")
         transform = Transform(
             translate=edit.translate if edit.translate is not None else t.translate,
@@ -2398,6 +2443,36 @@ def test_removing_a_parameter_a_saved_preset_names_is_refused_unless_dropped(cli
     assert "height_scale" not in next(p for p in presets if p["name"] == "Tall")["params"]
 
 
+def test_a_preset_left_naming_a_removed_parameter_is_trimmed_by_the_next_edit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The revision commits before the presets are trimmed; if that trim fails, the next
+    edit (which removes nothing) still mends the preset (review of #2388)."""
+    slug = upload(client).json()["slug"]
+    assert edit(
+        client, slug, {"edit": "expose", "object": "o1", "op": None, "field": "scale.2", "name": "height_scale"}
+    ).status_code == 200
+    saved = client.post(
+        f"/api/v1/models/{slug}/presets", json={"name": "Tall", "params": {"height_scale": 2}}, headers=press()
+    )
+    assert saved.status_code in (200, 201), saved.text
+    presets = client.app.state.scadbuddy.presets  # check the attribute against AppState before running
+    real_update = presets.update
+
+    def fails(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("Postgres went away")
+
+    monkeypatch.setattr(presets, "update", fails)
+    unexpose = {"edit": "unexpose", "object": "o1", "op": None, "field": "scale.2"}
+    assert edit(client, slug, unexpose, drop=True).status_code >= 500
+    # The revision committed: the scale is a plain number again.
+    assert client.get(f"/api/v1/models/{slug}/scene").json()["scene"]["objects"][0]["transform"]["scale"][2] == 1
+    monkeypatch.setattr(presets, "update", real_update)
+    assert edit(client, slug, {"edit": "rename", "object": "o1", "name": "Again"}).status_code == 200
+    tall = next(p for p in client.get(f"/api/v1/models/{slug}/presets").json() if p["name"] == "Tall")
+    assert "height_scale" not in tall["params"]
+
+
 def test_eject_leaves_a_plain_template_that_keeps_its_provenance(client: TestClient, paths: DataPaths) -> None:
     slug = upload(client).json()["slug"]
     ejected = client.post(f"/api/v1/models/{slug}/scene/eject", headers=press())
@@ -2448,6 +2523,7 @@ from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.presets import ParamPresetUpdate
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, SceneEditError, apply_edits, removed_parameters
+from scadbuddy.meshmodel.scene import exposed_values
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import SCENE_NAME, Scene, SceneSource, dump_scene, load_scene, text_sha256
 from scadbuddy.operations.claims import ClaimStore
@@ -2488,7 +2564,7 @@ def mesh_loader(directory: Path) -> Any:
 
 
 def mesh_kinds(state: AppState) -> list[OperationKind]:
-    async def source_bytes(request: dict[str, Any]) -> tuple[bytes, SceneSource]:
+    async def source_bytes(request: dict[str, Any], checked: dict[str, Any]) -> tuple[bytes, SceneSource]:
         source = request["source"]
         if source["kind"] == "upload":
             try:
@@ -2504,14 +2580,14 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
                 raise ApiError(status.HTTP_404_NOT_FOUND, f"output {source['output_id']!r} has no 3MF")
             data, name = found, f"{source['output_id']}.3mf"
         else:
+            # The check read the file's record; only its bytes are fetched here.
+            filename, kind = checked["filename"], checked["file_type"]
+            library = LibrarySource(file_id=source["file_id"], colours=[], plates=[], filename=filename, file_type=kind)
             async with client_for(state.settings_store.load()) as client:
-                file = await client.library_file(source["file_id"])
-                kind = (file.file_type or "").lower()
-                library = LibrarySource(file_id=file.id, colours=[], plates=[], filename=file.filename, file_type=kind)
                 payload = await library.fetch_3mf(client)
             if payload is None:
-                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{file.filename} is too large to read, or holds no mesh")
-            data, name = payload, file.filename
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{filename} is too large to read, or holds no mesh")
+            data, name = payload, filename
         return data, SceneSource(
             kind=source["kind"],
             name=name,
@@ -2533,10 +2609,11 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
                     f"{file.filename} is {what}; only an unsliced 3MF or an STL opens as a mesh model",
                 )
+            return {"filename": file.filename, "file_type": kind}
         return {}
 
     async def create_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        data, source = await source_bytes(request)
+        data, source = await source_bytes(request, checked)
         try:
             read = await asyncio.to_thread(read_objects, data, ReadBudget())
         except UnreadableObjectsError as error:
@@ -2568,12 +2645,17 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
         EDITS.validate_python(request["edits"])
         return {}
 
+    def trim_saved_presets(slug: str) -> None:
+        _, scene = scene_of(slug)
+        kept = exposed_values(scene)
+        for preset in state.presets.saved_presets(slug):
+            if set(preset.params) - set(kept):
+                params = {k: v for k, v in preset.params.items() if k in kept}
+                state.presets.update(slug, preset.id, ParamPresetUpdate(params=params))
+
     async def edit_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         slug = request["slug"]
         edits = EDITS.validate_python(request["edits"])
-        dropped: list[str] = []
-        removed_names: list[str] = []
-
         def compute(directory: Path) -> dict[str, bytes | None]:
             _, scene = scene_of(slug)
             if hand_edited(directory, scene):
@@ -2597,18 +2679,15 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
                         f"the saved presets {', '.join(p.name for p in saved)} set {', '.join(removed)}; "
                         "send drop_from_presets to remove it from them",
                     )
-                dropped.extend(p.id for p in saved)
-                removed_names.extend(removed)
             after, text = compiled(after)
             return {SCENE_NAME: dump_scene(after).encode(), "model.scad": text.encode()}
 
         record = await asyncio.to_thread(partial(state.catalogue.update_files, slug, compute, message=request["message"]))
-        # After the revision, so no render between them sees a preset naming a parameter
-        # the template no longer has for longer than this takes.
-        for preset in await asyncio.to_thread(state.presets.saved_presets, slug):
-            if preset.id in dropped:
-                params = {k: v for k, v in preset.params.items() if k not in removed_names}
-                await asyncio.to_thread(state.presets.update, slug, preset.id, ParamPresetUpdate(params=params))
+        # After the revision, and on every run whatever it removed: a saved preset naming a
+        # parameter the scene no longer exposes cannot render, so trimming it is always the
+        # repair. That makes a run that died between the commit and this loop (the revision
+        # kept, the presets not trimmed) mended by the next edit (review of #2388).
+        await asyncio.to_thread(trim_saved_presets, slug)
         models_api.announce_source_change(state.events, slug)
         dumped: dict[str, Any] = record.model_dump(mode="json")
         return dumped
@@ -3172,7 +3251,7 @@ const edit = z.discriminatedUnion('edit', [
       .optional(),
   }),
   z.object({ edit: z.literal('lay_flat'), object, normal: z.union([vec3, z.literal('largest_flat')]) }),
-  z.object({ edit: z.literal('add'), object, primitive: z.enum(['cube', 'cylinder', 'sphere']), size: nvec3, at: vec3.optional(), rotate: nvec3.optional() }),
+  z.object({ edit: z.literal('add'), object, primitive: z.enum(['cube', 'cylinder', 'sphere']), size: nvec3, at: vec3.optional(), rotate: nvec3.optional(), colour: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional() }),
   z.object({ edit: z.literal('subtract'), object, primitive: z.enum(['cube', 'cylinder', 'sphere']), size: nvec3, at: vec3.optional(), rotate: nvec3.optional() }),
   z.object({ edit: z.literal('custom'), object, scad: z.string().min(1).max(20_000) }),
   z.object({ edit: z.literal('set_colour'), object, part: z.string().regex(/^p[0-9]+$/), colour: z.string().regex(/^#[0-9A-Fa-f]{6}$/) }),
@@ -3204,12 +3283,14 @@ export const meshModelTools: Tool[] = [
       .refine(
         (a) => [a.library_file_id !== undefined, a.output_id !== undefined, a.content_base64 !== undefined].filter(Boolean).length === 1,
         'give exactly one of library_file_id, output_id, content_base64',
-      ),
+      )
+      // The extension says whether the bytes are an STL or a 3MF; without it an STL would be read as a 3MF and refused.
+      .refine((a) => a.content_base64 === undefined || a.filename !== undefined, 'filename is required with content_base64'),
     risk: 'write',
     routes: ['POST /api/v1/models/from-mesh', 'POST /api/v1/models/from-mesh/upload'],
     handler: async ({ name, description, library_file_id, output_id, filename, content_base64 }, ctx) => {
       if (content_base64 !== undefined) {
-        const form = fileForm(decodeBase64(content_base64, 'content_base64'), filename ?? 'mesh.3mf', 'application/octet-stream')
+        const form = fileForm(decodeBase64(content_base64, 'content_base64'), filename!, 'application/octet-stream')
         form.append('name', name)
         return json(
           await command(ctx, `open ${filename}`, (headers) =>
@@ -3507,8 +3588,175 @@ git commit -m "docs(plugin): authoring mesh models (#2146)"
 
 ---
 
+### Task 13: Real files (`requires_fixtures`)
+
+The MakerWorld 3MFs in `test-fixtures/makerworld/` (Git LFS, PR #2389; `manifest.json`
+says what each covers and what `read_objects` makes of it) run through every path a
+user takes: open each as a mesh model, the carrot fix the 2026-10-10 assistant session
+asked for, and Arrange on a mesh model's output.
+
+**Files:**
+- Create: `backend/tests/test_mesh_models_fixtures.py`
+- Modify: `backend/tests/api/test_mesh_models.py`
+
+**Interfaces:**
+- Consumes: `tests.support.fixtures` `makerworld() -> list[dict]`, `makerworld_path(name) -> Path` (PR #2389; merge it first); Tasks 3, 4, 5, 7, 8; Task 9's `render`, `mesh_of`; `read_objects`, `ReadBudget`.
+
+- [ ] **Step 1: Every fixture the reader accepts opens as a scene**
+
+```python
+# backend/tests/test_mesh_models_fixtures.py
+"""Mesh models from real MakerWorld files (#2146). Without `git lfs pull` these skip."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+import trimesh
+from pydantic import TypeAdapter
+
+from scadbuddy.meshmodel.compile import compile_scene
+from scadbuddy.meshmodel.edits import Edit, apply_edits
+from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.scene import SceneSource
+from scadbuddy.meshmodel.section import measure
+from scadbuddy.render.objects3mf import read_objects
+from scadbuddy.render.read_budget import ReadBudget
+from tests.support.fixtures import makerworld, makerworld_path
+from tests.test_mesh_models_openscad import render
+
+pytestmark = pytest.mark.requires_fixtures
+EDITS = TypeAdapter(list[Edit])
+READ = [e for e in makerworld() if "refused" not in e["arrange_reads"]]
+CARROT = "688-carrot-garden.3mf"
+GREEN = "#0ACC38"  # the painted leaves' filament (manifest: filament_colours)
+
+
+def opened(name: str, directory: Path) -> Any:
+    data = makerworld_path(name).read_bytes()
+    read = read_objects(data, ReadBudget())
+    scene, files = scene_from_objects(read, SceneSource(kind="upload", name=name, sha256="ab" * 32))
+    for path, body in files.items():
+        (directory / path).parent.mkdir(parents=True, exist_ok=True)
+        (directory / path).write_bytes(body)
+    return read, scene
+
+
+@pytest.mark.parametrize("entry", READ, ids=lambda e: e["file"].removesuffix(".3mf"))
+def test_every_readable_fixture_opens_with_its_objects_parts_and_paint(entry: dict[str, Any], tmp_path: Path) -> None:
+    read, scene = opened(entry["file"], tmp_path)
+    assert len(scene.objects) == entry["arrange_reads"]["objects"]
+    assert [len(o.parts) for o in scene.objects] == [len(o.parts) for o in read]
+    painted = sum(p.painted for o in scene.objects for p in o.parts)
+    assert painted == entry["arrange_reads"]["painted_parts"]
+    for obj in scene.objects:
+        for part in obj.parts:
+            mesh = trimesh.load(tmp_path / part.mesh, file_type="3mf", force="mesh")
+            assert mesh.is_watertight, f"{obj.name} {part.id}"
+    assert "module o1()" in compile_scene(scene)
+```
+
+The 200-object fixture (2178) reads in ~19 s; if the file's total passes a minute on CI,
+mark that one id `slow` the way `pyproject.toml` already does, or deselect it from the
+parametrize with a reason.
+
+- [ ] **Step 2: The carrot fix, as the session asked: anchor the green into the body, one print**
+
+The 2026-10-10 assistant session on Carrot Garden (#688; transcript in #2146) was told
+"Leaf-to-body joint: the top pulls out of or breaks off the orange body", then "have the
+green be more connected to the carrot. Print in place is always the rule if possible."
+The carrot is one painted shell (plus five loose rings); its weak spot is the narrowest
+section of the neck. The fix: a green cylinder, wider than the neck, through it.
+
+```python
+@pytest.mark.requires_openscad
+def test_the_carrot_neck_anchored_in_green_prints_as_one_piece(tmp_path: Path) -> None:
+    _, scene = opened(CARROT, tmp_path)
+    small = next(o for o in scene.objects if o.name.startswith("Small Carrot"))
+    mesh = trimesh.load(tmp_path / small.parts[0].mesh, file_type="3mf", force="mesh")
+    shells_before = len(mesh.split(only_watertight=False))
+    # The neck: the narrowest section of the carrot's own shell between body and leaves.
+    sections = {
+        z: measure(mesh, np.array([0.0, 0.0, z]), np.array([0.0, 0.0, 1.0]))
+        for z in np.arange(30.0, 50.0, 0.5)
+    }
+    z, neck = min(((z, s) for z, s in sections.items() if s is not None and s.inside), key=lambda zs: zs[1].room)
+    m = small.transform  # the object frame: `measure` ran in it, `at` is world
+    at = [float(neck.centroid[0]) + float(m.translate[0]), float(neck.centroid[1]) + float(m.translate[1]), float(z) + float(m.translate[2])]
+    anchored = apply_edits(
+        scene,
+        EDITS.validate_python([{
+            "edit": "add", "object": small.id, "primitive": "cylinder",
+            "size": [2 * neck.room + 3, 2 * neck.room + 3, 12], "at": at, "colour": GREEN,
+        }]),
+        lambda path: trimesh.load(tmp_path / path, file_type="3mf", force="mesh"),
+    )
+    only = [o for o in anchored.objects if o.id == small.id]
+    parts = render(tmp_path, anchored.model_copy(update={"objects": only}))
+    by_colour = {p.colour: p.mesh for p in parts}
+    assert set(by_colour) == {small.parts[0].colour, GREEN}
+    # The same scene in one colour: the render's union, where touching solids are one shell
+    # (two colours' meshes never share a vertex, so they cannot be counted joined).
+    one = only[0].model_copy(update={
+        "parts": [p.model_copy(update={"colour": GREEN}) for p in only[0].parts],
+    })
+    (single,) = render(tmp_path, anchored.model_copy(update={"objects": [one]}))
+    # One piece: the anchor joins what was there and adds no shell of its own.
+    assert len(single.mesh.split(only_watertight=False)) == shells_before
+    # No volume claimed by both colours.
+    assert sum(p.mesh.volume for p in parts) == pytest.approx(single.mesh.volume, rel=0.005)
+```
+
+Check the neck `z` range against the fixture before running: the small carrot is 58 mm
+tall, its leaves painted from about z = 35.
+
+- [ ] **Step 3: Arrange takes a mesh model's output and adds nothing to its history**
+
+```python
+# backend/tests/api/test_mesh_models.py
+@pytest.mark.requires_fixtures
+def test_arranging_a_mesh_models_output_writes_a_3mf_and_no_revision(client: TestClient) -> None:
+    """The user's rule (#2146): arranging makes a 3MF output; it never adds to a model's history."""
+    data = makerworld_path("411-broccoli.3mf").read_bytes()
+    slug = upload(client, data=data, filename="broccoli.3mf").json()["slug"]
+    versions = client.get(f"/api/v1/models/{slug}/versions").json()
+    output = render_and_save(client, slug)  # Task 8's helper; add it there if missing
+    arranged = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"output_id": output["id"], "count": 4}]},
+        headers=press(),
+    )
+    assert arranged.status_code in (200, 201, 202), arranged.text
+    job = wait_for_job(client, arranged.json())  # the arrange row, as tests/api/test_arrange*.py waits
+    assert job["state"] == "done" and job["outputs"]
+    assert client.get(f"/api/v1/models/{slug}/versions").json() == versions
+```
+
+Match `upload`'s parameters (Task 8's helper takes the bytes and name; extend it if it
+does not), the render-and-save call (`POST /models/{slug}/render` with `save_output`, as
+`tests/api/test_render*.py` does) and the arrange wait to the real tests before running.
+
+- [ ] **Step 4: Run**
+
+Run: `cd backend && uv run --frozen pytest tests/test_mesh_models_fixtures.py tests/api/test_mesh_models.py -q -n 4`
+Expected: PASS where the fixtures, openscad (the image) and Postgres/Temporal are
+present; skips otherwise. In the image: mount the fixtures as CI does
+(`-v "$PWD/test-fixtures:/app/test-fixtures:ro"`).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/tests/test_mesh_models_fixtures.py backend/tests/api/test_mesh_models.py
+git commit -m "test(meshmodel): open real MakerWorld files, anchor the carrot neck, arrange an output (#2146)"
+```
+
 ## Self-review
 
 - **Spec coverage (phases 1–2):** §3 representation → Tasks 1, 3; §3.3 colourless meshes → Task 5 (`test_a_part_file_is_a_colourless_closed_3mf`), Task 9; §4 sources (library, upload, output), cap, provenance, nothing to Bambuddy → Tasks 5, 6, 8; OBJ refused → Task 8 (`test_an_obj_upload_is_refused`); §5 edits, hash check, presets → Tasks 7, 8; §6 kinds on `library`, tools, flows (`tool(name, args)` needs nothing new) → Tasks 8, 10; §10 tests for phases 1–2 → Tasks 1–11; §11 phases 1–2 acceptance → Tasks 8, 9, 11. Deferred, stated in the header: §7, §8, §9, the eval scenario.
 - **Deviation from the spec, stated:** §4 says the library read reuses `library_objects.py`. Its pieces are `piece_mesh` 3MFs with `basematerials`, which §3.3 forbids in a part file, so `mesh_model_create` reuses only its fetch (`LibrarySource.fetch_3mf`), its reader (`read_objects`) and its refusals. Model-level `scene: true` is not written into `model.json`: a model is a mesh model when it has `scene.json`; `model.json` keeps `mesh_source` so the origin survives an eject. `drop_from_presets` drops from saved presets; the model's own `model.json` presets are refused with "edit them first". Beyond the spec, and added to spec §5 in this PR: `lay_flat`'s drop to the bed counts pegs and `add` shapes, and `largest_flat` never picks a cut face carrying a peg (otherwise the peg goes into the bed); a peg takes the colour of the part the cut goes through; a jointed cut, a joint's numbers and a jointed half's scale cannot be exposed or (scale) changed (review of #2388: one side would move without the other).
+- **Real files (Task 13):** the fixtures from PR #2389. The two negative-part files (1943, 2154) and the three over 256 MiB inflated (2464, 381, 2602) are refused by `read_objects` today, so Task 13 skips them by the manifest; Arrange cutting negative parts out is its own PR (the reader, not mesh models), and the inflate cap its own issue. When either lands, the manifest's `arrange_reads` changes and Task 13 picks the files up.
+- **Bambuddy from the `library` queue:** `mesh_model_create` fetches a library file from a `library`-queue kind, while #1060 moves Bambuddy calls to the `bambuddy` queue. Kept here because the fetch is a read into the data volume, which only the `library` worker holds; when #1060 splits reads too, this becomes a `bambuddy` prelude kind like `output_delete`'s (review of #2388).
 - **Type consistency:** `compiled(scene) -> tuple[Scene, str]` (Task 8) is used by Task 11's `make.py`; `mesh_of(path) -> trimesh.Trimesh` everywhere; `Exposed(expose, value)` in Tasks 1, 3, 7, 10 (zod `num`).
