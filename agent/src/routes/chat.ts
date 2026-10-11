@@ -442,8 +442,10 @@ export class ChatConnection {
           // The panel clears the session's feed when it attaches (state.ts
           // `select`), so this is always a full replay, even when followed already.
           await this.sessions.get(message.sessionId, this.principal)
-          if (!this.tabs?.sessionHasTab(message.sessionId)) this.pairTab(message.sessionId)
           this.follow(message.sessionId, 0)
+          // After the replay starts: asking another replica whether it holds the
+          // session's tab can wait out the relay's ack timeout when none does.
+          if (this.tabs && !(await this.tabs.sessionHasTab(message.sessionId))) this.pairTab(message.sessionId)
           return
         case 'approval.decision':
           await this.sessions.approvals.decision(this.principal, message, { clientIp: this.clientIp })
