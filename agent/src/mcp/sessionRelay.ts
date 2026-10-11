@@ -146,6 +146,8 @@ type Waiting = {
   chunk: (text: string) => void
   end: (error: boolean) => void
   heard: () => void
+  /** This replica is closing: the request fails now. */
+  shutdown: () => void
 }
 
 export type PgMcpSessionRelayOptions = {
@@ -165,7 +167,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
   readonly #log: (message: string) => void
   readonly #waiting = new Map<string, Waiting>()
   /** Relayed requests this replica is running as owner, to cancel. */
-  readonly #running = new Map<string, AbortController>()
+  readonly #running = new Map<string, { controller: AbortController; heard: number }>()
   readonly #touched = new Map<string, number>()
   #owner: SessionOwner | undefined
   #lastSweep = 0
@@ -238,9 +240,17 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       let lastHeard = Date.now()
       let ackTimer: NodeJS.Timeout | undefined
       let liveness: NodeJS.Timeout | undefined
+      // Liveness both ways: the owner stops a request whose relaying replica
+      // went silent (crashed, OOM-killed, lost its node), which would never send
+      // a cancel, so a relayed GET stream is not held on a dead replica's behalf.
+      const beating = setInterval(
+        () => void this.#send({ t: 'beat', req, to: owner }).catch((err: unknown) => this.#failed(err)),
+        this.#beatMs,
+      )
       const done = () => {
         clearTimeout(ackTimer)
         clearInterval(liveness)
+        clearInterval(beating)
         signal.removeEventListener('abort', onAbort)
         this.#waiting.delete(req)
       }
@@ -295,6 +305,17 @@ export class PgMcpSessionRelay implements McpSessionRelay {
         heard: () => {
           lastHeard = Date.now()
         },
+        shutdown: () => {
+          done()
+          if (!settled) {
+            settle(
+              Response.json(
+                { jsonrpc: '2.0', error: { code: -32000, message: 'This agent replica is shutting down; try again' }, id: null },
+                { status: 503 },
+              ),
+            )
+          } else stream?.error(new Error('this agent replica is shutting down'))
+        },
         acked: () => {
           clearTimeout(ackTimer)
           if (acked) return
@@ -346,8 +367,10 @@ export class PgMcpSessionRelay implements McpSessionRelay {
 
   close(): void {
     this.#closed = true
-    for (const controller of this.#running.values()) controller.abort()
+    for (const { controller } of this.#running.values()) controller.abort()
     this.#running.clear()
+    // Requests this replica relayed: their clients learn now, not after the owner's silence.
+    for (const waiting of [...this.#waiting.values()]) waiting.shutdown()
   }
 
   /** Inserts `body` (when given) as row `row` and NOTIFYs `header`, in one transaction. */
@@ -382,7 +405,13 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     }
     if (header.to !== this.replica) return
     if (header.t === 'req') return void this.#serveRequest(header)
-    if (header.t === 'cancel') return void this.#running.get(header.req)?.abort()
+    if (header.t === 'cancel') return void this.#running.get(header.req)?.controller.abort()
+    const running = this.#running.get(header.req)
+    if (running) {
+      // As the owner: the relaying replica is still there, and still wants the answer.
+      if (header.t === 'beat') running.heard = Date.now()
+      return
+    }
     const waiting = this.#waiting.get(header.req)
     if (!waiting) {
       // Nobody waits any more: a row addressed here is still ours to remove.
@@ -430,7 +459,8 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const to = body.from
     const req = header.req
     const controller = new AbortController()
-    this.#running.set(req, controller)
+    const running = { controller, heard: Date.now() }
+    this.#running.set(req, running)
     // One message at a time, so they commit, and so are heard, in order.
     let queue = Promise.resolve()
     /** A message could not be sent: the answer is incomplete, and ends as an error. */
@@ -446,6 +476,12 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       return queue
     }
     const beat = setInterval(() => {
+      // The relaying replica has gone silent: nobody will read the answer, and a
+      // GET stream held for it would refuse the client's reconnect (409).
+      if (Date.now() - running.heard > this.#beatMs * SILENT_AFTER_BEATS) {
+        controller.abort()
+        return
+      }
       void send({ t: 'beat', req, to })
       // A long relayed GET stream is use too: keep the directory row from the sweep.
       void this.touch(body.hash)

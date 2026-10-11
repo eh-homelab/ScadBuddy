@@ -234,13 +234,20 @@ sequenceDiagram
   (`BEAT_MS`) until it has answered; after 3 missed beats a request still waiting for
   its head answers 503, and a body already streaming ends with an error, so the client
   reconnects and meets the 404.
+- **The relaying replica went away.** Liveness runs both ways: the replica that relayed
+  a request beats to the owner too, and an owner that misses 3 of those beats stops the
+  request. Without it a GET stream relayed through a replica that crashed (or was
+  replaced in a rolling deploy) would stay held, and the transport, which allows one
+  standalone stream per session, would answer the client's reconnect with 409.
 - **Who may use it.** The replica the request reached runs every gate (HTTPS, Origin,
   auth) and relays the principal as authenticated; the owner ties it to the session
   (an anonymous caller's `anonymous:<session id>` is made there) and still refuses
   another caller's principal with 403, as it does for its own requests. No credential
   is relayed: `Authorization`, `Cookie` and `Mcp-Session-Id` are stripped, and the
   owner puts the session id back from the session it finds, so no relay row holds a
-  token or a session id.
+  token or a session id. A relayed POST's body (the JSON-RPC request, tool arguments
+  included) does pass through a row, taken at once by the owner and swept after 10
+  minutes if it is not.
 - **A late ack.** When the ack timeout passes, the request row is withdrawn only if it
   is still there. An owner that took it is running it (its ack was lost or is slow),
   so the replica keeps waiting on its beats rather than answer 404 and forget a live

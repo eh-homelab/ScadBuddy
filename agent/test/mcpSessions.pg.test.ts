@@ -244,6 +244,84 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
     expect(await db.sql`SELECT 1 FROM ai_mcp_sessions WHERE id_hash = ${sessionHash(id)}`).toHaveLength(1)
   })
 
+  /** A raw GET (the standalone SSE stream) to `replica` in `sessionId`; its body is cancelled once the status is read. */
+  async function openStream(replica: Replica, token: string, sessionId: string): Promise<number> {
+    const request = new Request(MCP_URL, {
+      method: 'GET',
+      headers: {
+        host: new URL(MCP_URL).host,
+        authorization: `Bearer ${token}`,
+        'mcp-session-id': sessionId,
+        'mcp-protocol-version': '2025-06-18',
+        accept: 'text/event-stream',
+      },
+    })
+    const res = await replica.app.fetch(request, { incoming: { socket: { remoteAddress: LOOPBACK } } })
+    await res.body?.cancel().catch(() => {})
+    return res.status
+  }
+
+  it("lets go of a relayed GET stream when the relaying replica dies, so the client's next one opens", async () => {
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    // Opened by hand, so no GET stream is open yet: the SDK client would open one.
+    const init = await a.app.fetch(
+      new Request(MCP_URL, {
+        method: 'POST',
+        headers: {
+          host: new URL(MCP_URL).host,
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 0,
+          method: 'initialize',
+          params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } },
+        }),
+      }),
+      { incoming: { socket: { remoteAddress: LOOPBACK } } },
+    )
+    const id = init.headers.get('mcp-session-id')!
+    await init.body?.cancel().catch(() => {})
+    expect((await post(a, token, id, { jsonrpc: '2.0', method: 'notifications/initialized' })).status).toBe(202)
+    // The session's one standalone stream, opened through B and held there.
+    const getVia = (r: Replica) =>
+      r.app.fetch(
+        new Request(MCP_URL, {
+          method: 'GET',
+          headers: {
+            host: new URL(MCP_URL).host,
+            authorization: `Bearer ${token}`,
+            'mcp-session-id': id,
+            'mcp-protocol-version': '2025-06-18',
+            accept: 'text/event-stream',
+          },
+        }),
+        { incoming: { socket: { remoteAddress: LOOPBACK } } },
+      )
+    let held: Response | undefined
+    await until(async () => {
+      const res = await getVia(b)
+      if (res.status === 200) held = res
+      else await res.body?.cancel().catch(() => {})
+      return held !== undefined
+    }, 'the stream through B')
+    // While B lives, a second stream is refused: the transport allows one.
+    expect(await openStream(a, token, id)).toBe(409)
+    // B dies without a word: no cancel, no more beats.
+    b.relay.close()
+    await b.listener.close()
+    const c = replica()
+    await c.listener.ready()
+    try {
+      await until(async () => (await openStream(c, token, id)) === 200, 'a new stream through C', BEAT_MS * 60)
+    } finally {
+      await c.app.close()
+      await c.listener.close()
+    }
+  })
+
   it('relays answers of every size whole, however much their JSON escapes', async () => {
     // Names full of quotes: a tool result is JSON inside a JSON string inside a
     // NOTIFY payload, so each quote is escaped twice on the way.
