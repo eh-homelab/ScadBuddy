@@ -67,6 +67,15 @@ const FRAMING_HEADERS: ReadonlySet<string> = new Set(['content-length', 'transfe
 /** How often a session's `last_seen` is written, at most. */
 const TOUCH_EVERY_MS = 30_000
 
+/**
+ * How long a directory row may go untouched before it is idle. `last_seen` lags
+ * a live session's last use by up to TOUCH_EVERY_MS, so the owner's own idle
+ * sweep (mcp/http.ts) ends the session before its row is swept or uncounted (#2213).
+ */
+export function directoryIdleMs(idleMs: number): number {
+  return idleMs + TOUCH_EVERY_MS
+}
+
 /** The directory's key for a session id. */
 export function sessionHash(sessionId: string): string {
   return createHash('sha256').update(sessionId, 'utf8').digest('hex')
@@ -211,7 +220,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     await this.#sweep(idleMs)
     const [row] = await this.#sql<{ total: number; caller: number }[]>`
       SELECT count(*)::int AS total, (count(*) FILTER (WHERE caller_key = ${callerKey}))::int AS caller
-      FROM ai_mcp_sessions WHERE last_seen > now() - make_interval(secs => ${idleMs / 1000})`
+      FROM ai_mcp_sessions WHERE last_seen > now() - make_interval(secs => ${directoryIdleMs(idleMs) / 1000})`
     return row ?? { total: 0, caller: 0 }
   }
 
@@ -290,9 +299,16 @@ export class PgMcpSessionRelay implements McpSessionRelay {
           // and its ack was lost or is late. Then keep waiting, on its beats.
           const withdrawn = await this.#sql`DELETE FROM ai_mcp_relay_messages WHERE id = ${row} RETURNING id`
           if (withdrawn.length === 0) return this.#waiting.get(req)?.acked()
-          // Nobody took it: nobody holds the session.
+          // Nobody took it: nobody holds the session. Or its owner is too slow
+          // to take a request under load, and the session it still holds is now
+          // unreachable from other replicas: said, so that shows if it happens (#2213).
           done()
-          await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner}`
+          const dropped = await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner} RETURNING id_hash`
+          if (dropped.length > 0) {
+            this.#log(
+              `mcp relay: replica ${owner} took no request within ${this.#ackTimeoutMs} ms; dropped its session ${hash.slice(0, 12)} from the directory`,
+            )
+          }
         } catch (err) {
           this.#failed(err)
           done()
@@ -387,7 +403,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     await Promise.all([
       this.#sql`DELETE FROM ai_mcp_relay_messages WHERE created_at < now() - ${STALE_MESSAGES}::interval`,
       // A dead replica's sessions: idle by now, since nothing could use them.
-      this.#sql`DELETE FROM ai_mcp_sessions WHERE last_seen < now() - make_interval(secs => ${idleMs / 1000})`,
+      this.#sql`DELETE FROM ai_mcp_sessions WHERE last_seen < now() - make_interval(secs => ${directoryIdleMs(idleMs) / 1000})`,
     ]).catch((err: unknown) => this.#failed(err))
   }
 
