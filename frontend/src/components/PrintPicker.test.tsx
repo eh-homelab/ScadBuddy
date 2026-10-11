@@ -328,6 +328,47 @@ describe('PrintPicker', () => {
     expect(body.choices.filament_overrides).toEqual({})
   })
 
+  it('opens on another source without the last one’s spools while its choices are read (#2186)', async () => {
+    const first = fixtures.outputs[0] as Output
+    const second = fixtures.outputs[1] as Output
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', async ({ params }) => {
+        if (params.id === second.id) await held
+        return undefined
+      }),
+    )
+    // As the Library page holds it: no source while closed, a file's once Print is pressed.
+    function Library() {
+      const [shown, setShown] = useState<Output | null>(first)
+      return (
+        <>
+          <button onClick={() => setShown(second)}>Print the second</button>
+          <PrintPicker
+            open={shown !== null}
+            source={shown ? { kind: 'output', output: shown } : undefined}
+            onClose={() => setShown(null)}
+            onRan={vi.fn()}
+          />
+        </>
+      )
+    }
+    const { user } = renderPage(<Library />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Print the second' }))
+
+    expect(await screen.findByText('Reading the printer and the inventory')).toBeInTheDocument()
+    expect(screen.queryByTestId('filament-slot-1')).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Advanced' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+
+    release()
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
   it('shows the run’s warnings once the print is queued', async () => {
     vi.spyOn(api, 'runPrint').mockResolvedValue({
       ...queuedResult,
@@ -1472,7 +1513,10 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
 
     rerender(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
-    await waitFor(() => expect(screen.getByLabelText('Print sequence')).toHaveValue(''))
+    // The file's own read opens it as a fresh open does, in Simple (#2186).
+    await loaded()
+    await showAdvanced()
+    expect(screen.getByLabelText('Print sequence')).toHaveValue('')
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('print_sequence')
