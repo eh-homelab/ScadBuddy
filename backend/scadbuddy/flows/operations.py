@@ -212,6 +212,15 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
             raise
         event_id = int(request["event_id"])
         preview = await outward_since(client, run, event_id, run_id=described.run_id)
+        if described.run_id != str(request["workflow_run_id"]):
+            # Another Reset replaced the execution the preview read: past its point, the
+            # same event ids name other events, so the point itself means something else.
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "Another Reset moved the run since that preview; check the new one.",
+                type_=RESET_CHANGED,
+                preview=preview.model_dump(mode="json"),
+            )
         if not preview.valid:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,

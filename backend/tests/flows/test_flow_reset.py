@@ -74,7 +74,12 @@ async def reset(flows: Outward, run: Run, point: int) -> dict[str, Any]:
     return await operate(
         flows,
         FLOW_RESET,
-        {"run_id": run.id, "event_id": point, "as_of_event_id": preview.as_of_event_id},
+        {
+            "run_id": run.id,
+            "event_id": point,
+            "as_of_event_id": preview.as_of_event_id,
+            "workflow_run_id": preview.workflow_run_id,
+        },
     )
 
 
@@ -128,7 +133,12 @@ async def test_a_reset_past_a_stale_preview_is_refused_with_the_new_one(
     await client.provide_callback_result(run.waiting_on[0].call_id, result={"answer": "y"})
     await outward.decide(run_id, approved=True)
     await outward.row(run_id, lambda r: len(r.steps) == 4 and r.status == "waiting")
-    request = {"run_id": run_id, "event_id": point, "as_of_event_id": stale.as_of_event_id}
+    request = {
+        "run_id": run_id,
+        "event_id": point,
+        "as_of_event_id": stale.as_of_event_id,
+        "workflow_run_id": stale.workflow_run_id,
+    }
     with pytest.raises(ApiError) as err:
         await operate(outward, FLOW_RESET, request)
     assert (err.value.status, err.value.type) == (409, RESET_CHANGED)
@@ -187,6 +197,53 @@ async def test_a_point_that_is_not_a_completed_task_is_refused(outward: Outward)
     run_id = await outward.run(script("await wait_for_human('q?', 600)"))
     run = await outward.row(run_id, lambda r: r.status == "waiting")
     with pytest.raises(ApiError) as err:
-        await operate(outward, FLOW_RESET, {"run_id": run_id, "event_id": 1, "as_of_event_id": 0})
+        await operate(
+            outward,
+            FLOW_RESET,
+            {
+                "run_id": run_id,
+                "event_id": 1,
+                "as_of_event_id": 0,
+                "workflow_run_id": run.workflow_run_id,
+            },
+        )
     assert (err.value.status, err.value.type) == (422, RESET_POINT)
     assert (await outward.store.get_run(run_id)) == run
+
+
+async def test_a_preview_of_an_execution_another_reset_replaced_is_refused(
+    outward: Outward,
+) -> None:
+    """Event ids past a Reset's point describe other events in the new execution: a
+    preview read before it says nothing about what a Reset now would send again."""
+    run_id = await outward.run(
+        script(
+            "await wait_for_human('First?', 600)",
+            "await wait_for_human('Second?', 600)",
+        )
+    )
+    first = await outward.row(run_id, lambda r: r.status == "waiting")
+    point = await point_after(outward, first, first.steps[0].history_length)
+    await operate(
+        outward,
+        FLOW_ANSWER,
+        {"run_id": run_id, "call_id": first.waiting_on[0].call_id, "answer": "1"},
+    )
+    second = await outward.row(run_id, lambda r: [w.prompt for w in r.waiting_on] == ["Second?"])
+    seen = await outward_since(outward.client, second, point)
+    assert seen.workflow_run_id == second.workflow_run_id
+    await reset(outward, second, point)
+    moved = await outward.row(run_id, lambda r: r.workflow_run_id != second.workflow_run_id)
+    with pytest.raises(ApiError) as err:
+        await operate(
+            outward,
+            FLOW_RESET,
+            {
+                "run_id": run_id,
+                "event_id": point,
+                "as_of_event_id": seen.as_of_event_id,
+                "workflow_run_id": seen.workflow_run_id,
+            },
+        )
+    assert (err.value.status, err.value.type) == (409, RESET_CHANGED)
+    assert err.value.extensions["preview"]["workflow_run_id"] == moved.workflow_run_id

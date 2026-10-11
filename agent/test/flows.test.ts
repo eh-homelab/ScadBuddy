@@ -89,6 +89,7 @@ describe('flow tools (#1057)', () => {
         HttpResponse.json({
           event_id: Number(new URL(request.url).searchParams.get('event_id')),
           as_of_event_id: 40,
+          workflow_run_id: 'w1',
           valid: true,
           calls: [{ fn: 'queue_print', call_id: 'c1', scheduled_event_id: 30 }],
         }),
@@ -99,8 +100,8 @@ describe('flow tools (#1057)', () => {
       }),
     )
     const preview = await runTool(tool('preview_flow_reset'), { run_id: RUN, event_id: 12 }, ctx())
-    expect(firstText(preview)).toMatchObject({ event_id: 12, as_of_event_id: 40 })
-    const args = { run_id: RUN, event_id: 12, as_of_event_id: 40 }
+    expect(firstText(preview)).toMatchObject({ event_id: 12, as_of_event_id: 40, workflow_run_id: 'w1' })
+    const args = { run_id: RUN, event_id: 12, as_of_event_id: 40, workflow_run_id: 'w1' }
     // Gated like every outward tool: nothing is sent until a person approves.
     expect(tool('reset_flow_run').gated).toBe(true)
     const below = await runTool(tool('reset_flow_run'), args, ctx())
@@ -109,6 +110,6 @@ describe('flow tools (#1057)', () => {
     // As confirm_action runs it once a person approved.
     const reset = await tool('reset_flow_run').execute(args, ctx())
     expect(firstText(reset)).toEqual({ run_id: RUN, workflow_run_id: 'w2', event_id: 12 })
-    expect(seen).toEqual([{ key: expect.stringMatching(/^[0-9a-f]{32}$/), body: { event_id: 12, as_of_event_id: 40 } }])
+    expect(seen).toEqual([{ key: expect.stringMatching(/^[0-9a-f]{32}$/), body: { event_id: 12, as_of_event_id: 40, workflow_run_id: 'w1' } }])
   })
 })

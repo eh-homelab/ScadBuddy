@@ -519,6 +519,9 @@ class ResetBody(BaseModel):
     #: The preview's `as_of_event_id`: a Reset is refused (409, with the new preview)
     #: when outward calls were added after it.
     as_of_event_id: int = Field(ge=0)
+    #: The preview's `workflow_run_id`: a Reset is refused (409, with the new preview)
+    #: when another Reset replaced that execution since.
+    workflow_run_id: str = Field(min_length=1, max_length=64)
 
 
 class Reset(BaseModel):
