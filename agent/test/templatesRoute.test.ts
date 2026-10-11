@@ -15,6 +15,6 @@ describe('GET /api/v1/ai/templates/blank', () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ source: BLANK_TEMPLATE })
     // A constant of the image, so the browser need not ask on every visit to New model.
-    expect(res.headers.get('Cache-Control')).toBe('public, max-age=3600')
+    expect(res.headers.get('Cache-Control')).toBe('private, max-age=3600')
   })
 })

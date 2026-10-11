@@ -311,6 +311,61 @@ describe('VersionsPage, item context (#975)', () => {
       expect(openSession).not.toHaveBeenCalled()
     })
 
+    /** Holds `GET /api/v1/ai/sessions/:id` until the returned `answer` is called (#2212). */
+    function heldSessionRead(): { answer: (response: Response) => void; asked: () => boolean } {
+      let release: ((response: Response) => void) | undefined
+      server.use(
+        http.get('/api/v1/ai/sessions/:id', () => new Promise<Response>((resolve) => (release = resolve))),
+      )
+      return { answer: (response) => release?.(response), asked: () => release !== undefined }
+    }
+
+    it('still opens the chat when its row is gone before the session read answers (#2212)', async () => {
+      agentMade({ principal: 'browser', session: 'sess-made' })
+      const held = heldSessionRead()
+      const openSession = vi.fn()
+      const error = vi.spyOn(console, 'error')
+      const { user, unmount } = render('name-keychain', withOpener(openSession))
+      const [newest] = await rows()
+
+      await user.click(within(newest as HTMLElement).getByRole('button', { name: /^Agent, for you/ }))
+      await waitFor(() => expect(held.asked()).toBe(true))
+      unmount()
+      held.answer(HttpResponse.json({ id: 'sess-made', title: 'Rename the keychain' }))
+
+      await waitFor(() => expect(openSession).toHaveBeenCalledWith('sess-made'))
+      expect(error).not.toHaveBeenCalled()
+      error.mockRestore()
+    })
+
+    it('opens nothing, and says nothing, when a gone row\u2019s session read is refused (#2212)', async () => {
+      agentMade({ principal: 'browser', session: 'sess-made' })
+      const held = heldSessionRead()
+      const read = vi.spyOn(api, 'getAiSession')
+      const openSession = vi.fn()
+      const error = vi.spyOn(console, 'error')
+      const { user, unmount } = render('name-keychain', withOpener(openSession))
+      const [newest] = await rows()
+
+      await user.click(within(newest as HTMLElement).getByRole('button', { name: /^Agent, for you/ }))
+      await waitFor(() => expect(held.asked()).toBe(true))
+      unmount()
+      held.answer(
+        HttpResponse.json(
+          { title: 'Not Found', status: 404, detail: 'no such session' },
+          { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      )
+
+      // The read the row started, settled; its handler runs in the microtasks after it.
+      await read.mock.results[0]!.value.catch(() => undefined)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(openSession).not.toHaveBeenCalled()
+      read.mockRestore()
+      expect(error).not.toHaveBeenCalled()
+      error.mockRestore()
+    })
+
     it('is only text without the assistant, or without a session to open', async () => {
       agentMade({ principal: 'anonymous:3f2a', session: null })
       render('name-keychain', withOpener(vi.fn()))

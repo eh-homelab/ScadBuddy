@@ -113,6 +113,12 @@ class StandInTools:
         # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
         self.turn_offered: list[dict[str, Any]] = []
         self.turn_packages: list[dict[str, Any]] = []
+        # memory_recall's block (agent temporal/memoryActivities.ts, #2320), and each
+        # memory activity's (name, turn); memory_fails makes both fail.
+        self.memory_context: str | None = None
+        self.memory: list[tuple[str, str]] = []
+        self.memory_fails = False
+        self.tier_refuses = False
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -186,13 +192,31 @@ class StandInTools:
         async def turn_tools() -> dict[str, Any]:
             return {"tools": self.turn_offered, "packages": self.turn_packages}
 
-        # As turnTools.ts tiers http_request: a GET is read, anything else outward.
+        # As httpRequest.ts httpTierOf tiers http_request: no method, a GET or a HEAD is
+        # read, anything else outward.
         def tier(args: dict[str, Any]) -> str:
-            return "read" if args.get("method") == "GET" else "outward"
+            return "read" if args.get("method", "GET") in ("GET", "HEAD") else "outward"
 
         @activity.defn(name="turn_tool_tier")
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, str]:
+            if self.tier_refuses:
+                raise ApplicationError(
+                    "the plugin did not answer", type="ToolError", non_retryable=True
+                )
             return {"tier": tier(args["input"])}
+
+        @activity.defn(name="memory_recall")
+        async def memory_recall(args: dict[str, Any]) -> dict[str, str | None]:
+            self.memory.append(("memory_recall", args["turn_id"]))
+            if self.memory_fails:
+                raise ApplicationError("hindsight is down")
+            return {"context": self.memory_context}
+
+        @activity.defn(name="memory_retain")
+        async def memory_retain(args: dict[str, Any]) -> None:
+            self.memory.append(("memory_retain", args["turn_id"]))
+            if self.memory_fails:
+                raise ApplicationError("hindsight is down")
 
         @activity.defn(dynamic=True)
         async def turn_tool(raw: Sequence[RawValue]) -> str:
@@ -215,6 +239,8 @@ class StandInTools:
             turn_tools,
             turn_tool_tier,
             turn_tool,
+            memory_recall,
+            memory_retain,
         ]
 
 

@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import type { AuditSink } from '../audit/log.js'
-import { HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import { HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -51,6 +51,8 @@ export type TurnServerDeps = {
     | {
         load: () => Promise<PackagesForRun>
         root: string | undefined
+        /** Where a package's copy without its http MCP servers is made, on this pod (as a classic turn's). */
+        localRoot: string
         /** Their http MCP servers through the loopback forwarder (plugins/packages/mcp.ts). */
         forward: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
       }
@@ -76,6 +78,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         connect: () => connectHttp(plugin.url),
         // An unlisted plugin tool is outward (registry.ts), as in a classic turn.
         tierOf: (name) => tiers(name) ?? 'outward',
+        mayPark: (name) => (tiers(name) ?? 'outward') === 'outward',
       })
     }
     const http = deps.httpRequest
@@ -92,13 +95,16 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
                 secrets: () => secrets,
                 audit: http.audit,
                 actor: context.owner,
-                sessionId: context.session,
+                // A flow's call has no session to audit it under (its saved bodies are under `flow-<run>`).
+                sessionId: context.flow ? undefined : context.session,
                 signal: context.signal,
                 ...(http.resolve ? { resolve: http.resolve } : {}),
                 ...(http.limits ? { limits: http.limits } : {}),
               }).instance,
           ),
         tierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
+        // http_request is outward by its method; only reading a saved body never is.
+        mayPark: (name) => name !== HTTP_READ_TOOL_NAME,
         pinned: true,
       })
     }
@@ -127,7 +133,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root)
+            const turnPackage = await sharePackage(pkg, root, deps.packages!.localRoot)
             const dark = unparkableBuiltins(turnPackage)
             if (dark.length) {
               problems.push(
@@ -142,7 +148,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         }
       }
     }
-    if (deps.extra) servers.push(...(await deps.extra(context)))
+    // The browser and its grant are a session's: a flow has neither, as it has no browser_* tools.
+    if (deps.extra && !context.flow) servers.push(...(await deps.extra(context)))
     return {
       servers,
       problems,

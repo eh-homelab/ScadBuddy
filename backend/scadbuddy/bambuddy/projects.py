@@ -23,16 +23,17 @@ Three details of Bambuddy's shape are load-bearing:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Collection
+from typing import Protocol
 
 import psycopg
 from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, UpstreamAnswer
+from scadbuddy.bambuddy.commits import PROJECT_NOT_FOUND, refused, visible
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.linking import link_item
 from scadbuddy.bambuddy.models import Folder, FolderCreate, Project, ProjectCreate
 from scadbuddy.bambuddy.print_links import PrintLinkStore
@@ -130,13 +131,44 @@ async def describe_projects(
     )
 
 
-async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> ProjectView:
+class FolderlessProjects(Protocol):
+    """The projects this ScadBuddy created whose folder is not linked yet (#2263).
+
+    :class:`~scadbuddy.bambuddy.uploads.BambuddyUploadStore` in Postgres. A project is
+    remembered the moment Bambuddy answers its create and forgotten once its folder is
+    linked, so a row left behind is exactly a project whose folder step failed.
+    """
+
+    async def folderless(self, name: str, parent_id: int | None) -> list[int]: ...
+
+    async def remember_folderless(
+        self, project_id: int, name: str, parent_id: int | None
+    ) -> None: ...
+
+    async def forget_folderless(self, project_id: int) -> None: ...
+
+
+async def ensure_project(
+    client: BambuddyClient,
+    request: ProjectRequest,
+    *,
+    folderless: FolderlessProjects | None = None,
+) -> ProjectView:
     """Create or link a project, and make sure it has a library folder.
 
     Linking is idempotent on the folder: a project that already has one keeps it, so
     linking the same project twice does not leave Bambuddy with two folders of the same
     name pointing at it.
+
+    Creating is idempotent on a failed folder step, given ``folderless`` (#2263): a
+    create pressed again after Bambuddy kept the project but its folder failed finds
+    that project and gives it the folder, rather than making a second project of the
+    same name. The key is ScadBuddy's own record of the project id it created, not the
+    name: Bambuddy allows two projects of one name, and a folderless one is also what
+    every project made in Bambuddy's UI is, so a name match would adopt a project the
+    user made on purpose. The name and parent only pick which record this create means.
     """
+    created = False
     if request.project_id is not None:
         if request.parent_id is not None:
             # Linking never re-parents a project; dropping the field would look like it did.
@@ -151,16 +183,27 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             # A linked folder stays where it is, so the project would be nested and its
             # folder not.
             raise ApiError(400, "parent_id cannot be combined with folder_id")
-        project = await client.create_project(
-            ProjectCreate(
-                name=name,
-                description=request.description,
-                color=request.colour,
-                tags=request.tags,
-                url=request.url,
-                parent_id=request.parent_id,
-            )
+        found = (
+            await _created_before(client, folderless, name, request.parent_id)
+            if folderless is not None
+            else None
         )
+        if found is not None:
+            project = found
+        else:
+            project = await client.create_project(
+                ProjectCreate(
+                    name=name,
+                    description=request.description,
+                    color=request.colour,
+                    tags=request.tags,
+                    url=request.url,
+                    parent_id=request.parent_id,
+                )
+            )
+            created = True
+            if folderless is not None:
+                await folderless.remember_folderless(project.id, name, request.parent_id)
 
     folder = project_folder(await client.folders_by_project(project.id))
     if folder is None and request.folder_id is not None:
@@ -185,16 +228,33 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
                 project_id=project.id,
                 parent_id=await _parent_folder_id(client, project),
             ),
-            created=request.project_id is None,
+            created=created,
         )
+    if folderless is not None:
+        await folderless.forget_folderless(project.id)
     return _view(project, folder)
 
 
-#: Bambuddy's own detail when a write names a project it cannot see.
-PROJECT_NOT_FOUND = "Project not found"
-#: The pauses before each read-back of a project Bambuddy has not committed yet (#2065):
-#: about 2 s in all, as long as its write lock is normally held.
-COMMIT_WAITS: tuple[float, ...] = (0.1, 0.3, 0.6, 1.0)
+async def _created_before(
+    client: BambuddyClient, folderless: FolderlessProjects, name: str, parent_id: int | None
+) -> Project | None:
+    """The project an earlier create of ``name`` under ``parent_id`` made and left
+    without a folder, if Bambuddy still has it under that name and parent.
+
+    A record whose project is gone (its commit failed, or it was deleted) or was renamed
+    or moved since is forgotten: it is no longer the project this create means.
+    """
+    for project_id in await folderless.folderless(name, parent_id):
+        try:
+            project = await client.project(project_id)
+        except ApiError as error:
+            if not refused(error, PROJECT_NOT_FOUND):
+                raise
+        else:
+            if project.name.strip() == name and project.parent_id == parent_id:
+                return project
+        await folderless.forget_folderless(project_id)
+    return None
 
 
 async def _create_folder(
@@ -213,7 +273,7 @@ async def _create_folder(
     try:
         return await client.create_folder(folder)
     except ApiError as error:
-        if not created or not _project_missing(error):
+        if not created or not refused(error, PROJECT_NOT_FOUND):
             raise
     await _wait_for_commit(client, project)
     return await client.create_folder(folder)
@@ -223,14 +283,7 @@ async def _wait_for_commit(client: BambuddyClient, project: Project) -> None:
     """Return once Bambuddy can read ``project`` back, or raise when it never can: its
     commit failed (SQLite's "database is locked"), so the project does not exist and
     nothing was linked to it."""
-    for wait in COMMIT_WAITS:
-        await asyncio.sleep(wait)
-        try:
-            await client.project(project.id)
-        except ApiError as error:
-            if not _project_missing(error):
-                raise
-            continue
+    if await visible(lambda: client.project(project.id), PROJECT_NOT_FOUND):
         return
     raise ApiError(
         status.HTTP_502_BAD_GATEWAY,
@@ -238,15 +291,6 @@ async def _wait_for_commit(client: BambuddyClient, project: Project) -> None:
         "but did not keep it, so it has no folder and nothing was linked to it. "
         "Create the project again.",
         type_=UNAVAILABLE_PROBLEM,
-    )
-
-
-def _project_missing(error: ApiError) -> bool:
-    upstream = error.upstream
-    return (
-        error.status == status.HTTP_404_NOT_FOUND
-        and isinstance(upstream, UpstreamAnswer)
-        and upstream.detail == PROJECT_NOT_FOUND
     )
 
 

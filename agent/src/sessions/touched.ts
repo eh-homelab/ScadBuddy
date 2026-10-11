@@ -439,6 +439,11 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',
   'check_library_candidate_from_pinned_url',
+  // The session's own workspace (#2329): its files are the session's, listed by
+  // workspace_list (and the panel's Files tab), not ScadBuddy resources it touched.
+  'workspace_write',
+  'workspace_edit',
+  'workspace_delete',
   // The user's tab: these change only what the open page shows or holds unsaved (a
   // parameter, the editor, a Settings field, a dialog a human then confirms). What is
   // saved is saved by a tool that records it. browser_click and browser_fill are not

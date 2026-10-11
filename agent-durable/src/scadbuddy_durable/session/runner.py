@@ -15,8 +15,11 @@ For each segment, ``ScadBuddyRunner``:
   attempt that reports a cost is counted: each was really spent.
 
 The images the user sent with the turn are offered through a read-only in-segment
-MCP server, ``scadbuddy_images``, whose one tool, ``view_user_images``, returns them
+MCP server, ``scadbuddy_images``, whose tool ``view_user_images`` returns them
 from ``ai_session_blobs`` as image blocks (Ruling 5). The plugin's prompt is text only.
+The same server's ``view_tool_images``, on every segment, returns the images a durable
+tool returned, which the agent kept in ``ai_session_blobs`` and named in the tool's
+result text (#2320): a durable activity's result reaches the model as text only.
 
 A segment that raises (#2243) never hands Temporal the engine's own exception: its text
 can be anything Claude Code printed, and its traceback alone pushed the failure past
@@ -46,10 +49,11 @@ of the segment's declared tools (#2088), so Claude is never offered them.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -77,6 +81,16 @@ logger = logging.getLogger(__name__)
 IMAGES_SERVER = "scadbuddy_images"
 VIEW_IMAGES = "view_user_images"
 VIEW_IMAGES_TOOL = f"mcp__{IMAGES_SERVER}__{VIEW_IMAGES}"
+# The images a durable tool returned (#2320): the agent keeps each in ai_session_blobs
+# and names it in the result (agent/src/temporal/toolActivities.ts `resultText`).
+VIEW_TOOL_IMAGES = "view_tool_images"
+VIEW_TOOL_IMAGES_TOOL = f"mcp__{IMAGES_SERVER}__{VIEW_TOOL_IMAGES}"
+TOOL_IMAGES_MAX = 4
+# agent/src/sessions/blobs.ts BLOB_NAME: a name that is not this shape is never looked up.
+BLOB_NAME = re.compile(r"^[0-9a-f]{64}\.(png|jpg|gif|webp)$")
+# The Messages API's own bound on an image's long edge: a tool's image is not the user's
+# upload, so the image_long_edge setting (the panel's scaling) is not its bound.
+API_LONG_EDGE = 8000
 NO_CREDENTIAL = (
     "no usable Claude credential: save one in Settings, or check the secret key it was saved under"
 )
@@ -181,6 +195,52 @@ def image_problem(images: list[Image], long_edge: int) -> str | None:
     return None
 
 
+def _remote_entry(config: Any) -> bool:
+    # plugins/packages/mcp.ts isRemoteEntry
+    return isinstance(config, dict) and (
+        config.get("command") is None
+        and (isinstance(config.get("url"), str) or config.get("type") in ("http", "sse"))
+    )
+
+
+def declares_remote_servers(root: str) -> bool:
+    """Whether a package declares an MCP server reached by URL, in its ``.mcp.json`` or
+    its manifest's ``mcpServers`` (inline, or the files it names), as
+    plugins/packages/mcp.ts ``declaresRemoteServers`` reads them. A config that cannot
+    be read counts as declaring one."""
+    maps: list[Any] = []
+
+    def read(rel: str, required: bool) -> Any:
+        full = os.path.join(root, rel)
+        if not required and not os.path.exists(full):
+            return None
+        with open(full, encoding="utf-8") as f:
+            return json.load(f)
+
+    try:
+        maps.append(read(".mcp.json", False))
+        manifest = read(os.path.join(".claude-plugin", "plugin.json"), False)
+        declared = manifest.get("mcpServers") if isinstance(manifest, dict) else None
+        for entry in declared if isinstance(declared, list) else [declared]:
+            if isinstance(entry, str):
+                if re.match(r"https?://", entry) or re.search(r"\.(mcpb|dxt)$", entry, re.I):
+                    continue
+                maps.append(read(entry, True))
+            else:
+                maps.append(entry)
+    except (OSError, ValueError):
+        return True
+    for m in maps:
+        servers = (
+            m.get("mcpServers")
+            if isinstance(m, dict) and isinstance(m.get("mcpServers"), dict)
+            else m
+        )
+        if isinstance(servers, dict) and any(_remote_entry(c) for c in servers.values()):
+            return True
+    return False
+
+
 def error_text(err: BaseException) -> str:
     """An exception's text with its causes', as the log has it."""
     parts: list[str] = []
@@ -257,9 +317,90 @@ class Image:
     data: bytes
 
 
-def images_server(images: list[Image]) -> Any:
-    """The in-segment MCP server that hands the model the turn's images."""
+LoadImages = Callable[[list[str]], Awaitable[list[Image]]]
 
+
+def tool_images_loader(connect: Connect, session: str) -> LoadImages:
+    """Reads the named images of this session's blobs, and of no other session's."""
+
+    async def load(names: list[str]) -> list[Image]:
+        async with connect() as conn:
+            cur = await conn.execute(
+                "SELECT name, media_type, data FROM ai_session_blobs"
+                " WHERE session_id = %s AND name = ANY(%s)",
+                (session, names),
+            )
+            found = {r[0]: Image(r[0], r[1], bytes(r[2])) for r in await cur.fetchall()}
+        return [found[n] for n in names if n in found]
+
+    return load
+
+
+def _error(text: str) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": text}], "is_error": True}
+
+
+def view_tool_images_tool(load: LoadImages) -> Any:
+    """``view_tool_images``: the images a tool returned, by the names its result gave."""
+
+    @tool(
+        VIEW_TOOL_IMAGES,
+        "Shows you images a tool returned. A tool result that carried images names them"
+        " ([image <name>]); call this with those names to see them, at most"
+        f" {TOOL_IMAGES_MAX} per call.",
+        {
+            "type": "object",
+            "properties": {
+                "names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": TOOL_IMAGES_MAX,
+                }
+            },
+            "required": ["names"],
+        },
+        annotations=None,
+    )
+    async def view(args: dict[str, Any]) -> dict[str, Any]:
+        names = args.get("names")
+        if not isinstance(names, list) or not names or len(names) > TOOL_IMAGES_MAX:
+            return _error(f"names takes 1 to {TOOL_IMAGES_MAX} image names a tool result gave")
+        wanted = list(dict.fromkeys(str(n) for n in names))
+        bad = [n for n in wanted if not BLOB_NAME.match(n)]
+        if bad:
+            return _error(f"not an image name a tool result gave: {', '.join(bad)}")
+        images = await load(wanted)
+        missing = [n for n in wanted if n not in {i.name for i in images}]
+        if missing:
+            return _error(f"no image of this session is named {', '.join(missing)}")
+        problem = image_problem(images, API_LONG_EDGE)
+        if problem is not None:
+            return _error(problem)
+        return {
+            "content": [
+                {
+                    "type": "image",
+                    "data": base64.b64encode(i.data).decode(),
+                    "mimeType": i.media_type,
+                }
+                for i in images
+            ]
+        }
+
+    return view
+
+
+def images_server(images: list[Image], load_tool_images: LoadImages) -> Any:
+    """The in-segment MCP server that hands the model the turn's images: the user's
+    (``view_user_images``, only when the turn has some) and its tools' (#2320)."""
+    tools = [view_tool_images_tool(load_tool_images)]
+    if images:
+        tools.append(_user_images_tool(images))
+    return create_sdk_mcp_server(IMAGES_SERVER, tools=tools)
+
+
+def _user_images_tool(images: list[Image]) -> Any:
     @tool(
         VIEW_IMAGES,
         "Shows you the images the user attached to their latest message. Call it once"
@@ -279,7 +420,7 @@ def images_server(images: list[Image]) -> Any:
             ]
         }
 
-    return create_sdk_mcp_server(IMAGES_SERVER, tools=[view])
+    return view
 
 
 class ScadBuddyRunner:
@@ -363,6 +504,15 @@ class ScadBuddyRunner:
             if not matches:
                 logger.warning(
                     "segment of %s: package %s does not hash to its pin", workflow_id, package.name
+                )
+                continue
+            if declares_remote_servers(path):
+                # Claude Code would reach it itself, past the forwarder's egress check
+                # (harness/run.ts refuses the same); the agent shares a copy without them.
+                logger.warning(
+                    "segment of %s: package %s declares an http MCP server",
+                    workflow_id,
+                    package.name,
                 )
                 continue
             dirs.append(path)
@@ -485,9 +635,11 @@ class ScadBuddyRunner:
         problem = image_problem(images, settings.long_edge) if images else None
         if problem is not None:
             return SegmentOutput(session_id=inp.session_id, is_error=True, error=problem)
-        if images:
-            extra["mcp_servers"] = {IMAGES_SERVER: images_server(images)}
-            extra["allowed_tools"] = [VIEW_IMAGES_TOOL]
+        # Every segment: a tool result of any segment may name images (#2320).
+        extra["mcp_servers"] = {
+            IMAGES_SERVER: images_server(images, tool_images_loader(self._connect, session))
+        }
+        extra["allowed_tools"] = [VIEW_TOOL_IMAGES_TOOL, *([VIEW_IMAGES_TOOL] if images else [])]
         await self._subagent_tools(session, extra)
         plugins = (
             [{"type": "local", "path": self._plugin_dir}]

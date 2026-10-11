@@ -62,6 +62,17 @@ describe('SettingsPage section links (#1307)', () => {
     }
   })
 
+  it('still opens, unscrolled, at a hash with a malformed escape (#2113)', async () => {
+    const { scrolled, restore } = stubScroll()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#%E0%A4%A' })
+      await seeded()
+      expect(scrolled).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
   it('leaves the page at the top without a hash', async () => {
     const { scrolled, restore } = stubScroll()
     try {

@@ -351,6 +351,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         binary: false,
         media_type: 'text/markdown',
         truncated: false,
+        too_large: false,
         content: GREETER['README.md'],
       })
       // Only a path the pin lists: never one outside the package, or a file it does not have.
@@ -472,6 +473,9 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
   })
 
   describe('the session manager', () => {
+    // sessions/manager.ts: a package that declares an http MCP server is loaded as its copy without it.
+    const strippedCopy = (stateDir: string, contentHash: string) => path.join(stateDir, 'plugins-local', contentHash.replace(/^sha256:/, ''))
+
     it('loads the enabled packages into each turn by path, and reports the ones it cannot load', async () => {
       const installed = await install()
       await store.approve('greeter', installed.commit_sha, installed.content_hash)
@@ -494,15 +498,17 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
           yield { type: 'system', subtype: 'init', mcp_servers: [], plugins: [] } as unknown as SDKMessage
           yield* scripted.runner(run)
         })()
+      const paths = await tempPaths()
       const m = manager({
         sql: db.sql,
-        paths: await tempPaths(),
+        paths,
         run: runner,
         packagePlugins: () => loadPackagesForRun(store, installer),
       })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
-      expect(runs[0]?.pluginPaths).toEqual([installer.cacheDir({ ...(await store.enabledPins())[0]! })])
+      // The fixture declares an http MCP server: Claude Code gets the copy without it (#2320).
+      expect(runs[0]?.pluginPaths).toEqual([strippedCopy(paths.stateDir, installed.content_hash)])
 
       const logged = (
         await db.sql<{ event: string }[]>`
@@ -550,9 +556,10 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       await store.setEnabled('greeter', true)
       const scripted = scriptedRunner(() => ({ reply: 'hi' }))
       const runs: HarnessRun[] = []
+      const paths = await tempPaths()
       const m = manager({
         sql: db.sql,
-        paths: await tempPaths(),
+        paths,
         run: (run) => {
           runs.push(run)
           return scripted.runner(run)
@@ -562,7 +569,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
       expect(runs[0]?.pluginPaths).toBeUndefined()
-      expect(runs[0]?.allowedPluginPaths).toEqual([installer.cacheDir((await store.enabledPins())[0]!)])
+      expect(runs[0]?.allowedPluginPaths).toEqual([strippedCopy(paths.stateDir, installed.content_hash)])
     })
   })
 })

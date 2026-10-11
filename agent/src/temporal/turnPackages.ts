@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { declaredConfigs } from '../harness/plugins.js'
 import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
 import type { LoadedPackage } from '../plugins/packages/install.js'
-import { packageServerName } from '../plugins/packages/mcp.js'
+import { packageServerName, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import { type TurnPackage, type TurnServer } from './turnTools.js'
 
 // Plugin packages in a durable session (#2320). A classic turn hands Claude Code each
@@ -21,7 +21,9 @@ import { type TurnPackage, type TurnServer } from './turnTools.js'
 //     the copy again before it loads it, as the agent re-hashes its own cache;
 //   - the package's MCP servers run here, as turn tools, as a remote plugin's do: the
 //     durable engine starts no MCP server of a plugin (the Temporal plugin sets
-//     `strict_mcp_config`), and here each call goes through the gate. They carry the
+//     `strict_mcp_config`; a package that declares an http one is shared without it,
+//     `sharePackage`, and the segment runner refuses a copy that still does), and here
+//     each call goes through the gate. They carry the
 //     names Claude Code gives them (`plugin_<package>_<server>`), so their tiers are
 //     the classic turn's: no package tool is ScadBuddy's, so every one is outward.
 //     An http server is reached only through the loopback forwarder, as a remote
@@ -42,32 +44,37 @@ export function sharedName(contentHash: string): string {
 }
 
 /**
- * Copies a loaded package to `root/<hash>` unless a copy that hashes to the pin is
+ * Copies a loaded package to `root/<hash>` unless a copy that hashes to `<hash>` is
  * already there, and returns its name under `root`. A copy that does not match is
- * replaced: the volume is shared, so it is checked, never trusted.
+ * replaced: the volume is shared, so it is checked, never trusted. A package that
+ * declares an http MCP server is shared without it (`withoutRemoteServers`, made under
+ * `localRoot`), named by that copy's own hash: Claude Code in agent-durable would reach
+ * it itself, past the forwarder, and the segment runner refuses a copy that declares one.
  */
-export async function sharePackage(pkg: LoadedPackage, root: string): Promise<TurnPackage> {
-  const name = sharedName(pkg.contentHash)
+export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: string): Promise<TurnPackage> {
+  const source = await withoutRemoteServers(pkg.dir, pkg.contentHash, localRoot)
+  const contentHash = source === pkg.dir ? pkg.contentHash : (await hashTree(source)).hash
+  const name = sharedName(contentHash)
   const target = path.join(root, name)
-  if (!(await matches(target, pkg.contentHash))) {
+  if (!(await matches(target, contentHash))) {
     await mkdir(root, { recursive: true })
     const tmp = path.join(root, `.tmp-${randomUUID()}`)
     try {
-      await cp(pkg.dir, tmp, { recursive: true, preserveTimestamps: true })
-      if (!(await matches(tmp, pkg.contentHash))) throw new Error(`the copy of ${pkg.name} does not hash to its pin`)
+      await cp(source, tmp, { recursive: true, preserveTimestamps: true })
+      if (!(await matches(tmp, contentHash))) throw new Error(`the copy of ${pkg.name} does not hash to its pin`)
       await rm(target, { recursive: true, force: true })
       try {
         await rename(tmp, target)
       } catch (err) {
         // Another replica placed it first: fine when it matches.
         const code = (err as NodeJS.ErrnoException).code
-        if ((code !== 'ENOTEMPTY' && code !== 'EEXIST') || !(await matches(target, pkg.contentHash))) throw err
+        if ((code !== 'ENOTEMPTY' && code !== 'EEXIST') || !(await matches(target, contentHash))) throw err
       }
     } finally {
       await rm(tmp, { recursive: true, force: true })
     }
   }
-  return { name: pkg.name, dir: name, content_hash: pkg.contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
+  return { name: pkg.name, dir: name, content_hash: contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
 }
 
 async function matches(dir: string, contentHash: string): Promise<boolean> {
@@ -154,5 +161,8 @@ export function unparkableBuiltins(pkg: TurnPackage): string[] {
   return pkg.builtin_tools.filter((t) => !PARKABLE_BUILTINS.has(t) && !OFFERED.has(t))
 }
 
-/** What every durable turn's Claude Code has already (the Skill and Agent tools, read). */
-const OFFERED = new Set(['Skill', 'Agent'])
+/**
+ * What every durable turn's Claude Code has already (the Skill tool). Not Agent: the
+ * durable agent starts without it, and one a package names would run unasked.
+ */
+const OFFERED = new Set(['Skill'])

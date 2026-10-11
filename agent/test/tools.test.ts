@@ -103,6 +103,28 @@ describe('every call has a deadline (#1918)', () => {
     }
   })
 
+  it('answers a Stop at once, even from a handler that ignores its signal (#2099)', async () => {
+    let release = () => {}
+    const t = tool('get_schema')
+    const deaf: Tool = {
+      ...t,
+      execute: () => new Promise((resolve) => {
+        release = () => resolve({ content: [] })
+      }),
+    }
+    const stop = new AbortController()
+    setTimeout(() => stop.abort(), 10)
+    const started = Date.now()
+    try {
+      const result = await runTool(deaf, { slug: 'cable-clip' }, ctx({ signal: stop.signal, toolDeadlineMs: 60_000 }))
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('the call was cancelled')
+      expect(Date.now() - started).toBeLessThan(5_000)
+    } finally {
+      release()
+    }
+  })
+
   it('allows a tool its own designed wait on top', () => {
     const c = ctx()
     expect(tool('get_schema').deadlineMs({ slug: 'x' }, c)).toBe(TOOL_DEADLINE_MS)

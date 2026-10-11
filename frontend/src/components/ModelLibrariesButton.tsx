@@ -60,17 +60,24 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   // so a read that finds the same pins does not bump it (#2193).
   const [pinsChanged, setPinsChanged] = useState(0)
   const pinsSeen = useRef<string | null>(null)
+  // Bumped by a `libraries` signal whose read finds this model's pins unchanged: some
+  // other model's pins changed, and every model's pins feed an unresolved include's
+  // suggestion (backend `library/includes.py`), so those are checked again (#2219).
+  const [othersPinned, setOthersPinned] = useState(0)
 
-  function showModel(model: ModelSummary) {
+  /** Shows `model`'s pins, and says whether they differ from the last ones shown. */
+  function showModel(model: ModelSummary): boolean {
     const libraries = model.libraries ?? []
     const invalidLibraries = model.invalid_libraries ?? []
     setPins(libraries)
     setInvalid(invalidLibraries)
+    // Compared as JSON, so this rests on the backend serialising each pin's fields in one
+    // order, as Pydantic does for a model: a reordering alone would read as a change.
     const seen = JSON.stringify([libraries, invalidLibraries])
-    if (seen !== pinsSeen.current) {
-      pinsSeen.current = seen
-      setPinsChanged((n) => n + 1)
-    }
+    if (seen === pinsSeen.current) return false
+    pinsSeen.current = seen
+    setPinsChanged((n) => n + 1)
+    return true
   }
 
   useEffect(() => {
@@ -116,7 +123,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     try {
       const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
       if (generation.current !== started) return
-      showModel(model)
+      if (!showModel(model)) setOthersPinned((n) => n + 1)
       setCatalogue(libraries)
     } catch (caught) {
       // Otherwise the dialog keeps what it shows; the next change or reopen reads again.
@@ -248,7 +255,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
               </section>
             )}
 
-            <Includes slug={slug} checkAgain={pinsChanged} apply={apply} />
+            <Includes slug={slug} checkAgain={pinsChanged} othersPinned={othersPinned} apply={apply} />
 
             <AddByUrl slug={slug} apply={apply} />
           </div>
@@ -516,9 +523,20 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
 /**
  * #1285 — the dependency check (`POST /models/{slug}/dependencies`): the saved source's
  * includes that resolve nowhere, with the library that would provide each, and the
- * `font = "…"` families that are not installed. Checked again whenever the pins change.
+ * `font = "…"` families that are not installed. Checked again whenever the pins change,
+ * and when another model's do while an include is unresolved: its suggestion may change.
  */
-function Includes({ slug, checkAgain, apply }: { slug: string; checkAgain: number; apply: Apply }) {
+function Includes({
+  slug,
+  checkAgain,
+  othersPinned,
+  apply,
+}: {
+  slug: string
+  checkAgain: number
+  othersPinned: number
+  apply: Apply
+}) {
   const [report, setReport] = useState<DependencyReport | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Bumped by a font install: the families it adds resolve now.
@@ -526,6 +544,14 @@ function Includes({ slug, checkAgain, apply }: { slug: string; checkAgain: numbe
   // A check is running. A re-check keeps the last report on screen until it answers, so
   // this is what says that report is about to be replaced (#2193).
   const [checking, setChecking] = useState(true)
+  // Another model's pins changed: checked again only when an include is unresolved, as
+  // a resolved one does not depend on them (#2219).
+  const [othersSeen, setOthersSeen] = useState(othersPinned)
+  const [suggestionsStale, setSuggestionsStale] = useState(0)
+  if (othersPinned !== othersSeen) {
+    setOthersSeen(othersPinned)
+    if (report?.includes?.some((include) => include.status === 'unresolved')) setSuggestionsStale((n) => n + 1)
+  }
 
   useEffect(() => {
     let live = true
@@ -545,7 +571,7 @@ function Includes({ slug, checkAgain, apply }: { slug: string; checkAgain: numbe
     return () => {
       live = false
     }
-  }, [slug, checkAgain, installed])
+  }, [slug, checkAgain, installed, suggestionsStale])
 
   const unresolved = report?.includes?.filter((include) => include.status === 'unresolved') ?? []
   const missingFonts = [...new Set((report?.fonts ?? []).flatMap((use) => use.missing))]

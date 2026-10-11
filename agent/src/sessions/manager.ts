@@ -65,7 +65,7 @@ import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, p
 import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { TabWait, WaitForTab } from '../tools/registry.js'
-import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
+import { type AuditContext, type AuditLog, type AuditSink, safeDetail } from '../audit/log.js'
 import { TurnAuditor, turnCostEntry } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
@@ -83,6 +83,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
+import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
@@ -414,6 +415,61 @@ export function memoryText(text: string, secrets: readonly (string | undefined)[
   return clean.length > MEMORY_TEXT_MAX ? `${clean.slice(0, MEMORY_TEXT_MAX)}… (${clean.length} characters)` : clean
 }
 
+/**
+ * One automatic recall or retain as the session records it: an audit row (never
+ * fails, audit/log.ts) and a `memory` panel event, both redacted. Classic turns
+ * (`SessionManager.memoryHooks`) and durable ones (temporal/memoryActivities.ts) alike.
+ */
+export async function recordMemoryActivity(
+  deps: { audit?: AuditSink | undefined; events: Pick<EventLog, 'append'> },
+  session: { id: string; owner: Owner },
+  turnId: string,
+  a: MemoryActivity,
+  secrets: readonly string[],
+): Promise<void> {
+    const id = session.id
+    const summary = {
+      bank: a.bank,
+      ...(a.documentId ? { document_id: a.documentId } : {}),
+      ...(a.count === undefined ? {} : { results: a.count }),
+      ...(a.tool ? { tool: a.tool } : {}),
+    }
+    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+    await Promise.all([
+      deps.audit?.record({
+        kind: 'memory',
+        action: a.action,
+        surface: 'harness',
+        actor: session.owner,
+        sessionId: id,
+        turnId,
+        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+        inputSummary: JSON.stringify(summary),
+        outcome: a.outcome === 'ok' ? 'ok' : 'error',
+        ...detail,
+        startedAt: a.startedAt,
+        finishedAt: a.finishedAt,
+      }),
+      deps.events.append(id, [
+        scrubForLog(
+          event({
+            type: 'memory',
+            sessionId: id,
+            turnId,
+            action: a.action,
+            bank: a.bank,
+            outcome: a.outcome,
+            ...(a.count === undefined ? {} : { count: a.count }),
+            ...detail,
+            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
+          }),
+          secrets,
+        ),
+      ]),
+    ])
+}
+
 export class SessionError extends Error {
   override name = 'SessionError'
   readonly code: SessionErrorCode
@@ -654,6 +710,12 @@ export type SessionManagerDeps = {
     /** Tests only: smaller caps. */
     limits?: Partial<HttpLimits>
   }
+  /**
+   * The assistant's workspace (#2329, workspace/store.ts): where http_request's
+   * `save_to_workspace` writes, and what a fork copies. One over `sql` (caps from
+   * `settings`) when omitted.
+   */
+  workspace?: SessionFiles
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -893,12 +955,14 @@ export class SessionManager {
   private readonly touched: SessionResources
   /** The images tool results carried (#782), read by `blob`. */
   private readonly blobs: SessionBlobs
+  private readonly files: SessionFiles
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
     this.touched = new SessionResources(deps.sql)
     this.blobs = new SessionBlobs(deps.sql)
+    this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -1544,13 +1608,17 @@ export class SessionManager {
             ? this.deps.ownPlugin
             : undefined
         packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
+        const packageNames = new Map<string, string>()
         if (packages) {
           // Loaded without their own http MCP servers, which come through the forwarder
           // below: a query with strictMcpConfig off would start them itself (run.ts).
           const loaded = packages
           const stripped = async (dir: string) => {
             const pkg = loaded.loaded.find((p) => p.dir === dir)
-            return pkg ? withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local')) : dir
+            const loadedDir = pkg ? await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local')) : dir
+            if (pkg) packageNames.set(loadedDir, pkg.name)
+            return loadedDir
           }
           packages = {
             ...loaded,
@@ -1600,7 +1668,7 @@ export class SessionManager {
           }
           for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
             if (!loaded.has(path.resolve(dir))) {
-              await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+              await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
             }
           }
           // #1255: Claude Code drops an in-process server it cannot connect, and every
@@ -1644,6 +1712,8 @@ export class SessionManager {
           this.deps.httpRequest && httpRequestEnabled(httpSetting)
             ? httpRequestServer({
                 saveDir: path.join(cwd, 'http'),
+                // save_to_workspace (#2329): the body becomes one of the session's files.
+                workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
                 secrets: () => secrets,
                 audit: this.deps.audit,
                 actor: session.owner,
@@ -1911,47 +1981,7 @@ export class SessionManager {
     a: MemoryActivity,
     secrets: readonly string[],
   ): Promise<void> {
-    const id = session.id
-    const summary = {
-      bank: a.bank,
-      ...(a.documentId ? { document_id: a.documentId } : {}),
-      ...(a.count === undefined ? {} : { results: a.count }),
-      ...(a.tool ? { tool: a.tool } : {}),
-    }
-    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-    await Promise.all([
-      this.deps.audit?.record({
-        kind: 'memory',
-        action: a.action,
-        surface: 'harness',
-        actor: session.owner,
-        sessionId: id,
-        turnId,
-        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-        inputSummary: JSON.stringify(summary),
-        outcome: a.outcome === 'ok' ? 'ok' : 'error',
-        ...detail,
-        startedAt: a.startedAt,
-        finishedAt: a.finishedAt,
-      }),
-      this.events.append(id, [
-        scrubForLog(
-          event({
-            type: 'memory',
-            sessionId: id,
-            turnId,
-            action: a.action,
-            bank: a.bank,
-            outcome: a.outcome,
-            ...(a.count === undefined ? {} : { count: a.count }),
-            ...detail,
-            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-          }),
-          secrets,
-        ),
-      ]),
-    ])
+    await recordMemoryActivity({ audit: this.deps.audit, events: this.events }, session, turnId, a, secrets)
   }
 
   /**
@@ -2392,6 +2422,8 @@ export class SessionManager {
     }
     // The images those results name (#782), before the events that name them.
     await this.blobs.copy(id, childId)
+    // Its workspace files (#2329), so the fork carries on with what the parent had.
+    await this.files.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',

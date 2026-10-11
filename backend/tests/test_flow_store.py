@@ -11,9 +11,10 @@ import pytest
 from psycopg import Connection
 
 from scadbuddy.core.events import Event, FlowRunEvent
+from scadbuddy.flows import store as flow_store
 from scadbuddy.flows.manifest import raise_tiers
 from scadbuddy.flows.models import RESULT_MAX
-from scadbuddy.flows.store import FlowStore, ResetSupersededError
+from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
 
@@ -377,6 +378,57 @@ async def test_a_reset_keeps_a_step_that_ended_before_6e_recorded_where(store: F
     # Not reopened: nothing would ever end it, while a step that does run again records
     # its end again.
     assert [(s.call_id, s.status) for s in run.steps] == [("a", "succeeded")]
+
+
+async def test_resolved_entries_are_capped_and_a_reset_before_the_cut_is_refused(
+    store: FlowStore, jobs: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2268: `waiting_done` keeps `DONE_KEPT` entries; the earliest resolved go, and a
+    Reset that might need one of them is refused."""
+    monkeypatch.setattr(flow_store, "DONE_KEPT", 3)
+    await started(store)
+    # Five questions, each parked at 10*i + 1 and answered at 10*i + 5.
+    for i in range(5):
+        call_id = f"q{i}"
+        await store.project(
+            ProjectionWrite(
+                run_id="r1",
+                workflow_run_id="wr1",
+                waiting_add=parked(call_id, 10 * i + 1),
+                history_length=10 * i + 1,
+            )
+        )
+        await store.project(
+            ProjectionWrite(
+                run_id="r1",
+                workflow_run_id="wr1",
+                waiting_remove=call_id,
+                history_length=10 * i + 5,
+            )
+        )
+    with jobs.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT waiting_done, reset_floor FROM workflow_runs WHERE id = 'r1'"
+        ).fetchone()
+    assert row is not None
+    assert [w["call_id"] for w in row["waiting_done"]] == ["q2", "q3", "q4"]
+    # q1, the later of the two dropped, was answered at 15.
+    assert row["reset_floor"] == 15
+    assert await store.reset_floor("r1") == 15
+    calls: list[str] = []
+
+    async def reset() -> str:
+        calls.append("reset")
+        return "wr2"
+
+    # Event 16 does again the task started at 15, where q1 was answered: q1 would have to
+    # wait again, and the row no longer has it.
+    with pytest.raises(ResetBeforeFloorError):
+        await store.reset_run("r1", replaced="wr1", point=16, request_id="op1", reset=reset)
+    assert calls == []
+    # Event 26 does again from 25 on: q2 (answered at 25) waits again; q0 and q1 stay done.
+    run = await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
+    assert run is not None and [w.call_id for w in run.waiting_on] == ["q2"]
 
 
 async def test_tool_overrides_are_the_agents_stored_setting(
