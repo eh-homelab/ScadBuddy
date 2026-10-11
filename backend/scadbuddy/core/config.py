@@ -105,15 +105,17 @@ DEFAULT_MEDIA_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 # is about what a real file at the archive cap reaches.
 DEFAULT_READ_MAX_OBJECTS = 200
 DEFAULT_READ_MAX_VISITS = 20_000
-DEFAULT_READ_MAX_TRIANGLES = 5_000_000
+#: 0 is no limit: a file of any size is read (its memory is then the pod's to give).
+DEFAULT_READ_MAX_TRIANGLES = 0
 DEFAULT_READ_MAX_PAINT_DIGITS = 20_000_000
 #: Distinct objects: an Arrange lays out at most 2000 copies a request.
 READ_MAX_OBJECTS_CEILING = 2000
 #: Objects visited, components included: each visit is a little XML and a matrix.
 READ_MAX_VISITS_CEILING = 200_000
-#: Triangles: every instance's faces and vertices are held at once, then joined per
-#: colour, so twice the default is about what the API pod's 4 GiB holds.
-READ_MAX_TRIANGLES_CEILING = 10_000_000
+#: Triangles have no ceiling: 0 (the default) is no limit, any other value is one an
+#: operator chose. Every instance's faces and vertices are held at once, then joined
+#: per colour; some 10,000,000 is what a 4 GiB pod holds.
+READ_MAX_TRIANGLES_CEILING: int | None = None
 #: Paint digits: each placed copy of a painted mesh carries its codes as strings.
 READ_MAX_PAINT_DIGITS_CEILING = 50_000_000
 

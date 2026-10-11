@@ -18,10 +18,10 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 import psycopg
 from fastapi import status
@@ -54,6 +54,8 @@ from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
+from scadbuddy.render.objects3mf import check_stl
+from scadbuddy.render.read_budget import ReadBudget
 
 logger = logging.getLogger(__name__)
 
@@ -482,9 +484,22 @@ SLICED_TYPE = "gcode.3mf"
 #: The color of the one filament of a file Bambuddy reads none from (an STL, a 3MF
 #: without slice metadata). ``normalise_colour`` reads it as unknown.
 UNKNOWN_COLOUR = ""
-#: A library file is untrusted; one larger than the archive cap could not be laid out
-#: anyway, so it is never held whole (a 3MF's compressed size is below its inflated one).
+#: A library file is untrusted; one larger than the archive cap could not be rewritten
+#: for the print anyway, so it is never held whole here, and prints as it is (a 3MF's
+#: compressed size is below its inflated one). Arrange and a library file's preview
+#: read one of any size (:meth:`LibrarySource.write_3mf`).
 MAX_DOWNLOAD_BYTES = MAX_UNCOMPRESSED_BYTES
+
+
+class SpoolFullError(Exception):
+    """A library file's download stopped: the volume it is spooled to is nearly full.
+    Not the file's fault, so never kept as its refusal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "ScadBuddy's cache volume has too little free space to download it; free some"
+            " space, or give the volume more, and try again"
+        )
 
 
 def printable(file_type: str | None) -> bool:
@@ -607,6 +622,50 @@ class LibrarySource(PrintPipeline):
                 extra={"library_file_id": self.file_id, "error": type(exc).__name__},
             )
             return None
+
+    async def write_3mf(
+        self,
+        client: BambuddyClient,
+        out: BinaryIO,
+        budget: ReadBudget,
+        room: Callable[[], bool] = lambda: True,
+    ) -> bool:
+        """Write the 3MF :meth:`fetch_3mf` would answer into ``out``, whatever its size:
+        what Arrange and a library file's preview read, which spend ``budget`` rather
+        than refuse a file for being large, so only a chunk at a time is held here. An
+        STL is wrapped only within ``budget`` (:func:`check_stl`, raising
+        :class:`OverBudgetError`), since wrapping loads it whole: the STL and its 3MF are
+        then both in memory, a peak ``budget`` bounds. The download stops, as
+        :class:`SpoolFullError`, once ``room`` says the volume ``out`` is on is too full
+        to go on. ``False`` for an STL that holds no mesh."""
+        async with aclosing(client.download_library_file(self.file_id)) as chunks:
+            async for chunk in chunks:
+                if not await asyncio.to_thread(room):
+                    raise SpoolFullError
+                await asyncio.to_thread(out.write, chunk)
+        logger.info(
+            "spooled a library file",
+            extra={"library_file_id": self.file_id, "bytes": await asyncio.to_thread(out.tell)},
+        )
+        if self.file_type != "stl":
+            return True
+        await asyncio.to_thread(check_stl, out, budget)
+        try:
+            await asyncio.to_thread(self._wrap_stl, out)
+        except Exception as exc:
+            logger.warning(
+                "could not read the STL's mesh",
+                extra={"library_file_id": self.file_id, "error": type(exc).__name__},
+            )
+            return False
+        return True
+
+    def _wrap_stl(self, out: BinaryIO) -> None:
+        out.seek(0)
+        wrapped = stl_3mf(out.read(), model_name=_file_stem(self.filename) or "model")
+        out.seek(0)
+        out.truncate()
+        out.write(wrapped)
 
     async def _download(self, client: BambuddyClient) -> bytes | None:
         """The file's bytes, counted as they stream in; ``None`` past

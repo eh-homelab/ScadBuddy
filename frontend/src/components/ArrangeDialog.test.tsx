@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
 import { fromFiles, fromOutputs } from '../lib/arrange'
 import * as fixtures from '../mocks/fixtures'
@@ -461,6 +461,108 @@ describe('ArrangeDialog', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(save).not.toHaveBeenCalled()
     expect(onArranged).not.toHaveBeenCalled()
+  })
+
+  it('offers Try again after a failed save, which keeps the save key so one output is saved', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({
+          type: 'https://scadbuddy.dev/problems/temporal-refused',
+          title: 'Refused',
+          status: 500,
+          detail: 'ScadBuddy could not start this; its server log says why.',
+          may_have_started: true,
+        }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('its server log says why')
+    expect(screen.queryByText(/Temporal/)).toBeNull()
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    // Only the save is tried again: the same job, under the same key.
+    expect(arrange).not.toHaveBeenCalled()
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(failed![5]).toBeTruthy()
+    expect(again![5]).toBe(failed![5])
+  })
+
+  it('offers no Try again for a request the server refused as it is', async () => {
+    vi.spyOn(api, 'createOutput').mockRejectedValueOnce(
+      new ApiError({ type: 'about:blank', title: 'Unprocessable', status: 422, detail: 'no such template' }),
+    )
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no such template')
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+  })
+
+  it('tries a save that definitely failed again under a new key, not the recorded failure', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ type: 'about:blank', title: 'Failed', status: 500, detail: 'ScadBuddy failed unexpectedly' }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    // The same finished job, but a new key: the old one would replay the recorded 500.
+    expect(arrange).not.toHaveBeenCalled()
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(again![5]).toBeTruthy()
+    expect(again![5]).not.toBe(failed![5])
+  })
+
+  it('arranges anew after the save of a finished arrange was refused', async () => {
+    vi.spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ type: 'about:blank', title: 'Not Found', status: 404, detail: 'the result of job is gone' }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(arrange).toHaveBeenCalledTimes(1))
+  })
+
+  it('saves a changed arrange under a new key', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(new Error('could not save'))
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.type(screen.getByLabelText(/name/i), 'renamed')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    expect(save.mock.calls[1]![5]).not.toBe(save.mock.calls[0]![5])
   })
 
   it('acts on nothing when it is closed while the output is being saved', async () => {
