@@ -31,6 +31,12 @@ points at a Postgres they can create schemas in, e.g.
 postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
+`test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
+`manifest.json` says what each covers) and skip, naming the first missing file, without
+them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
+it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
+and each shard mounts them at `/app/test-fixtures`.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
