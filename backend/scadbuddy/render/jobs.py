@@ -6,8 +6,8 @@ import logging
 import os
 import secrets
 import shutil
-import threading
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import (
@@ -719,10 +719,10 @@ def export_revision(history: ModelHistory, slug: str, version: str, directory: P
 
     Renders are debounced, so two of the same revision overlap routinely, and a
     reader that finds `model.scad` present while the other writer is still
-    extracting `model.json` would render against half a revision.
+    extracting `model.json` would render against half a revision. The staging name
+    is random, not the pid and thread: every API pod is pid 1 on the shared volume.
     """
-    staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
-    shutil.rmtree(staging, ignore_errors=True)
+    staging = directory.with_name(f"{directory.name}.{uuid.uuid4().hex}")
     try:
         history.export(model_path(slug), version, staging)
         directory.parent.mkdir(parents=True, exist_ok=True)
