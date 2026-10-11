@@ -23,6 +23,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetMeta, AssetStore
@@ -311,7 +312,11 @@ def _folder(**values: Any) -> dict[str, Any]:
 
 
 @respx.mock
-async def test_the_bambuddy_store_works_as_the_role(granted: Pool) -> None:
+async def test_the_bambuddy_store_works_as_the_role(
+    granted: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
+
     async def target() -> BambuddyTarget:
         return BambuddyTarget(config=BambuddyConfig(base_url=BASE_URL, api_key="k"), inbox_id=INBOX)
 
@@ -326,6 +331,10 @@ async def test_the_bambuddy_store_works_as_the_role(granted: Pool) -> None:
         )
     )
     respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
+    # Really deleted, not merely uncommitted (#2263): the read-back never finds it.
+    read_back = respx.get(f"{API}/library/folders/11").mock(
+        return_value=httpx.Response(404, json={"detail": "Folder not found"})
+    )
     respx.post(f"{API}/library/files").mock(
         side_effect=[
             httpx.Response(
@@ -348,6 +357,7 @@ async def test_the_bambuddy_store_works_as_the_role(granted: Pool) -> None:
         await content.put("piece", b"b", name="b.zip", scope=scope, key="piece-b")
         # The object is gone from Bambuddy: its row is forgotten.
         assert await content.stat("piece-a") is None
+        assert read_back.call_count == len(commits.COMMIT_WAITS)
     finally:
         await backend.aclose()
 
