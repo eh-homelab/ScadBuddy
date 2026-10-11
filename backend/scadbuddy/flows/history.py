@@ -33,7 +33,8 @@ class ResetPreview(BaseModel):
     event_id: int
     #: The history's last event when this was read.
     as_of_event_id: int
-    #: `event_id` is a completed workflow task before the last event: what Reset takes.
+    #: `event_id` is a completed workflow task after the script started and before the
+    #: last event: what a flow's Reset takes.
     valid: bool
     calls: list[OutwardCall]
 
@@ -42,10 +43,15 @@ def preview_of(events: Iterable[HistoryEvent], event_id: int) -> ResetPreview:
     """The preview over one execution's events."""
     last = 0
     valid = False
+    started = False
     calls: list[OutwardCall] = []
     for event in events:
         last = event.event_id
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED:
+            started = started or event.event_id < event_id
         if event.event_id == event_id:
+            # After the script started: a Reset reapplies no Update (`flow_reset`), so
+            # one to before `execute` was accepted would leave a run with no script.
             valid = event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
         if event.event_id <= event_id:
             continue
@@ -57,11 +63,16 @@ def preview_of(events: Iterable[HistoryEvent], event_id: int) -> ResetPreview:
         fn, _, call_id = activity_id.removeprefix(OUTWARD_PREFIX).partition("-")
         calls.append(OutwardCall(fn=fn, call_id=call_id, scheduled_event_id=event.event_id))
     return ResetPreview(
-        event_id=event_id, as_of_event_id=last, valid=valid and event_id < last, calls=calls
+        event_id=event_id,
+        as_of_event_id=last,
+        valid=valid and started and event_id < last,
+        calls=calls,
     )
 
 
-async def outward_since(client: Client, workflow_id: str, event_id: int) -> ResetPreview:
-    """The preview of the workflow's current execution."""
-    history = await client.get_workflow_handle(workflow_id).fetch_history()
+async def outward_since(
+    client: Client, workflow_id: str, event_id: int, *, run_id: str | None = None
+) -> ResetPreview:
+    """The preview of the workflow's execution `run_id`, else its current one."""
+    history = await client.get_workflow_handle(workflow_id, run_id=run_id).fetch_history()
     return preview_of(history.events, event_id)

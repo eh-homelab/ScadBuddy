@@ -79,4 +79,36 @@ describe('flow tools (#1057)', () => {
     const result = await runTool(tool('register_flow'), { name: 'swap', script: 'x' }, ctx())
     expect(result.isError).toBe(true)
   })
+
+  it('previews as a read and resets as an outward call with one key', async () => {
+    expect([tool('preview_flow_reset').risk, tool('reset_flow_run').risk]).toEqual(['read', 'outward'])
+    const RUN = '7a1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f'
+    const seen: { key: string | null; body: unknown }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/workflow-runs/${RUN}/reset-preview`, ({ request }) =>
+        HttpResponse.json({
+          event_id: Number(new URL(request.url).searchParams.get('event_id')),
+          as_of_event_id: 40,
+          valid: true,
+          calls: [{ fn: 'queue_print', call_id: 'c1', scheduled_event_id: 30 }],
+        }),
+      ),
+      http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/reset`, async ({ request }) => {
+        seen.push({ key: request.headers.get('Idempotency-Key'), body: await request.json() })
+        return HttpResponse.json({ run_id: RUN, workflow_run_id: 'w2', event_id: 12 })
+      }),
+    )
+    const preview = await runTool(tool('preview_flow_reset'), { run_id: RUN, event_id: 12 }, ctx())
+    expect(firstText(preview)).toMatchObject({ event_id: 12, as_of_event_id: 40 })
+    const args = { run_id: RUN, event_id: 12, as_of_event_id: 40 }
+    // Gated like every outward tool: nothing is sent until a person approves.
+    expect(tool('reset_flow_run').gated).toBe(true)
+    const below = await runTool(tool('reset_flow_run'), args, ctx())
+    expect(below.isError).toBe(true)
+    expect(seen).toEqual([])
+    // As confirm_action runs it once a person approved.
+    const reset = await tool('reset_flow_run').execute(args, ctx())
+    expect(firstText(reset)).toEqual({ run_id: RUN, workflow_run_id: 'w2', event_id: 12 })
+    expect(seen).toEqual([{ key: expect.stringMatching(/^[0-9a-f]{32}$/), body: { event_id: 12, as_of_event_id: 40 } }])
+  })
 })

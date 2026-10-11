@@ -204,3 +204,98 @@ async def test_delete_run(store: FlowStore) -> None:
     assert await store.delete_run("r1")
     assert await store.get_run("r1") is None
     assert not await store.delete_run("r1")
+
+
+def parked(call_id: str, at: int) -> FlowWaiting:
+    return FlowWaiting(
+        call_id=call_id,
+        kind="answer",
+        fn="wait_for_human",
+        prompt=call_id,
+        since=NOW,
+        history_length=at,
+    )
+
+
+async def _history(store: FlowStore) -> None:
+    """Steps at 11 (ended 15), 21 (ended 31) and 41 (running); 'a' answered at 15, 'b'
+    at 31, 'c' still waiting."""
+    await started(store)
+    for seq, (call_id, at, ended) in enumerate([("a", 11, 15), ("b", 21, 31), ("c", 41, None)], 1):
+        done = step(call_id, seq).model_copy(update={"history_length": at})
+        await store.project(
+            ProjectionWrite(
+                run_id="r1",
+                workflow_run_id="wr1",
+                step=done,
+                waiting_add=parked(call_id, at),
+                history_length=at,
+            )
+        )
+        if ended is not None:
+            await store.project(
+                ProjectionWrite(
+                    run_id="r1",
+                    workflow_run_id="wr1",
+                    step=done.model_copy(
+                        update={
+                            "status": "succeeded",
+                            "ended_at": NOW,
+                            "ended_history_length": ended,
+                        }
+                    ),
+                    waiting_remove=call_id,
+                    history_length=ended,
+                )
+            )
+
+
+async def test_a_reset_moves_the_row_to_the_point(store: FlowStore, events: Events) -> None:
+    await _history(store)
+
+    async def reset() -> str:
+        return "wr2"
+
+    # Event 26: the task started at 25 is done again, so 'b' (answered at 31) waits again
+    # and its step runs again; 'c' (asked at 41) is dropped; 'a' stays answered.
+    run = await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
+    assert run is not None
+    assert (run.workflow_run_id, run.status) == ("wr2", "waiting")
+    assert [(s.call_id, s.status) for s in run.steps] == [("a", "succeeded"), ("b", "running")]
+    assert [w.call_id for w in run.waiting_on] == ["b"]
+    assert events.runs()[-1] == ("r1", "waiting")
+    # The replaced execution's write still in flight is ignored.
+    late = await store.project(
+        ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_remove="b", history_length=50)
+    )
+    assert late is not None and (late.workflow_run_id, [w.call_id for w in late.waiting_on]) == (
+        "wr2",
+        ["b"],
+    )
+
+
+async def test_a_failed_reset_leaves_the_row(store: FlowStore) -> None:
+    await _history(store)
+    before = await store.get_run("r1")
+
+    async def reset() -> str:
+        raise RuntimeError("refused")
+
+    with pytest.raises(RuntimeError):
+        await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
+    assert await store.get_run("r1") == before
+    after = await store.project(ProjectionWrite(run_id="r1", workflow_run_id="wr1"))
+    assert after is not None and after.workflow_run_id == "wr1"
+
+
+async def test_a_retried_reset_resets_once(store: FlowStore) -> None:
+    await _history(store)
+    calls: list[str] = []
+
+    async def reset() -> str:
+        calls.append("reset")
+        return "wr2"
+
+    await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
+    await store.reset_run("r1", replaced="wr1", point=26, reset=reset)
+    assert calls == ["reset"]

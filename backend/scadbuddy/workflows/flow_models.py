@@ -22,6 +22,8 @@ class FlowStep(BaseModel):
     ended_at: datetime | None = None
     #: The history length when the call started: a Reset drops the steps past it.
     history_length: int
+    #: The history length when the call ended: a Reset to before it reopens the step.
+    ended_history_length: int | None = None
     #: The exception's type name, never its message.
     error: str | None = None
 
@@ -34,6 +36,10 @@ class FlowWaiting(BaseModel):
     fn: str
     prompt: str | None = None
     since: datetime
+    #: The history length when it parked, and (once resolved) when it was resolved: a
+    #: Reset to between the two parks it again.
+    history_length: int | None = None
+    resolved_at: int | None = None
 
 
 class ProjectionWrite(BaseModel):
@@ -48,6 +54,8 @@ class ProjectionWrite(BaseModel):
     result: str | None = None
     #: A Reset's write (6e), the one that may reopen a finished run.
     reset: bool = False
+    #: The history length when written (`project` sets it).
+    history_length: int | None = None
 
 
 class FlowRecord(BaseModel):

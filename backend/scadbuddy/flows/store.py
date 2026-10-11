@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from typing import Any
 
@@ -28,7 +29,7 @@ from scadbuddy.flows.models import (
     DefinitionSummary,
     Run,
 )
-from scadbuddy.workflows.flow_models import FlowRecord, ProjectionWrite
+from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, ProjectionWrite
 
 _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder, created_at"
@@ -40,6 +41,15 @@ _RUN = (
     " result_truncated, approval_timeout_s, workflow_id, workflow_run_id, started_by,"
     " created_at, updated_at"
 )
+
+
+#: How long the row stays locked waiting for Temporal's Reset to answer.
+RESET_CALL_S = 30.0
+
+
+def _done(row: DictRow) -> list[FlowWaiting]:
+    """The row's resolved entries."""
+    return [FlowWaiting.model_validate(w) for w in row["waiting_done"]]
 
 
 class FlowStore:
@@ -94,6 +104,28 @@ class FlowStore:
         """Apply one of the run's own writes. A finished run is not moved again, except
         by a Reset's write. ``None`` when the run has no row."""
         return await asyncio.to_thread(self._project, write)
+
+    async def reset_run(
+        self,
+        run_id: str,
+        *,
+        replaced: str,
+        point: int,
+        reset: Callable[[], Coroutine[Any, Any, str]],
+    ) -> Run | None:
+        """Reset the run's execution `replaced` to event `point` with `reset` (which
+        answers the new execution's run id), and move the row with it, holding the row's
+        lock throughout: the new execution's first writes wait for it, and a failed
+        `reset` leaves the row as it was. Steps started after `point` are dropped, steps
+        that ended after it run again, and calls parked at `point` wait again. Writes
+        from `replaced` are ignored from now on. ``None`` when the run has no row; the
+        row unchanged when `replaced` was reset already (a retry)."""
+        loop = asyncio.get_running_loop()
+
+        def call() -> str:
+            return asyncio.run_coroutine_threadsafe(reset(), loop).result(RESET_CALL_S)
+
+        return await asyncio.to_thread(self._reset_run, run_id, replaced, point, call)
 
     async def open_runs(self, older_than: timedelta) -> list[Run]:
         """Runs still ``running`` or ``waiting`` whose row has not moved for
@@ -261,18 +293,29 @@ class FlowStore:
     def _project(self, write: ProjectionWrite) -> Run | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                f"SELECT {_RUN} FROM workflow_runs WHERE id = %s FOR UPDATE", (write.run_id,)
+                f"SELECT {_RUN}, waiting_done, %s = ANY(superseded_run_ids) AS superseded"
+                " FROM workflow_runs WHERE id = %s FOR UPDATE",
+                (write.workflow_run_id, write.run_id),
             ).fetchone()
             if row is None:
                 return None
             run = Run.model_validate(row)
             if run.status in TERMINAL and not write.reset:
                 return run
+            if row["superseded"]:
+                # A write a Reset's replaced execution still had in flight.
+                return run
             # Merged here, under the row's lock, never by concatenating JSON in SQL.
             steps = {step.call_id: step for step in run.steps}
             if write.step is not None:
                 steps[write.step.call_id] = write.step
             waiting = [w for w in run.waiting_on if w.call_id != write.waiting_remove]
+            done = _done(row)
+            done += [
+                w.model_copy(update={"resolved_at": write.history_length})
+                for w in run.waiting_on
+                if w.call_id == write.waiting_remove
+            ]
             if write.waiting_add is not None and all(
                 w.call_id != write.waiting_add.call_id for w in waiting
             ):
@@ -285,17 +328,82 @@ class FlowStore:
             if write.result is not None:
                 result, truncated = write.result[:RESULT_MAX], len(write.result) > RESULT_MAX
             updated = conn.execute(
-                "UPDATE workflow_runs SET status = %s, waiting_on = %s, steps = %s,"
-                " result = %s, result_truncated = %s, workflow_run_id = %s, updated_at = now()"
-                f" WHERE id = %s RETURNING {_RUN}",
+                "UPDATE workflow_runs SET status = %s, waiting_on = %s, waiting_done = %s,"
+                " steps = %s, result = %s, result_truncated = %s, workflow_run_id = %s,"
+                f" updated_at = now() WHERE id = %s RETURNING {_RUN}",
                 (
                     status,
                     Jsonb([w.model_dump(mode="json") for w in waiting]),
+                    Jsonb([w.model_dump(mode="json") for w in done]),
                     Jsonb([s.model_dump(mode="json") for s in sorted(steps.values(), key=_seq)]),
                     result,
                     truncated,
                     write.workflow_run_id,
                     write.run_id,
+                ),
+            ).fetchone()
+            assert updated is not None
+            after = Run.model_validate(updated)
+            self._announce(conn, after)
+        return after
+
+    def _reset_run(
+        self, run_id: str, replaced: str, point: int, reset: Callable[[], str]
+    ) -> Run | None:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                f"SELECT {_RUN}, waiting_done, %s = ANY(superseded_run_ids) AS superseded"
+                " FROM workflow_runs WHERE id = %s FOR UPDATE",
+                (replaced, run_id),
+            ).fetchone()
+            if row is None:
+                return None
+            run = Run.model_validate(row)
+            if row["superseded"]:
+                return run
+            current = reset()
+            # Temporal keeps the history up to the reset task's started event and does
+            # that task again (with new randomness): what was recorded in it or after
+            # it is done again.
+            redone = point - 1
+            steps = [
+                step
+                if step.ended_history_length is not None and step.ended_history_length < redone
+                else step.model_copy(
+                    update={
+                        "status": "running",
+                        "ended_at": None,
+                        "ended_history_length": None,
+                        "error": None,
+                    }
+                )
+                for step in run.steps
+                if step.history_length < redone
+            ]
+            entries = [
+                w
+                for w in [*run.waiting_on, *_done(row)]
+                if w.history_length is not None and w.history_length < redone
+            ]
+            waiting = [
+                w.model_copy(update={"resolved_at": None})
+                for w in entries
+                if w.resolved_at is None or w.resolved_at >= redone
+            ]
+            done = [w for w in entries if w.resolved_at is not None and w.resolved_at < redone]
+            updated = conn.execute(
+                "UPDATE workflow_runs SET status = %s, waiting_on = %s, waiting_done = %s,"
+                " steps = %s, result = NULL, result_truncated = false, workflow_run_id = %s,"
+                " superseded_run_ids = array_append(superseded_run_ids, %s),"
+                f" updated_at = now() WHERE id = %s RETURNING {_RUN}",
+                (
+                    "waiting" if waiting else "running",
+                    Jsonb([w.model_dump(mode="json") for w in waiting]),
+                    Jsonb([w.model_dump(mode="json") for w in done]),
+                    Jsonb([s.model_dump(mode="json") for s in steps]),
+                    current,
+                    replaced,
+                    run_id,
                 ),
             ).fetchone()
             assert updated is not None

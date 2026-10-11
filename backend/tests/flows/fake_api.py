@@ -46,6 +46,8 @@ class FakeApi:
         self.runs: dict[str, dict[str, Any]] = {}
         #: Answer the next print `command-still-accepting` this many times.
         self.accepting = 0
+        #: Refuse every print, as a printer that is offline.
+        self.refuse_prints = False
         self.app = Starlette(
             routes=[
                 Route("/api/v1/models/{slug}/render", self.render, methods=["POST"]),
@@ -95,6 +97,8 @@ class FakeApi:
         if self.accepting > 0:
             self.accepting -= 1
             return problem(503, "still accepting", STILL_ACCEPTING)
+        if self.refuse_prints:
+            return problem(422, "the printer is offline")
         if "filament_plan" not in body:
             return problem(422, "filament_plan: Field required")
         run_id = f"run-{body['request_id']}"

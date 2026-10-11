@@ -224,6 +224,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // list_flow_runs' `session`, and a run's own steps say what it did.
   register_flow: () => [],
   start_flow_run: () => [],
+  reset_flow_run: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),

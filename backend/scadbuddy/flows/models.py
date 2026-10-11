@@ -13,6 +13,12 @@ RunStatus = Literal["starting", "running", "waiting", "succeeded", "failed", "te
 TERMINAL: frozenset[str] = frozenset({"succeeded", "failed", "terminated"})
 #: The longest result a run's row keeps; a longer one is cut and flagged.
 RESULT_MAX = 4096
+#: The host function behind a harness callback or gated tool, by the tool's name.
+HOST_FN = {
+    "human_answer": "wait_for_human",
+    "approved_print": "queue_print",
+    "approved_arrange": "arrange",
+}
 
 
 class DefinitionSummary(BaseModel):
