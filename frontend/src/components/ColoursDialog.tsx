@@ -33,11 +33,11 @@ export function ColoursDialog({ open, jobId, colors, onClose }: Props) {
     if (!open || !jobId) return
     const stop = new AbortController()
     const asked = `${jobId}:${view}`
+    // A retry of a view that failed shows as drawing, not as the old failure.
+    setFailed((f) => (f?.key === asked ? null : f))
     api.getJobColours(jobId, view, stop.signal).then(
       (breakdown) => {
         if (stop.signal.aborted) return
-        // A draw that works replaces an earlier failure of the same view (a 503 retried).
-        setFailed((f) => (f?.key === asked ? null : f))
         setDrawn({ key: asked, breakdown, url: URL.createObjectURL(breakdown.image) })
       },
       (cause: unknown) => {
