@@ -5,6 +5,7 @@ import math
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -141,6 +142,22 @@ async def test_downloaded_fonts_reach_a_worker_that_never_installed_them(
     assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"ttf"
     assert await mirror.sync() == []
     assert content.index.get(font_key(family.name)) is not None
+
+
+async def test_a_stopped_font_backfill_publishes_nothing_more(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2128: the boot's font backfill ends once the shutdown sets ``stop``."""
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"ttf")
+    mirror = FontMirror(content, api_fonts)
+    stop = threading.Event()
+    stop.set()
+    assert await mirror.backfill(stop=stop) == 0
+    assert content.index.get(font_key(family.name)) is None
+    assert await mirror.backfill() == 1
 
 
 async def test_a_republished_family_reaches_a_worker_that_has_the_old_one(
