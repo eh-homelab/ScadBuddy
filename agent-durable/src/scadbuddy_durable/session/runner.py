@@ -372,6 +372,11 @@ class ScadBuddyRunner:
                                 " updated_at = now() WHERE id = %s",
                                 (cost, session),
                             )
+                    if left <= 0:
+                        # Spent by the refused attempt: no other credential runs past it.
+                        return SegmentOutput(
+                            session_id=inp.session_id, is_error=True, error=BUDGET_EXHAUSTED
+                        )
                     logger.warning(
                         "segment of %s continues on %s", workflow_id, credentials[i + 1].label
                     )

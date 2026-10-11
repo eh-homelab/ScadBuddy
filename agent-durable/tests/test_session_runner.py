@@ -601,3 +601,28 @@ async def test_a_failure_of_the_request_does_not_try_another_credential(
             await handle.terminate()
     assert len(refusing.tokens) >= 2
     assert set(refusing.tokens) == {TOKEN}
+
+
+async def test_a_fallback_never_runs_past_the_budget_a_refused_attempt_spent(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """What the refused attempt cost is spent: with nothing left, no other credential
+    runs, and the turn ends as the budget's (security review of the fallback)."""
+    await _two_credentials(agent_db)
+    error = _result_error("API Error: 429 rate limited", status=429)
+    error.data["total_cost_usd"] = 1.0
+    refusing = Refusing({TOKEN}, error)
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db, budget=1.0)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    assert refusing.tokens == [TOKEN]
+    [event] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert event["code"] == "error_max_budget_usd"
+    cost, _ = await _row(agent_db, sid)
+    assert cost == pytest.approx(1.0)
