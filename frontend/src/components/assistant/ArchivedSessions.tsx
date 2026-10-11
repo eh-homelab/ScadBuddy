@@ -17,9 +17,14 @@ interface Props {
   onOpen: (session: AiSessionView) => void
   /** Resolve once the agent took it; reject with what to show beside the row. */
   onUnarchive: (session: AiSessionView) => Promise<void>
+  /**
+   * Whether the panel's state now holds this chat unarchived: one unarchived elsewhere
+   * (the composer's note) leaves the list at once, not when the view re-mounts (#2118).
+   */
+  unarchived: (id: string) => boolean
 }
 
-export function ArchivedSessions({ onOpen, onUnarchive }: Props) {
+export function ArchivedSessions({ onOpen, onUnarchive, unarchived }: Props) {
   const archived = useAsync(() => api.listArchivedAiSessions(ARCHIVE_LIMIT), [])
   const [gone, setGone] = useState<ReadonlySet<string>>(new Set())
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -38,7 +43,7 @@ export function ArchivedSessions({ onOpen, onUnarchive }: Props) {
       </p>
     )
   }
-  const sessions = (archived.data?.sessions ?? []).filter((s) => !gone.has(s.id))
+  const sessions = (archived.data?.sessions ?? []).filter((s) => !gone.has(s.id) && !unarchived(s.id))
   if (sessions.length === 0) return <p className="px-3 py-2 text-[12.5px] text-muted">No archived chats.</p>
 
   const unarchive = async (session: AiSessionView) => {

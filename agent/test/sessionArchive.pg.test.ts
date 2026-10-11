@@ -1,3 +1,4 @@
+import type { Client } from '@temporalio/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { AuditLog } from '../src/audit/log.js'
@@ -7,6 +8,7 @@ import { ATTENTION_TOOL } from '../src/harness/questions.js'
 import { originPolicy } from '../src/http/origins.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import { pendingInput } from '../src/routes/pendingInput.js'
+import { DurableTurns } from '../src/sessions/durable.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
@@ -144,6 +146,22 @@ describe.skipIf(skip !== undefined)(`session archive${skip ? ` (skipped: ${skip}
     await archived(id)
     await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${id}`
     await expect(m.send(id, browser, 'more')).rejects.toMatchObject({ code: 'archived' })
+  })
+
+  it('a durable claim refuses a chat archived after the send checked it (#2118)', async () => {
+    const id = await session()
+    await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${id}`
+    // What the manager read before the archive committed.
+    const before = await m.get(id, browser)
+    expect(before.archivedAt).toBeNull()
+    await archived(id)
+    // Never reached: the claim must refuse before Temporal is asked.
+    const client = new Proxy({}, { get: () => { throw new Error('the workflow was reached') } }) as Client
+    const durable = new DurableTurns({ client, sql: db.sql, events: m.events })
+    const turn = { turnId: 't', prompt: 'more', text: 'more', author: browser, images: [], systemAppend: '' }
+    expect(await durable.send(before, turn)).toBeUndefined()
+    const [row] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`
+    expect(row?.status).not.toBe('running')
   })
 
   it('forks an archived chat; the fork is not archived', async () => {
