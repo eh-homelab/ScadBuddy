@@ -409,6 +409,20 @@ class SourcePatch(BaseModel):
 
 class ReadmeUpdate(BaseModel):
     content: str = Field(max_length=MAX_SOURCE_CHARS, description="The README, as Markdown text")
+    message: str | None = Field(
+        default=None,
+        max_length=MAX_SUBJECT,
+        description="What the revision is called in the history; a default when omitted",
+    )
+    base: str | None = Field(
+        default=None,
+        pattern=COMMIT_ID_PATTERN,
+        description=(
+            "The model's revision this README was made from (its `version` when it was "
+            "read). When given and the model has moved on since, 409 with the `current` "
+            "revision, writing nothing (#1067)"
+        ),
+    )
 
 
 class CheckRequest(BaseModel):
@@ -1903,8 +1917,12 @@ def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> Response:
     "/models/{slug}/readme",
     response_model=ModelRecord,
     summary="Set a model's README",
-    description="Sets or replaces the README, as one revision in the model's history.",
-    responses=OPERATION_RESPONSES,
+    description=(
+        "Sets or replaces the README, as one revision in the model's history named by "
+        "`message`. With `base`, a 409 naming the `current` revision when the model has "
+        "moved on since, writing nothing (#1067)."
+    ),
+    responses={**OPERATION_RESPONSES, 409: {"description": "The model is no longer at `base`"}},
 )
 async def put_readme(
     slug: SlugPath,
@@ -1931,17 +1949,45 @@ async def put_readme(
         response,
         kind=ops.kinds["model_readme_put"],
         subject=slug,
-        request={"slug": slug, "content": claimed.name},
+        request={
+            "slug": slug,
+            "content": claimed.name,
+            "message": body.message,
+            "base": body.base,
+        },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [claimed]),
     )
     return operation_answer(result, ModelRecord)
 
 
-async def readme_put_run(slug: str, content: str, state: AppState) -> ModelRecord:
-    """The ``model_readme_put`` operation's run (#1054)."""
+async def readme_put_run(
+    slug: str,
+    content: str,
+    state: AppState,
+    *,
+    message: str | None = None,
+    base: str | None = None,
+) -> ModelRecord:
+    """The ``model_readme_put`` operation's run (#1054). With ``base``, the write is
+    refused unless the model is still at it, checked under the history's lock (#1067)."""
     try:
-        record = await asyncio.to_thread(state.catalogue.write_readme, slug, content)
+        record = await asyncio.to_thread(
+            partial(
+                state.catalogue.write_readme,
+                slug,
+                content,
+                message=message,
+                expected_version=base,
+            )
+        )
+    except StaleVersionError as error:
+        raise stale_edit(slug, error.expected, error.current) from None
+    except GitUnavailableError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "model history is unavailable, so the edit's base cannot be checked",
+        ) from None
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     emit(state.events, ModelEvent(kind="model.updated", slug=slug))

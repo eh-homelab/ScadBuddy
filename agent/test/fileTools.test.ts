@@ -29,10 +29,22 @@ function textResponse(body: string) {
  * commands, as on the backend (#1054): refused without an Idempotency-Key, and with
  * `accepted` answered 202 with an operation that GET /operations/{id} then reports done.
  */
+type Extras = {
+  /** Files per pinned library name, served as the checkout `plate` pins. */
+  libraries?: Record<string, Record<string, string>>
+  /** Each file as it was at V1, for a read at that revision. */
+  atV1?: Record<string, string>
+  /** What POST /lsp/diagnostics answers. */
+  lsp?: () => Response
+  /** Answer GET /tree as cut at the backend's cap. */
+  treeCut?: boolean
+}
+
 function store(
   models: Record<string, Record<string, string>> = { plate: { 'model.scad': MAIN, 'parts.scad': PARTS } },
   beforeWrite: (versions: Record<string, string>) => void = () => {},
   accepted = false,
+  extras: Extras = {},
 ) {
   const seen: Seen[] = []
   const versions: Record<string, string> = Object.fromEntries(Object.keys(models).map((s) => [s, V1]))
@@ -46,6 +58,9 @@ function store(
     const key = r.headers.get('Idempotency-Key')
     seen.push({ method: r.method, path, query: url.search, body, key })
     if (r.method === 'GET' && path === '/api/v1/models') return Response.json(Object.keys(models).map((s) => record(versions[s]!, s)))
+    if (r.method === 'POST' && path === '/api/v1/lsp/diagnostics') {
+      return extras.lsp ? extras.lsp() : Response.json({ available: true, diagnostics: [] })
+    }
     const op = /^\/api\/v1\/operations\/([^/]+)$/.exec(path)?.[1]
     if (r.method === 'GET' && op !== undefined) return Response.json({ id: op, status: 'succeeded', result: operations[op] })
     const m = /^\/api\/v1\/models\/([^/]+)(\/.*)?$/.exec(path)
@@ -61,8 +76,30 @@ function store(
           .map((name) => ({ name, size: files[name]!.length, main: name === 'model.scad' })),
       )
     }
+    const listing = (all: Record<string, string>) =>
+      Response.json({
+        files: Object.keys(all)
+          .sort()
+          .map((p) => ({ path: p, size: all[p]!.length })),
+        truncated: extras.treeCut ?? false,
+      })
+    if (r.method === 'GET' && rest === '/tree') return listing(files)
+    const lib = /^\/libraries\/([^/]+)\/files(?:\/(.+))?$/.exec(rest)
+    if (r.method === 'GET' && lib) {
+      const checkout = extras.libraries?.[lib[1]!]
+      if (!checkout) return Response.json({ detail: `does not pin ${lib[1]}` }, { status: 404 })
+      if (lib[2] === undefined) return listing(checkout)
+      const found = checkout[lib[2]]
+      return found === undefined ? Response.json({ detail: 'no file' }, { status: 404 }) : textResponse(found)
+    }
+    const then = new RegExp(`^/versions/${V1}/files/(.+)$`).exec(rest)?.[1]
+    if (r.method === 'GET' && then !== undefined) {
+      const old = extras.atV1?.[then]
+      return old === undefined ? Response.json({ detail: 'no file' }, { status: 404 }) : textResponse(old)
+    }
     const file = /^\/files\/(.+)$/.exec(rest)?.[1]
     if (r.method === 'GET' && file !== undefined) {
+      if (file.endsWith('.png')) return Response.json({ detail: `'${file}' is not UTF-8 text` }, { status: 415 })
       return files[file] === undefined ? Response.json({ detail: `no file '${file}'` }, { status: 404 }) : textResponse(files[file])
     }
     const written = (name: string, content: string) => {
@@ -81,6 +118,7 @@ function store(
       return Response.json({ id: `op-${key}`, status: 'running' }, { status: 202 })
     }
     if (r.method === 'PUT' && rest === '/source') return written('model.scad', (body as { source: string }).source)
+    if (r.method === 'PUT' && rest === '/readme') return written('README.md', (body as { content: string }).content)
     if (r.method === 'PUT' && file !== undefined) return written(file, (body as { content: string }).content)
     if (r.method === 'GET' && rest === `/versions/${V1}/source`) return textResponse('cube(1);\n')
     const diff = /^\/versions\/([0-9a-f]+)\/diff$/.exec(rest)
@@ -274,9 +312,9 @@ describe('edit_file', () => {
     expect(seen.some((s) => s.method === 'PUT')).toBe(false)
   })
 
-  it('writes only .scad files at the top of the model', async () => {
+  it('writes only README.md and .scad files at the top of the model', async () => {
     const { client, seen } = store()
-    for (const file_path of ['README.md', '../other/model.scad', 'sub/x.scad', 'model.json']) {
+    for (const file_path of ['../other/model.scad', 'sub/x.scad', 'model.json', 'ui/index.html']) {
       const result = await runTool(tool('edit_file'), { slug: 'plate', file_path, old_string: 'a', new_string: 'b' }, ctx(client))
       expect(result.isError, file_path).toBe(true)
     }
@@ -387,5 +425,140 @@ describe('grep', () => {
   it('are all read-tier except the writes', () => {
     expect(['read_file', 'glob', 'grep'].map((n) => tool(n).risk)).toEqual(['read', 'read', 'read'])
     expect(['edit_file', 'multi_edit', 'write_file'].map((n) => tool(n).risk)).toEqual(['write', 'write', 'write'])
+  })
+})
+
+// #1067: past the .scad files.
+describe('the whole model directory', () => {
+  const directory = () => ({
+    plate: {
+      'model.scad': MAIN,
+      'parts.scad': PARTS,
+      'README.md': '# Plate\nA flat plate.\n',
+      'model.json': '{"name": "Plate"}\n',
+      'ui/index.html': '<p>plate</p>\n',
+      'images/cover.png': 'PNG',
+    },
+  })
+
+  it('reads any file as it was at an earlier revision', async () => {
+    const { client, seen } = store(undefined, undefined, false, { atV1: { 'parts.scad': 'module bar() {}\n' } })
+    const out = firstText(await runTool(tool('read_file'), { slug: 'plate', file_path: 'parts.scad', version: V1 }, ctx(client)))
+    expect(out).toContain('     1\tmodule bar() {}')
+    expect(out).toContain(`read at earlier revision ${V1}`)
+    expect(seen.map((s) => s.path)).toEqual([`/api/v1/models/plate/versions/${V1}/files/parts.scad`])
+  })
+
+  it('globs every path in the directory, `*` stopping at `/`', async () => {
+    const { client } = store(directory())
+    const all = firstText(await runTool(tool('glob'), { slug: 'plate', pattern: '**' }, ctx(client))) as string
+    expect(all.split('\n')).toEqual(['README.md', 'images/cover.png', 'model.json', 'model.scad', 'parts.scad', 'ui/index.html'])
+    expect(firstText(await runTool(tool('glob'), { slug: 'plate', pattern: '*.scad' }, ctx(client)))).toBe('model.scad\nparts.scad')
+    expect(firstText(await runTool(tool('glob'), { slug: 'plate', pattern: 'ui/**' }, ctx(client)))).toBe('ui/index.html')
+  })
+
+  it('says when the listing was cut at the backend cap', async () => {
+    const { client } = store(directory(), undefined, false, { treeCut: true })
+    expect(firstText(await runTool(tool('glob'), { slug: 'plate', pattern: '**' }, ctx(client)))).toMatch(/only the first ones/)
+  })
+
+  it('greps every file a glob names, skipping what is not text', async () => {
+    const { client, seen } = store(directory())
+    const out = firstText(await runTool(tool('grep'), { slug: 'plate', pattern: 'plate', glob: '**', '-i': true }, ctx(client))) as string
+    expect(out.split('\n')).toEqual(['plate/README.md', 'plate/model.json', 'plate/ui/index.html'])
+    expect(seen.some((s) => s.path.endsWith('/images/cover.png'))).toBe(true)
+    // Without a glob it is the .scad files, as before.
+    const scad = firstText(await runTool(tool('grep'), { slug: 'plate', pattern: 'Plate' }, ctx(client)))
+    expect(scad).toMatch(/^no matches in 2 file/)
+  })
+})
+
+describe('grep in a pinned library', () => {
+  const libraries = {
+    BOSL2: {
+      'std.scad': 'include <shapes3d.scad>\n',
+      'shapes3d.scad': 'module cuboid(size, rounding) {}\n',
+      'tests/test_shapes3d.scad': 'cuboid(10);\n',
+      'README.md': 'cuboid docs\n',
+    },
+  }
+
+  it("searches the library's .scad files, named as `use <…>` names them", async () => {
+    const { client, seen } = store(undefined, undefined, false, { libraries })
+    const out = firstText(
+      await runTool(tool('grep'), { slug: 'plate', library: 'BOSL2', pattern: 'module cuboid', output_mode: 'content' }, ctx(client)),
+    )
+    expect(out).toBe('BOSL2/shapes3d.scad:1:module cuboid(size, rounding) {}')
+    expect(seen.some((s) => s.path === '/api/v1/models/plate/libraries/BOSL2/files/README.md')).toBe(false)
+    const tests = firstText(await runTool(tool('grep'), { slug: 'plate', library: 'BOSL2', pattern: 'cuboid', glob: 'tests/**' }, ctx(client)))
+    expect(tests).toBe('BOSL2/tests/test_shapes3d.scad')
+  })
+
+  it('needs the model that pins it, and reports a library it does not pin', async () => {
+    const { client } = store(undefined, undefined, false, { libraries })
+    const noSlug = await runTool(tool('grep'), { library: 'BOSL2', pattern: 'x' }, ctx(client))
+    expect(noSlug.isError).toBe(true)
+    expect(firstText(noSlug)).toMatch(/needs the `slug`/)
+    expect((await runTool(tool('grep'), { slug: 'plate', library: 'MCAD', pattern: 'x' }, ctx(client))).isError).toBe(true)
+  })
+})
+
+describe('writing README.md and model.json', () => {
+  it('edits README.md through its route, against the base it read', async () => {
+    const { client, seen, models } = store({ plate: { 'model.scad': MAIN, 'README.md': '# Plate\n' } })
+    const out = payload(
+      await runTool(tool('edit_file'), { slug: 'plate', file_path: 'README.md', old_string: '# Plate', new_string: '# Flat plate', message: 'Retitle' }, ctx(client)),
+    )
+    expect(models.plate!['README.md']).toBe('# Flat plate\n')
+    expect(out).toMatchObject({ status: 'written', revision: V2 })
+    expect(out).not.toHaveProperty('diagnostics')
+    const put = seen.find((s) => s.method === 'PUT')!
+    expect(put.path).toBe('/api/v1/models/plate/readme')
+    expect(put.body).toEqual({ content: '# Flat plate\n', message: 'Retitle', base: V1 })
+    expect(seen.some((s) => s.path === '/api/v1/lsp/diagnostics')).toBe(false)
+  })
+
+  it('refuses model.json, which update_model writes', async () => {
+    const { client, seen } = store()
+    const result = await runTool(tool('write_file'), { slug: 'plate', file_path: 'model.json', content: '{}' }, ctx(client))
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toMatch(/update_model/)
+    expect(seen).toEqual([])
+  })
+})
+
+describe("a sibling write's diagnostics", () => {
+  const diagnostic = { message: 'syntax error', severity: 'error', start: { line: 0, character: 3 }, end: { line: 0, character: 4 } }
+
+  it("returns openscad-lsp's diagnostics of the file it wrote", async () => {
+    const { client, seen } = store(undefined, undefined, false, { lsp: () => Response.json({ available: true, diagnostics: [diagnostic] }) })
+    const out = payload(await runTool(tool('write_file'), { slug: 'plate', file_path: 'new.scad', content: 'mod(\n' }, ctx(client)))
+    expect(out).toMatchObject({ status: 'written', diagnostics: [diagnostic] })
+    expect(seen.find((s) => s.path === '/api/v1/lsp/diagnostics')!.body).toEqual({ source: 'mod(\n', slug: 'plate' })
+  })
+
+  it('leaves model.scad to its own parse check', async () => {
+    const { client, seen } = store()
+    await runTool(tool('write_file'), { slug: 'plate', file_path: 'model.scad', content: 'cube(3);\n' }, ctx(client))
+    expect(seen.some((s) => s.path === '/api/v1/lsp/diagnostics')).toBe(false)
+  })
+
+  it('reports the write as written when the check cannot run', async () => {
+    const busy = store(undefined, undefined, false, { lsp: () => Response.json({ detail: 'busy' }, { status: 503 }) })
+    const out = payload(await runTool(tool('write_file'), { slug: 'plate', file_path: 'new.scad', content: 'module n() {}\n' }, ctx(busy.client)))
+    expect(out).toMatchObject({ status: 'written', diagnostics_note: expect.stringMatching(/answered 503/) })
+
+    const none = store(undefined, undefined, false, { lsp: () => Response.json({ available: false, diagnostics: [] }) })
+    const quiet = payload(await runTool(tool('write_file'), { slug: 'plate', file_path: 'new.scad', content: 'module n() {}\n' }, ctx(none.client)))
+    expect(quiet).toMatchObject({ status: 'written', diagnostics_note: expect.stringMatching(/no openscad-lsp/) })
+
+    const broken = store(undefined, undefined, false, {
+      lsp: () => {
+        throw new TypeError('fetch failed')
+      },
+    })
+    const lost = payload(await runTool(tool('write_file'), { slug: 'plate', file_path: 'new.scad', content: 'module n() {}\n' }, ctx(broken.client)))
+    expect(lost).toMatchObject({ status: 'written', diagnostics_note: expect.stringMatching(/fetch failed/) })
+    expect(broken.models.plate!['new.scad']).toBe('module n() {}\n')
   })
 })
