@@ -11,7 +11,7 @@ import { PendingActionStore } from '../src/tools/pending.js'
 import { createHarnessServer, SERVER_NAME } from '../src/tools/projections.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
-import { type CollectOptions, collectRenders, type RenderedJob, type ScenarioBackend } from './render.js'
+import { type CollectOptions, collectRenders, DEFAULT_COLLECT_DEADLINE_MS, type RenderedJob, type ScenarioBackend } from './render.js'
 
 // Runs one eval scenario through the REAL harness (src/harness/run.ts
 // `runHarness`: the Agent SDK and its bundled Claude Code binary) with the
@@ -100,6 +100,13 @@ export type RunOptions = {
   renderWaitMs?: number
   /** How the scorer follows the run's renders afterwards (evals/render.ts). */
   collect?: CollectOptions
+  /**
+   * The whole scenario's budget, run and render collection together, from when
+   * `runScenario` starts. The collection's deadline is cut to what is left of it,
+   * so a slow run cannot push the scenario past the test's own timeout and drop
+   * it from the report (#2110).
+   */
+  budgetMs?: number
   stderr?: (line: string) => void
 }
 
@@ -157,6 +164,14 @@ export function foldMessages(messages: SDKMessage[]): Pick<Outcome, 'toolCalls' 
   return { toolCalls, finalText, model, claudeCodeVersion, result }
 }
 
+/** The collection's options, its deadline cut to what is left of `budgetMs` after `elapsedMs` (#2110). */
+export function collectWithin(options: Pick<RunOptions, 'collect' | 'budgetMs'>, elapsedMs: number): CollectOptions {
+  const collect = options.collect ?? {}
+  if (options.budgetMs === undefined) return collect
+  const left = Math.max(0, options.budgetMs - elapsedMs)
+  return { ...collect, deadlineMs: Math.min(collect.deadlineMs ?? DEFAULT_COLLECT_DEADLINE_MS, left) }
+}
+
 /** Runs a scenario's prompt through the harness and returns what happened. */
 export async function runScenario(
   scenario: Scenario,
@@ -211,7 +226,7 @@ export async function runScenario(
   } finally {
     clearTimeout(timer)
   }
-  const renders = await collectRenders(backend, options.collect)
+  const renders = await collectRenders(backend, collectWithin(options, Date.now() - started))
   return {
     scenario: scenario.id,
     ...foldMessages(messages),

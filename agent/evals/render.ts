@@ -52,6 +52,9 @@ const RENDER = /^POST \/api\/v1\/models\/([^/]+)\/render$/
 
 export type CollectOptions = { pollMs?: number; deadlineMs?: number }
 
+/** How long `collectRenders` follows a run's renders when not told. */
+export const DEFAULT_COLLECT_DEADLINE_MS = 180_000
+
 async function json(res: Response): Promise<unknown> {
   return res.ok ? res.json() : undefined
 }
@@ -66,7 +69,7 @@ export async function collectRenders(backend: ScenarioBackend, options: CollectO
     const body = (r.body ?? {}) as { params?: Record<string, unknown>; inputs?: { params?: Record<string, unknown> } }
     started.set(jobId, { slug, params: body.inputs?.params ?? body.params ?? {} })
   }
-  const deadline = Date.now() + (options.deadlineMs ?? 180_000)
+  const deadline = Date.now() + (options.deadlineMs ?? DEFAULT_COLLECT_DEADLINE_MS)
   const rendered: RenderedJob[] = []
   for (const [jobId, { slug, params }] of started) {
     const job: RenderedJob = { jobId, slug, params, status: 'unknown' }
