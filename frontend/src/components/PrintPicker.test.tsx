@@ -1525,6 +1525,23 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     expect(bodies[0]).not.toHaveProperty('print_sequence')
   })
 
+  it('clears a refused run when the sequence changes (#2136)', async () => {
+    const refusal = 'By object is refused: the plate has a part taller than the gantry clearance.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(new ApiError(422, refusal))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByText(refusal)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by layer')
+    expect(screen.queryByText(refusal)).toBeNull()
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
+
   it('is not remembered: a reopened dialog is back on Default', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderReopenable()
