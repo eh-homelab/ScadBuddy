@@ -43,17 +43,29 @@ class Tools:
             self._record("send_to_bambuddy", args)
             return "sent"
 
+        @activity.defn(name="make_thing")
+        async def make_thing(args: dict[str, Any]) -> str:
+            self._record("make_thing", args)
+            raise ApplicationError("lost its answer")
+
         @activity.defn(name="broken")
         async def broken(args: dict[str, Any]) -> str:
             self._record("broken", args)
             raise ApplicationError("the model is gone", type="ToolError", non_retryable=True)
 
-        return [get_model, send_to_bambuddy, broken]
+        return [get_model, send_to_bambuddy, make_thing, broken]
 
 
 @pytest.fixture(autouse=True)
 def manifest() -> Iterator[None]:
-    use_manifest({"get_model": "read", "send_to_bambuddy": "outward", "broken": "read"})
+    use_manifest(
+        {
+            "get_model": "read",
+            "send_to_bambuddy": "outward",
+            "make_thing": "write",
+            "broken": "read",
+        }
+    )
     yield
     use_manifest({})
 
@@ -170,3 +182,22 @@ async def test_the_tiers_are_the_runs_own_from_its_start(
     parked = await outward.row(run_id, lambda r: any(w.kind == "approval" for w in r.waiting_on))
     assert [w.fn for w in parked.waiting_on] == ["tool:send_to_bambuddy"]
     assert served.calls == []
+
+
+async def test_a_write_tool_runs_once_even_when_its_attempt_fails(
+    outward: Outward, tools: tuple[Tools, str]
+) -> None:
+    """A write that landed and lost its answer is never sent again: only reads retry."""
+    served, queue = tools
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('make_thing', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "lost its answer" in (run.result or "")
+    assert [c[0] for c in served.calls] == ["make_thing"]
