@@ -3,9 +3,26 @@ import { binary } from './binary.js'
 import { staleBase } from './authoring.js'
 import { command, commandAnswer, isRunning } from './command.js'
 import { ok } from './call.js'
-import { commit, decodeBase64, fileForm, slug } from './common.js'
-import { defineTool, image, json, text, type Tool } from './registry.js'
+import { commit, slug } from './common.js'
+import { defineTool, image, json, text, type Tool, ToolError } from './registry.js'
 import { backendPage, PAGED, pageInput, totalCount } from './pagination.js'
+import {
+  binarySource,
+  fromWorkspace,
+  inlineOrWorkspace,
+  textSource,
+  uploadInit,
+  uploadName,
+  withSent,
+  workspacePathInput,
+  workspaceShaInput,
+  workspaceText,
+} from './workspaceUploads.js'
+
+/** A model's display name from a workspace file's name: "box_v2.scad" is "box_v2". */
+function modelNameOf(path: string): string {
+  return uploadName(path).replace(/\.scad$/i, '') || 'model'
+}
 
 // Catalogue & models (issue #251): list, get, create, import, check, duplicate,
 // delete, and edit details, README, source and thumbnail. Routes:
@@ -86,10 +103,13 @@ export const catalogueTools: Tool[] = [
     name: 'create_model',
     description:
       'Add a new model from OpenSCAD source. The slug is derived from the name. Refused when the source ' +
-      'fails the parse check unless `force` is true.',
+      'fails the parse check unless `force` is true.' +
+      fromWorkspace('the `source`'),
     input: z.object({
       name: z.string().min(1),
-      source: z.string().max(1_000_000),
+      source: z.string().max(1_000_000).optional().describe('The OpenSCAD source'),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
       description: z.string().default(''),
       tags: z.array(z.string()).default([]),
       force: z.boolean().default(false),
@@ -97,8 +117,11 @@ export const catalogueTools: Tool[] = [
     risk: 'write',
     routes: ['POST /api/v1/models'],
     title: ({ name }) => `Create template → ${name}`,
-    handler: async (body, ctx) =>
-      json(await command(ctx, `create model ${body.name}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers }))),
+    handler: async ({ source, workspace_path, workspace_sha256, ...rest }, ctx) => {
+      const { text, info } = await textSource(ctx, { text: source, textName: 'source', path: workspace_path, sha256: workspace_sha256 })
+      const body = { ...rest, source: text }
+      return json(withSent(await command(ctx, `create model ${rest.name}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers })), info))
+    },
   }),
 
   // `outward`, although the result is reversible, because the backend fetches a
@@ -112,21 +135,38 @@ export const catalogueTools: Tool[] = [
     name: 'import_model',
     description:
       'Import a model from an https URL to its .scad source. The backend fetches the URL, so this needs a ' +
-      'human approval.',
+      'human approval. Or import a .scad file you already hold: `workspace_path` (with its `workspace_sha256`) ' +
+      'instead of `url` creates the model from that file as create_model does, under the same approval; exactly ' +
+      'one of the two.',
     input: z.object({
-      url: z.string().url().max(2048),
-      name: z.string().optional(),
+      url: z.string().url().max(2048).optional(),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
+      name: z.string().optional().describe('Display name; taken from the file name when omitted'),
       force: z.boolean().default(false),
     }),
     risk: 'outward',
+    // From a workspace file it creates the model through `POST /api/v1/models`, create_model's
+    // route. Not listed here: a route an outward tool lists is outward for the backend's
+    // agent-actor gate (agent_actor.py AGENT_ALLOWED_WRITES), and a create is a `write`.
     routes: ['POST /api/v1/models/import'],
-    summarize: ({ url, name }) => `Fetch and import a model from ${url}${name ? ` as "${name}"` : ''}`,
-    handler: async ({ url, name, force }, ctx) =>
-      json(
-        await command(ctx, `import ${url}`, (headers) =>
-          ctx.backend.POST('/api/v1/models/import', { body: { url, name: name ?? null, force }, headers }),
-        ),
-      ),
+    summarize: ({ url, workspace_path, workspace_sha256, name }) =>
+      url !== undefined
+        ? `Fetch and import a model from ${url}${name ? ` as "${name}"` : ''}`
+        : `Import a model from the workspace file ${workspace_path ?? '?'} (sha256 ${workspace_sha256 ?? '?'})${name ? ` as "${name}"` : ''}`,
+    handler: async ({ url, workspace_path, workspace_sha256, name, force }, ctx) => {
+      const choice = inlineOrWorkspace(url, 'url', workspace_path, workspace_sha256)
+      if ('inline' in choice) {
+        return json(
+          await command(ctx, `import ${choice.inline}`, (headers) =>
+            ctx.backend.POST('/api/v1/models/import', { body: { url: choice.inline, name: name ?? null, force }, headers }),
+          ),
+        )
+      }
+      const { text, info } = await workspaceText(ctx, choice.workspace)
+      const body = { name: name ?? modelNameOf(info.path), source: text, description: '', tags: [], force }
+      return json(withSent(await command(ctx, `import ${info.path}`, (headers) => ctx.backend.POST('/api/v1/models', { body, headers })), info))
+    },
   }),
 
   defineTool({
@@ -238,16 +278,22 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'set_readme',
-    description: "Set a model's README (Markdown), as a revision in its history.",
-    input: z.object({ slug, content: z.string().max(1_000_000) }),
+    description: "Set a model's README (Markdown), as a revision in its history." + fromWorkspace('the `content`'),
+    input: z.object({
+      slug,
+      content: z.string().max(1_000_000).optional().describe('The Markdown'),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
+    }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/readme'],
-    handler: async ({ slug, content }, ctx) =>
-      json(
-        await command(ctx, `set README of ${slug}`, (headers) =>
-          ctx.backend.PUT('/api/v1/models/{slug}/readme', { params: { path: { slug } }, body: { content }, headers }),
-        ),
-      ),
+    handler: async ({ slug, content, workspace_path, workspace_sha256 }, ctx) => {
+      const { text, info } = await textSource(ctx, { text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
+      const answer = await command(ctx, `set README of ${slug}`, (headers) =>
+        ctx.backend.PUT('/api/v1/models/{slug}/readme', { params: { path: { slug } }, body: { content: text }, headers }),
+      )
+      return json(withSent(answer, info))
+    },
   }),
 
   defineTool({
@@ -282,22 +328,58 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'set_model_thumbnail',
-    description: "Set a model's thumbnail from a base64 PNG (at most 10 MiB), as a revision in its history.",
-    input: z.object({ slug, png_base64: z.string().min(1) }),
+    description: "Set a model's thumbnail from a PNG (at most 10 MiB), as a revision in its history." + fromWorkspace('`png_base64`'),
+    input: z.object({
+      slug,
+      png_base64: z.string().min(1).optional().describe('The PNG as base64'),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
+    }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/thumbnail'],
-    handler: async ({ slug, png_base64 }, ctx) => {
-      const form = fileForm(decodeBase64(png_base64, 'png_base64'), 'thumbnail.png', 'image/png')
-      return json(
-        await command(ctx, `set thumbnail of ${slug}`, (headers) =>
-          ctx.backend.PUT('/api/v1/models/{slug}/thumbnail', {
-            params: { path: { slug } },
-            body: { file: 'thumbnail.png' },
-            bodySerializer: () => form,
-            headers,
-          }),
-        ),
+    handler: async ({ slug, png_base64, workspace_path, workspace_sha256 }, ctx) => {
+      const source = await binarySource(ctx, { base64: png_base64, base64Name: 'png_base64', path: workspace_path, sha256: workspace_sha256 })
+      const answer = await command(ctx, `set thumbnail of ${slug}`, (headers) =>
+        ctx.backend.PUT('/api/v1/models/{slug}/thumbnail', {
+          params: { path: { slug } },
+          body: { file: 'thumbnail.png' },
+          ...uploadInit(ctx, source, { name: 'file', filename: 'thumbnail.png', type: 'image/png' }, headers),
+        }),
       )
+      return json(withSent(answer, 'info' in source ? source.info : undefined))
+    },
+  }),
+
+  defineTool({
+    name: 'add_model_media',
+    description:
+      "Add an image (PNG, JPEG or WebP, at most 10 MB) or a video (MP4 or WebM) to a model's media gallery, as its " +
+      'last item and one revision; the type comes from the bytes. Answers the model, whose `media` lists the items.' +
+      fromWorkspace('`content_base64` (with `filename`)'),
+    input: z.object({
+      slug,
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
+      content_base64: z.string().min(1).optional().describe("The file's bytes as base64; a video is better sent from the workspace"),
+      filename: z.string().min(1).max(255).optional().describe('e.g. "photo.jpg"; with workspace_path, the file\'s own name by default'),
+      caption: z.string().max(500).optional().describe("The item's caption"),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/models/{slug}/media'],
+    title: ({ slug, filename, workspace_path }) => `Add media ${filename ?? workspace_path ?? ''} → ${slug}`,
+    handler: async ({ slug, workspace_path, workspace_sha256, content_base64, filename, caption }, ctx) => {
+      const source = await binarySource(ctx, { base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
+      const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
+      if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
+      const type = 'info' in source ? source.info.mediaType : 'application/octet-stream'
+      const answer = await command(ctx, `add media to ${slug}`, (headers) =>
+        ctx.backend.POST('/api/v1/models/{slug}/media', {
+          params: { path: { slug } },
+          body: { file: name, caption: caption ?? null, poster: null },
+          ...uploadInit(ctx, source, { name: 'file', filename: name, type }, headers, caption === undefined ? {} : { caption }),
+        }),
+      )
+      return json(withSent(answer, 'info' in source ? source.info : undefined))
     },
   }),
 

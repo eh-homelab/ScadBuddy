@@ -14,7 +14,8 @@ import {
   materializeHeadlessBrowser,
   SERVER_NAME,
 } from '../src/harness/headlessBrowser.js'
-import { type Hit, type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
+import { type DownloadTarget, drainDownloads } from '../src/harness/browserDownloads.js'
+import { DOWNLOAD_BODY, type Hit, type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
 
 // The pinned @playwright/mcp server itself, started exactly as the per-session
 // plugin's `.mcp.json` starts it, driven over stdio by an MCP client. No model
@@ -288,6 +289,28 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
     const fresh = (await b.call('browser_navigate', { url: `${ui.origin}/` })).text
     expect(fresh).toContain('seen=x')
     expect(fresh).not.toContain('seen=xx')
+  }, 60_000)
+
+  it('saves a download for the harness, which moves it into the workspace without its query (#2329)', async () => {
+    const { call, plugin } = await connect(ui.origin)
+    await call('browser_navigate', { url: `${ui.origin}/` })
+    const snap = (await call('browser_snapshot')).text
+    expect((await call('browser_click', { element: 'Download part', target: refOf(snap, 'link', 'Download part') })).isError).toBe(false)
+    const written: { path: string; bytes: string; source: unknown }[] = []
+    const target: DownloadTarget = {
+      ref: { kind: 'session', sessionId: randomUUID() },
+      files: {
+        limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 5000 }),
+        write: async (_ws, p, bytes, options) => {
+          written.push({ path: p, bytes: Buffer.from(bytes).toString(), source: options?.source })
+          return { path: p, mediaType: 'model/stl', size: bytes.byteLength, sha256: '0'.repeat(64), source: null, createdAt: new Date(), updatedAt: new Date() }
+        },
+      },
+    }
+    const drained = await drainDownloads(plugin.downloadsDir, target, { waitMs: 15_000 })
+    expect(drained.refused).toEqual([])
+    expect(written).toEqual([{ path: 'downloads/part.stl', bytes: DOWNLOAD_BODY, source: { tool: 'browser', url: `${ui.origin}/files/part.stl` } }])
+    expect(await readdir(plugin.downloadsDir)).toEqual([])
   }, 60_000)
 
   it('writes unnamed output to the output dir, named output to the cwd, and nothing outside', async () => {

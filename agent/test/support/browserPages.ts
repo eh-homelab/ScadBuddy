@@ -70,6 +70,9 @@ export async function startOtherOrigin(): Promise<PageServer> {
  */
 export type OutwardGate = (headers: IncomingHttpHeaders) => Promise<number>
 
+/** What the stand-in UI's "Download part" link downloads (`/files/part.stl?token=abc`). */
+export const DOWNLOAD_BODY = 'solid part\nendsolid part\n'
+
 /** The stand-in UI; `otherOrigin` is what its probe and redirect point at. */
 export async function startUi(otherOrigin: string, gate: OutwardGate = () => Promise.resolve(403)): Promise<PageServer> {
   const page = `<!doctype html>
@@ -91,6 +94,7 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <p id="approve-result">approve not run</p>
   <button id="agent-socket" onclick="const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/v1/ai/chat'); ws.onopen = () => document.getElementById('agent-socket-result').textContent = 'agent socket open'; ws.onerror = ws.onclose = () => document.getElementById('agent-socket-result').textContent = 'agent socket closed'">Agent socket</button>
   <p id="agent-socket-result">agent socket not run</p>
+  <a id="download" href="/files/part.stl?token=abc">Download part</a>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
 </body></html>`
   return serve(async (url, method, res, headers) => {
@@ -115,6 +119,12 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
     if (url === '/redirect-away') {
       res.writeHead(302, { location: `${otherOrigin}/` })
       res.end()
+      return
+    }
+    if (url.startsWith('/files/part.stl')) {
+      // A download (#2329): an attachment, its URL carrying a token in the query.
+      res.writeHead(200, { 'content-type': 'model/stl', 'content-disposition': 'attachment; filename="part.stl"' })
+      res.end(DOWNLOAD_BODY)
       return
     }
     if (url === '/api/v1/prints' && method === 'POST') {

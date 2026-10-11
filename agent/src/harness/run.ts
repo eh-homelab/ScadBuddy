@@ -13,6 +13,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
+import { downloadsHook } from './browserDownloads.js'
 import {
   assertHeadlessPlugin,
   browserInputGuard,
@@ -94,7 +95,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     HTTP servers with their own tier maps (remotePluginOptions below);
 //   - the headless browser (#349, headlessBrowser.ts) when the session has it
 //     enabled: a per-session copy of the vendored `playwright` plugin, its
-//     tier map, its disallowed tools and its origin/file-name guard;
+//     tier map, its disallowed tools and its origin/file-name guard, and a
+//     `PostToolUse` hook that moves its downloads into the session's
+//     workspace after each browser call (browserDownloads.ts, #2329);
 //   - in-process memory hooks (memory/hindsight.ts): `UserPromptSubmit`,
 //     `Stop` and optionally `PostToolUse` callbacks that recall from and
 //     retain to the enabled `hindsight` plugin's bank. SDK callbacks, run in
@@ -398,11 +401,15 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   let guard: InputGuard | undefined
   let gate = run.approvalGate
   let browserPlugin: string | undefined
+  let downloadHooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> | undefined
   if (run.headlessBrowser) {
     const browser = materializeHeadlessBrowser(run.headlessBrowser)
     const remember = run.headlessBrowser.rememberOrigin
     assertHeadlessPlugin(browser.pluginDir)
     browserPlugin = browser.pluginDir
+    // Its downloads go into the session's workspace after each browser call (#2329).
+    const downloads = run.headlessBrowser.downloads
+    if (downloads) downloadHooks = { PostToolUse: [downloadsHook(browser.downloadsDir, downloads)] }
     tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
     guard = (name, input) => browserInputGuard(name, input, browser.origins, browser.approved)
     const inner = gate
@@ -483,13 +490,16 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     canUseTool: questions ? answeringQuestions(questions, permission) : permission,
     hooks: mergeHooks(
       mergeHooks(
-        {
-          PreToolUse: [
-            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
-            ...(questions ? [QUESTION_PROMPT_HOOK] : []),
-          ],
-        },
-        run.memoryHooks,
+        mergeHooks(
+          {
+            PreToolUse: [
+              makePreToolUseHook(tierOf, run.onDecision, gate, guard),
+              ...(questions ? [QUESTION_PROMPT_HOOK] : []),
+            ],
+          },
+          run.memoryHooks,
+        ),
+        downloadHooks,
       ),
       run.traceHooks,
     ),

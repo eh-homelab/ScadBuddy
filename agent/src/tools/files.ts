@@ -8,6 +8,8 @@ import { commandAnswer, isRunning } from './command.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, text, ToolError, type Tool, type ToolContext } from './registry.js'
 import { MAX_MESSAGE_CHARS, MAX_SOURCE_CHARS } from './sourceFiles.js'
+import type { WorkspaceFileInfo } from '../workspace/store.js'
+import { fromWorkspace, sent, textSource, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // The file tools coding agents already know (#813): Read, Edit, MultiEdit,
 // Write, Glob and Grep, with their argument names, over a model's files in the
@@ -451,6 +453,8 @@ type Write = {
   previous: string | null
   force: boolean
   response: 'diff' | 'full'
+  /** The workspace file the content came from (#2329), named in the result. */
+  from?: WorkspaceFileInfo | undefined
 }
 
 /** One revision through the backend's own routes, answered with the revision and its diff. */
@@ -487,7 +491,10 @@ async function save(ctx: ToolContext, w: Write) {
   // the operation's result: the route's own ModelRecord.
   const record = (await ok(Promise.resolve(answered), what)) as ModelRecord
   const revision = record.version ?? null
-  const full = w.response === 'full' ? { content: w.content } : {}
+  const full = {
+    ...(w.response === 'full' ? { content: w.content } : {}),
+    ...(w.from ? { workspace_file: sent(w.from) } : {}),
+  }
   const checked = w.path !== MAIN && w.path !== README ? await siblingDiagnostics(ctx, w.slug, w.content) : {}
   if (revision === null || revision === w.previous) {
     // Nothing new was committed (the file already held this), or there is no history to diff.
@@ -671,11 +678,14 @@ export const fileTools: Tool[] = [
     description:
       "Create or replace one of a model's .scad files or its README.md with `content`, as one revision. " +
       'Prefer edit_file for a change to part of a file. A .scad file beside model.scad comes back with ' +
-      "openscad-lsp's `diagnostics` of it. With `base`, refused as a conflict if the model has moved on since.",
+      "openscad-lsp's `diagnostics` of it. With `base`, refused as a conflict if the model has moved on since." +
+      fromWorkspace('the `content`'),
     input: z.object({
       slug,
       file_path: writablePath,
-      content: z.string().describe("The file's whole new text"),
+      content: z.string().optional().describe("The file's whole new text"),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
       message,
       base,
       force,
@@ -691,11 +701,12 @@ export const fileTools: Tool[] = [
       'GET /api/v1/models/{slug}/versions/{commit}/diff',
       'POST /api/v1/lsp/diagnostics',
     ],
-    handler: async ({ slug, file_path, content, message, base, force, response }, ctx) => {
+    handler: async ({ slug, file_path, content, workspace_path, workspace_sha256, message, base, force, response }, ctx) => {
       const path = writable(file_path)
+      const { text, info } = await textSource(ctx, { text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
       const previous = await revisionOf(ctx.backend, slug)
       if (base !== undefined && (previous === null || !previous.startsWith(base))) return conflict(base, previous)
-      return save(ctx, { slug, path, content, message, base: base ?? null, previous, force, response })
+      return save(ctx, { slug, path, content: text, message, base: base ?? null, previous, force, response, from: info })
     },
   }),
 

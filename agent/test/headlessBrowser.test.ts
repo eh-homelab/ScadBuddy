@@ -353,10 +353,12 @@ describe('the per-session plugin', () => {
         isolated: boolean
         userDataDir?: string
         launchOptions: { headless: boolean }
-        contextOptions: { extraHTTPHeaders?: Record<string, string> }
+        contextOptions: { extraHTTPHeaders?: Record<string, string>; acceptDownloads: boolean }
       }
     }
     const config = JSON.parse(readFileSync(configFile, 'utf8')) as Config
+    // #2329: downloads are accepted, and drained into the session's workspace.
+    expect(config.browser.contextOptions.acceptDownloads).toBe(true)
     expect(config.network).toEqual({ allowedOrigins: [ORIGIN] })
     expect(config.browser.isolated).toBe(true)
     expect(config.browser.userDataDir).toBeUndefined()
@@ -394,7 +396,10 @@ describe('the per-session plugin', () => {
     expect(guard).toContain(`const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}`)
     expect(guard).toContain('maxRedirects: 0')
     const approvedFile = path.join(dir, 'approved-origins.json')
-    expect(guard).toBe(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile }))
+    expect(guard).toBe(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile, downloadsDir: path.join(dir, 'downloads') }))
+    // #2329: it saves each page's downloads where the harness drains them.
+    expect(guard).toContain(`const DOWNLOADS = ${JSON.stringify(path.join(dir, 'downloads'))}`)
+    expect(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile })).toContain('const DOWNLOADS = null')
     expect(JSON.parse(readFileSync(approvedFile, 'utf8'))).toEqual([])
   })
 

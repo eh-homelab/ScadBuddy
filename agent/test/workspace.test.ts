@@ -1,5 +1,18 @@
+import { randomUUID } from 'node:crypto'
+import { mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
+import {
+  describeDrained,
+  downloadName,
+  downloadsHook,
+  downloadSource,
+  type DownloadTarget,
+  drainDownloads,
+} from '../src/harness/browserDownloads.js'
+import { TOOL_PREFIX } from '../src/harness/headlessBrowser.js'
 import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { DURABLE_TOOLS } from '../src/tools/manifest.js'
@@ -88,6 +101,118 @@ describe('the workspace tools', () => {
     const result = await runTool(byName('workspace_list'), {}, ctx)
     expect(result.isError).toBe(true)
     expect(String(firstText(result))).toMatch(/needs the agent database/)
+  })
+})
+
+describe('uploads take a workspace file (#2329 part 2)', () => {
+  const byName = (name: string) => ALL_TOOLS.find((t) => t.name === name)!
+  const UPLOADS = [
+    'upload_asset',
+    'add_model_media',
+    'set_model_thumbnail',
+    'set_output_thumbnail',
+    'create_model',
+    'import_model',
+    'write_source_file',
+    'write_file',
+    'set_readme',
+  ]
+
+  it('every upload tool offers workspace_path with its sha256, says so, and keeps its tier', () => {
+    for (const name of UPLOADS) {
+      const t = byName(name)
+      expect(Object.keys(t.shape)).toEqual(expect.arrayContaining(['workspace_path', 'workspace_sha256']))
+      expect(t.description).toContain('workspace_path')
+      expect(DURABLE_TOOLS.some((d) => d.name === name)).toBe(true)
+    }
+    expect(Object.fromEntries(UPLOADS.map((n) => [n, byName(n).risk]))).toEqual({
+      upload_asset: 'write',
+      add_model_media: 'write',
+      set_model_thumbnail: 'write',
+      set_output_thumbnail: 'write',
+      create_model: 'write',
+      import_model: 'outward',
+      write_source_file: 'write',
+      write_file: 'write',
+      set_readme: 'write',
+    })
+  })
+
+  it('refuses a workspace_path without a store, before anything is sent', async () => {
+    const ctx: ToolContext = {
+      ...services(),
+      principal: { id: 'token:t1', kind: 'bearer', tiers: tiersUpTo('write') },
+      progress: async () => {},
+      signal: new AbortController().signal,
+    }
+    const result = await runTool(byName('set_readme'), { slug: 'box', workspace_path: 'r.md', workspace_sha256: 'a'.repeat(64) }, ctx)
+    expect(String(firstText(result))).toMatch(/needs the agent database/)
+  })
+})
+
+describe('headless-browser downloads', () => {
+  it('get a plain name, as the input guard wants a filename', () => {
+    expect(downloadName('part.stl')).toBe('part.stl')
+    expect(downloadName('../../etc/passwd')).toBe('passwd')
+    expect(downloadName('C:\\x\\My File (1).3mf')).toBe('My-File-1-.3mf')
+    expect(downloadName('.hidden')).toBe('hidden')
+    expect(downloadName('a..b')).toBe('a.b')
+    expect(downloadName('')).toBe('download')
+    expect(downloadName('...')).toBe('download')
+    const long = downloadName(`${'x'.repeat(200)}.stl`)
+    expect(long).toHaveLength(128)
+    expect(long.endsWith('.stl')).toBe(true)
+  })
+
+  it('record their URL without its query or fragment', () => {
+    expect(downloadSource('https://a.example/dl/p.stl?token=abc#frag')).toBe('https://a.example/dl/p.stl')
+    expect(downloadSource('blob:https://a.example/0b6e')).toBe('blob:https://a.example')
+    expect(downloadSource('data:text/plain,hi')).toBe('data:')
+    expect(downloadSource('not a url')).toBe('unknown')
+  })
+
+  it('are drained after a browser call, and the model is told where they are', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'dl-'))
+    const id = randomUUID()
+    await writeFile(path.join(dir, `${id}.bin`), 'solid x')
+    await writeFile(path.join(dir, `${id}.json`), JSON.stringify({ url: 'https://a.example/p.stl?k=1', name: 'p.stl', error: null }))
+    const failed = randomUUID()
+    await writeFile(path.join(dir, `${failed}.json`), JSON.stringify({ url: 'https://a.example/q', name: 'q.zip', error: 'canceled' }))
+    const written: { path: string; source: unknown }[] = []
+    const target: DownloadTarget = {
+      ref: { kind: 'session', sessionId: 's' },
+      files: {
+        limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 5000 }),
+        write: async (_ws, p, bytes, options) => {
+          written.push({ path: p, source: options?.source })
+          return { path: p, mediaType: 'model/stl', size: bytes.byteLength, sha256: 'b'.repeat(64), source: null, createdAt: new Date(), updatedAt: new Date() }
+        },
+      },
+    }
+    const hook = downloadsHook(dir, target, { waitMs: 0 })
+    expect(hook.matcher).toBe(`^${TOOL_PREFIX}`)
+    const signal = new AbortController().signal
+    expect(await hook.hooks[0]!({ hook_event_name: 'PostToolUse', tool_name: 'mcp__scadbuddy__get_model' } as never, undefined, { signal })).toEqual({})
+    const out = (await hook.hooks[0]!({ hook_event_name: 'PostToolUse', tool_name: `${TOOL_PREFIX}browser_click` } as never, undefined, {
+      signal,
+    })) as { hookSpecificOutput: { additionalContext: string } }
+    expect(written).toEqual([{ path: 'downloads/p.stl', source: { tool: 'browser', url: 'https://a.example/p.stl' } }])
+    expect(out.hookSpecificOutput.additionalContext).toContain(`downloads/p.stl (model/stl, 7 bytes, sha256 ${'b'.repeat(64)})`)
+    expect(out.hookSpecificOutput.additionalContext).toContain('q.zip: not saved, the download failed in the browser')
+    expect(await readdir(dir)).toEqual([])
+  })
+
+  it('wait for a running one, and say when it is still running', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'dl-'))
+    await writeFile(path.join(dir, `${randomUUID()}.pending`), '')
+    const target = {
+      ref: { kind: 'session', sessionId: 's' },
+      files: { limits: async () => ({ fileMaxBytes: 1, workspaceMaxBytes: 1 }), write: async () => Promise.reject(new Error('no')) },
+    } as unknown as DownloadTarget
+    const drained = await drainDownloads(dir, target, { waitMs: 50, pollMs: 10 })
+    expect(drained).toEqual({ saved: [], refused: [], running: 1 })
+    expect(describeDrained(drained)).toMatch(/1 still downloading/)
+    expect(describeDrained({ saved: [], refused: [], running: 0 })).toBeUndefined()
   })
 })
 

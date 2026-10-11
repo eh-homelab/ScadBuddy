@@ -73,12 +73,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "One-time setup that edits Bambuddy's own sidebar; an operator action in Settings, not an agent task.",
   },
   {
-    operation: 'PUT /api/v1/outputs/{output_id}/thumbnail',
-    reason:
-      "Uploads the 3D viewer's canvas capture. An agent has no canvas; a browser_* tool driving the open tab " +
-      'can (#254, #266).',
-  },
-  {
     operation: 'GET /api/v1/outputs/{output_id}/files/{name}',
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
@@ -94,7 +88,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'the host migrates inputs as it opens a preset or output; the agent reads inputs already migrated',
   },
   // #274: template media. An agent reads `media` (ids, captions, order) from the model record;
-  // workspace_save (#2329) saves an item's file into the workspace.
+  // workspace_save (#2329) saves an item's file into the workspace, and add_model_media adds one.
   ...(
     [
       'GET /api/v1/models/{slug}/media/{item_id}/poster',
@@ -106,10 +100,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Serves an image or video file to the browser; an agent gets the item list from the model record ' +
       'and has no use for the bytes.',
   })),
-  {
-    operation: 'POST /api/v1/models/{slug}/media',
-    reason: 'A multipart upload of an image or video from the user; an agent has no file to send.',
-  },
   ...(
     [
       'PATCH /api/v1/models/{slug}/media/{item_id}',

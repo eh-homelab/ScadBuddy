@@ -11,6 +11,7 @@ import {
   classifyNavigation,
   mayApprove,
 } from './browserOrigins.js'
+import type { DownloadTarget } from './browserDownloads.js'
 import type { UiReachMap } from './browserReach.js'
 import { isUuid } from './stateDirs.js'
 import type { GuardVerdict, RiskTier } from './permissions.js'
@@ -50,6 +51,10 @@ import type { GuardVerdict, RiskTier } from './permissions.js'
 //   - `outputDir` = `output/` in the session's browser directory, never
 //     `--allow-unrestricted-file-access`, `capabilities` left at the core set
 //     (no `--caps`), `webmcp: false` (`--no-webmcp`);
+//   - `acceptDownloads: true` (#2329): the request guard saves each download in
+//     `downloads/` in the browser directory, and after every browser tool call
+//     the harness moves it into the session's workspace as
+//     `downloads/<plain name>` and deletes it from the disk (browserDownloads.ts);
 //   - the agent-actor marker (AGENT_ACTOR_HEADER) naming the session, on every
 //     request to one of ScadBuddy's own origins and on no other: the request guard adds it
 //     (redirectGuardSource). The backend refuses outward routes on requests
@@ -199,8 +204,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Only `name.ext`-like names: no directory part, no leading dot, no `..`. */
-const PLAIN_FILE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/
+/** Only `name.ext`-like names: no directory part, no leading dot (and `..` is refused besides). Downloads are named by it too (browserDownloads.ts). */
+export const PLAIN_FILE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/
 
 /**
  * What the permission seam should do with a headless-browser tool call, or
@@ -313,6 +318,12 @@ export type HeadlessBrowserOptions = {
    * otherwise Chromium runs with `--no-sandbox` (docs/ai/headless-browser.md).
    */
   sandbox?: boolean
+  /**
+   * The session's workspace (#2329): after each browser tool call the harness
+   * moves the call's downloads there (run.ts, browserDownloads.ts). Without it
+   * downloads stay in the browser directory, removed with it at the turn's end.
+   */
+  downloads?: DownloadTarget
 }
 
 export type HeadlessBrowserPlugin = {
@@ -322,6 +333,8 @@ export type HeadlessBrowserPlugin = {
   configFile: string
   /** Where screenshots and other output land. */
   outputDir: string
+  /** Where the request guard saves downloads until the harness drains them into the workspace (browserDownloads.ts). */
+  downloadsDir: string
   origins: BrowserOrigins
   /** The origins approved in this session, as the harness and the request guard see them. */
   approved: ReadonlySet<string>
@@ -399,15 +412,21 @@ export function redirectGuardSource(options: {
   ui: readonly string[]
   sessionId: string
   approvedFile: string
+  /** Where each page's downloads are saved for the harness to drain (browserDownloads.ts); none when unset. */
+  downloadsDir?: string
 }): string {
   return `'use strict'
 // Written by agent/src/harness/headlessBrowser.ts (redirectGuardSource); do not edit.
-const { readFileSync } = require('node:fs')
+const { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } = require('node:fs')
+const { randomUUID } = require('node:crypto')
+const { join } = require('node:path')
 const UI = ${JSON.stringify(options.ui)}
 const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}
 const SESSION = ${JSON.stringify(options.sessionId)}
 const APPROVED_FILE = ${JSON.stringify(options.approvedFile)}
+const DOWNLOADS = ${JSON.stringify(options.downloadsDir ?? null)}
 const INSTALLED = Symbol.for('scadbuddy.requestGuard')
+const WATCHED = Symbol.for('scadbuddy.downloads')
 const originOf = (url) => {
   try {
     const u = new URL(url)
@@ -499,7 +518,34 @@ async function guard(route) {
   if (!getNavigation) return refuse(route, 403, 'Blocked: a redirect of a non-navigation request.')
   return moveTo(route, next.url)
 }
+// Each download is saved as <uuid>.bin, with <uuid>.pending while it runs and
+// <uuid>.json (its URL and suggested name, or its error) once it has ended, for
+// the harness to drain into the workspace (browserDownloads.ts). The server
+// keeps its own copy in its output directory, as it always did.
+const watchDownloads = (page) => {
+  if (DOWNLOADS === null || page[WATCHED]) return
+  page[WATCHED] = true
+  page.on('download', async (download) => {
+    const base = join(DOWNLOADS, randomUUID())
+    try {
+      mkdirSync(DOWNLOADS, { recursive: true })
+      writeFileSync(base + '.pending', '')
+      let error = null
+      try {
+        await download.saveAs(base + '.bin')
+      } catch (e) {
+        error = String((e && e.message) || e)
+      }
+      writeFileSync(base + '.json.tmp', JSON.stringify({ url: download.url(), name: download.suggestedFilename(), error }))
+      renameSync(base + '.json.tmp', base + '.json')
+    } catch {
+    } finally {
+      rmSync(base + '.pending', { force: true })
+    }
+  })
+}
 module.exports.default = async function requestGuard({ page }) {
+  watchDownloads(page)
   const context = page.context()
   if (context[INSTALLED]) return
   context[INSTALLED] = true
@@ -540,8 +586,11 @@ export function playwrightConfig(options: {
       },
       ...(options.initPage ? { initPage: [options.initPage] } : {}),
       // No `extraHTTPHeaders`: the request guard adds the marker, to ScadBuddy's own origins only.
+      // Downloads land in the session's workspace (#2329): the request guard saves
+      // each in the downloads directory and the harness drains it after each call.
+      // They come only from where the guard lets a request go.
       contextOptions: {
-        acceptDownloads: false,
+        acceptDownloads: true,
         serviceWorkers: 'block',
       },
     },
@@ -615,7 +664,8 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   const configFile = path.join(dir, 'playwright-mcp.json')
   const guardFile = path.join(dir, 'redirect-guard.cjs')
   const approvedFile = path.join(dir, 'approved-origins.json')
-  for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home]) {
+  const downloadsDir = path.join(dir, 'downloads')
+  for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home, downloadsDir]) {
     mkdirSync(d, { recursive: true })
   }
   if (options.tmpDir) mkdirSync(options.tmpDir, { recursive: true, mode: 0o700 })
@@ -628,7 +678,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   writeApproved()
   writeFileSync(
     guardFile,
-    redirectGuardSource({ ui: origins.ui, sessionId: options.sessionId, approvedFile }),
+    redirectGuardSource({ ui: origins.ui, sessionId: options.sessionId, approvedFile, downloadsDir }),
   )
   writeFileSync(
     configFile,
@@ -659,6 +709,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
     pluginDir,
     configFile,
     outputDir,
+    downloadsDir,
     origins,
     approved,
     approve(origin) {

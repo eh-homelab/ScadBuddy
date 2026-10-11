@@ -2,9 +2,10 @@ import { z } from 'zod'
 import { command } from './command.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
-import { defineTool, json, text, type Tool } from './registry.js'
+import { defineTool, json, text, type Tool, ToolError } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 import { codePoints } from './text.js'
+import { fromWorkspace, textSource, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 /** The backend's MAX_SOURCE_CHARS and MAX_SUBJECT (`SourceFileUpdate.content` and
  * `.message` in backend/scadbuddy/api/model_files.py); test/sourceFiles.test.ts checks
@@ -67,13 +68,17 @@ export const sourceFileTools: Tool[] = [
     description:
       'Create or replace a .scad file beside model.scad (a module library it `use`s, a part it `include`s), ' +
       'as one revision in its history. Not model.scad itself: that is update_source or apply_patch. The file ' +
-      'is not parse-checked on its own; check the model afterwards with check_source (with `slug`) or a render.',
+      'is not parse-checked on its own; check the model afterwards with check_source (with `slug`) or a render.' +
+      fromWorkspace('the `content`'),
     input: z.object({
       slug,
       name: fileName,
       content: z
         .string()
-        .refine((text) => codePoints(text) <= MAX_SOURCE_CHARS, `at most ${MAX_SOURCE_CHARS} characters`),
+        .refine((text) => codePoints(text) <= MAX_SOURCE_CHARS, `at most ${MAX_SOURCE_CHARS} characters`)
+        .optional(),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
       message: z
         .string()
         .refine((text) => codePoints(text) <= MAX_MESSAGE_CHARS, `at most ${MAX_MESSAGE_CHARS} characters`)
@@ -82,16 +87,18 @@ export const sourceFileTools: Tool[] = [
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/files/{name}'],
     title: ({ slug, name }) => `Write ${name} → ${slug}`,
-    handler: async ({ slug, name, content, message }, ctx) =>
-      json(
-        await command(ctx, `write ${slug}/${name}`, (headers) =>
-          ctx.backend.PUT('/api/v1/models/{slug}/files/{name}', {
-            params: { path: { slug, name } },
-            body: { content, message: message ?? null },
-            headers,
-          }),
-        ),
-      ),
+    handler: async ({ slug, name, content, workspace_path, workspace_sha256, message }, ctx) => {
+      const { text, info } = await textSource(ctx, { text: content, textName: 'content', path: workspace_path, sha256: workspace_sha256 })
+      if (codePoints(text) > MAX_SOURCE_CHARS) throw new ToolError(`${info?.path ?? 'content'} is over ${MAX_SOURCE_CHARS} characters`)
+      const answer = await command(ctx, `write ${slug}/${name}`, (headers) =>
+        ctx.backend.PUT('/api/v1/models/{slug}/files/{name}', {
+          params: { path: { slug, name } },
+          body: { content: text, message: message ?? null },
+          headers,
+        }),
+      )
+      return json(withSent(answer, info))
+    },
   }),
 
   defineTool({
