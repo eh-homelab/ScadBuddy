@@ -30,15 +30,42 @@ export const SPAN_LIMITS: SpanLimits = {
 export const MAX_EXPORT_BATCH_SIZE = 64
 
 /**
- * Spec §6's one sampling rule, the backend's `NoParentlessClients`: a `CLIENT` span with
- * no parent (a poll's `fetch` outside any action) is dropped. Its `traceparent` still goes,
- * unsampled, so the backend drops the request's trace too.
+ * The polls (#2187): reads on a timer or a follow, outside any action, that would each be
+ * a trace of their own. The attention badge (`agent/attention.ts` `ATTENTION_PATH`,
+ * `RUNNING_PATH`), the assistant's availability (`agent/chat/availability.ts`
+ * `AI_STATUS_PATH`) and a print's progress (`printSource.ts` `readPrintProgress`).
  */
-const noParentlessClients: Sampler = {
-  shouldSample: (_context, _traceId, _name, kind) => ({
-    decision: kind === SpanKind.CLIENT ? SamplingDecision.NOT_RECORD : SamplingDecision.RECORD_AND_SAMPLED,
-  }),
-  toString: () => 'NoParentlessClients',
+function isPoll(url: URL): boolean {
+  const path = url.pathname
+  return (
+    path === '/api/v1/ai/pending-input' ||
+    path === '/api/v1/ai/status' ||
+    (path === '/api/v1/ai/sessions' && url.searchParams.get('status') === 'running') ||
+    /^\/api\/v1\/print\/(outputs|library)\/[^/]+\/progress$/.test(path)
+  )
+}
+
+/**
+ * Spec §6's root rule for the page (#2187): a `fetch` outside any action is traced, so a
+ * page's or dialog's loads reach Tempo, except a poll's or another origin's. Those are
+ * dropped; a poll's `traceparent` still goes, unsampled, so the backend drops its trace too.
+ */
+const noParentlessPolls: Sampler = {
+  shouldSample: (_context, _traceId, _name, kind, attributes) => {
+    if (kind !== SpanKind.CLIENT) return { decision: SamplingDecision.RECORD_AND_SAMPLED }
+    const full = attributes['url.full']
+    let keep = false
+    if (typeof full === 'string') {
+      try {
+        const url = new URL(full, location.href)
+        keep = url.origin === location.origin && !isPoll(url)
+      } catch {
+        // Not a URL: dropped.
+      }
+    }
+    return { decision: keep ? SamplingDecision.RECORD_AND_SAMPLED : SamplingDecision.NOT_RECORD }
+  },
+  toString: () => 'NoParentlessPolls',
 }
 
 let stop: (() => Promise<void>) | null = null
@@ -61,7 +88,7 @@ export function startTracing(): () => Promise<void> {
       'service.name': TRACER_NAME,
       'service.version': import.meta.env.VITE_SCADBUDDY_VERSION || 'dev',
     }),
-    sampler: new ParentBasedSampler({ root: noParentlessClients }),
+    sampler: new ParentBasedSampler({ root: noParentlessPolls }),
     spanLimits: SPAN_LIMITS,
     spanProcessors: [
       new BatchSpanProcessor(new ScrubbingSpanExporter(exporter), {
