@@ -285,6 +285,8 @@ def _retrieve_start_error(operation: WithStartWorkflowOperation[object, object])
     arrives."""
     handle = getattr(operation, "_workflow_handle", None)
     if not isinstance(handle, asyncio.Future):
+        # A temporalio rename lands here and the #2065 log comes back silently:
+        # tests/test_temporal_failure.py `_start_handle` fails on such a bump.
         return
     if handle.done():
         _read_error(handle)
