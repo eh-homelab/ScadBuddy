@@ -110,13 +110,16 @@ function useLiveOffer(offer: HandoffOffer | null | undefined): HandoffOffer | nu
   const [lapsed, setLapsed] = useState<number | null>(null)
   useEffect(() => {
     if (!Number.isFinite(until)) return
-    // setTimeout's delay is a 32-bit int; the check keeps a capped wait from firing early.
-    const timer = setTimeout(
-      () => {
-        if (Date.now() >= until) setLapsed(until)
-      },
-      Math.max(0, Math.min(until - Date.now(), 2 ** 31 - 1)),
-    )
+    // setTimeout's delay is a 32-bit int, and a timer can fire a little before Date.now()
+    // reaches `until`: either way it is armed again for what is left, never dropped.
+    let timer: ReturnType<typeof setTimeout>
+    const arm = () => {
+      timer = setTimeout(
+        () => (Date.now() >= until ? setLapsed(until) : arm()),
+        Math.max(0, Math.min(until - Date.now(), 2 ** 31 - 1)),
+      )
+    }
+    arm()
     return () => clearTimeout(timer)
   }, [until])
   return offer && lapsed !== until ? offer : null
