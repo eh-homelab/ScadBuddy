@@ -240,7 +240,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
   `workflow_runs`, the latter written only by the run's workflow), `typecheck.py` (a
-  script's check at registration and at each start), `component.py` (`FLOWS`; runs the
+  script's check at registration and at each start), `history.py` (a Reset's preview: the
+  outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
   `SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS`), `forget.py` (`DELETE
   /workflow-runs/{id}`: key, then workflow, then row), `sweep.py` (the housekeeping

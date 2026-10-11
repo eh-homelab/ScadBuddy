@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { ok } from './call.js'
-import { answered } from './command.js'
+import { answered, command } from './command.js'
 import { page, PAGED, pageInput } from './pagination.js'
 import { defineTool, json, type Tool } from './registry.js'
 
@@ -122,7 +122,8 @@ export const flowTools: Tool[] = [
     name: 'get_flow_run',
     description:
       'One flow run: its record, and `pending`, what it waits on now (a question for a person, or an approval). ' +
-      'People answer and approve on the Workflows page, never through a tool.',
+      'People answer and approve on the Workflows page, never through a tool. To go back to an earlier point, ' +
+      'see preview_flow_reset.',
     input: z.object({ run_id: runId }),
     risk: 'read',
     routes: ['GET /api/v1/workflow-runs/{run_id}'],
@@ -131,6 +132,55 @@ export const flowTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/workflow-runs/{run_id}', { params: { path: { run_id } } }),
           `get flow run ${run_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'preview_flow_reset',
+    description:
+      'What resetting a flow run to an earlier point would send again: its outward calls (queue_print, arrange) ' +
+      'after `event_id`, a completed workflow task of the run\'s Temporal history after its script started ' +
+      '(`valid`). Every host call after the point runs again; answers and approvals after it are undone. ' +
+      'Pass the answer\'s `as_of_event_id` and `workflow_run_id` to reset_flow_run.',
+    input: z.object({ run_id: runId, event_id: z.number().int().min(1) }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflow-runs/{run_id}/reset-preview'],
+    handler: async ({ run_id, event_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/workflow-runs/{run_id}/reset-preview', {
+            params: { path: { run_id }, query: { event_id } },
+          }),
+          `preview reset of flow run ${run_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'reset_flow_run',
+    description:
+      'Reset a flow run to `event_id` (Temporal Reset): it continues from there on the current code, and every ' +
+      'host call after the point runs again, its outward ones as new prints or arranges. Refused (409, with the ' +
+      'new preview) when outward calls landed after the preview\'s `as_of_event_id`, or another Reset replaced ' +
+      'its `workflow_run_id`. Needs a human approval.',
+    input: z.object({
+      run_id: runId,
+      event_id: z.number().int().min(1),
+      as_of_event_id: z.number().int().min(0).describe('From preview_flow_reset'),
+      workflow_run_id: z.string().min(1).max(64).describe('From preview_flow_reset'),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/workflow-runs/{run_id}/reset'],
+    summarize: ({ run_id, event_id }) => `Reset flow run ${run_id} to event ${event_id}`,
+    handler: async ({ run_id, event_id, as_of_event_id, workflow_run_id }, ctx) =>
+      json(
+        await command(ctx, `reset flow run ${run_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/workflow-runs/{run_id}/reset', {
+            params: { path: { run_id } },
+            body: { event_id, as_of_event_id, workflow_run_id },
+            headers,
+          }),
         ),
       ),
   }),

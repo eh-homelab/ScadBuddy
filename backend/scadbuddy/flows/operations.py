@@ -42,12 +42,16 @@ from temporal_agent_harness.harness.agent_client import (
     ToolApprovalError,
 )
 from temporalio import activity
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.enums.v1 import ResetReapplyExcludeType
+from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
 from temporalio.client import WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Run
-from scadbuddy.flows.store import FlowStore
+from scadbuddy.flows.store import FlowStore, ResetSupersededError
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
 
 if TYPE_CHECKING:
@@ -58,6 +62,10 @@ FLOW_DECIDE = "flow_decide"
 STALE_ENTRY = "https://scadbuddy.dev/problems/stale-entry"
 ALREADY_RESOLVED = "https://scadbuddy.dev/problems/already-resolved"
 RUN_CLOSED = "https://scadbuddy.dev/problems/flow-run-closed"
+FLOW_RESET = "flow_reset"
+RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
+RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
+RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
 #: How long asking Temporal whether a decision's Update landed may take.
 LANDED_PROBE = timedelta(seconds=10)
 
@@ -232,6 +240,97 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
                 raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": decision.outcome}
 
+    async def check_reset(request: dict[str, Any]) -> dict[str, Any]:
+        run = await store.get_run(str(request["run_id"]))
+        if run is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+        if any(w.history_length is None for w in run.waiting_on):
+            # Parked before 6e recorded where: a Reset cannot tell whether such a call
+            # comes back, and guessing would leave a card for a call nothing waits on.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "This run parked a call before ScadBuddy recorded where in its history,"
+                " so it cannot be reset safely. Answer the call, or start a new run.",
+                type_=RESET_UNRECORDED,
+            )
+        client = activity.client()
+        try:
+            described = await client.get_workflow_handle(run.workflow_id).describe()
+        except RPCError as err:
+            if err.status == RPCStatusCode.NOT_FOUND:
+                raise ApiError(status.HTTP_404_NOT_FOUND, "The run's history is gone.") from None
+            raise
+        event_id = int(request["event_id"])
+        preview = await outward_since(client, run.workflow_id, event_id, run_id=described.run_id)
+        if described.run_id != str(request["workflow_run_id"]):
+            # Another Reset replaced the execution the preview read: past its point, the
+            # same event ids name other events, so the point itself means something else.
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "Another Reset moved the run since that preview; check the new one.",
+                type_=RESET_CHANGED,
+                preview=preview.model_dump(mode="json"),
+            )
+        if not preview.valid:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Event {event_id} is not a point a run resets to: name a completed"
+                " workflow task before the run's last event.",
+                type_=RESET_POINT,
+            )
+        if any(c.scheduled_event_id > int(request["as_of_event_id"]) for c in preview.calls):
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "The run made more outward calls since that preview; check the new one.",
+                type_=RESET_CHANGED,
+                preview=preview.model_dump(mode="json"),
+            )
+        return {"workflow_id": run.workflow_id, "replaced": described.run_id}
+
+    async def run_reset(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        client = activity.client()
+        workflow_id = str(checked["workflow_id"])
+        replaced = str(checked["replaced"])
+        event_id = int(request["event_id"])
+
+        async def reset() -> str:
+            answer = await client.workflow_service.reset_workflow_execution(
+                ResetWorkflowExecutionRequest(
+                    namespace=client.namespace,
+                    workflow_execution=WorkflowExecution(workflow_id=workflow_id, run_id=replaced),
+                    reason=f"flow reset by {request.get('responder') or 'browser'}",
+                    workflow_task_finish_event_id=event_id,
+                    # The operation's own id: a retried run resets once, and the row
+                    # records it to tell that retry from another Reset.
+                    request_id=str(activity.info().workflow_id),
+                    # Every answer, approval and `close` after the point is undone with it:
+                    # the calls past it run again and park again for a person.
+                    reset_reapply_exclude_types=[
+                        ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_SIGNAL,
+                        ResetReapplyExcludeType.RESET_REAPPLY_EXCLUDE_TYPE_UPDATE,
+                    ],
+                )
+            )
+            return answer.run_id
+
+        try:
+            run = await store.reset_run(
+                str(request["run_id"]),
+                replaced=replaced,
+                point=event_id,
+                request_id=str(activity.info().workflow_id),
+                reset=reset,
+            )
+        except ResetSupersededError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "Another Reset moved the run first; check its history again.",
+                type_=RESET_CHANGED,
+            ) from None
+        if run is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+        return {"run_id": run.id, "workflow_run_id": run.workflow_run_id, "event_id": event_id}
+
     # A transport failure is retried: the same Update id makes the resend safe, and a
     # decision already recorded by the first attempt is the same decision.
     return [
@@ -240,6 +339,9 @@ def flow_kinds(store: FlowStore) -> list[OperationKind]:
         ),
         OperationKind(
             name=FLOW_DECIDE, check=check_decide, run=run_decide, run_attempts=3, queue="projects"
+        ),
+        OperationKind(
+            name=FLOW_RESET, check=check_reset, run=run_reset, run_attempts=3, queue="projects"
         ),
     ]
 

@@ -38,8 +38,16 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.forget import forget_run
-from scadbuddy.flows.models import TERMINAL, Definition, DefinitionSummary, Run, RunStatus
-from scadbuddy.flows.operations import FLOW_ANSWER, FLOW_DECIDE
+from scadbuddy.flows.history import ResetPreview, outward_since
+from scadbuddy.flows.models import (
+    HOST_FN,
+    TERMINAL,
+    Definition,
+    DefinitionSummary,
+    Run,
+    RunStatus,
+)
+from scadbuddy.flows.operations import FLOW_ANSWER, FLOW_DECIDE, FLOW_RESET
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
@@ -58,12 +66,6 @@ SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
 ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
 _STATUS_SECONDS = 2.0
-#: The host function behind a harness callback or gated tool, by the tool's name.
-_HOST_FN = {
-    "human_answer": "wait_for_human",
-    "approved_print": "queue_print",
-    "approved_arrange": "arrange",
-}
 
 ApprovalTimeout = int | Literal["never"]
 
@@ -352,7 +354,7 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
             PendingEntry(
                 call_id=approval.tool_id,
                 kind="approval",
-                fn=seen.fn if seen else _HOST_FN.get(approval.tool_name, approval.tool_name),
+                fn=seen.fn if seen else HOST_FN.get(approval.tool_name, approval.tool_name),
                 since=seen.since if seen else None,
             )
         )
@@ -362,7 +364,7 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
             PendingEntry(
                 call_id=callback.tool_id,
                 kind="answer",
-                fn=seen.fn if seen else _HOST_FN.get(callback.tool_name, callback.tool_name),
+                fn=seen.fn if seen else HOST_FN.get(callback.tool_name, callback.tool_name),
                 prompt=seen.prompt if seen else None,
                 since=seen.since if seen else None,
             )
@@ -502,3 +504,83 @@ async def decide_flow_run(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, Decided)
+
+
+class ResetBody(BaseModel):
+    """Where to reset a run to, and the preview the caller saw."""
+
+    #: A completed workflow task of the run's history, after its script started.
+    event_id: int = Field(ge=1)
+    #: The preview's `as_of_event_id`: a Reset is refused (409, with the new preview)
+    #: when outward calls were added after it.
+    as_of_event_id: int = Field(ge=0)
+    #: The preview's `workflow_run_id`: a Reset is refused (409, with the new preview)
+    #: when another Reset replaced that execution since.
+    workflow_run_id: str = Field(min_length=1, max_length=64)
+
+
+class Reset(BaseModel):
+    """A Reset done: the run continues on a new execution."""
+
+    run_id: str
+    workflow_run_id: str
+    event_id: int
+
+
+@router.get(
+    "/workflow-runs/{run_id}/reset-preview",
+    response_model=ResetPreview,
+    summary="What a Reset of a run would run again",
+)
+async def preview_flow_reset(
+    run_id: str,
+    flows: FlowsDep,
+    event_id: Annotated[int, Query(ge=1, description="A completed workflow task's event id.")],
+) -> ResetPreview:
+    """The outward calls (a print, an arrange) a Reset to `event_id` would send again,
+    as new effects (spec 2026-10-01 §7.4). Every host call after the point runs again;
+    the others are local. Pinned to the history's last event, `as_of_event_id`, which
+    the Reset sends back."""
+    run = await flows.store.get_run(run_id)
+    if run is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+    if flows.client is None:
+        raise _unavailable()
+    return await outward_since(flows.client, run.workflow_id, event_id)
+
+
+@router.post(
+    "/workflow-runs/{run_id}/reset",
+    response_model=Reset,
+    responses=OPERATION_RESPONSES,
+    summary="Reset a run to an earlier point",
+)
+async def reset_flow_run(
+    run_id: str,
+    body: ResetBody,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Reset | JSONResponse:
+    """Temporal's Reset (spec 2026-10-01 §7.4): the run continues from `event_id` on
+    the current code with the same script, and every host call after it runs again.
+    The answers and approvals after it are undone, so those calls park again. 409
+    `flow-reset-changed` with the new `preview` when outward calls landed after
+    `as_of_event_id`, or (with no preview) when another Reset moved the run first; 422
+    `flow-reset-point` for an event that is not a completed workflow task after the
+    script started, and 422 `flow-reset-unrecorded` for a run with a call parked
+    before ScadBuddy recorded where in the history."""
+    author = current_author()
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[FLOW_RESET],
+        subject=f"flow:{run_id}",
+        request={
+            "run_id": run_id,
+            **body.model_dump(),
+            "responder": "browser" if author is None else f"agent {author.principal}",
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Reset)

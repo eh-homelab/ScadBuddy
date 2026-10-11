@@ -38,9 +38,10 @@ class StepOwner(Protocol):
 async def project(write: ProjectionWrite) -> None:
     """One write to the run's row. Retried without limit: a projection write never
     fails the script."""
+    length = workflow.info().get_current_history_length()
     await workflow.execute_local_activity(
         FLOW_PROJECT,
-        write,
+        write.model_copy(update={"history_length": length}),
         start_to_close_timeout=timedelta(seconds=8),
         retry_policy=RetryPolicy(maximum_attempts=0),
     )
@@ -70,7 +71,14 @@ async def step(
         history_length=info.get_current_history_length(),
     )
     parked = (
-        FlowWaiting(call_id=call_id, kind=waiting, fn=fn, prompt=prompt, since=workflow.now())
+        FlowWaiting(
+            call_id=call_id,
+            kind=waiting,
+            fn=fn,
+            prompt=prompt,
+            since=workflow.now(),
+            history_length=started.history_length,
+        )
         if waiting is not None
         else None
     )
@@ -103,6 +111,7 @@ async def step(
                         update={
                             "status": "failed" if error is not None else "succeeded",
                             "ended_at": workflow.now(),
+                            "ended_history_length": workflow.info().get_current_history_length(),
                             "error": error,
                         }
                     ),
