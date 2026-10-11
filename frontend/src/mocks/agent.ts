@@ -93,7 +93,7 @@ export interface MockAgentSessions {
   archived(): { id: string; title: string; origin: Origin; status: SessionStatus; parentId: string | null; costUsd: number; budgetUsd: number; archivedAt: string }[]
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
   /** #1284 — for tests: the chat titled `title` is offered to `to`, as `sessions_handoff` would. */
-  offerChat(title: string, to: Owner): void
+  offerChat(title: string, to: Owner, forMs?: number): void
   /** #1284 — `DELETE /api/v1/ai/sessions/:id/handoff`: withdraws the offer, the owner only. */
   cancelOffer(sessionId: string): { cancelled: boolean } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
@@ -700,10 +700,10 @@ export function createMockAgentTransport({
     has(sessionId) {
       return sessions.has(sessionId)
     },
-    offerChat(title, to) {
+    offerChat(title, to, forMs = 3_600_000) {
       const s = [...sessions.values()].find((one) => one.title === title)
       if (!s) throw new Error(`no chat titled ${title}`)
-      s.offer = { to, until: new Date(Date.now() + 3_600_000).toISOString() }
+      s.offer = { to, until: new Date(Date.now() + forMs).toISOString() }
       deliver(snapshot())
     },
     cancelOffer(sessionId) {

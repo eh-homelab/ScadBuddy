@@ -1654,12 +1654,13 @@ export const api = {
       body: JSON.stringify({ add_usd: addUsd }),
     }),
 
-  /** #1288 — one session, as the browser user sees it; 404 when it is gone or not theirs to show. */
   /** #1284 — withdraws the session's live handoff offer; `cancelled` is false when there was none. */
   cancelAiSessionOffer: (id: string) =>
     request<{ cancelled: boolean; session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/handoff`, {
       method: 'DELETE',
     }),
+
+  /** #1288 — one session, as the browser user sees it; 404 when it is gone or not theirs to show. */
   getAiSession: (id: string) => request<AiSessionView>(`/ai/sessions/${encodeURIComponent(id)}`),
 
   /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
