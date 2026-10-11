@@ -32,6 +32,8 @@ import {
   httpRequestEnabled,
   httpRequestServer,
   httpTierOf,
+  type SavedMeta,
+  savedBody,
   SETTING_HTTP_REQUEST,
 } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
@@ -957,6 +959,18 @@ export class SessionManager {
     const blob = await this.blobs.get(id, name)
     if (!blob) throw new SessionError('not_found', `no image ${name} in session ${id}`)
     return blob
+  }
+
+  /**
+   * A response body the session's http_request saved (#1292), by the id its
+   * audit row names; not_found for a session the principal may not see, or a
+   * body that is not (or no longer) in the session's directory on this replica.
+   */
+  async httpBody(id: string, saved: string, principal: Owner): Promise<{ meta: SavedMeta; bytes: Buffer }> {
+    await this.get(id, principal)
+    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
+    return body
   }
 
   /** Newest first. */

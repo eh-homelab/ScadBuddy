@@ -24,6 +24,7 @@ import {
   httpTierOf,
   readSavedResponse,
   runHttpRequest,
+  savedBody,
 } from '../src/harness/httpRequest.js'
 import { decide } from '../src/harness/permissions.js'
 import { assertHostAllowed, assertHttpUrl, EgressError } from '../src/http/egress.js'
@@ -351,6 +352,35 @@ describe('audit', () => {
     })
     const all = JSON.stringify(ctx.audit.entries)
     for (const leaked of ['secret-path', 'private', 'request-body-text', 'response-body-text']) expect(all).not.toContain(leaked)
+  })
+})
+
+describe('a saved body in the audit (#1292)', () => {
+  it('names the saved body on the row of the hop that answered, and only there', async () => {
+    const { url } = await serve((req, res) => {
+      if (req.url === '/start') res.writeHead(302, { location: '/data' }).end()
+      else res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(Buffer.from([0, 1, 2, 3]))
+    })
+    const ctx = await context()
+    const body = json(await runHttpRequest(args({ url: `${url}/start` }), ctx))
+    const saved = (body.saved as { id: string }).id
+    expect(ctx.audit.entries).toHaveLength(2)
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
+    expect(JSON.parse(ctx.audit.entries[1]!.inputSummary!)).toMatchObject({ status: 200, saved })
+    expect(await savedBody(ctx.saveDir, saved)).toMatchObject({ meta: { content_type: 'application/octet-stream', size_bytes: 4 } })
+  })
+
+  it('names nothing when the body was returned inline', async () => {
+    const { url } = await serve((_req, res) => res.writeHead(200, { 'content-type': 'text/plain' }).end('short'))
+    const ctx = await context()
+    expect(json(await runHttpRequest(args({ url }), ctx)).saved).toBeNull()
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
+  })
+
+  it('reads back only a saved response id in its directory', async () => {
+    const ctx = await context()
+    expect(await savedBody(ctx.saveDir, '../../etc/passwd')).toBeUndefined()
+    expect(await savedBody(ctx.saveDir, '00000000-0000-4000-8000-000000000000')).toBeUndefined()
   })
 })
 

@@ -109,6 +109,49 @@ describe('AiAuditSection', () => {
     expect(screen.getByRole('option', { name: 'HTTP requests' })).toBeInTheDocument()
   })
 
+  it('links an http row to the body its request saved, and only that row (#1292)', async () => {
+    const SESSION = '5a1c3e2b-7d4f-4e6a-9b8c-0d1e2f3a4b5c'
+    const SAVED = '0b7d4c3e-5f6a-4b8c-9d0e-1f2a3b4c5d6e'
+    const row = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({
+      ...AUDIT_FIXTURES[3]!,
+      id,
+      kind: 'http' as const,
+      action: 'GET',
+      tier: 'read' as const,
+      outcome: 'ok' as const,
+      session_id: SESSION,
+      ...fields,
+    })
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            row('3', {
+              input_summary: `{"method":"GET","scheme":"https","host":"example.com","status":200,"size_bytes":2000000,"saved":"${SAVED}"}`,
+            }),
+            // Returned inline: nothing was saved.
+            row('2', { input_summary: '{"method":"GET","scheme":"https","host":"example.com","status":200,"size_bytes":12}' }),
+            // Not an id the agent makes: never turned into a path.
+            row('1', { input_summary: '{"method":"GET","host":"example.com","saved":"../../etc/passwd"}' }),
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    const [saved, inline, odd] = rows()
+    expect(within(saved!).getByRole('link', { name: 'View / download body' })).toHaveAttribute(
+      'href',
+      `/api/v1/ai/sessions/${SESSION}/http/${SAVED}`,
+    )
+    // The summary line stays words, without the id.
+    expect(saved).toHaveTextContent('https://example.com · HTTP 200 · 2000000 bytes')
+    expect(within(inline!).queryByRole('link')).not.toBeInTheDocument()
+    expect(within(odd!).queryByRole('link')).not.toBeInTheDocument()
+  })
+
   it("shows each turn's cost, and flags one Claude Code never priced (#1922)", async () => {
     const turn = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({
       ...AUDIT_FIXTURES[3]!,

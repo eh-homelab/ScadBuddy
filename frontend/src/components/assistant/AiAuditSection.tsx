@@ -113,7 +113,8 @@ function memoryText(entry: AuditEntry): string | null {
 
 /**
  * An http row's summary (#827) in words: the agent stores `{method, scheme, host,
- * status?, size_bytes?, redirect?}` as JSON, never a path, a header or a body.
+ * status?, size_bytes?, redirect?, saved?}` as JSON, never a path, a header or a
+ * body (`saved` is the id of a saved body; see savedBodyUrl).
  */
 function httpText(entry: AuditEntry): string | null {
   let parts: string[] = []
@@ -128,6 +129,26 @@ function httpText(entry: AuditEntry): string | null {
   }
   if (entry.detail) parts.push(entry.detail)
   return parts.length ? parts.join(' · ') : null
+}
+
+const SAVED_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * #1292 — where a saved response body is served, for an http row whose response
+ * was too long (or binary) to return inline: the row names the id it was saved
+ * under, and the agent serves it from the session's directory
+ * (`GET /api/v1/ai/sessions/:id/http/:saved`). Null for any other row.
+ */
+function savedBodyUrl(entry: AuditEntry): string | null {
+  if (entry.kind !== 'http' || !entry.session_id) return null
+  let saved: unknown
+  try {
+    saved = (JSON.parse(entry.input_summary ?? '{}') as Record<string, unknown>).saved
+  } catch {
+    return null
+  }
+  if (typeof saved !== 'string' || !SAVED_ID.test(saved)) return null
+  return `/api/v1/ai/sessions/${encodeURIComponent(entry.session_id)}/http/${saved}`
 }
 
 const usd = (value: number) => `$${value.toFixed(4)}`
@@ -148,6 +169,7 @@ function turnCost(entry: AuditEntry): string | null {
 
 function AuditRow({ entry }: { entry: AuditEntry }) {
   const cost = turnCost(entry)
+  const body = savedBodyUrl(entry)
   const text =
     entry.kind === 'memory'
       ? memoryText(entry)
@@ -176,6 +198,17 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         <p className="mt-0.5 truncate font-mono text-[12px] text-muted" title={text}>
           {text}
         </p>
+      )}
+      {body && (
+        <a
+          href={body}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="mt-0.5 inline-block text-[12px] text-accent underline"
+          title="Plain text and JSON open as text; anything else downloads. The body is kept while the session's 10 newest saved responses include it."
+        >
+          View / download body
+        </a>
       )}
     </li>
   )
