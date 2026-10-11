@@ -2523,9 +2523,16 @@ from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.presets import ParamPresetUpdate
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, SceneEditError, apply_edits, removed_parameters
-from scadbuddy.meshmodel.scene import exposed_values
 from scadbuddy.meshmodel.ingest import scene_from_objects
-from scadbuddy.meshmodel.scene import SCENE_NAME, Scene, SceneSource, dump_scene, load_scene, text_sha256
+from scadbuddy.meshmodel.scene import (
+    SCENE_NAME,
+    Scene,
+    SceneSource,
+    dump_scene,
+    exposed_values,
+    load_scene,
+    text_sha256,
+)
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
 from scadbuddy.render.bambu3mf import stl_3mf
@@ -3610,6 +3617,7 @@ asked for, and Arrange on a mesh model's output.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -3678,13 +3686,22 @@ def test_the_carrot_neck_anchored_in_green_prints_as_one_piece(tmp_path: Path) -
     small = next(o for o in scene.objects if o.name.startswith("Small Carrot"))
     mesh = trimesh.load(tmp_path / small.parts[0].mesh, file_type="3mf", force="mesh")
     shells_before = len(mesh.split(only_watertight=False))
-    # The neck: the narrowest section of the carrot's own shell between body and leaves.
+    # The neck: the narrowest section where the painted leaves meet the body, searched
+    # from a little below the lowest painted face to a little above it, so a leaf's own
+    # thin section is never taken for it.
+    codes = json.loads((tmp_path / small.parts[0].mesh.replace(".3mf", ".paint.json")).read_text())["codes"]
+    painted = np.array([bool(code) for code in codes])
+    leaves_from = float(mesh.triangles_center[painted][:, 2].min())
     sections = {
         z: measure(mesh, np.array([0.0, 0.0, z]), np.array([0.0, 0.0, 1.0]))
-        for z in np.arange(30.0, 50.0, 0.5)
+        for z in np.arange(leaves_from - 8.0, leaves_from + 4.0, 0.5)
     }
     z, neck = min(((z, s) for z, s in sections.items() if s is not None and s.inside), key=lambda zs: zs[1].room)
-    m = small.transform  # the object frame: `measure` ran in it, `at` is world
+    assert leaves_from - 8.0 <= z <= leaves_from + 4.0
+    # Ingest places an object by translation only, so object to world is that shift
+    # (`_primitive` solves with the full matrix; this test relies on rotate 0, scale 1).
+    m = small.transform
+    assert [float(v) for v in m.rotate] == [0.0, 0.0, 0.0] and [float(v) for v in m.scale] == [1.0, 1.0, 1.0]
     at = [float(neck.centroid[0]) + float(m.translate[0]), float(neck.centroid[1]) + float(m.translate[1]), float(z) + float(m.translate[2])]
     anchored = apply_edits(
         scene,
@@ -3756,7 +3773,7 @@ git commit -m "test(meshmodel): open real MakerWorld files, anchor the carrot ne
 ## Self-review
 
 - **Spec coverage (phases 1–2):** §3 representation → Tasks 1, 3; §3.3 colourless meshes → Task 5 (`test_a_part_file_is_a_colourless_closed_3mf`), Task 9; §4 sources (library, upload, output), cap, provenance, nothing to Bambuddy → Tasks 5, 6, 8; OBJ refused → Task 8 (`test_an_obj_upload_is_refused`); §5 edits, hash check, presets → Tasks 7, 8; §6 kinds on `library`, tools, flows (`tool(name, args)` needs nothing new) → Tasks 8, 10; §10 tests for phases 1–2 → Tasks 1–11; §11 phases 1–2 acceptance → Tasks 8, 9, 11. Deferred, stated in the header: §7, §8, §9, the eval scenario.
-- **Deviation from the spec, stated:** §4 says the library read reuses `library_objects.py`. Its pieces are `piece_mesh` 3MFs with `basematerials`, which §3.3 forbids in a part file, so `mesh_model_create` reuses only its fetch (`LibrarySource.fetch_3mf`), its reader (`read_objects`) and its refusals. Model-level `scene: true` is not written into `model.json`: a model is a mesh model when it has `scene.json`; `model.json` keeps `mesh_source` so the origin survives an eject. `drop_from_presets` drops from saved presets; the model's own `model.json` presets are refused with "edit them first". Beyond the spec, and added to spec §5 in this PR: `lay_flat`'s drop to the bed counts pegs and `add` shapes, and `largest_flat` never picks a cut face carrying a peg (otherwise the peg goes into the bed); a peg takes the colour of the part the cut goes through; a jointed cut, a joint's numbers and a jointed half's scale cannot be exposed or (scale) changed (review of #2388: one side would move without the other).
+- **Deviation from the spec, stated:** §4 says the library read reuses `library_objects.py`. Its pieces are `piece_mesh` 3MFs with `basematerials`, which §3.3 forbids in a part file, so `mesh_model_create` reuses only its fetch (`LibrarySource.fetch_3mf`), its reader (`read_objects`) and its refusals. Model-level `scene: true` is not written into `model.json`: a model is a mesh model when it has `scene.json`; `model.json` keeps `mesh_source` so the origin survives an eject. `drop_from_presets` drops from saved presets; the model's own `model.json` presets are refused with "edit them first". Beyond the spec, and added to spec §3 and §5 (#2388 and its follow-up): a coloured `add` (`Add.colour`) carves its shape out of the object's other colours and fills it in its own, and never colours a peg; `lay_flat`'s drop to the bed counts pegs and `add` shapes, and `largest_flat` never picks a cut face carrying a peg (otherwise the peg goes into the bed); a peg takes the colour of the part the cut goes through; a jointed cut, a joint's numbers and a jointed half's scale cannot be exposed or (scale) changed (review of #2388: one side would move without the other).
 - **Real files (Task 13):** the fixtures from PR #2389. The two negative-part files (1943, 2154) and the three over 256 MiB inflated (2464, 381, 2602) are refused by `read_objects` today, so Task 13 skips them by the manifest; Arrange cutting negative parts out is its own PR (the reader, not mesh models), and the inflate cap its own issue. When either lands, the manifest's `arrange_reads` changes and Task 13 picks the files up.
 - **Bambuddy from the `library` queue:** `mesh_model_create` fetches a library file from a `library`-queue kind, while #1060 moves Bambuddy calls to the `bambuddy` queue. Kept here because the fetch is a read into the data volume, which only the `library` worker holds; when #1060 splits reads too, this becomes a `bambuddy` prelude kind like `output_delete`'s (review of #2388).
 - **Type consistency:** `compiled(scene) -> tuple[Scene, str]` (Task 8) is used by Task 11's `make.py`; `mesh_of(path) -> trimesh.Trimesh` everywhere; `Exposed(expose, value)` in Tasks 1, 3, 7, 10 (zod `num`).

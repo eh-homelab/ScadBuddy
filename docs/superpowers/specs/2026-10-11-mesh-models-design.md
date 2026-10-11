@@ -101,7 +101,7 @@ the UI both edit `scene.json`, only through `scene_edit` (§5).
 |---|---|---|
 | `cut` | `point`, `normal`, `keep: above\|below` | `intersection()` with a half-space: a cube larger than the object's bounding box, aligned to the plane |
 | `joint` | `at: [x,y,z]`, `axis`, `diameter`, `depth`, `clearance`, `key: none\|flat\|hex`, `role: peg\|socket` | peg: `union()` with the keyed cylinder; socket: `difference()` with it grown by `clearance` radially and at the bottom |
-| `add` | `primitive: cube\|cylinder\|sphere`, `size`, `transform` | `union()` |
+| `add` | `primitive: cube\|cylinder\|sphere`, `size`, `transform`, `colour?` | `union()`; with `colour`, the shape is first `difference()`d from everything else, then unioned in its own colour, so no volume has two colours |
 | `subtract` | as `add` | `difference()` |
 | `custom` | `scad` (text) | the snippet, given the geometry so far as `children()` |
 
@@ -172,14 +172,15 @@ Edits (what callers send; they expand into ops):
 | `transform {object, translate?, rotate?, scale?}` | sets the object's transform |
 | `split_at_plane {object, point, normal, joint?}` | the plane is in world coordinates. With `M` the transform's linear part (object frame to world) and `t` its translation, the point maps as `M⁻¹(p − t)` and the normal as `Mᵀn`, renormalised (a plane's normal transforms by the inverse-transpose, which matters once the scale is non-uniform). The object becomes two (`<id>` keeps `cut keep:below`, a new one `cut keep:above`), both keeping the parent's ops. With `joint {diameter?, depth, clearance, key, peg_on: above\|below}`: the section at the plane is measured with trimesh at edit time; the peg sits at the section's centroid and the diameter defaults to 60 % of the largest inscribed circle; refused when the circle is smaller than `diameter + 2*clearance + 0.8 mm` (two 0.4 mm walls). The measured position and size are stored in the ops, so compiling stays pure |
 | `lay_flat {object, normal \| "largest_flat"}` | `normal` is a world-space direction (the viewer sends the normal of the face clicked on the preview; no face index, since the preview is the rendered mesh after ops and its triangles change with each render). The object is rotated so that direction points to −Z, the rotation written into the transform and the object dropped to Z=0. `"largest_flat"` picks the largest coplanar facet of the object's part meshes after its ops' cuts (trimesh `facets`), which is what a cut face usually is |
-| `add`, `subtract {object, primitive, size, transform}` | appends the op |
+| `add`, `subtract {object, primitive, size, transform}` | appends the op; `add` takes an optional `colour` (above) |
 | `custom {object, scad}` | appends the op |
 | `set_colour {object, part, colour}` | a part's colour |
 | `delete`, `duplicate`, `rename {object, …}` | as named |
 | `expose {object, op, field, name}` | makes an op field a customizer parameter; `unexpose` reverses it |
 
 Joints stay whole (review of #2388): a peg takes the colour of the part the cut goes
-through most, so it prints with the piece it stands on. A parameter may not move a cut
+through most, so it prints with the piece it stands on; a coloured `add` is not a part,
+so its colour never colours a peg, even where it fills most of the section. A parameter may not move a cut
 that carries a joint, size a joint, or scale a jointed half, and `transform` may not
 change a jointed half's scale: the other half's cut and the joint's root are numbers of
 their own, so one side would move without the other, and a joint's size would skip the
