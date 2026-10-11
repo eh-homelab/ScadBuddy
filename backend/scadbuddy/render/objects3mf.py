@@ -66,7 +66,7 @@ from scadbuddy.render.bambu3mf import (
     parse_model,
 )
 from scadbuddy.render.geometry import NoSuchPlateError
-from scadbuddy.render.glb import BoundingBox, bounding_box
+from scadbuddy.render.glb import BoundingBox, bounding_box, footprint_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PartSource, PlateLayout
 from scadbuddy.render.paint import PaintCodeError, states
 from scadbuddy.render.read_budget import ReadBudget
@@ -855,7 +855,8 @@ def piece_mesh(parts: list[ColourPart]) -> bytes:
 
 def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
     """Write ``obj`` into ``directory`` as a piece `write_output` places: the mesh file,
-    then its ``layout.json`` (last, so a piece with a layout is whole). Returns its box."""
+    then its ``layout.json`` (last, so a piece with a layout is whole). Returns the box
+    it is packed by (:func:`~scadbuddy.render.glb.footprint_box`)."""
     parts = [
         ColourPart(index, part.name, part.colour, part.mesh, part.paint, negative=part.negative)
         for index, part in enumerate(obj.parts)
@@ -870,4 +871,4 @@ def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
         sources=[tuple(PartSource(str(PurePosixPath(PIECE_MESH_NAME))) for _ in parts)],
     )
     layout.save(directory / LAYOUT_NAME)
-    return box
+    return footprint_box(parts)

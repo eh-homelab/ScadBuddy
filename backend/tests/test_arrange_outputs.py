@@ -415,3 +415,49 @@ async def test_a_negative_part_is_written_for_the_slicer_to_cut(tmp_path: Path) 
     # Arranged again, the output still carries the cut.
     [again] = read_objects(model.read_bytes())
     assert [p.negative for p in again.parts] == [False, True]
+
+
+async def test_no_copy_is_packed_where_a_neighbours_negative_part_reaches(tmp_path: Path) -> None:
+    """An arranged plate is one object to the slicer, which cuts a negative part out of
+    all of it: a cut reaching past its body (x 15 to 35 on a 20 mm body) widens the
+    footprint, so the next copy is packed beyond it, not inside it."""
+    from scadbuddy.render.glb import footprint_box
+
+    deps, _ = _deps(tmp_path)
+    cutter = trimesh.creation.box(extents=(20, 4, 20))
+    cutter.apply_translation((25, 5, 2))
+    body = trimesh.creation.box(extents=(20, 10, 5))
+    body.apply_translation((10, 5, 2.5))
+    read = read_objects(
+        bambu_project(
+            items=[at(0, 0)],
+            parts={1: (body, "normal_part", None), 2: (cutter, "negative_part", 1)},
+        )
+    )
+    box = footprint_box(read[0].parts)
+    assert round(box.size[0], 3) == 35 and round(box.size[2], 3) == 5
+    entry = ManifestObject(
+        part=piece_key("ab" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000"],
+        count=2,
+        library_file_id=91,
+    )
+    await publish_library_pieces(deps.blobs, [entry], read)
+    library = part_of(entry)
+    layout = pack_layout(
+        PackRequest(
+            items=[PackItem(part=library, count=2)],
+            plate=PlateSize(key="default", width=256.0, depth=256.0),
+            allow_own=False,
+        )
+    )
+    [plate] = layout.plates
+    first, second = plate.items
+    apart_x = abs(first.x - second.x) >= 35 and first.rot == second.rot == 0
+    apart_y = abs(first.y - second.y) >= min(box.size[1], box.size[0])
+    assert apart_x or apart_y

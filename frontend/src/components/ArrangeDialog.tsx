@@ -317,6 +317,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       // under its key and would be answered again as it is, so the next press gets a new
       // one; the finished job is kept, since nothing of it was saved.
       if (attempt.current && !mayHaveRun(cause)) attempt.current.key = newRequestId()
+      // A save the server refused (a 4xx: the job pruned, say) cannot save that job again:
+      // the next press arranges anew.
+      if (attempt.current && cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
+        attempt.current.arranged = undefined
+      }
       // A request the server refused as it is (a 4xx) fails the same way again.
       setRetryable(!(cause instanceof ApiError) || cause.status === 0 || cause.status >= 500 || mayHaveRun(cause))
     } finally {

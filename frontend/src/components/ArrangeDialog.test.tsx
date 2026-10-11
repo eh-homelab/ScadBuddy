@@ -532,6 +532,23 @@ describe('ArrangeDialog', () => {
     expect(again![5]).not.toBe(failed![5])
   })
 
+  it('arranges anew after the save of a finished arrange was refused', async () => {
+    vi.spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ type: 'about:blank', title: 'Not Found', status: 404, detail: 'the result of job is gone' }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(arrange).toHaveBeenCalledTimes(1))
+  })
+
   it('saves a changed arrange under a new key', async () => {
     const save = vi
       .spyOn(api, 'createOutput')

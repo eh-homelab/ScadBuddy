@@ -44,7 +44,7 @@ from scadbuddy.bambuddy.print_source import (
     SpoolFullError,
     printable,
 )
-from scadbuddy.render.glb import bounding_box
+from scadbuddy.render.glb import footprint_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import LAYOUT_NAME
 from scadbuddy.render.objects3mf import (
@@ -201,7 +201,9 @@ async def read_library_objects(
         raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):
-        box = bounding_box(obj.parts)
+        # Packed by its negative parts' reach too: the slicer cuts them out of the whole
+        # plate, so no neighbour may sit inside one (`footprint_box`).
+        box = footprint_box(obj.parts)
         objects.append(
             ManifestObject(
                 part=piece_key(digest, index),
