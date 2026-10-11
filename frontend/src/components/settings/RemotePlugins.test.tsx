@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
+import { setRemotePluginProblem } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { RemotePluginsPanel } from './RemotePlugins'
@@ -11,6 +12,20 @@ describe('RemotePluginsPanel', () => {
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
     expect(within(card).getByText('Authorization: …9f3a')).toBeInTheDocument()
     expect(within(card).getByText('Disabled')).toBeInTheDocument()
+  })
+
+  it('says when a stored endpoint is not loaded because Claude Code reserves its name (#2127)', async () => {
+    const problem = 'its name "hindsight" is reserved by Claude Code, which drops the server; delete it and register it again under another name'
+    setRemotePluginProblem('hindsight', problem)
+    renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
+    expect(within(card).getByRole('alert')).toHaveTextContent(`Not loaded: ${problem}`)
+  })
+
+  it('shows no problem for an endpoint that has none', async () => {
+    renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
+    expect(within(card).queryByText(/Not loaded/)).toBeNull()
   })
 
   it('registers an endpoint with a write-only secret', async () => {
