@@ -443,9 +443,12 @@ export class ChatConnection {
           // `select`), so this is always a full replay, even when followed already.
           await this.sessions.get(message.sessionId, this.principal)
           this.follow(message.sessionId, 0)
-          // After the replay starts: asking another replica whether it holds the
-          // session's tab can wait out the relay's ack timeout when none does.
-          if (this.tabs && !(await this.tabs.sessionHasTab(message.sessionId))) this.pairTab(message.sessionId)
+          // Off the frame queue: asking another replica whether it holds the
+          // session's tab can wait out the relay's ack timeout when none does,
+          // and the socket's next frame must not wait for it.
+          void this.pairUnlessHeld(message.sessionId).catch((err: unknown) =>
+            this.log(`chat: pairing ${message.sessionId}: ${err instanceof Error ? err.message : String(err)}`),
+          )
           return
         case 'approval.decision':
           await this.sessions.approvals.decision(this.principal, message, { clientIp: this.clientIp })
@@ -476,6 +479,13 @@ export class ChatConnection {
   /** Pairs `sessionId` with this panel's tab, once the panel has named it. */
   private pairTab(sessionId: string): void {
     if (this.tabId !== undefined) this.tabs?.pairSession(sessionId, this.tabId)
+  }
+
+  /** Pairs this tab with an attached session unless the session's tab is connected to some replica. */
+  private async pairUnlessHeld(sessionId: string): Promise<void> {
+    if (!this.tabs || (await this.tabs.sessionHasTab(sessionId))) return
+    if (this.closed) return // the socket went while the answer came
+    this.pairTab(sessionId)
   }
 
   /**
