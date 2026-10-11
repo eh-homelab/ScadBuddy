@@ -540,14 +540,18 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and the approval audit row (`store.py`, mirroring `eventLog.ts`). `codec.py` is the
   payload codec's Python half (`data_converter`, the same vectors).
 - `models/` — bundled example models (`models/<name>/verify.sh`).
-- `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
-  `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in
+- `deploy/grafana/` — the ScadBuddy Grafana dashboards (#988, tracing spec §7): the
+  overview `scadbuddy.json` (uid `scadbuddy`; never change it) and one `<name>.json` per
+  area (`scadbuddy-api`, `-web`, `-renders`, `-printing`, `-agent`), each with uid
+  `<name>` and its own `configMapGenerator` ConfigMap `<name>-dashboard` in
   `cattle-dashboards` for the rancher-monitoring sidecar, datasources only as the
-  `DS_PROMETHEUS`/`DS_TEMPO` variables. clusters will pull it in as a remote
+  `DS_PROMETHEUS`/`DS_TEMPO` variables. A new dashboard is a new file plus its
+  generator entry. clusters will pull them in as a remote
   resource pinned to a full SHA, once clusters#1596 Phase 5 adds the line, and
   `deploy.reusable.yml` moves that `ref` with the image.
   A query may read only series `core/metrics.py` declares and span names the
-  service emits (`lint-dashboard.sh` checks both).
+  service emits (`lint-dashboard.sh` checks both, in every file); a span named at run
+  time (a server span, `bambuddy.<op>`, Temporal's) is matched by attribute instead.
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
