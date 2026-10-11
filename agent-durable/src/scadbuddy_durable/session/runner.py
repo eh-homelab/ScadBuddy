@@ -19,8 +19,9 @@ from ``ai_session_blobs`` as image blocks (Ruling 5). The plugin's prompt is tex
 A segment that raises (#2243) never hands Temporal the engine's own exception: its text
 can be anything Claude Code printed, and its traceback alone pushed the failure past
 the 4 KiB Temporal keeps of an activity's last failure, which then read only "Failure
-exceeds size limit.". The full text goes to the worker's log; Temporal gets a bounded
-``ApplicationError`` (``bounded_failure``). A failure that running the same segment
+exceeds size limit.". Temporal gets a bounded ``ApplicationError`` (``bounded_failure``),
+sealed by the codec like every failure; the worker's log gets only the error's type and
+size, never its text, which is the session's content. A failure that running the same segment
 again cannot fix (``final_failure``: a request or prompt too large) ends the turn with
 that message instead of retrying.
 
@@ -178,7 +179,7 @@ def bounded(text: str, limit: int = FAILURE_TEXT_BYTES) -> str:
     raw = text.encode()
     if len(raw) <= limit:
         return text
-    note = f" [... {len(raw) - limit} more bytes in the worker's log]"
+    note = f" [... {len(raw) - limit} more bytes]"
     return raw[: limit - len(note.encode())].decode(errors="ignore") + note
 
 
@@ -347,7 +348,14 @@ class ScadBuddyRunner:
         try:
             out = await runner.run(inp, attempt)
         except Exception as err:
-            logger.warning("segment of %s failed (attempt %d)", workflow_id, attempt, exc_info=err)
+            # Never the text: like the codec's sealed failures, it is the session's content.
+            logger.warning(
+                "segment of %s failed (attempt %d): %s, %d bytes of text",
+                workflow_id,
+                attempt,
+                type(err).__name__,
+                len(error_text(err).encode()),
+            )
             if not final_failure(err):
                 raise bounded_failure(err) from None
             # Ends the turn with the reason, as the plugin's own final errors do.
