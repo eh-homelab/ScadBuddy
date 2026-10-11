@@ -18,6 +18,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     import jsonschema
+    import referencing.exceptions
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
@@ -490,6 +491,10 @@ def _answer(text: str, schema: dict[str, Any] | None) -> Any:
         raise ValueError(
             f"the session's answer does not match result_schema: {err.message}"
         ) from None
+    except referencing.exceptions.Unresolvable as err:
+        # A `$ref` it cannot resolve (remote refs are never fetched): `check_schema`
+        # passes it, and only validating reaches the ref (#2278).
+        raise ValueError(f"result_schema has a $ref that cannot be resolved: {err}") from None
     return value
 
 
