@@ -70,6 +70,29 @@ describe('a single call', () => {
     expect(screen.getByTestId('agent-tool-status')).toHaveTextContent('Failed')
   })
 
+  // #2149: a refused or stopped call's result is Claude Code's note to the model.
+  it.each(['not_run', 'stopped'] as const)('shows no result message when the call is %s', (status) => {
+    const note = "The user doesn't want to proceed with this tool use. The tool use was rejected."
+    group([call('t1', { result: { ok: false, summary: note, sources: [] } })], [status])
+    expect(screen.getByTestId('agent-tool')).not.toHaveTextContent('want to proceed')
+  })
+
+  // #2149: the first call stays mounted, Details open, when a second joins its group.
+  it('keeps a call’s open Details when a second call joins it', async () => {
+    const first = call('t1', { title: 'Render cable-clip' })
+    const { user, rerender } = group([first], ['running'])
+    await user.click(screen.getByRole('button', { name: 'Details: Render cable-clip' }))
+    expect(screen.getByTestId('agent-tool-details')).toBeVisible()
+
+    rerender(
+      <MemoryRouter>
+        <ToolGroup calls={[first, call('t2', { title: 'Render lid' })]} statuses={['running', 'running']} sessionId="sess-1" advanced={false} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('agent-tool-group')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Details: Render cable-clip' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
   it.each([
     ['waiting_approval', 'Waiting for approval'],
     ['waiting_input', 'Waiting for you'],

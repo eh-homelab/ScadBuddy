@@ -77,7 +77,14 @@ export type FeedItem =
    * (#815). Its resolve frame, or a later response the route took, drops the error:
    * a POST that landed but whose answer was lost resolves the card anyway (#1359).
    */
-  | { kind: 'error'; id: string; message: string; about?: string }
+  | {
+      kind: 'error'
+      id: string
+      message: string
+      about?: string
+      /** The agent's error code, when it gave one: `interrupted` marks a stopped turn (#2149). */
+      code?: string
+    }
   /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
   | {
       kind: 'memory'
@@ -516,7 +523,15 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         mapItems(s, (i) => (i.kind === 'question' && i.id === id && i.state === 'sent' ? { ...i, state: 'pending' } : i))
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(event.questionId ? reopen(s, event.questionId) : s, { kind: 'error', id: errorId(s), message }),
+          push(event.questionId ? reopen(s, event.questionId) : s, {
+            kind: 'error',
+            id: errorId(s),
+            message,
+            // #2133: an error that refused an answer is about that question, so its
+            // resolution drops it, as a respond route's error is (#1359).
+            ...(event.questionId ? { about: event.questionId } : {}),
+            ...(event.code ? { code: event.code } : {}),
+          }),
         )
       }
       return { ...state, notice: message, awaitingStart: false }

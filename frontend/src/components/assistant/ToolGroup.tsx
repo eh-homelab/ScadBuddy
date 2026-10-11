@@ -121,7 +121,9 @@ export function ToolCallView({
           Details
         </button>
       </div>
-      {result && !result.ok && <p className="mt-1 text-warn">{result.summary}</p>}
+      {/* Only a call that ran and broke: a refused or stopped one's result is Claude Code's
+          note to the model ("The user doesn't want to proceed…"), kept under Details (#2149). */}
+      {result && !result.ok && status === 'failed' && <p className="mt-1 text-warn">{result.summary}</p>}
       {result?.images && result.images.length > 0 && (
         <div className="mt-1.5">
           <ToolImages images={result.images} sessionId={sessionId} title={title} size="full" />
@@ -204,35 +206,43 @@ export function ToolGroup({
       nested={call.parent !== undefined && ids.has(call.parent)}
     />
   ))
-  if (calls.length === 1) return rows[0]!
-  const open = advanced || (toggled ?? isLiveStatus(status))
+  // #2149: one wrapper whatever the count, so a call keeps its place in the tree (and its
+  // open Details) when a second joins its group.
+  const many = calls.length > 1
+  const open = !many || advanced || (toggled ?? isLiveStatus(status))
   const last = calls.at(-1)!
   const images = calls.flatMap((c) => c.result?.images ?? [])
   return (
-    <section className="rounded-[6px] border border-line text-[12.5px]" data-testid="agent-tool-group" aria-label={`${calls.length} steps`}>
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-left hover:bg-surface-2"
-        aria-expanded={open}
-        aria-controls={listId}
-        onClick={() => setToggled(!open)}
-      >
-        <span aria-hidden="true" className="w-3 shrink-0 text-[10px] text-muted">
-          {open ? '▾' : '▸'}
-        </span>
-        <StatusIcon status={status} />
-        <span className="shrink-0 font-medium">{calls.length} steps</span>
-        <span className="min-w-0 flex-1 truncate text-muted">{toolTitle(last)}</span>
-        <span className={`shrink-0 text-[11px] ${STATUS_STYLE[status]}`} data-testid="agent-tool-group-status">
-          {toolStatusLabel(status)}
-        </span>
-      </button>
-      {!open && images.length > 0 && (
+    <section
+      className={many ? 'rounded-[6px] border border-line text-[12.5px]' : undefined}
+      data-testid={many ? 'agent-tool-group' : undefined}
+      aria-label={many ? `${calls.length} steps` : undefined}
+    >
+      {many && (
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-left hover:bg-surface-2"
+          aria-expanded={open}
+          aria-controls={listId}
+          onClick={() => setToggled(!open)}
+        >
+          <span aria-hidden="true" className="w-3 shrink-0 text-[10px] text-muted">
+            {open ? '▾' : '▸'}
+          </span>
+          <StatusIcon status={status} />
+          <span className="shrink-0 font-medium">{calls.length} steps</span>
+          <span className="min-w-0 flex-1 truncate text-muted">{toolTitle(last)}</span>
+          <span className={`shrink-0 text-[11px] ${STATUS_STYLE[status]}`} data-testid="agent-tool-group-status">
+            {toolStatusLabel(status)}
+          </span>
+        </button>
+      )}
+      {many && !open && images.length > 0 && (
         <div className="px-2.5 pb-1.5">
           <ToolImages images={images} sessionId={sessionId} title={toolTitle(last)} size="thumb" />
         </div>
       )}
-      <div id={listId} hidden={!open} className="space-y-1.5 px-1.5 pb-1.5">
+      <div id={listId} hidden={!open} className={many ? 'space-y-1.5 px-1.5 pb-1.5' : undefined}>
         {open && rows}
       </div>
     </section>
