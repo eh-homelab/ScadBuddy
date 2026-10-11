@@ -38,7 +38,12 @@ from pydantic import BaseModel, ValidationError
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.library_view import _HASH, _store, spooled_3mf
 from scadbuddy.bambuddy.models import LibraryFile
-from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printable
+from scadbuddy.bambuddy.print_source import (
+    SLICED_TYPE,
+    LibrarySource,
+    SpoolFullError,
+    printable,
+)
 from scadbuddy.render.glb import bounding_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import LAYOUT_NAME
@@ -190,6 +195,9 @@ async def read_library_objects(
     except UnreadableObjectsError as error:
         # A budget refusal of an STL, or a 3MF that cannot be read.
         await _keep(path, _Kept(refused=str(error), budget=spend))
+        raise NotArrangeableError(file_id, file.filename, str(error)) from None
+    except SpoolFullError as error:
+        # The volume's, not the file's: never kept, so the next try reads it again.
         raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):

@@ -30,7 +30,7 @@ def _hashed(file_id: int, tmp_path: Path) -> None:
 
 
 @respx.mock
-def test_a_request_can_lower_and_raise_the_setting(client: TestClient, tmp_path: Path) -> None:
+def test_a_request_can_lower_the_setting(client: TestClient, tmp_path: Path) -> None:
     configure(client)
     _hashed(88, tmp_path)
     lowered = client.get(f"/api/v1/print/library/88/objects?max_triangles={TRIANGLES - 1}")
@@ -53,8 +53,13 @@ def test_the_setting_is_the_default_and_a_request_overrides_it(
     assert saved.json()["applies"]["read_max_triangles"] == "live"
     refused = client.get("/api/v1/print/library/88/objects")
     assert refused.status_code == 422 and "SCADBUDDY_READ_MAX_TRIANGLES" in refused.text
-    raised = client.get(f"/api/v1/print/library/88/objects?max_triangles={TRIANGLES}")
-    assert raised.status_code == 200, raised.text
+    # The operator's limit binds every request: one may not raise it, nor lift it with 0.
+    for override in (TRIANGLES, 0):
+        raised = client.get(f"/api/v1/print/library/88/objects?max_triangles={override}")
+        assert raised.status_code == 422, (override, raised.text)
+    # With no limit set, a request may read with none or with any limit of its own.
+    assert client.put("/api/v1/settings", json={"read_max_triangles": 0}).status_code == 200
+    assert client.get("/api/v1/print/library/88/objects").status_code == 200
 
 
 def test_no_setting_goes_past_its_ceiling(client: TestClient) -> None:
@@ -72,15 +77,6 @@ def test_triangles_have_no_ceiling_and_0_is_no_limit(client: TestClient) -> None
         saved = client.put("/api/v1/settings", json={"read_max_triangles": value})
         assert saved.status_code == 200, saved.text
         assert saved.json()["read_max_triangles"] == value
-
-
-@respx.mock
-def test_no_triangle_limit_reads_the_file(client: TestClient, tmp_path: Path) -> None:
-    configure(client)
-    _hashed(88, tmp_path)
-    assert client.put("/api/v1/settings", json={"read_max_triangles": 1}).status_code == 200
-    assert client.get("/api/v1/print/library/88/objects").status_code == 422
-    assert client.get("/api/v1/print/library/88/objects?max_triangles=0").status_code == 200
 
 
 @respx.mock

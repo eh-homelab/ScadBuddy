@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, ApiError, newRequestId } from '../api/client'
+import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type { ArrangeRequest, LibraryEntry, LibraryFileObjects, ModelSummary, Output } from '../api/types'
 import {
   backfillFailures,
@@ -15,6 +15,7 @@ import {
   type ArrangeGoal,
   type ArrangeSource,
   type Arranged,
+  type ArrangedJob,
 } from '../lib/arrange'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
@@ -136,7 +137,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
    * keeps the key, so a save that did start is followed rather than made twice; any
    * change to the arrange is a new press with a new key.
    */
-  const attempt = useRef<{ key: string; body: string } | null>(null)
+  const attempt = useRef<{ key: string; body: string; arranged?: ArrangedJob } | null>(null)
+  /** Whether the last failure is worth trying again as it is (not a refusal of the request). */
+  const [retryable, setRetryable] = useState(false)
 
   const countOf = (key: string, fallback: number) => counts[key] ?? fallback
 
@@ -287,10 +290,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       }
       const signature = JSON.stringify(body)
       if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
+      const current = attempt.current
       const arranged = await runArrange(slug, body, {
         onProgress: setProgress,
         signal: controller.signal,
-        saveKey: attempt.current.key,
+        saveKey: current.key,
+        arranged: current.arranged,
+        onArranged: (job) => (current.arranged = job),
       })
       attempt.current = null
       // Closed while the output was being saved: it is saved, a normal output in
@@ -306,6 +312,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         return
       }
       setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      // A request the server refused as it is (a 4xx) fails the same way again.
+      setRetryable(!(cause instanceof ApiError) || cause.status === 0 || cause.status >= 500 || mayHaveRun(cause))
     } finally {
       if (running.current === controller) running.current = null
       setBusy(false)
@@ -449,7 +457,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             {[failures, error].filter(Boolean).join(' ')}
           </p>
         )}
-        {error && !busy && (
+        {error && retryable && !busy && (
           <Button size="sm" className="self-start" onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}>
             Try again
           </Button>

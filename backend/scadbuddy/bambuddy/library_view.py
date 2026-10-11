@@ -23,9 +23,10 @@ import asyncio
 import contextlib
 import os
 import re
+import shutil
 import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -33,7 +34,7 @@ from pydantic import ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import LibraryFile
-from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printable
+from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, SpoolFullError, printable
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_geometry
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.objects3mf import PlateRead, UnreadableObjectsError, read_plate_parts
@@ -59,6 +60,16 @@ class NotViewableError(Exception):
 
 #: Where a library file is spooled while it is read, under the data volume's cache.
 SPOOL_DIRNAME = "library-spool"
+#: What a spooled download leaves free on its volume: a file of any size is read, but
+#: never by filling the volume that holds the models, outputs and their history.
+SPOOL_RESERVE_BYTES = 1024**3
+
+
+def _room(spool: Path) -> Callable[[], bool]:
+    def check() -> bool:
+        return shutil.disk_usage(spool).free > SPOOL_RESERVE_BYTES
+
+    return check
 
 
 @contextlib.asynccontextmanager
@@ -69,11 +80,12 @@ async def spooled_3mf(
     its start; ``None`` for an STL that holds no mesh. A library file of any size can be
     read this way: what the read may cost is ``budget``'s to say, not the file's size
     (an STL past it is :class:`~scadbuddy.render.objects3mf.OverBudgetError` before it
-    is wrapped)."""
+    is wrapped). It stops as :class:`SpoolFullError` before the volume's last
+    :data:`SPOOL_RESERVE_BYTES`."""
     spool = cache / SPOOL_DIRNAME
     await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)
     with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
-        if not await source.write_3mf(client, out, budget):
+        if not await source.write_3mf(client, out, budget, _room(spool)):
             yield None
             return
         await asyncio.to_thread(out.seek, 0)
@@ -104,6 +116,8 @@ async def _read(
                 raise NotViewableError(file, "it holds no mesh ScadBuddy can read")
             return await asyncio.to_thread(read_plate_parts, payload, plate, budget)
     except UnreadableObjectsError as error:
+        raise NotViewableError(file, str(error)) from None
+    except SpoolFullError as error:
         raise NotViewableError(file, str(error)) from None
 
 

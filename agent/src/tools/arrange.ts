@@ -83,7 +83,11 @@ export const arrangeTools: Tool[] = [
         .object({
           max_objects: z.number().int().min(1).max(2000),
           max_visits: z.number().int().min(1).max(200_000),
-          max_triangles: z.number().int().min(0).describe('0 is no limit'),
+          max_triangles: z
+            .number()
+            .int()
+            .min(0)
+            .describe('Only lowers the Settings limit; 0 (no limit) applies only where Settings has none'),
           max_paint_digits: z.number().int().min(1).max(50_000_000),
         })
         .partial()

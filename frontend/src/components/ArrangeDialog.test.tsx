@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
 import { fromFiles, fromOutputs } from '../lib/arrange'
 import * as fixtures from '../mocks/fixtures'
@@ -475,12 +475,28 @@ describe('ArrangeDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('its server log says why')
     expect(screen.queryByText(/Temporal/)).toBeNull()
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
     await user.click(screen.getByRole('button', { name: 'Try again' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalled())
-    const keys = save.mock.calls.map((call) => call[5])
-    expect(keys).toHaveLength(2)
-    expect(keys[0]).toBeTruthy()
-    expect(keys[1]).toBe(keys[0])
+    // Only the save is tried again: the same job, under the same key.
+    expect(arrange).not.toHaveBeenCalled()
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(failed![5]).toBeTruthy()
+    expect(again![5]).toBe(failed![5])
+  })
+
+  it('offers no Try again for a request the server refused as it is', async () => {
+    vi.spyOn(api, 'createOutput').mockRejectedValueOnce(
+      new ApiError({ type: 'about:blank', title: 'Unprocessable', status: 422, detail: 'no such template' }),
+    )
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no such template')
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
   })
 
   it('saves a changed arrange under a new key', async () => {

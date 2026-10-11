@@ -69,21 +69,40 @@ export async function runArrange(
     signal?: AbortSignal
     /** The save's key: a "Try again" passes the failed attempt's, so it saves one output. */
     saveKey?: string
+    /**
+     * A job this arrange already finished: a "Try again" after only its save failed
+     * saves that job again, under the same key, rather than arranging anew (a new job
+     * is a new save, which the key could not tell from the first).
+     */
+    arranged?: ArrangedJob
+    /** Called once the arrange's job is done, before it is saved. */
+    onArranged?: (job: ArrangedJob) => void
   } = {},
 ): Promise<Arranged> {
   const { signal } = opts
-  const started = await api.arrangeOutputs(body)
-  signal?.throwIfAborted()
-  const job = await waitForJob(started.id, {
-    pollMs: opts.pollMs ?? 1000,
-    signal,
-    onJob: (read) => opts.onProgress?.(read.status === 'running' ? 'Arranging…' : 'Waiting for a worker…'),
-  })
-  if (job.status === 'failed' || job.status === 'cancelled') {
-    throw new Error(job.error ?? `The arrange was ${job.status}.`)
+  let done = opts.arranged
+  if (!done) {
+    const started = await api.arrangeOutputs(body)
+    signal?.throwIfAborted()
+    const job = await waitForJob(started.id, {
+      pollMs: opts.pollMs ?? 1000,
+      signal,
+      onJob: (read) => opts.onProgress?.(read.status === 'running' ? 'Arranging…' : 'Waiting for a worker…'),
+    })
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      throw new Error(job.error ?? `The arrange was ${job.status}.`)
+    }
+    done = { jobId: job.id, plates: Math.max(1, (job.plates ?? []).length) }
+    opts.onArranged?.(done)
   }
-  const output = await api.createOutput(slug, job.id, body.name ?? undefined, undefined, undefined, opts.saveKey)
-  return { output, plates: Math.max(1, (job.plates ?? []).length) }
+  const output = await api.createOutput(slug, done.jobId, body.name ?? undefined, undefined, undefined, opts.saveKey)
+  return { output, plates: done.plates }
+}
+
+/** An arrange's finished job, as its save needs it. */
+export interface ArrangedJob {
+  jobId: string
+  plates: number
 }
 
 /** An output as a caller may know it: its id, and its name when it has one. */

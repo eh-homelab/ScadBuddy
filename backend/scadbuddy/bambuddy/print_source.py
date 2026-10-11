@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import BinaryIO, Protocol
@@ -491,6 +491,17 @@ UNKNOWN_COLOUR = ""
 MAX_DOWNLOAD_BYTES = MAX_UNCOMPRESSED_BYTES
 
 
+class SpoolFullError(Exception):
+    """A library file's download stopped: the volume it is spooled to is nearly full.
+    Not the file's fault, so never kept as its refusal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "ScadBuddy's cache volume has too little free space to download it; free some"
+            " space, or give the volume more, and try again"
+        )
+
+
 def printable(file_type: str | None) -> bool:
     return (file_type or "").lower() in PRINTABLE_TYPES
 
@@ -612,15 +623,25 @@ class LibrarySource(PrintPipeline):
             )
             return None
 
-    async def write_3mf(self, client: BambuddyClient, out: BinaryIO, budget: ReadBudget) -> bool:
+    async def write_3mf(
+        self,
+        client: BambuddyClient,
+        out: BinaryIO,
+        budget: ReadBudget,
+        room: Callable[[], bool] = lambda: True,
+    ) -> bool:
         """Write the 3MF :meth:`fetch_3mf` would answer into ``out``, whatever its size:
         what Arrange and a library file's preview read, which spend ``budget`` rather
         than refuse a file for being large, so only a chunk at a time is held here. An
         STL is wrapped only within ``budget`` (:func:`check_stl`, raising
-        :class:`OverBudgetError`), since wrapping loads it whole. ``False`` for an STL
-        that holds no mesh."""
+        :class:`OverBudgetError`), since wrapping loads it whole: the STL and its 3MF are
+        then both in memory, a peak ``budget`` bounds. The download stops, as
+        :class:`SpoolFullError`, once ``room`` says the volume ``out`` is on is too full
+        to go on. ``False`` for an STL that holds no mesh."""
         async with aclosing(client.download_library_file(self.file_id)) as chunks:
             async for chunk in chunks:
+                if not await asyncio.to_thread(room):
+                    raise SpoolFullError
                 await asyncio.to_thread(out.write, chunk)
         logger.info(
             "spooled a library file",

@@ -30,12 +30,22 @@ def test_the_settings_are_the_budget() -> None:
     assert budget_of(_settings(read_max_triangles=7)).max_triangles == 7
 
 
+def test_a_request_may_only_lower_the_operators_triangle_limit() -> None:
+    limited = _settings(read_max_triangles=100)
+    assert budget_of(limited, ReadBudgetOverride(max_triangles=50)).max_triangles == 50
+    assert budget_of(limited, ReadBudgetOverride(max_triangles=500)).max_triangles == 100
+    assert budget_of(limited, ReadBudgetOverride(max_triangles=0)).max_triangles == 100
+    unlimited = _settings(read_max_triangles=0)
+    assert budget_of(unlimited, ReadBudgetOverride(max_triangles=500)).max_triangles == 500
+    assert budget_of(unlimited, ReadBudgetOverride(max_triangles=0)).max_triangles == 0
+
+
 def test_an_override_replaces_only_what_it_names() -> None:
     budget = budget_of(
         _settings(read_max_triangles=7, read_max_visits=9),
-        ReadBudgetOverride(max_triangles=11),
+        ReadBudgetOverride(max_triangles=5, max_visits=None),
     )
-    assert (budget.max_triangles, budget.max_visits) == (11, 9)
+    assert (budget.max_triangles, budget.max_visits) == (5, 9)
     assert budget.max_objects == ReadBudget().max_objects
 
 

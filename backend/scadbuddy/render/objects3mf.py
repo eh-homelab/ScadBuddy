@@ -712,7 +712,12 @@ def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_A
                     )
                 return read(archive)
             except OverBudgetError as error:
-                size = len(payload) if isinstance(payload, bytes) else payload.seek(0, io.SEEK_END)
+                if isinstance(payload, bytes):
+                    size = len(payload)
+                else:
+                    at = payload.tell()
+                    size = payload.seek(0, io.SEEK_END)
+                    payload.seek(at)
                 raise OverBudgetError(
                     f"{error} (the file is {_megabytes(size)}; its model files"
                     f" {_megabytes(models)} once inflated)"

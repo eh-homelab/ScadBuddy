@@ -261,3 +261,22 @@ async def test_a_library_stl_past_the_triangle_budget_is_refused_before_it_is_lo
     assert "is an STL of 12 triangles" in refused.value.reason
     assert "max_triangles read budget" in refused.value.reason
     assert f"(the file is {len(stl):,} bytes)" in refused.value.reason
+
+
+@respx.mock
+async def test_a_download_stops_before_it_fills_the_cache_volume(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file of any size is read, but never by filling the volume the models live on;
+    that refusal is the volume's, so it is not kept and the next try reads again."""
+    from scadbuddy.bambuddy import library_view
+
+    payload = _project(tmp_path)
+    download = library_file(92, payload)
+    monkeypatch.setattr(library_view, "SPOOL_RESERVE_BYTES", 2**62)
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    with pytest.raises(NotArrangeableError, match="too little free space"):
+        await read_library_objects(bambuddy, 92, blobs=blobs, cache=cache)
+    monkeypatch.undo()
+    [obj] = (await read_library_objects(bambuddy, 92, blobs=blobs, cache=cache)).objects
+    assert obj.library_file_id == 92 and download.call_count == 2

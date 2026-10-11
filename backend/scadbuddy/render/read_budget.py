@@ -121,13 +121,17 @@ class ReadBudget(BaseModel):
         """Why a read past ``budget`` was refused, and how to raise it: ``past`` says what
         the file was found to hold, when not the budget's own (:data:`PAST`)."""
         found = past if past is not None else PAST[budget].format(getattr(self, budget))
-        ceiling = CEILINGS[budget]
-        bound = "0 is no limit" if ceiling is None else f"at most {ceiling:,}"
+        if CEILINGS[budget] is None:
+            # The operator's limit: a request may lower it but never raise it.
+            return (
+                f"the 3MF {found}, past the {budget} read budget; raise it under Settings"
+                f" → Projects & files ({env_name(budget)}, 0 is no limit)"
+            )
         return (
             f"the 3MF {found}, past the {budget} read"
-            f" budget; raise it under Settings → Projects & files ({env_name(budget)},"
-            f" {bound}) or for one request (its read_budget.{budget}, or ?{budget}= on a"
-            " GET)"
+            f" budget; raise it under Settings → Projects & files ({env_name(budget)}, at"
+            f" most {CEILINGS[budget]:,}) or for one request (its read_budget.{budget},"
+            f" or ?{budget}= on a GET)"
         )
 
 
@@ -139,13 +143,23 @@ class ReadBudgetOverride(BaseModel):
 
     max_objects: int | None = Field(default=None, gt=0, le=READ_MAX_OBJECTS_CEILING)
     max_visits: int | None = Field(default=None, gt=0, le=READ_MAX_VISITS_CEILING)
-    #: 0 is no limit, for this request.
+    #: 0 is no limit, for this request: honoured only where the setting is no limit too
+    #: (:meth:`over`).
     max_triangles: int | None = Field(default=None, ge=0)
     max_paint_digits: int | None = Field(default=None, gt=0, le=READ_MAX_PAINT_DIGITS_CEILING)
 
     def over(self, base: ReadBudget) -> ReadBudget:
-        """``base`` with every budget this override sets in its place."""
-        return base.model_copy(update=self.model_dump(exclude_none=True))
+        """``base`` with every budget this override sets in its place. A budget with no
+        ceiling (triangles) is the operator's to bound: where the setting is a limit, a
+        request may only lower it, never raise it or remove it (0); where the setting is
+        no limit, a request may set any."""
+        update = self.model_dump(exclude_none=True)
+        for name, ceiling in CEILINGS.items():
+            limit = base.limit(name)
+            if name in update and ceiling is None and limit is not None:
+                value = update[name]
+                update[name] = limit if value == NO_LIMIT else min(value, limit)
+        return base.model_copy(update=update)
 
 
 def env_name(budget: Budget) -> str:
