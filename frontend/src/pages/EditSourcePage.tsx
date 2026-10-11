@@ -201,8 +201,9 @@ export function EditSourcePage() {
       fields={
         <>
         {theirs !== null && (
-          <div data-testid="changed-elsewhere" role="status">
-            <div className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]">
+          <div data-testid="changed-elsewhere">
+            {/* Only the banner row is live: the diff below it would be re-announced on every keystroke (#2194). */}
+            <div role="status" className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]">
               <span>
                 This source was changed elsewhere since you opened it. Load that version (your
                 edits here are discarded), or keep editing and save over it.
