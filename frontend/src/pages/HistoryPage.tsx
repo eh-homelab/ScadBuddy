@@ -334,9 +334,17 @@ function OutputLibraries({
       {libraries.map((library, index) => {
         const change = pinChange(library, pinned)
         return (
+          // #2109: real text separators, so the line does not read (or copy) as one run-together
+          // token; the comma is for the text only, the margin spaces the line on screen.
           <span key={library.name} className={index > 0 ? 'ml-3' : undefined}>
+            {index > 0 && <span className="sr-only">, </span>}
             {libraryLabel(library)}
-            {change && <span className="ml-1 text-warn">({change})</span>}
+            {change && (
+              <>
+                {' '}
+                <span className="text-warn">({change})</span>
+              </>
+            )}
           </span>
         )
       })}
