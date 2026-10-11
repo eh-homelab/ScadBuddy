@@ -541,32 +541,56 @@ async function runJudgedByResult(
 
 const TIMED_OUT = Symbol('timed out')
 
+/** How long a stopped call's handler has to answer before the Stop is answered for it (#2099). */
+const STOP_GRACE_MS = 1_000
+
 /**
  * `run`'s result, or `TIMED_OUT` once `ms` passes, when the signal it was given
- * is aborted. The deadline answers whether or not the handler heeds that
- * signal; one that does not is left to finish unobserved.
+ * is aborted, or an `AbortError` shortly after `outer` is (a user Stop). Both
+ * answer whether or not the handler heeds that signal; one that does not is
+ * left to finish unobserved.
  */
 async function withDeadline<T>(
   ms: number,
   outer: AbortSignal,
   run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T | typeof TIMED_OUT> {
-  if (!Number.isFinite(ms)) return run(outer)
   const timer = new AbortController()
   let handle: ReturnType<typeof setTimeout> | undefined
-  const expired = new Promise<typeof TIMED_OUT>((resolve) => {
-    handle = setTimeout(() => {
-      // Settled before the abort, so the handler's own AbortError cannot win the race.
-      resolve(TIMED_OUT)
-      timer.abort()
-    }, ms)
-  })
+  const racers: Promise<T | typeof TIMED_OUT>[] = []
+  if (Number.isFinite(ms)) {
+    racers.push(
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        handle = setTimeout(() => {
+          // Settled before the abort, so the handler's own AbortError cannot win the race.
+          resolve(TIMED_OUT)
+          timer.abort()
+        }, ms)
+      }),
+    )
+  }
+  // A Stop is answered for the handler only once it has had STOP_GRACE_MS to answer
+  // itself: one that heeds the signal can say what it had already done (a submitted
+  // render's job id), and that is worth more to the model than a bare cancel.
+  let grace: ReturnType<typeof setTimeout> | undefined
+  let stop = () => {}
+  racers.push(
+    new Promise<never>((_, reject) => {
+      stop = () => {
+        grace = setTimeout(() => reject(new DOMException('the call was cancelled', 'AbortError')), STOP_GRACE_MS)
+      }
+      if (outer.aborted) stop()
+      else outer.addEventListener('abort', stop, { once: true })
+    }),
+  )
   const running = run(AbortSignal.any([outer, timer.signal]))
   running.catch(() => {})
   try {
-    return await Promise.race([running, expired])
+    return await Promise.race([running, ...racers])
   } finally {
     clearTimeout(handle)
+    clearTimeout(grace)
+    outer.removeEventListener('abort', stop)
   }
 }
 
