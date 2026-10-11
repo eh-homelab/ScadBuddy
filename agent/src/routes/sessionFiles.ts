@@ -188,8 +188,10 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
     )
   }
 
-  /** The upload's body cap: the per-file cap and the multipart around it, read at each request. */
+  /** The upload's body cap: the per-file cap and the multipart around it, read at each request, after the guard. */
   const uploadLimit: MiddlewareHandler = async (c, next) => {
+    const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'session file changes')
+    if (problem) return c.json({ detail: problem }, 403)
     const got = await stores()
     if (typeof got === 'string') return c.json({ detail: got }, 503)
     const { fileMaxBytes } = await got.files.limits()
@@ -292,8 +294,13 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
         return c.json({ detail: 'expected_sha256: a lowercase hex sha256' }, 400)
       }
       const name = workspacePath(filePathOf(c) ?? '')
-      if (!(await files.delete(ws, name, expected === undefined ? {} : { expectedSha256: expected }))) {
-        throw new WorkspaceError('not_found', `no file ${name} in this session's workspace`)
+      try {
+        if (!(await files.delete(ws, name, expected === undefined ? {} : { expectedSha256: expected }))) {
+          throw new WorkspaceError('not_found', `no file ${name} in this session's workspace`)
+        }
+      } catch (err) {
+        if (err instanceof WorkspaceError) await audited(c, 'workspace_delete', sessionId, 'refused', `${name}: ${err.code}`)
+        throw err
       }
       await audited(c, 'workspace_delete', sessionId, 'ok', name)
       await sessions.events.append(sessionId, [

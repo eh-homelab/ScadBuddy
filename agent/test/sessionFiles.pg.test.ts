@@ -117,7 +117,11 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     ])
     await expectPanelAccepts(events)
     expect(await rows('workspace_upload')).toEqual([expect.objectContaining({ outcome: 'ok', session_id: id })])
-    expect(await rows('workspace_delete')).toEqual([expect.objectContaining({ outcome: 'ok', session_id: id })])
+    // The second delete found nothing: refused, and audited as such.
+    expect((await rows('workspace_delete')).map((r) => [r.outcome, r.session_id]).sort()).toEqual([
+      ['ok', id],
+      ['refused', id],
+    ])
   })
 
   it('never serves HTML or SVG as itself, and sniffs nothing', async () => {
@@ -156,6 +160,8 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     // A stale sha on delete is a conflict too.
     expect((await remove(id, 'a.txt', `?expected_sha256=${sha('one')}`)).status).toBe(409)
     expect((await remove(id, 'a.txt', `?expected_sha256=${sha('two')}`)).status).toBe(204)
+    expect((await remove(id, 'a.txt')).status).toBe(404)
+    expect((await rows('workspace_delete')).map((r) => r.outcome).sort()).toEqual(['ok', 'refused', 'refused'])
   })
 
   it('applies the caps: 413 past the file cap or the workspace cap', async () => {
@@ -230,6 +236,8 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     expect((await download(id, 'a.txt', { ...UI_READ, origin: 'https://evil.example' })).status).toBe(403)
     expect((await upload(id, 'a.txt', 'x', {}, { ...UI, origin: 'https://evil.example' })).status).toBe(403)
     expect((await upload(id, 'a.txt', 'x', {}, { host: UI.host, 'x-forwarded-proto': 'https' })).status).toBe(403)
+    // A cross-origin body past the cap is refused as cross-origin, before the cap.
+    expect((await upload(id, 'huge.bin', new Uint8Array(200_000), {}, { ...UI, origin: 'https://evil.example' })).status).toBe(403)
     expect((await remove(id, 'a.txt', '', { ...UI, origin: 'https://evil.example' })).status).toBe(403)
     expect(((await (await list(id)).json()) as { files: unknown[] }).files).toEqual([])
   })
