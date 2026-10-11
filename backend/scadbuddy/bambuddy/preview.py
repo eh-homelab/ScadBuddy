@@ -22,6 +22,7 @@ import logging
 import re
 import zipfile
 from contextlib import aclosing
+from datetime import timedelta
 from typing import Literal
 
 from fastapi import status
@@ -143,48 +144,54 @@ async def _still_sliced(
 ) -> SliceJob | None:
     """Bambuddy's job for ``row`` while it is still that slice, and once completed, its
     sliced file still the one it made; else ``None``, and a row that no longer
-    describes its job is dropped."""
+    describes its job is retired, for :func:`sweep_preview_slices`."""
     try:
         job = await client.slice_job(row.job_id)
     except ApiError:
         # Expired or gone with a restart: nothing to reuse or read.
-        await uploads.drop_preview(row.id or 0)
+        await uploads.retire_preview(row.id or 0)
         return None
     if not _same_job(job, row):
-        await uploads.drop_preview(row.id or 0)
+        await uploads.retire_preview(row.id or 0)
         return None
     if job.status != "completed":
         return job
     sliced = job.result.library_file_id if job.result else None
     if sliced is None or (row.sliced_file_id is not None and sliced != row.sliced_file_id):
-        await uploads.drop_preview(row.id or 0)
+        await uploads.retire_preview(row.id or 0)
         return None
     try:
         made = await client.library_file(sliced)
     except ApiError:
         # The sliced file was deleted.
-        await uploads.drop_preview(row.id or 0)
+        await uploads.retire_preview(row.id or 0)
         return None
     name = job.result.name if job.result else None
     if name is not None and made.filename != name:
         # Another file under the id of the one the job made.
-        await uploads.drop_preview(row.id or 0)
+        await uploads.retire_preview(row.id or 0)
         return None
     if row.sliced_file_id is None and row.id is not None:
         await uploads.preview_sliced(row.id, sliced, name)
     return job
 
 
-def reusable_slice(client: BambuddyClient, uploads: BambuddyUploadStore) -> ReuseSlice:
+def reusable_slice(
+    client: BambuddyClient, uploads: BambuddyUploadStore, *, printing: bool = False
+) -> ReuseSlice:
     """A finished background slice of this copy with these presets that Bambuddy's
     job still describes and whose sliced file it still has, newest first; ``None``
-    when there is none (#2169), and the run slices again."""
+    when there is none (#2169), and the run slices again. ``printing``: a run queues
+    it, so it is marked printed, and the sweep never removes its sliced file."""
 
     async def find(library_file_id: int, preset_key: str) -> int | None:
         for row in await uploads.previews_for(library_file_id, preset_key):
             job = await _still_sliced(client, uploads, row)
-            if job is not None and job.status == "completed":
-                return row.job_id
+            if job is None or job.status != "completed":
+                continue
+            if printing and not await uploads.claim_preview(row.id or 0):
+                continue
+            return row.job_id
         return None
 
     return find
@@ -244,3 +251,45 @@ async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) 
         return None
     loads = [int(match) for match in _LOAD.findall(gcode) if int(match) != 255]
     return max(len(loads) - 1, 0)
+
+
+#: How long a background slice no run queued is kept: a dialog left open that long
+#: slices again when its print starts.
+PREVIEW_GRACE = timedelta(hours=6)
+
+
+async def sweep_preview_slices(
+    client: BambuddyClient, uploads: BambuddyUploadStore, *, grace: timedelta = PREVIEW_GRACE
+) -> int:
+    """Remove from Bambuddy's library the sliced files of background slices no run
+    queued, once retired or past ``grace``, with their rows; a printed one's row only
+    (its file is the print's). A file is removed only while it still carries the name
+    its job gave it, so nothing else under a reused id goes. How many were removed."""
+    removed = 0
+    for row in await uploads.previews_to_sweep(grace):
+        if row.id is None:
+            continue
+        if row.printed:
+            await uploads.forget_preview(row.id)
+            continue
+        if not await uploads.take_preview(row.id):
+            continue  # a run claimed it meanwhile
+        sliced, name = row.sliced_file_id, row.sliced_name
+        if sliced is None and not row.retired:
+            try:
+                job = await client.slice_job(row.job_id)
+            except ApiError:
+                continue
+            if _same_job(job, row) and job.status == "completed" and job.result is not None:
+                sliced, name = job.result.library_file_id, job.result.name
+        if sliced is None or name is None:
+            continue
+        try:
+            made = await client.library_file(sliced)
+        except ApiError:
+            continue
+        if made.filename != name:
+            continue
+        await client.delete_library_file(sliced)
+        removed += 1
+    return removed

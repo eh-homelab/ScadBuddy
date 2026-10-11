@@ -6,6 +6,8 @@
 -- restarts, so a job id alone does not name a slice: each row keeps what Bambuddy said
 -- about the job when it started (its source file and creation time) and what it sliced
 -- to, and a job that no longer says the same is never reused (preview.py).
+-- A slice no run queued is removed from Bambuddy's library by the housekeeping
+-- sweep `housekeeping_sweep_preview_slices`, with its row.
 CREATE TABLE IF NOT EXISTS print_preview_slices (
     id bigserial PRIMARY KEY,
     job_id integer NOT NULL,
@@ -19,6 +21,10 @@ CREATE TABLE IF NOT EXISTS print_preview_slices (
     -- The sliced file, once the job was seen completed.
     sliced_file_id integer,
     sliced_name text,
+    -- A run queued this slice: its sliced file is the print's now, never removed here.
+    printed boolean NOT NULL DEFAULT false,
+    -- The job no longer says what it did: never reused or read, only swept.
+    retired boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 

@@ -240,7 +240,7 @@ class PrintActivities:
                     plan=input.plan,
                     plate_id=input.plate_id,
                     # The dialog's background slice of the same, when there is one (#2169).
-                    reuse=reusable_slice(client, self.d.uploads),
+                    reuse=reusable_slice(client, self.d.uploads, printing=True),
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None

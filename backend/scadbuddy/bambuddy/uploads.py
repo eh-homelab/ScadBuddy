@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from psycopg import AsyncConnection, Connection
@@ -83,6 +83,10 @@ class PreviewSlice(BaseModel):
     #: The sliced file, once the job was seen completed.
     sliced_file_id: int | None = None
     sliced_name: str | None = None
+    #: A run queued it: the sliced file is the print's.
+    printed: bool = False
+    #: Its job no longer says what it did: kept only for the sweep.
+    retired: bool = False
 
 
 class ProjectTarget(BaseModel):
@@ -193,13 +197,32 @@ class BambuddyUploadStore:
         """What a background slice sliced to, once seen completed."""
         await asyncio.to_thread(self._preview_sliced, row_id, sliced_file_id, name)
 
-    async def drop_preview(self, row_id: int) -> None:
-        """Forget a background slice whose job no longer says what it did."""
-        await asyncio.to_thread(self._drop_preview, row_id)
+    async def retire_preview(self, row_id: int) -> None:
+        """A background slice whose job no longer says what it did: never reused or
+        read again, and left to :meth:`previews_to_sweep`."""
+        await asyncio.to_thread(self._retire_preview, row_id)
+
+    async def claim_preview(self, row_id: int) -> bool:
+        """Mark a background slice as queued by a run, so the sweep leaves its sliced
+        file alone; ``False`` when the sweep took it first."""
+        return await asyncio.to_thread(self._claim_preview, row_id)
+
+    async def previews_to_sweep(self, older_than: timedelta) -> list[PreviewSlice]:
+        """The retired background slices, and every one older than ``older_than``."""
+        return await asyncio.to_thread(self._previews_to_sweep, older_than)
+
+    async def take_preview(self, row_id: int) -> bool:
+        """Delete an unprinted background slice's row: ``True`` when this call did, and
+        its sliced file is then the caller's to remove."""
+        return await asyncio.to_thread(self._take_preview, row_id)
+
+    async def forget_preview(self, row_id: int) -> None:
+        """Delete a background slice's row, printed or not."""
+        await asyncio.to_thread(self._forget_preview, row_id)
 
     _PREVIEW_COLUMNS = (
         "id, job_id, subject, library_file_id, preset_key, plate_id, job_created,"
-        " sliced_file_id, sliced_name"
+        " sliced_file_id, sliced_name, printed, retired"
     )
 
     def _record_preview(self, preview: PreviewSlice) -> None:
@@ -221,7 +244,8 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {self._PREVIEW_COLUMNS} FROM print_preview_slices"
-                " WHERE job_id = %s AND subject = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                " WHERE job_id = %s AND subject = %s AND NOT retired"
+                " ORDER BY created_at DESC, id DESC LIMIT 1",
                 (job_id, subject),
             ).fetchone()
         return PreviewSlice.model_validate(row) if row else None
@@ -230,7 +254,7 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {self._PREVIEW_COLUMNS} FROM print_preview_slices"
-                " WHERE library_file_id = %s AND preset_key = %s"
+                " WHERE library_file_id = %s AND preset_key = %s AND NOT retired"
                 " ORDER BY created_at DESC, id DESC",
                 (library_file_id, preset_key),
             ).fetchall()
@@ -244,7 +268,37 @@ class BambuddyUploadStore:
                 (sliced_file_id, name, row_id),
             )
 
-    def _drop_preview(self, row_id: int) -> None:
+    def _retire_preview(self, row_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("UPDATE print_preview_slices SET retired = true WHERE id = %s", (row_id,))
+
+    def _claim_preview(self, row_id: int) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE print_preview_slices SET printed = true"
+                " WHERE id = %s AND NOT retired RETURNING id",
+                (row_id,),
+            ).fetchone()
+        return row is not None
+
+    def _previews_to_sweep(self, older_than: timedelta) -> list[PreviewSlice]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {self._PREVIEW_COLUMNS} FROM print_preview_slices"
+                " WHERE retired OR created_at < now() - %s ORDER BY id",
+                (older_than,),
+            ).fetchall()
+        return [PreviewSlice.model_validate(row) for row in rows]
+
+    def _take_preview(self, row_id: int) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "DELETE FROM print_preview_slices WHERE id = %s AND NOT printed RETURNING id",
+                (row_id,),
+            ).fetchone()
+        return row is not None
+
+    def _forget_preview(self, row_id: int) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM print_preview_slices WHERE id = %s", (row_id,))
 

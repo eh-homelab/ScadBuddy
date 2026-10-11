@@ -7,19 +7,24 @@ through Bambuddy's ``POST /inventory/assignments`` on the person's own "yes".
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
+from datetime import timedelta
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.preview import PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
 from tests.api.test_send import BASE, configure, upload_route
+from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 
@@ -189,7 +194,7 @@ def test_a_job_that_no_longer_is_the_background_slice_is_sliced_again(
 
     # Sliced again rather than queueing the recorded job.
     assert sliced.call_count == 2
-    # Nor is it read back as this output's slice: the stale row is gone.
+    # Nor is it read back as this output's slice: the stale row is retired.
     read = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
     assert read.status_code == 404, read.text
 
@@ -251,3 +256,91 @@ def test_a_plate_clicked_in_the_dialog_is_previewed_on_its_own(
     assert plate.content[:4] == b"glTF"
     assert client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=2").status_code == 422
     assert client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=9").status_code == 404
+
+
+def _sweep(client: TestClient, grace: timedelta = PREVIEW_GRACE) -> int:
+    state = _state(client)
+    settings = state.settings_store.load()
+
+    async def sweep() -> int:
+        async with client_for(settings) as bambuddy:
+            return await sweep_preview_slices(bambuddy, state.uploads, grace=grace)
+
+    return asyncio.run(sweep())
+
+
+def _previewed(client: TestClient, model: str) -> tuple[str, Job, respx.Route]:
+    """A background slice of job 9, its sliced file 77 readable and deletable."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    job = Job()
+    job.routes()
+    sliced_routes()
+    queue_route()
+    deleted = respx.delete(f"{API}/library/files/{SLICED}").mock(
+        return_value=httpx.Response(200, json={"trashed": True})
+    )
+    started = client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
+    )
+    assert started.status_code == 200, started.text
+    return output_id, job, deleted
+
+
+@respx.mock
+def test_a_background_slice_no_run_queued_is_removed_after_its_grace(
+    client: TestClient, model: str
+) -> None:
+    """Every settled change slices in Bambuddy's library; one never printed is removed
+    once past its grace, with its row, and one within it is kept."""
+    output_id, _, deleted = _previewed(client, model)
+
+    assert _sweep(client) == 0
+    assert not deleted.called
+
+    assert _sweep(client, grace=timedelta(0)) == 1
+    assert deleted.call_count == 1
+    assert client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9").status_code == 404
+    assert _sweep(client, grace=timedelta(0)) == 0
+
+
+@respx.mock
+def test_a_background_slice_a_run_queued_is_left_to_the_print(
+    client: TestClient, model: str
+) -> None:
+    output_id, _, deleted = _previewed(client, model)
+    assert run_print(client, output_id, json=body()).status_code == 200
+
+    assert _sweep(client, grace=timedelta(0)) == 0
+    assert not deleted.called
+
+
+@respx.mock
+def test_a_retired_background_slice_is_removed_at_once_while_its_file_is_its_own(
+    client: TestClient, model: str
+) -> None:
+    """A Bambuddy restart retires the row; its sliced file, still under the name the job
+    gave it, goes on the next sweep."""
+    output_id, job, deleted = _previewed(client, model)
+    read = f"/api/v1/print/outputs/{output_id}/preview-slices/9"
+    assert client.get(read).status_code == 200  # learns the sliced file and its name
+    job.body = {**job.body, "created_at": "2026-10-11T08:00:00.000001"}
+    assert client.get(read).status_code == 404
+
+    assert _sweep(client) == 1
+    assert deleted.call_count == 1
+
+
+@respx.mock
+def test_a_sliced_file_replaced_under_its_id_is_never_removed(
+    client: TestClient, model: str
+) -> None:
+    output_id, _, deleted = _previewed(client, model)
+    read = f"/api/v1/print/outputs/{output_id}/preview-slices/9"
+    assert client.get(read).status_code == 200
+    sliced_file_route(filename="someone-else.gcode.3mf")
+    assert client.get(read).status_code == 404
+
+    assert _sweep(client) == 0
+    assert not deleted.called
