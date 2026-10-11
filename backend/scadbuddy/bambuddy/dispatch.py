@@ -68,6 +68,13 @@ class SlicePlan(BaseModel):
     #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
     #: when they are, an explicit fix goes over these.
     process_overrides: dict[str, str] = Field(default_factory=dict)
+    #: Slice the file as a whole (``plate: 0``) rather than by its plate number: set
+    #: for a library file of one plate (#2180). Naming a plate makes Bambuddy repaint
+    #: any slot it thinks that plate leaves unused, and it cannot see colour painted
+    #: inline on a mesh, so queue 268's two-colour file sliced in one colour. The
+    #: queue item still names the plate. Defaults off, so a plan in a workflow's
+    #: history from before it reads as before.
+    whole_file: bool = False
 
 
 async def slice_and_queue(
@@ -151,7 +158,7 @@ async def start_slice(
         filament_presets=plan.filament_presets,
         filament_colours=plan.filament_colours,
         bed_type=plan.bed_type,
-        plate=plate_id,
+        plate=0 if plan.whole_file else plate_id,
         process_overrides=plan.process_overrides or None,
     )
     accepted = await client.slice(library_file_id, request)
