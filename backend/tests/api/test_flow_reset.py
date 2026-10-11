@@ -55,7 +55,11 @@ def test_a_reset_undoes_the_answer_and_the_dropped_question_is_stale(
     assert shown["calls"] == []
     response = client.post(
         f"/api/v1/workflow-runs/{run_id}/reset",
-        json={"event_id": point, "as_of_event_id": shown["as_of_event_id"]},
+        json={
+            "event_id": point,
+            "as_of_event_id": shown["as_of_event_id"],
+            "workflow_run_id": shown["workflow_run_id"],
+        },
         headers={"Idempotency-Key": "reset-1"},
     )
     assert response.status_code == 200, response.text
@@ -93,10 +97,11 @@ def test_a_point_before_the_script_is_refused(client: TestClient) -> None:
     definition = register(client, script("await wait_for_human('q?', 600)"))
     run_id = start(client, definition["id"], "p").json()["id"]
     until(client, run_id, lambda v: v["status"] == "waiting")
-    assert preview(client, run_id, 4)["valid"] is False
+    early = preview(client, run_id, 4)
+    assert early["valid"] is False
     response = client.post(
         f"/api/v1/workflow-runs/{run_id}/reset",
-        json={"event_id": 4, "as_of_event_id": 0},
+        json={"event_id": 4, "as_of_event_id": 0, "workflow_run_id": early["workflow_run_id"]},
         headers={"Idempotency-Key": "early"},
     )
     assert response.status_code == 422
@@ -118,7 +123,7 @@ def test_a_run_parked_before_resets_recorded_where_is_refused(
         )
     response = client.post(
         f"/api/v1/workflow-runs/{run_id}/reset",
-        json={"event_id": 5, "as_of_event_id": 0},
+        json={"event_id": 5, "as_of_event_id": 0, "workflow_run_id": "x"},
         headers={"Idempotency-Key": "legacy"},
     )
     assert response.status_code == 422, response.text

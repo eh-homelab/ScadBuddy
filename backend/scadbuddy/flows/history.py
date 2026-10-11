@@ -31,6 +31,9 @@ class OutwardCall(BaseModel):
 
 class ResetPreview(BaseModel):
     event_id: int
+    #: The execution the preview was read from: past a Reset's point, another
+    #: execution's event ids describe other events.
+    workflow_run_id: str = ""
     #: The history's last event when this was read.
     as_of_event_id: int
     #: `event_id` is a completed workflow task after the script started and before the
@@ -74,5 +77,9 @@ async def outward_since(
     client: Client, workflow_id: str, event_id: int, *, run_id: str | None = None
 ) -> ResetPreview:
     """The preview of the workflow's execution `run_id`, else its current one."""
+    if run_id is None:
+        run_id = (await client.get_workflow_handle(workflow_id).describe()).run_id
     history = await client.get_workflow_handle(workflow_id, run_id=run_id).fetch_history()
-    return preview_of(history.events, event_id)
+    preview = preview_of(history.events, event_id)
+    preview.workflow_run_id = run_id
+    return preview
