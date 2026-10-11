@@ -40,6 +40,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
+import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
@@ -729,6 +730,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           />
         </section>
       )}
+
+      {active && <SessionFlowRuns key={active.id} sessionId={active.id} />}
 
       <div
         role="log"
