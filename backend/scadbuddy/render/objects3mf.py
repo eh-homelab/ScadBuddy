@@ -16,8 +16,10 @@ where each colour falls on it is the slicer's to work out again, as it was for t
 
 What cannot be read faithfully is refused (:class:`UnreadableObjectsError`) rather than
 guessed: a sliced file, PrusaSlicer's painting, painting in a file with no Bambu Studio
-filaments for it to name, a painted part the file mirrors, a negative part. Modifiers
-and support blockers or enforcers print nothing and are dropped, with a note.
+filaments for it to name, a painted part the file mirrors. Modifiers and support
+blockers or enforcers print nothing and are dropped, with a note. A negative part is
+carried with its object (``ColourPart.negative``) for the slicer to cut out, as it was
+for the file; a plate read for a preview or the mesh checks leaves it out.
 
 The file is untrusted, but its size alone is no reason to refuse it: every read spends
 against a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087), and that is what
@@ -560,6 +562,8 @@ class _Reader:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
         # A painted mesh stays a part of its own: its faces are its painting's (#1965).
         painted: list[tuple[str, trimesh.Trimesh, Paint]] = []
+        # Negative parts, joined: what the slicer cuts out of this object.
+        negatives: list[trimesh.Trimesh] = []
         notes: list[str] = []
 
         def add(pieces: Iterator[_Piece]) -> None:
@@ -580,10 +584,18 @@ class _Reader:
                 cid = component.get("objectid", "")
                 part = settings.parts.get(cid, _PartSettings(None, "normal_part"))
                 if part.subtype == "negative_part":
-                    raise UnreadableObjectsError(
-                        f"object {settings.name or object_id} has a negative part, which"
-                        " Arrange cannot cut out"
-                    )
+                    path = (component.get(_PATH) or "").lstrip("/") or model
+                    for _, points, faces, _ in self.meshes(
+                        path,
+                        cid,
+                        _combine(matrix, _matrix(component.get("transform"))),
+                        part.extruder or settings.extruder or 1,
+                    ):
+                        # Its painting, if any, is never printed: only its volume is.
+                        cut = trimesh.Trimesh(vertices=points, faces=faces, process=False)
+                        cut.remove_unreferenced_vertices()
+                        negatives.append(cut)
+                    continue
                 if part.subtype in _DROPPED:
                     note = f"a {part.subtype.replace('_', ' ')} was left out"
                     if note not in notes:
@@ -607,6 +619,14 @@ class _Reader:
         for colour, mesh, paint in painted:
             index = len(parts) + 1
             parts.append(ColourPart(index, f"Color {index}", colour, mesh, paint))
+        cuts = [mesh for mesh in negatives if not mesh.is_empty]
+        if parts and cuts:
+            joined = cuts[0] if len(cuts) == 1 else trimesh.util.concatenate(cuts)
+            if isinstance(joined, trimesh.Trimesh):
+                index = len(parts) + 1
+                parts.append(
+                    ColourPart(index, "Negative part", parts[0].colour, joined, negative=True)
+                )
         return parts, notes
 
 
@@ -676,6 +696,8 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         path = (item.get(_PATH) or "").lstrip("/") or model
         parts, _ = reader.item(path, object_id, _matrix(item.get("transform")))
         for part in parts:
+            if part.negative:
+                continue  # cut out by the slicer: neither shown nor checked
             by_colour.setdefault(part.colour, []).append(part.mesh)
     found: list[ColourPart] = []
     for index, (colour, meshes) in enumerate(by_colour.items(), start=1):
@@ -835,7 +857,7 @@ def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
     """Write ``obj`` into ``directory`` as a piece `write_output` places: the mesh file,
     then its ``layout.json`` (last, so a piece with a layout is whole). Returns its box."""
     parts = [
-        ColourPart(index, part.name, part.colour, part.mesh, part.paint)
+        ColourPart(index, part.name, part.colour, part.mesh, part.paint, negative=part.negative)
         for index, part in enumerate(obj.parts)
     ]
     (directory / PIECE_MESH_NAME).write_bytes(piece_mesh(parts))

@@ -67,6 +67,11 @@ class ColourPart:
     mesh: trimesh.Trimesh
     #: Its faces' painting in other colours, when it is painted (#1965).
     paint: Paint | None = None
+    #: A Bambu Studio negative part: a volume the slicer cuts out of its object, never
+    #: printed. It travels with its object into an arranged file (written with
+    #: ``subtype="negative_part"``) and counts for nothing a person sees: the box, the
+    #: filaments, the preview, the covers and the mesh checks.
+    negative: bool = False
 
     @property
     def watertight(self) -> bool:

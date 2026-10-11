@@ -18,6 +18,7 @@ from scadbuddy.render.bambu3mf import (
     write_plates_3mf,
 )
 from scadbuddy.render.geometry import NoSuchPlateError
+from scadbuddy.render.glb import bounding_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PlateLayout
 from scadbuddy.render.objects3mf import (
     OverBudgetError,
@@ -153,7 +154,7 @@ def test_a_component_transform_applies() -> None:
     assert tuple(np.round(obj.parts[0].mesh.extents, 3)) == (40, 20, 10)
 
 
-def test_a_modifier_is_dropped_and_a_negative_part_refused() -> None:
+def test_a_modifier_is_dropped() -> None:
     payload = bambu_project(
         items=[at(0, 0)],
         parts={
@@ -164,12 +165,43 @@ def test_a_modifier_is_dropped_and_a_negative_part_refused() -> None:
     [obj] = read_objects(payload)
     assert [p.colour for p in obj.parts] == ["#FF0000"]
     assert obj.notes and "modifier" in obj.notes[0]
-    negative = bambu_project(
+
+
+def _cut_project() -> bytes:
+    """A 20x10x5 body with a 5 mm cube cut out of it, and the cube sticking out above."""
+    cutter = _box(5, 5, 8)
+    cutter.apply_translation((2, 2, 0))
+    return bambu_project(
         items=[at(0, 0)],
-        parts={1: (_box(20, 10, 5), "normal_part", None), 2: (_box(5, 5, 5), "negative_part", 1)},
+        parts={1: (_box(20, 10, 5), "normal_part", None), 2: (cutter, "negative_part", 2)},
     )
-    with pytest.raises(UnreadableObjectsError, match="negative"):
-        read_objects(negative)
+
+
+def test_a_negative_part_is_carried_with_its_object_for_the_slicer() -> None:
+    [obj] = read_objects(_cut_project())
+    body, cut = obj.parts
+    assert not body.negative and cut.negative
+    assert tuple(np.round(cut.mesh.extents, 3)) == (5, 5, 8)
+    # It prints nothing: the box is the body's, and it names no filament of its own.
+    assert tuple(round(v, 3) for v in bounding_box(obj.parts).size) == (20, 10, 5)
+    assert cut.colour == body.colour
+
+
+def test_a_plate_read_leaves_a_negative_part_out() -> None:
+    read = read_plate_parts(_cut_project(), 1)
+    assert [p.negative for p in read.parts] == [False]
+    assert tuple(np.round(read.parts[0].mesh.extents, 3)) == (20, 10, 5)
+
+
+def test_a_piece_keeps_its_negative_part(tmp_path: Path) -> None:
+    [obj] = read_objects(_cut_project())
+    piece = tmp_path / "piece"
+    piece.mkdir()
+    box = write_piece(piece, obj)
+    assert tuple(round(v, 3) for v in box.size) == (20, 10, 5)
+    parts = PlateLayout.load(piece / LAYOUT_NAME).plates[0].parts
+    assert [p.negative for p in parts] == [False, True]
+    assert len(parts[1].mesh.faces) == len(obj.parts[1].mesh.faces)
 
 
 def test_a_painted_object_is_one_part_carrying_its_painting() -> None:

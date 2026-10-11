@@ -42,7 +42,9 @@ def _linear_rgba(colour: str) -> list[float]:
 
 
 def bounding_box(parts: Sequence[ColourPart]) -> BoundingBox:
-    bounds = np.array([part.mesh.bounds for part in parts])
+    """The box of the parts that print: a negative part is cut out, never placed."""
+    printed = [part for part in parts if not part.negative] or list(parts)
+    bounds = np.array([part.mesh.bounds for part in printed])
     low = bounds[:, 0, :].min(axis=0)
     high = bounds[:, 1, :].max(axis=0)
     return BoundingBox(
@@ -53,6 +55,8 @@ def bounding_box(parts: Sequence[ColourPart]) -> BoundingBox:
 
 
 def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
+    # A negative part is cut out by the slicer: the preview shows what prints.
+    parts = [part for part in parts if not part.negative]
     if not parts:
         raise ValueError("a GLB needs at least one colour part")
     scene = trimesh.Scene()

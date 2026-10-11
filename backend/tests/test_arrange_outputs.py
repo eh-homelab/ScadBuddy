@@ -362,3 +362,56 @@ async def test_a_painted_library_object_keeps_its_painting_in_the_output(tmp_pat
     [part] = again.parts
     assert part.colour == "#FF0000"
     assert part.paint is not None and part.paint.used() == ["#00FF00"]
+
+
+async def test_a_negative_part_is_written_for_the_slicer_to_cut(tmp_path: Path) -> None:
+    """A library object's negative part goes into the output as Bambu Studio's
+    ``negative_part``, on no filament of its own, and nothing a person sees counts it:
+    the colours, the parts, the box and the mesh checks are the body's."""
+    from scadbuddy.render.geometry import analyze_3mf
+    from tests.test_objects3mf import _cut_project
+
+    deps, paths = _deps(tmp_path)
+    read = read_objects(_cut_project())
+    box = bounding_box(read[0].parts)
+    entry = ManifestObject(
+        part=piece_key("ef" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000"],
+        count=1,
+        library_file_id=90,
+    )
+    await publish_library_pieces(deps.blobs, [entry], read)
+    library = part_of(entry)
+    req = OutputRequest(
+        job_id="j8",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[LayoutPlate(items=[Placed(piece_key=library.piece_key, x=0, y=0, rot=0.0)])]
+        ),
+        parts=[library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([library.piece_key]),
+        provenance={entry.part: entry},
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert written.result.colors == ["#FF0000"]
+    assert [p.colour for p in written.result.parts] == ["#FF0000"]
+    assert tuple(round(v, 3) for v in written.result.bbox_mm.size) == (20, 10, 5)
+    model = paths.root / written.result.model_3mf
+    with zipfile.ZipFile(model) as archive:
+        settings = archive.read("Metadata/model_settings.config").decode()
+    assert settings.count('subtype="negative_part"') == 1
+    assert settings.count('subtype="normal_part"') == 1
+    analysis = analyze_3mf(model)
+    assert len(analysis.parts) == 1
+    # Arranged again, the output still carries the cut.
+    [again] = read_objects(model.read_bytes())
+    assert [p.negative for p in again.parts] == [False, True]

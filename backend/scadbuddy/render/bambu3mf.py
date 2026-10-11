@@ -159,8 +159,10 @@ def object_model(part: ColourPart, object_id: int) -> str:
 
 
 def model_bounds(parts: Sequence[ColourPart]) -> np.ndarray:
-    """The ``(2, 3)`` min/max box every part shares, in the meshes' coordinates."""
-    bounds = np.array([part.mesh.bounds for part in parts])
+    """The ``(2, 3)`` min/max box every part shares, in the meshes' coordinates: those
+    that print, since a negative part is cut out."""
+    printed = [part for part in parts if not part.negative] or list(parts)
+    bounds = np.array([part.mesh.bounds for part in printed])
     return np.array([bounds[:, 0, :].min(axis=0), bounds[:, 1, :].max(axis=0)])
 
 
@@ -274,6 +276,11 @@ def root_model(
     )
 
 
+def _subtype(part: ColourPart) -> str:
+    """Bambu Studio's part subtype: a negative part is cut out of its object (#1863)."""
+    return "negative_part" if part.negative else "normal_part"
+
+
 def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: bool) -> str:
     total = sum(len(plate.parts) for plate in plates)
     objects: list[str] = []
@@ -283,7 +290,7 @@ def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: boo
     ):
         assembly_id = total + plate_index
         entries = "".join(
-            f'  <part id="{index}" subtype="normal_part">\n'
+            f'  <part id="{index}" subtype="{_subtype(part)}">\n'
             f'   <metadata key="name" value={quoteattr(part.name)}/>\n'
             f'   <metadata key="extruder" value="{extruder}"/>\n'
             "  </part>\n"

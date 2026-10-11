@@ -88,7 +88,7 @@ async def test_a_file_read_once_is_not_downloaded_or_parsed_again(
     assert download.call_count == 1 and len(parses) == 1
     assert second.objects == first.objects
     [obj] = second.objects
-    assert obj.part.startswith("lib2-") and obj.library_file_id == 88
+    assert obj.part.startswith("lib3-") and obj.library_file_id == 88
     assert obj.colours == ["#FF0000", "#0000FF"]
     # The pieces are stored as the file is read: nothing is left for the arrange to write.
     assert (blobs.dir_for(obj.part) / LAYOUT_NAME).is_file()
@@ -219,7 +219,7 @@ async def test_a_file_past_the_print_paths_download_cap_is_still_arranged(
     blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
     [obj] = (await read_library_objects(bambuddy, 90, blobs=blobs, cache=cache)).objects
     assert obj.colours == ["#FF0000", "#0000FF"]
-    assert obj.part == f"lib2-{hashlib.sha256(payload).hexdigest()[:48]}-0"
+    assert obj.part == f"lib3-{hashlib.sha256(payload).hexdigest()[:48]}-0"
     # The spool is gone once the file is read.
     assert not any((cache / "library-spool").iterdir())
 
