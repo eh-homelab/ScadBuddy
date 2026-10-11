@@ -58,6 +58,11 @@ import { ready, type RouteModule } from './module.js'
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
+//   DELETE /api/v1/ai/sessions/:id/handoff        → {cancelled, session}: withdraw the session's live
+//                                                 handoff offer, or decline one made to the browser
+//                                                 user (#1284; manager.ts `cancelHandoff`, as MCP's
+//                                                 sessions_cancel_handoff). `cancelled` is false when
+//                                                 there was none (it expired, or was accepted)
 //   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true, archived?} → {session}: rename
 //                                                 it, mark it done (#795), or archive or unarchive it
 //                                                 (#1885; sessions/edits.ts). Owner-only (403); done is
@@ -373,6 +378,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) =>
       c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER), BROWSER_USER)),
     ),
+  )
+
+  app.delete(
+    `${base}/:id/handoff`,
+    limit,
+    route('write', async (c, sessions) => {
+      const cancelled = await sessions.cancelHandoff(idOf(c), BROWSER_USER)
+      return c.json({ cancelled, session: sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER) })
+    }),
   )
 
   app.post(

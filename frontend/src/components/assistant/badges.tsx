@@ -1,4 +1,6 @@
+import { principalLabel } from '../../agent/chat/labels'
 import type { Origin, Owner, Risk } from '../../agent/chat/protocol'
+import type { HandoffOffer } from '../../agent/chat/state'
 
 const RISK_STYLE: Record<Risk, string> = {
   read: 'border-line text-muted',
@@ -51,6 +53,21 @@ export function DurableBadge() {
   return (
     <Pill className="border-accent/50 text-accent" title="Runs as a durable workflow: a turn survives a restart of the assistant">
       Durable
+    </Pill>
+  )
+}
+
+/**
+ * #1284 — a session its owner has offered to another principal: nothing has moved
+ * until that principal accepts (agent sessions/manager.ts `handoff`).
+ */
+export function OfferBadge({ offer }: { offer: HandoffOffer }) {
+  return (
+    <Pill
+      className="border-warn/60 text-warn"
+      title={`Offered until ${new Date(offer.until).toLocaleString()}; it moves only when accepted`}
+    >
+      {`Offered to ${offer.to.id ? principalLabel(offer.to.id) : offer.to.label}`}
     </Pill>
   )
 }
