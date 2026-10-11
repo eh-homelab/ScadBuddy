@@ -21,7 +21,12 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
-from scadbuddy.render.bambu3mf import MAX_SETTINGS_BYTES, layout_of, write_bambu_3mf
+from scadbuddy.render.bambu3mf import (
+    MAX_SETTINGS_BYTES,
+    laid_out_plates,
+    layout_of,
+    write_bambu_3mf,
+)
 from scadbuddy.render.split import ColourPart
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
@@ -52,13 +57,13 @@ STUB_SETTINGS = {
 }
 
 
-def library_3mf(*, sliced: bool = False) -> bytes:
+def library_3mf(*, sliced: bool = False, settings: dict[str, Any] | None = None) -> bytes:
     """A 3MF as Bambuddy's library holds it: unsliced, or with a plate's gcode in it."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
         archive.writestr("3D/3dmodel.model", "<model/>")
-        archive.writestr("Metadata/project_settings.config", json.dumps(STUB_SETTINGS))
+        archive.writestr("Metadata/project_settings.config", json.dumps(settings or STUB_SETTINGS))
         if sliced:
             archive.writestr("Metadata/plate_1.gcode", "; sliced\n")
     return buffer.getvalue()
@@ -216,6 +221,10 @@ def test_an_stl_slices_as_one_plate(client: TestClient) -> None:
     assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert uploaded_name(upload) == "file-46 (ScadBuddy).3mf"
     assert layout_of(_uploaded_3mf(upload)) == "scadbuddy"
+    # Laying out never adds a plate, so slicing the copy whole slices exactly the one
+    # plate the library file has (#2227).
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        assert len(laid_out_plates(archive)) == 1
 
 
 @respx.mock
@@ -759,6 +768,39 @@ def high_flow_run() -> dict[str, Any]:
         **body(nozzles=[{"size": "0.4", "flow": "high_flow"}], tier="standard"),
         "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
     }
+
+
+@respx.mock
+def test_queue_268_a_one_extruder_library_file_gets_both_nozzles_and_one_slice(
+    client: TestClient,
+) -> None:
+    """#2181, #2227: a library file saved for one extruder (an A1's stats) printed on a
+    printer with the chosen 0.4 High Flow on both sides. The copy sliced states both
+    sides, so the slicer may spread the colours; before, the file's own one-side stats
+    were kept and both colours went onto the left. Its one plate is sliced whole
+    (#2180)."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    one_side = {
+        **STUB_SETTINGS,
+        "extruder_nozzle_stats": ["Standard#1"],
+        "extruder_nozzle_stats_new": ["Standard#1"],
+    }
+    library_file(89, content=library_3mf(settings=one_side))
+    run_routes()
+    both_sides_high_flow()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(client, 89, json=high_flow_run())
+
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "High Flow#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["High Flow#1", "High Flow#1"]
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 0
 
 
 def flow_copy_routes(listed: list[dict[str, Any]] | None = None) -> respx.Route:

@@ -21,15 +21,22 @@ import { useAsync } from '../lib/useAsync'
  */
 export function EditSourceFilePage() {
   const { slug = '', file = '' } = useParams()
+  // One editor per file: switching files mounts a fresh one, so nothing from the last
+  // file (a "changed elsewhere" banner and the base Keep editing would save against,
+  // an open Delete dialog) carries over to this one.
+  return <SourceFileEditor key={`${slug}/${file}`} slug={slug} file={file} />
+}
+
+function SourceFileEditor({ slug, file }: { slug: string; file: string }) {
   const navigate = useNavigate()
-  const model = useAsync(() => api.getModel(slug), [slug])
-  // The revision is read before the file, so a save made in between leaves the base
+  // The model is read before the file, so a save made in between leaves the base
   // older than the text: a save is then refused rather than written over a change
   // this page never showed (EditSourcePage, #1054).
   const loaded = useAsync(async () => {
-    const version = (await api.getModel(slug)).version ?? undefined
-    return { text: await api.getDefinitionFile(slug, { path: file }), version }
+    const record = await api.getModel(slug)
+    return { record, text: await api.getDefinitionFile(slug, { path: file }), version: record.version ?? undefined }
   }, [slug, file])
+  const record = loaded.data?.record
   const [text, setText] = useState<string | null>(null)
   const [base, setBase] = useState<string | undefined>()
   /** The model's revision a refused save named as current. */
@@ -46,10 +53,8 @@ export function EditSourceFilePage() {
 
   if (file === MAIN_SOURCE) return <Navigate to={sourceFilePath(slug, MAIN_SOURCE)} replace />
 
-  if (!SOURCE_FILE_PATTERN.test(file) || loaded.error || model.error) {
-    const why = !SOURCE_FILE_PATTERN.test(file)
-      ? `${file} is not a .scad file name.`
-      : (loaded.error ?? model.error)?.message
+  if (!SOURCE_FILE_PATTERN.test(file) || loaded.error) {
+    const why = !SOURCE_FILE_PATTERN.test(file) ? `${file} is not a .scad file name.` : loaded.error?.message
     return (
       <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
         <h1 className="text-[15px] font-medium">That file is not here</h1>
@@ -61,7 +66,7 @@ export function EditSourceFilePage() {
     )
   }
 
-  if (model.loading || loaded.loading || text === null) {
+  if (loaded.loading || text === null) {
     return (
       <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
         <Spinner /> Loading {file}
@@ -69,17 +74,17 @@ export function EditSourceFilePage() {
     )
   }
 
-  const builtin = model.data?.origin === 'builtin'
-  const canEdit = model.data?.origin === 'mine'
+  const builtin = record?.origin === 'builtin'
+  const canEdit = record?.origin === 'mine'
   const dirty = !builtin && loaded.data !== undefined && text !== loaded.data.text
 
   async function save() {
     try {
-      const record = await api.writeSourceFile(slug, file, text ?? '', base)
-      const version = record.version ?? undefined
+      const saved = await api.writeSourceFile(slug, file, text ?? '', base)
+      const version = saved.version ?? undefined
       setBase(version)
       setStale(null)
-      loaded.setData({ text: text ?? '', version }, { supersede: true })
+      loaded.setData({ record: loaded.data!.record, text: text ?? '', version }, { supersede: true })
     } catch (caught) {
       // Changed since this file was read: the workbench shows the refusal.
       if (caught instanceof ApiError && caught.status === 409 && caught.problem['current']) {
@@ -108,7 +113,7 @@ export function EditSourceFilePage() {
         breadcrumb={
           <>
             <Link to={modelPath(slug)} className="shrink-0 text-[12px] text-muted hover:text-ink">
-              {model.data?.name ?? slug}
+              {record?.name ?? slug}
             </Link>
             <span className="text-faint">/</span>
             <h1 className="truncate text-[13px] font-medium">{file}</h1>

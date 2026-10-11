@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { statusLabel } from '../../agent/chat/labels'
-import { isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
+import { type HandoffOffer, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import { timeAgo } from '../../lib/format'
 import { Button } from '../ui/Button'
 import { OfferBadge, OriginBadge, OwnerBadge } from './badges'
@@ -94,6 +94,29 @@ export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, 
   )
 }
 
+/**
+ * #1284 — the offer while it is live. A snapshot carries it until the agent next
+ * sends one, which can be after `until` has passed; so a timer drops it once it
+ * lapses, and the row renders again then. An `until` that does not parse is left
+ * to the agent to judge.
+ */
+function useLiveOffer(offer: HandoffOffer | null | undefined): HandoffOffer | null {
+  const until = offer ? Date.parse(offer.until) : Number.NaN
+  const [lapsed, setLapsed] = useState<number | null>(null)
+  useEffect(() => {
+    if (!Number.isFinite(until)) return
+    // setTimeout's delay is a 32-bit int; the check keeps a capped wait from firing early.
+    const timer = setTimeout(
+      () => {
+        if (Date.now() >= until) setLapsed(until)
+      },
+      Math.max(0, Math.min(until - Date.now(), 2 ** 31 - 1)),
+    )
+    return () => clearTimeout(timer)
+  }, [until])
+  return offer && lapsed !== until ? offer : null
+}
+
 function SessionRow({
   session: s,
   activeId,
@@ -118,6 +141,7 @@ function SessionRow({
     }
   }, [editing])
   const open = s.id === activeId
+  const offer = useLiveOffer(s.offer)
   const mine = isOwnedByBrowser(s)
   const canFinish = mine && s.status !== 'done' && !RUNNING.has(s.status)
   // The agent refuses an archive while a turn runs or anything waits on the user (409).
@@ -181,7 +205,7 @@ function SessionRow({
             {s.parentId && <span className="text-[10.5px] text-faint">fork</span>}
             <OriginBadge origin={s.origin} />
             <OwnerBadge owner={s.owner} />
-            {s.offer && <OfferBadge offer={s.offer} />}
+            {offer && <OfferBadge offer={offer} />}
             <span className="text-[11px] text-faint">{outOfBudget(s) ? 'Out of budget' : statusLabel(s.status)}</span>
             {s.budget && (
               <span className="text-[11px] text-faint">
@@ -223,7 +247,7 @@ function SessionRow({
                 Done
               </Button>
             )}
-            {s.offer && (
+            {offer && (
               <Button
                 variant="ghost"
                 size="sm"
