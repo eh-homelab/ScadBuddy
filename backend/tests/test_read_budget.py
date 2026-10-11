@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from scadbuddy.core.settings import Settings, check_value
 from scadbuddy.render.read_budget import (
     CEILINGS,
+    NO_LIMIT,
     ReadBudget,
     ReadBudgetOverride,
     budget_of,
@@ -38,7 +39,9 @@ def test_an_override_replaces_only_what_it_names() -> None:
     assert budget.max_objects == ReadBudget().max_objects
 
 
-@pytest.mark.parametrize(("budget", "ceiling"), CEILINGS.items())
+@pytest.mark.parametrize(
+    ("budget", "ceiling"), [(name, top) for name, top in CEILINGS.items() if top is not None]
+)
 def test_nothing_goes_past_a_ceiling(budget: str, ceiling: int) -> None:
     assert ReadBudgetOverride.model_validate({budget: ceiling})
     with pytest.raises(ValidationError):
@@ -51,12 +54,27 @@ def test_nothing_goes_past_a_ceiling(budget: str, ceiling: int) -> None:
 
 
 def test_a_budget_covers_one_no_larger_on_any_axis() -> None:
-    base = ReadBudget()
+    base = ReadBudget(max_triangles=100)
     assert base.covers(base)
     assert base.covers(base.model_copy(update={"max_triangles": 1}))
-    assert not base.covers(base.model_copy(update={"max_triangles": base.max_triangles + 1}))
+    assert not base.covers(base.model_copy(update={"max_triangles": 101}))
+    # No limit (0) is at least any limit, and no limit is past every one.
+    unlimited = base.model_copy(update={"max_triangles": NO_LIMIT})
+    assert unlimited.covers(base) and not base.covers(unlimited)
+    assert ReadBudget.widest().covers(unlimited)
+
+
+def test_triangles_default_to_no_limit_with_no_ceiling() -> None:
+    assert ReadBudget().max_triangles == NO_LIMIT
+    assert ReadBudget().limit("max_triangles") is None
+    assert ReadBudget().model_bytes() is None
+    assert ReadBudgetOverride(max_triangles=10**12).max_triangles == 10**12
+    assert check_value("read_max_triangles", 0) == 0
+    assert "0 is no limit" in ReadBudget(max_triangles=5).refusal("max_triangles")
 
 
 def test_the_defaults_sit_under_their_ceilings() -> None:
     default = ReadBudget()
-    assert all(getattr(default, name) <= ceiling for name, ceiling in CEILINGS.items())
+    assert all(
+        ceiling is None or getattr(default, name) <= ceiling for name, ceiling in CEILINGS.items()
+    )

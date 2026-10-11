@@ -118,20 +118,23 @@ def check_stl(stl: BinaryIO, budget: ReadBudget) -> None:
     """Refuse an STL past ``budget``'s triangles before anything loads it whole
     (:class:`OverBudgetError`): a binary one by the count its header states (which its
     size must match), an ASCII one by its size against what that many facets could
-    take. Leaves ``stl`` at its start."""
+    take. With no triangle limit, any STL is wrapped. Leaves ``stl`` at its start."""
+    limit = budget.limit("max_triangles")
+    if limit is None:
+        return
     size = stl.seek(0, io.SEEK_END)
     stl.seek(0)
     head = stl.read(_STL_HEADER)
     stl.seek(0)
     count = int.from_bytes(head[80:84], "little") if len(head) == _STL_HEADER else -1
     if count >= 0 and size == _STL_HEADER + _STL_TRIANGLE * count:
-        if count > budget.max_triangles:
+        if count > limit:
             raise OverBudgetError(
                 f"{budget.refusal('max_triangles', f'is an STL of {count:,} triangles')}"
                 f" (the file is {_megabytes(size)})"
             )
         return
-    allowed = _STL_ASCII_TRIANGLE * budget.max_triangles
+    allowed = _STL_ASCII_TRIANGLE * limit
     if size > allowed:
         raise OverBudgetError(
             budget.refusal(
@@ -202,32 +205,33 @@ class _Archive:
             if name not in self.names:
                 raise UnreadableObjectsError(f"the 3MF names a model file it lacks ({name})")
             allowed = self.budget.model_bytes()
+            limit = self.budget.limit("max_triangles")
             try:
                 parsed = parse_model(
                     self.archive,
                     name,
-                    cap=allowed - self.inflated,
-                    max_triangles=self.budget.max_triangles - self.stored,
+                    cap=None if allowed is None else allowed - self.inflated,
+                    max_triangles=None if limit is None else limit - self.stored,
                     # Against the whole budget: a file may keep its vertices in one model
                     # and its triangles in another.
-                    max_vertices=3 * self.budget.max_triangles - self.vertices,
+                    max_vertices=None if limit is None else 3 * limit - self.vertices,
                 )
             except ET.ParseError:
                 raise UnreadableObjectsError(f"{name} is not readable XML") from None
             except TooManyTrianglesError as error:
                 # Said over the whole file, not the remainder this model was allowed.
                 past = (
-                    f"stores more than {3 * self.budget.max_triangles:,} vertices, three for"
-                    " every triangle allowed"
+                    f"stores more than {3 * (limit or 0):,} vertices, three for every"
+                    " triangle allowed"
                     if "vertices" in str(error)
-                    else f"stores more than {self.budget.max_triangles:,} triangles"
+                    else f"stores more than {limit or 0:,} triangles"
                 )
                 raise OverBudgetError(self.budget.refusal("max_triangles", past)) from None
             except ArchiveTooLargeError:
                 raise OverBudgetError(
                     self.budget.refusal(
                         "max_triangles",
-                        f"has model files that inflate past {_megabytes(allowed)}, more"
+                        f"has model files that inflate past {_megabytes(allowed or 0)}, more"
                         " than that many triangles could take",
                     )
                 ) from None
@@ -380,7 +384,8 @@ class _Reader:
         self.paint_digits += paint_digits
         if self.visits > self.budget.max_visits:
             raise OverBudgetError(self.budget.refusal("max_visits"))
-        if self.triangles > self.budget.max_triangles:
+        triangles_allowed = self.budget.limit("max_triangles")
+        if triangles_allowed is not None and self.triangles > triangles_allowed:
             raise OverBudgetError(self.budget.refusal("max_triangles"))
         if self.paint_digits > self.budget.max_paint_digits:
             raise OverBudgetError(self.budget.refusal("max_paint_digits"))
@@ -694,14 +699,15 @@ def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_A
             if any(_GCODE.fullmatch(name) for name in archive.names):
                 raise UnreadableObjectsError("the file is sliced already; print it from Bambuddy")
             models = sum(zipped.getinfo(name).file_size for name in _model_names(archive.names))
+            allowed = budget.model_bytes()
             try:
-                if models > budget.model_bytes():
+                if allowed is not None and models > allowed:
                     # Said before anything is inflated: the headers declare it.
                     raise OverBudgetError(
                         budget.refusal(
                             "max_triangles",
                             f"has model files that inflate to {_megabytes(models)}, past the"
-                            f" {_megabytes(budget.model_bytes())} that many triangles could take",
+                            f" {_megabytes(allowed)} that many triangles could take",
                         )
                     )
                 return read(archive)

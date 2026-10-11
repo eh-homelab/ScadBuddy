@@ -30,7 +30,6 @@ from scadbuddy.core.config import (
     DEFAULT_READ_MAX_VISITS,
     READ_MAX_OBJECTS_CEILING,
     READ_MAX_PAINT_DIGITS_CEILING,
-    READ_MAX_TRIANGLES_CEILING,
     READ_MAX_VISITS_CEILING,
 )
 
@@ -39,13 +38,16 @@ if TYPE_CHECKING:
 
 Budget = Literal["max_objects", "max_visits", "max_triangles", "max_paint_digits"]
 
-#: Each budget's ceiling: no setting or override goes past it.
-CEILINGS: Final[dict[Budget, int]] = {
+#: Each budget's ceiling: no setting or override goes past it. ``None`` is a budget
+#: with none, whose 0 is no limit at all (:data:`NO_LIMIT`).
+CEILINGS: Final[dict[Budget, int | None]] = {
     "max_objects": READ_MAX_OBJECTS_CEILING,
     "max_visits": READ_MAX_VISITS_CEILING,
-    "max_triangles": READ_MAX_TRIANGLES_CEILING,
+    "max_triangles": None,
     "max_paint_digits": READ_MAX_PAINT_DIGITS_CEILING,
 }
+#: A budget of 0, where it has no ceiling: nothing is counted against it.
+NO_LIMIT: Final = 0
 
 #: What a read past each budget found, as its refusal says it.
 PAST: Final[dict[Budget, str]] = {
@@ -77,39 +79,55 @@ class ReadBudget(BaseModel):
 
     max_objects: int = Field(default=DEFAULT_READ_MAX_OBJECTS, gt=0, le=READ_MAX_OBJECTS_CEILING)
     max_visits: int = Field(default=DEFAULT_READ_MAX_VISITS, gt=0, le=READ_MAX_VISITS_CEILING)
-    max_triangles: int = Field(
-        default=DEFAULT_READ_MAX_TRIANGLES, gt=0, le=READ_MAX_TRIANGLES_CEILING
-    )
+    #: 0 is no limit.
+    max_triangles: int = Field(default=DEFAULT_READ_MAX_TRIANGLES, ge=0)
     max_paint_digits: int = Field(
         default=DEFAULT_READ_MAX_PAINT_DIGITS, gt=0, le=READ_MAX_PAINT_DIGITS_CEILING
     )
 
+    @classmethod
+    def widest(cls) -> ReadBudget:
+        """Every budget at its ceiling, or no limit where it has none: covers any."""
+        return cls(**{name: NO_LIMIT if top is None else top for name, top in CEILINGS.items()})
+
+    def limit(self, budget: Budget) -> int | None:
+        """``budget``'s limit, or ``None`` when it is :data:`NO_LIMIT`."""
+        value: int = getattr(self, budget)
+        return None if CEILINGS[budget] is None and value == NO_LIMIT else value
+
     def covers(self, other: ReadBudget) -> bool:
         """Whether every budget here is at least ``other``'s: what this budget refused,
-        ``other`` would refuse too."""
-        return all(getattr(self, name) >= getattr(other, name) for name in CEILINGS)
+        ``other`` would refuse too. No limit is at least any."""
 
-    def model_bytes(self) -> int:
+        def at_least(name: Budget) -> bool:
+            mine, theirs = self.limit(name), other.limit(name)
+            return mine is None or (theirs is not None and mine >= theirs)
+
+        return all(at_least(name) for name in CEILINGS)
+
+    def model_bytes(self) -> int | None:
         """How many bytes a read's model files may inflate to, all together: a generous
         :data:`MODEL_BYTES_PER_TRIANGLE` for every triangle the budget allows, its paint
         digits, and :data:`MODEL_BYTES_OVERHEAD`. What bounds the parse of a file's XML,
         whose arrays the triangle budget bounds as they are read; the rest of the archive
-        (thumbnails, attachments) is never read, so its size counts for nothing."""
-        return (
-            self.max_triangles * MODEL_BYTES_PER_TRIANGLE
-            + self.max_paint_digits
-            + MODEL_BYTES_OVERHEAD
-        )
+        (thumbnails, attachments) is never read, so its size counts for nothing. ``None``
+        when triangles have no limit: then nothing bounds the parse either."""
+        triangles = self.limit("max_triangles")
+        if triangles is None:
+            return None
+        return triangles * MODEL_BYTES_PER_TRIANGLE + self.max_paint_digits + MODEL_BYTES_OVERHEAD
 
     def refusal(self, budget: Budget, past: str | None = None) -> str:
         """Why a read past ``budget`` was refused, and how to raise it: ``past`` says what
         the file was found to hold, when not the budget's own (:data:`PAST`)."""
         found = past if past is not None else PAST[budget].format(getattr(self, budget))
+        ceiling = CEILINGS[budget]
+        bound = "0 is no limit" if ceiling is None else f"at most {ceiling:,}"
         return (
             f"the 3MF {found}, past the {budget} read"
-            f" budget; raise it under Settings → Projects & files ({env_name(budget)}, at"
-            f" most {CEILINGS[budget]:,}) or for one request (its read_budget.{budget},"
-            f" or ?{budget}= on a GET)"
+            f" budget; raise it under Settings → Projects & files ({env_name(budget)},"
+            f" {bound}) or for one request (its read_budget.{budget}, or ?{budget}= on a"
+            " GET)"
         )
 
 
@@ -121,7 +139,8 @@ class ReadBudgetOverride(BaseModel):
 
     max_objects: int | None = Field(default=None, gt=0, le=READ_MAX_OBJECTS_CEILING)
     max_visits: int | None = Field(default=None, gt=0, le=READ_MAX_VISITS_CEILING)
-    max_triangles: int | None = Field(default=None, gt=0, le=READ_MAX_TRIANGLES_CEILING)
+    #: 0 is no limit, for this request.
+    max_triangles: int | None = Field(default=None, ge=0)
     max_paint_digits: int | None = Field(default=None, gt=0, le=READ_MAX_PAINT_DIGITS_CEILING)
 
     def over(self, base: ReadBudget) -> ReadBudget:

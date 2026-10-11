@@ -1104,22 +1104,23 @@ class _MeshTarget:
 def parse_model(
     archive: zipfile.ZipFile,
     name: str,
-    cap: int = MAX_UNCOMPRESSED_BYTES,
+    cap: int | None = MAX_UNCOMPRESSED_BYTES,
     *,
     max_triangles: int | None = None,
     max_vertices: int | None = None,
 ) -> ParsedModel:
-    """Model file ``name``, inflated in chunks and refused past ``cap``, parsed as it
-    inflates, its meshes read into arrays (`_MeshTarget`), refused past ``max_triangles``
-    or ``max_vertices`` (:class:`TooManyTrianglesError`) when given. ``ET.ParseError``
-    when it is not XML, ``ValueError`` when a vertex or triangle is not numbers."""
+    """Model file ``name``, inflated in chunks and refused past ``cap`` (``None``: no
+    cap), parsed as it inflates, its meshes read into arrays (`_MeshTarget`), refused
+    past ``max_triangles`` or ``max_vertices`` (:class:`TooManyTrianglesError`) when
+    given. ``ET.ParseError`` when it is not XML, ``ValueError`` when a vertex or triangle
+    is not numbers."""
     target = _MeshTarget(max_triangles, max_vertices)
     parser = ET.XMLParser(target=target)
     read = 0
     with archive.open(name) as entry:
         while chunk := entry.read(_CHUNK):
             read += len(chunk)
-            if read > cap:
+            if cap is not None and read > cap:
                 raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
             try:
                 parser.feed(chunk)

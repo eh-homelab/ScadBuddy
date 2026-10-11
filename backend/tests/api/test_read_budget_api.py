@@ -58,12 +58,29 @@ def test_the_setting_is_the_default_and_a_request_overrides_it(
 
 
 def test_no_setting_goes_past_its_ceiling(client: TestClient) -> None:
-    ceiling = CEILINGS["max_triangles"]
-    past = client.put("/api/v1/settings", json={"read_max_triangles": ceiling + 1})
+    ceiling = CEILINGS["max_objects"]
+    assert ceiling is not None
+    past = client.put("/api/v1/settings", json={"read_max_objects": ceiling + 1})
     assert past.status_code == 422, past.text
-    assert "SCADBUDDY_READ_MAX_TRIANGLES" in past.text
-    at = client.put("/api/v1/settings", json={"read_max_triangles": ceiling})
+    assert "SCADBUDDY_READ_MAX_OBJECTS" in past.text
+    at = client.put("/api/v1/settings", json={"read_max_objects": ceiling})
     assert at.status_code == 200, at.text
+
+
+def test_triangles_have_no_ceiling_and_0_is_no_limit(client: TestClient) -> None:
+    for value in (0, 10**12):
+        saved = client.put("/api/v1/settings", json={"read_max_triangles": value})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["read_max_triangles"] == value
+
+
+@respx.mock
+def test_no_triangle_limit_reads_the_file(client: TestClient, tmp_path: Path) -> None:
+    configure(client)
+    _hashed(88, tmp_path)
+    assert client.put("/api/v1/settings", json={"read_max_triangles": 1}).status_code == 200
+    assert client.get("/api/v1/print/library/88/objects").status_code == 422
+    assert client.get("/api/v1/print/library/88/objects?max_triangles=0").status_code == 200
 
 
 @respx.mock
@@ -73,6 +90,8 @@ def test_no_override_goes_past_its_ceiling(
     configure(client)
     _hashed(88, tmp_path)
     for budget, ceiling in CEILINGS.items():
+        if ceiling is None:
+            continue
         past = client.get(f"/api/v1/print/library/88/objects?{budget}={ceiling + 1}")
         assert past.status_code == 422, (budget, past.text)
         assert budget in past.text
@@ -81,7 +100,7 @@ def test_no_override_goes_past_its_ceiling(
     body = {
         "objects": [{"library_file_id": 88}],
         "slug": "demo",
-        "read_budget": {"max_paint_digits": CEILINGS["max_paint_digits"] + 1},
+        "read_budget": {"max_paint_digits": (CEILINGS["max_paint_digits"] or 0) + 1},
     }
     past = client.post("/api/v1/outputs/arrange", json=body)
     assert past.status_code == 422, past.text
