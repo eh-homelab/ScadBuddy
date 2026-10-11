@@ -47,6 +47,8 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { PgFlowRuns } from './temporal/flowRuns.js'
+import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
@@ -414,10 +416,13 @@ const temporalWorker =
             services: toolServices,
             sessions: new PgSessionOwners(temporal.sql),
             approvals: new PgApprovalRecords(temporal.sql),
+            flows: new PgFlowRuns(temporal.sql),
             audit,
             answers: new PgAnswers(temporal.sql),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
+          // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
+          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),

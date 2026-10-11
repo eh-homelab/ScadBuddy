@@ -25,7 +25,11 @@ export const flowTools: Tool[] = [
       '`save_output(slug, job_id, name)` (returns the output id), and two that wait for a person to approve them ' +
       'in ScadBuddy: `queue_print(source, request)` (source {output_id} or {file_id}; request is the print ' +
       "route's body, filament_plan and choices; returns {run_id, status, may_have_queued, error}) and " +
-      "`arrange(request)` (the arrange route's body; returns {job_id, status, output_id, error}). Results are " +
+      "`arrange(request)` (the arrange route's body; returns {job_id, status, output_id, error}). " +
+      '`agent(prompt, skills, result_schema)` starts a durable agent session as the run\'s starter and returns ' +
+      'its answer (skills a list, maybe empty; with a JSON Schema the JSON value it answered, else its text), and ' +
+      '`ask_session(session_id, message)` sends to a durable session the starter owns and returns its answer; ' +
+      "a session's own outward calls wait for approval in its chat. Results are " +
       'dicts; a refusal is an exception in ScadBuddy\'s words, and a denial a ToolApprovalDenied. The script ' +
       'is `import asyncio`, an `async def main()` that awaits host functions, and `asyncio.run(main())`; it may ' +
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
@@ -139,7 +143,7 @@ export const flowTools: Tool[] = [
   defineTool({
     name: 'preview_flow_reset',
     description:
-      'What resetting a flow run to an earlier point would send again: its outward calls (queue_print, arrange) ' +
+      'What resetting a flow run to an earlier point would send again: its outward calls (queue_print, arrange, an outward tool, an agent turn that made one) ' +
       'after `event_id`, a completed workflow task of the run\'s Temporal history after its script started ' +
       '(`valid`). Every host call after the point runs again; answers and approvals after it are undone. ' +
       'Pass the answer\'s `as_of_event_id` to reset_flow_run.',
