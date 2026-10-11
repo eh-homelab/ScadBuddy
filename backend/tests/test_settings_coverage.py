@@ -61,6 +61,8 @@ def test_every_env_seeded_field_is_shown_and_no_secret_is() -> None:
         ),
         ("job_ttl", -1, "SCADBUDDY_JOB_TTL must be more than 0"),
         ("media_upload_max_bytes", 0, "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES"),
+        ("read_max_triangles", 0, "SCADBUDDY_READ_MAX_TRIANGLES"),
+        ("read_max_triangles", 10**9, "SCADBUDDY_READ_MAX_TRIANGLES"),
         ("event_log_retention_rows", -1, "SCADBUDDY_EVENT_LOG_RETENTION_ROWS must be at least 0"),
         ("asset_sweep_grace", 60, "SCADBUDDY_ASSET_SWEEP_GRACE must be at least 3600"),
         ("log_level", "loud", "SCADBUDDY_LOG_LEVEL must be one of"),

@@ -56,6 +56,7 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
+from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
@@ -886,6 +887,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
+    # The render worker's own role, if the deployment made one, gets what this
+    # build's worker touches (#601); the worker waits for it.
+    await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # Then what the UI saved (#322), before anything below is sized or started from it.
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     apply_runtime(state, snapshot.runtime, booting=True)

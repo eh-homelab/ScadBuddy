@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
-from fastapi import Depends, Path
+from fastapi import Depends, Path, Query
 from psycopg import Connection
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
@@ -64,6 +64,12 @@ from scadbuddy.render.previews import (
     PreviewScheduler,
 )
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.read_budget import (
+    CEILINGS,
+    ReadBudget,
+    ReadBudgetOverride,
+    budget_of,
+)
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import BlobRefs, BlobStore
@@ -589,6 +595,27 @@ def get_fetcher(state: StateDep, libraries: LibrariesDep) -> CheckoutFetcher:
 
 
 FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
+
+
+def get_read_budget(
+    state: StateDep,
+    max_objects: Annotated[int | None, Query(gt=0, le=CEILINGS["max_objects"])] = None,
+    max_visits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_visits"])] = None,
+    max_triangles: Annotated[int | None, Query(gt=0, le=CEILINGS["max_triangles"])] = None,
+    max_paint_digits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_paint_digits"])] = None,
+) -> ReadBudget:
+    """What a GET's read of a library 3MF may spend (#2087): the settings in effect, then
+    any budget the query overrides, each at most its ceiling."""
+    override = ReadBudgetOverride(
+        max_objects=max_objects,
+        max_visits=max_visits,
+        max_triangles=max_triangles,
+        max_paint_digits=max_paint_digits,
+    )
+    return budget_of(state.settings, override)
+
+
+ReadBudgetDep = Annotated[ReadBudget, Depends(get_read_budget)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]

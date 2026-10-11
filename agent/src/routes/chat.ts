@@ -7,15 +7,9 @@ import { QuestionError } from '../questions/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
-import {
-  type ClientMessage,
-  isAttachmentRefs,
-  parseClientFrame,
-  renderPageContext,
-  type UserMessageImages,
-} from '../sessions/clientProtocol.js'
-import { type UserImage, UserImagesSchema } from '../sessions/images.js'
+import { type AttachmentRef, AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
+import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
+import { UserImagesSchema } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
@@ -102,7 +96,8 @@ export const MAX_QUEUED_FRAMES = 32
  * message and its page context. Images are not in frames: the panel uploads
  * them (#1941, routes/attachments.ts) and a message names them by id. A larger
  * frame closes the socket, 1009 Message Too Big; that is what a tab loaded
- * before #1941 meets when it sends inline images larger than this.
+ * before #1941 meets when it sends inline images larger than this. Smaller,
+ * they are refused with clientProtocol.ts `STALE_TAB_IMAGES` (#1959).
  */
 export const CHAT_FRAME_MAX = 256 * 1024
 
@@ -327,10 +322,12 @@ export class ChatConnection {
     const parsed = parseClientFrame(raw)
     if (!parsed.ok) {
       // Answered through the queue, so it counts against the cap like any other frame.
-      const error = parsed.error
-      const where = refusedAnswer(raw)
+      const { error, stale } = parsed
+      // A tab loaded before #1941 sends images inline (#1959): it is told to reload, in the session it wrote to.
+      const where = stale ?? refusedAnswer(raw)
+      const message = stale ? error : `ignored a malformed message: ${error}`
       return this.enqueue(async () => {
-        this.emit(event({ type: 'error', ...where, code: 'invalid', message: `ignored a malformed message: ${error}` }))
+        this.emit(event({ type: 'error', ...where, code: 'invalid', message }))
       })
     }
     const message = parsed.value
@@ -369,9 +366,9 @@ export class ChatConnection {
     return run
   }
 
-  /** The attachments a message names, read for this connection's principal; undefined for inline images or none. */
-  private async resolveAttachments(images: UserMessageImages): Promise<ResolvedAttachment[] | undefined> {
-    if (!images || !isAttachmentRefs(images)) return undefined
+  /** The attachments a message names, read for this connection's principal; undefined for none. */
+  private async resolveAttachments(images: AttachmentRef[] | undefined): Promise<ResolvedAttachment[] | undefined> {
+    if (!images) return undefined
     if (!this.attachments) throw new SessionError('invalid', 'image uploads need the database: SCADBUDDY_DATABASE_URL is not set')
     let resolved: ResolvedAttachment[]
     try {
@@ -411,8 +408,7 @@ export class ChatConnection {
           // Uploaded images (#1941) are read before anything starts, so one that is
           // unknown, expired or another owner's refuses the message, not the turn.
           const attached = await this.resolveAttachments(message.images)
-          const sent = attached ? attached.map((a) => a.image) : (message.images as UserImage[] | undefined)
-          const images = sent ? { images: sent } : {}
+          const images = attached ? { images: attached.map((a) => a.image) } : {}
           // The turn is the browser's child when the frame names its span,
           // else a root (spec 2026-10-01 §4); a malformed one is ignored.
           const parent = contextFrom(message.traceparent)

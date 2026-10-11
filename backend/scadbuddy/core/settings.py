@@ -27,6 +27,10 @@ from scadbuddy.core.config import (
     DEFAULT_MEDIA_UPLOAD_MAX_BYTES,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
+    DEFAULT_READ_MAX_OBJECTS,
+    DEFAULT_READ_MAX_PAINT_DIGITS,
+    DEFAULT_READ_MAX_TRIANGLES,
+    DEFAULT_READ_MAX_VISITS,
     DEFAULT_REALTIME_SOCKETS,
     DEFAULT_RENDER_CONCURRENCY,
     DEFAULT_RENDER_LATENCY_SLO,
@@ -40,6 +44,10 @@ from scadbuddy.core.config import (
     DEFAULT_TEMPORAL_NAMESPACE,
     DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     DEFAULT_WORKER_CACHE_MAX_BYTES,
+    READ_MAX_OBJECTS_CEILING,
+    READ_MAX_PAINT_DIGITS_CEILING,
+    READ_MAX_TRIANGLES_CEILING,
+    READ_MAX_VISITS_CEILING,
     Config,
     StoreBackend,
 )
@@ -100,6 +108,19 @@ class Settings(BaseSettings):
     # The largest media upload (#274). Env-seeded like the rest (#322): Settings can
     # change it, and the upload gate reads the value in effect on every request.
     media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
+    # SCADBUDDY_READ_MAX_<BUDGET> (#2087): what one read of a library 3MF may spend
+    # (`render/read_budget.py`), each at most its ceiling; a request may override one
+    # for itself, never past the ceiling either.
+    read_max_objects: int = Field(
+        default=DEFAULT_READ_MAX_OBJECTS, gt=0, le=READ_MAX_OBJECTS_CEILING
+    )
+    read_max_visits: int = Field(default=DEFAULT_READ_MAX_VISITS, gt=0, le=READ_MAX_VISITS_CEILING)
+    read_max_triangles: int = Field(
+        default=DEFAULT_READ_MAX_TRIANGLES, gt=0, le=READ_MAX_TRIANGLES_CEILING
+    )
+    read_max_paint_digits: int = Field(
+        default=DEFAULT_READ_MAX_PAINT_DIGITS, gt=0, le=READ_MAX_PAINT_DIGITS_CEILING
+    )
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
@@ -525,6 +546,11 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "default_plate": "live",
         # The upload gate asks for the value in effect on every request.
         "media_upload_max_bytes": "live",
+        # Read from the settings in effect by every read of a library 3MF (#2087).
+        "read_max_objects": "live",
+        "read_max_visits": "live",
+        "read_max_triangles": "live",
+        "read_max_paint_digits": "live",
         # Read from the queue's config by each job, poll or admission check.
         "render_timeout": "live",
         # Read from the config by every pipeline submit (spec 2026-09-27 §5.2).

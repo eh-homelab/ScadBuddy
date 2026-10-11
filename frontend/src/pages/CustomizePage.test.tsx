@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import type { ReactNode } from 'react'
 import { Route, Routes, useLocation } from 'react-router'
@@ -808,6 +808,27 @@ describe('CustomizePage', () => {
 
     const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['padding'])
     expect(sent).toEqual([-12])
+  }, 20000)
+
+  it('flags a font family that is not installed on its field, and renders again once it is installed there (#1286)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+
+    await user.click(screen.getByRole('tab', { name: 'Text' }))
+    const typeface = screen.getByRole('combobox', { name: 'Typeface' })
+    // All at once: typed a key at a time, every prefix would be a family too.
+    fireEvent.change(typeface, { target: { value: 'Roboto:style=Bold' } })
+
+    await waitFor(() => expect(typeface).toHaveAttribute('aria-invalid', 'true'), { timeout: 4000 })
+    expect(typeface).toHaveAccessibleDescription(/Roboto is not installed/)
+    const before = renders.length
+
+    await user.click(screen.getByRole('button', { name: 'Install Roboto' }))
+
+    await waitFor(() => expect(typeface).not.toHaveAttribute('aria-invalid'), { timeout: 4000 })
+    expect(renders.length).toBeGreaterThan(before)
+    expect(screen.queryByRole('button', { name: 'Install Roboto' })).not.toBeInTheDocument()
   }, 20000)
 
   it('flags an out-of-range number on its field and neither renders nor generates it (#921)', async () => {

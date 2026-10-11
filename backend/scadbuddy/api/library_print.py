@@ -19,6 +19,7 @@ from scadbuddy.api.deps import (
     PrintLinksDep,
     PrintProgressDep,
     PrintRunsDep,
+    ReadBudgetDep,
     SettingsStoreDep,
     StateDep,
     UploadsDep,
@@ -121,13 +122,14 @@ class LibraryFileObjects(BaseModel):
     summary="The objects Arrange reads from a library file",
 )
 async def get_library_objects(
-    file_id: FileIdPath, store: SettingsStoreDep, state: StateDep
+    file_id: FileIdPath, store: SettingsStoreDep, state: StateDep, budget: ReadBudgetDep
 ) -> LibraryFileObjects:
     """Each object the file's 3MF places, with its count (#1863): what the Arrange
     dialog lists for a file ScadBuddy did not make. One that cannot be arranged is the
-    arrange's own 422 (code `library_file_not_arrangeable`), saying why."""
+    arrange's own 422 (code `library_file_not_arrangeable`), saying why. The read spends
+    the read budgets in effect, each overridable for this request (#2087)."""
     async with client_for(store.load()) as client:
-        found = (await read_plain_files(client, [file_id], state))[file_id]
+        found = (await read_plain_files(client, [file_id], state, budget))[file_id]
     return LibraryFileObjects(
         file_id=file_id,
         filename=found.filename,
@@ -155,15 +157,16 @@ async def get_library_preview(
     file_id: FileIdPath,
     store: SettingsStoreDep,
     paths: PathsDep,
+    budget: ReadBudgetDep,
     plate: Annotated[int, Query(ge=1)] = 1,
 ) -> Response:
     """Plate ``plate`` of the file, read from the 3MF a print of it slices (#1753), as an
     output's ``preview.glb`` is read from its own: its parts in their colours, where the
     file places them. A file ScadBuddy cannot read a mesh from (sliced, not a 3MF or STL,
-    damaged, past the caps) is a 422 saying why; a plate it lacks is a 404."""
+    damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404."""
     async with client_for(store.load()) as client:
         try:
-            data = await library_preview(client, paths.cache, file_id, plate)
+            data = await library_preview(client, paths.cache, file_id, plate, budget)
         except NotViewableError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except NoSuchPlateError as error:

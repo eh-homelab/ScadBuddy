@@ -99,6 +99,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
 )
 from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
+from scadbuddy.render.read_budget import ReadBudget, ReadBudgetOverride, budget_of
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.workflows.arrange import GOALS, part_of
@@ -339,6 +340,9 @@ class ArrangeRequest(BaseModel):
     #: The template the result is filed under (#1864): one of the outputs', omitted the
     #: first one's. With library files only, any template, and required.
     slug: str | None = Field(default=None, max_length=200)
+    #: What reading each plain library file may spend (#2087), each omitted budget the
+    #: setting's; none past its ceiling.
+    read_budget: ReadBudgetOverride | None = None
 
     @model_validator(mode="after")
     def _copies_within_the_cap(self) -> ArrangeRequest:
@@ -383,7 +387,7 @@ async def resolve_library_files(
 
 
 async def read_plain_files(
-    client: BambuddyClient, file_ids: list[int], state: AppState
+    client: BambuddyClient, file_ids: list[int], state: AppState, budget: ReadBudget
 ) -> dict[int, LibraryObjects]:
     """Each plain library file's objects, read from its 3MF (#1863) once per file hash
     (#1973), their pieces stored. Every file that cannot be arranged is refused at
@@ -393,7 +397,7 @@ async def read_plain_files(
     for file_id in file_ids:
         try:
             read[file_id] = await read_library_objects(
-                client, file_id, blobs=state.store.blobs, cache=state.paths.cache
+                client, file_id, blobs=state.store.blobs, cache=state.paths.cache, budget=budget
             )
         except NotArrangeableError as error:
             refused.append(error)
@@ -577,7 +581,8 @@ async def arrange_outputs(
         async with client_for(stored) as client:
             if printer_id is not None:
                 plate_model = (await client.printer(printer_id)).model
-            library = await read_plain_files(client, plain, state)
+            budget = budget_of(state.settings, body.read_budget)
+            library = await read_plain_files(client, plain, state, budget)
     slug, inputs = await asyncio.to_thread(
         arrange_inputs, outputs, body, plate_model=plate_model, library=library
     )

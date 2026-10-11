@@ -61,7 +61,9 @@ export const arrangeTools: Tool[] = [
       "(omit for the first object's); with library files alone, slug is required and may be any template. Waits for the job; if it outlasts the wait, the still-running job " +
       'is returned: poll it with get_render_job, then save_output under its slug. An output saved before ' +
       'Arrange existed is refused: the user re-renders it from Arrange in History. A part painted in ' +
-      'Bambu Studio keeps its painting; a sliced library file, or one painted in PrusaSlicer, cannot be arranged.',
+      'Bambu Studio keeps its painting; a sliced library file, or one painted in PrusaSlicer, cannot be arranged. ' +
+      'A library file past a read budget (objects, visits, triangles or paint digits) is refused naming it; ' +
+      '`read_budget` raises that budget for this arrange alone, up to its ceiling, when the user asks for it.',
     input: z.object({
       objects: z.array(arrangeObject).min(1).max(200),
       goal: goal.default('fewest_plates'),
@@ -74,6 +76,18 @@ export const arrangeTools: Tool[] = [
       slug: slug
         .optional()
         .describe("The template the result is filed under: one of the outputs'; required with library files alone"),
+      // The ceilings are backend/scadbuddy/core/config.py's READ_MAX_*_CEILING: the
+      // generated schema carries no bounds, so they are repeated here.
+      read_budget: z
+        .object({
+          max_objects: z.number().int().min(1).max(2000),
+          max_visits: z.number().int().min(1).max(200_000),
+          max_triangles: z.number().int().min(1).max(10_000_000),
+          max_paint_digits: z.number().int().min(1).max(50_000_000),
+        })
+        .partial()
+        .optional()
+        .describe('What reading each library file may spend, for this arrange only; omitted, the Settings values'),
     }),
     risk: 'write',
     bambuddyScope: ['Read Status'],
@@ -82,7 +96,7 @@ export const arrangeTools: Tool[] = [
       `Arrange ${objects.length} object${objects.length === 1 ? '' : 's'} (${goal.replaceAll('_', ' ')}) and save the result`,
     // Its own wait for the render, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
-    handler: async ({ objects, goal, printer_id, filament_plan, colours, name, slug }, ctx) => {
+    handler: async ({ objects, goal, printer_id, filament_plan, colours, name, slug, read_budget }, ctx) => {
       const sent = await ctx.backend.POST('/api/v1/outputs/arrange', {
         body: {
           objects,
@@ -92,6 +106,7 @@ export const arrangeTools: Tool[] = [
           colours: colours ?? null,
           name: name ?? null,
           slug: slug ?? null,
+          read_budget: read_budget ?? null,
         },
         signal: ctx.signal,
       })

@@ -17,7 +17,7 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
 
 ``library_print_choices`` (#313) held a library file's choices until #1754 copied them
 into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
-it is no longer read or written.
+#1963 dropped it.
 
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
@@ -372,6 +372,10 @@ class SettingsPatch(BaseModel):
     asset_sweep_interval: float | None = None
     duplicate_staging_max_age: float | None = None
     media_upload_max_bytes: int | None = None
+    read_max_objects: int | None = None
+    read_max_visits: int | None = None
+    read_max_triangles: int | None = None
+    read_max_paint_digits: int | None = None
     #: Write-only, like the Bambuddy key; ``""`` clears it.
     google_fonts_api_key: str | None = None
     fonts_catalogue_ttl: float | None = None
@@ -956,11 +960,14 @@ class RenderStoreSettings(BaseModel):
 def load_render_store_settings(
     pool: ConnectionPool[Connection[DictRow]], defaults: Settings
 ) -> RenderStoreSettings:
-    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9)."""
+    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
+    the `render_settings` view, all of the settings the render worker's own role may
+    read (#601); the full key is in it only while no render key is stored."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(RENDER_FIELDS),)
+            "SELECT name, value FROM render_settings WHERE name = ANY(%s)",
+            (list(RENDER_FIELDS),),
         ).fetchall()
     values: dict[str, Any] = {
         name: getattr(defaults, name) for name in ENV_SEEDED if name in RENDER_FIELDS

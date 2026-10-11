@@ -56,7 +56,9 @@ test.describe('print dialog', () => {
 
     // The suggestion for slot 2 is on a shelf, so it comes with a "load this in" advisory.
     await expect(dialog.getByTestId('filament-warnings-2')).toContainText('Load Elegoo')
-    // Swap it for the pink already in the AMS-HT.
+    // Swap it for the pink already in the AMS-HT: the slot shows only its spool until
+    // Change opens the list.
+    await dialog.getByTestId('change-slot-2').click()
     await slotTwo.getByTestId('spool-22').check()
     await expect(dialog.getByTestId('filament-warnings-2')).toBeHidden()
 
@@ -117,6 +119,7 @@ test.describe('print dialog', () => {
   // reachable: nothing past the screen's edge, and Print on screen, with the choices kept.
   test('stays usable at phone width with Advanced on, and after it is switched off', async ({ page }) => {
     const dialog = await openDialog(page)
+    await dialog.getByTestId('change-slot-1').click()
     await page.setViewportSize({ width: 390, height: 844 })
     const fits = async (state: string) => {
       const scrollWidth = Number(await page.evaluate('document.documentElement.scrollWidth'))

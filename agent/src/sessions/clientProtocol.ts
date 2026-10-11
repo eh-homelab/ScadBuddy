@@ -1,7 +1,6 @@
 import { z } from 'zod'
 import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
-import { type AttachmentRef, AttachmentRefsSchema } from '../attachments/store.js'
-import { UserImagesSchema } from './images.js'
+import { AttachmentRefsSchema } from '../attachments/store.js'
 import { PROTOCOL_VERSION, SESSION_MODES } from './protocol.js'
 
 // The panel → server half of the assistant panel's wire protocol, version 1,
@@ -45,12 +44,10 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     traceparent: z.string().max(256).optional().catch(undefined),
     /**
      * Images for the model: the ids of images the panel uploaded (#1941,
-     * routes/attachments.ts), or, from a tab loaded before that, the images
-     * themselves with their previews (#1866, images.ts). Inline images are
-     * accepted for one release more, within CHAT_FRAME_MAX (routes/chat.ts).
-     * TODO(#1959): drop the UserImagesSchema branch.
+     * routes/attachments.ts). Inline images, which a tab loaded before that
+     * sends, are refused with STALE_TAB_IMAGES (#1959).
      */
-    images: z.union([AttachmentRefsSchema, UserImagesSchema]).optional(),
+    images: AttachmentRefsSchema.optional(),
     /**
      * Plan 5d: the new session's mode (spec §6.1). Absent, the `session_mode`
      * setting's applies; with `sessionId` it is refused (routes/chat.ts).
@@ -76,14 +73,30 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
 ])
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 
-export type UserMessageImages = Extract<ClientMessage, { type: 'user.message' }>['images']
+/**
+ * The answer to a `user.message` that carries its images inline, as a tab
+ * loaded before #1941 does (#1959): the panel shows it as it is.
+ */
+export const STALE_TAB_IMAGES =
+  'This page is out of date: it sent your images in a way the assistant no longer takes, so your message was not sent. ' +
+  'Please reload the page, then send the message with its images again.'
 
-/** Whether a message's images are uploads named by id (#1941) rather than inline. */
-export function isAttachmentRefs(images: NonNullable<UserMessageImages>): images is AttachmentRef[] {
-  return images.every((i) => 'kind' in i)
+/**
+ * A refusal the panel should show as an answer to what the user sent rather
+ * than as a malformed frame: in the session the frame names, if any.
+ */
+export type StaleFrame = { sessionId?: string }
+
+export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string; stale?: StaleFrame }
+
+/** Whether a frame is a `user.message` with an image that is not an attachment ref (an inline one). */
+function staleImages(value: object): StaleFrame | undefined {
+  const { type, images, sessionId } = value as Record<string, unknown>
+  if (type !== 'user.message' || !Array.isArray(images)) return undefined
+  const inline = images.some((i: unknown) => typeof i === 'object' && i !== null && !('kind' in i) && 'data' in i)
+  if (!inline) return undefined
+  return typeof sessionId === 'string' && sessionId.length > 0 && sessionId.length <= 200 ? { sessionId } : {}
 }
-
-export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string }
 
 /** A text frame from the socket. Never throws. */
 export function parseClientFrame(raw: string): ParseResult<ClientMessage> {
@@ -96,6 +109,8 @@ export function parseClientFrame(raw: string): ParseResult<ClientMessage> {
   if (typeof value === 'object' && value !== null && 'v' in value && value.v !== PROTOCOL_VERSION) {
     return { ok: false, error: `unsupported protocol version ${String(value.v)}` }
   }
+  const stale = typeof value === 'object' && value !== null ? staleImages(value) : undefined
+  if (stale) return { ok: false, error: STALE_TAB_IMAGES, stale }
   const parsed = ClientMessageSchema.safeParse(value)
   return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: z.prettifyError(parsed.error) }
 }

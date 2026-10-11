@@ -73,6 +73,7 @@ from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
@@ -118,7 +119,11 @@ MAKE_CURRENT_EVERY = 5.0
 MAKE_CURRENT_DEADLINE = 60.0
 
 
-def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
+def build_worker_deps(
+    settings: Settings, *, stopping: Callable[[], bool] = lambda: False
+) -> tuple[WorkerDeps, StoreBundle]:
+    """``stopping`` ends the wait for the API's schema and grants
+    (`WorkerStoppedError`)."""
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
@@ -141,7 +146,9 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     projection = JobProjection(
         settings.database_url, pool_size=settings.database_pool_size, events=events
     )
-    projection.open()
+    # Never migrated here (#601): the worker's own role may not, and in a rollout the
+    # API, which does, may not have started yet. Wait for it instead.
+    projection.open(migrate_schema=False)
     # The leases in Postgres, where the API's removals see them (#872).
     checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -155,6 +162,7 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         max_count=config.asset_max_count,
     )
     try:
+        wait_until_ready(projection.pool, stopping=stopping)
         source = RenderSettingsSource(projection.pool, settings)
         current = load_render_store_settings(projection.pool, settings)
         source.seed(current)
@@ -635,8 +643,13 @@ async def run_worker(
 ) -> None:
     stop = stop or asyncio.Event()
     # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
-    # the rest opens the projection's pool and reads the store settings.
-    deps, store = await asyncio.to_thread(build_worker_deps, settings)
+    # the rest opens the projection's pool, waits for the API's schema and grants
+    # (#601), and reads the store settings. A stop meanwhile ends the wait.
+    try:
+        deps, store = await asyncio.to_thread(build_worker_deps, settings, stopping=stop.is_set)
+    except WorkerStoppedError:
+        logger.info("stopped before the database was ready for this worker")
+        return
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:

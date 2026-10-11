@@ -14,6 +14,35 @@ export function statusLabel(status: SessionStatus): string {
 }
 
 /**
+ * #1288 — who an agent-made revision ran for, from its `ScadBuddy-Agent-Principal`
+ * trailer (backend `core/authorship.py`): the principal ids of agent
+ * `src/auth/principal.ts`, `browser`, `token:<id>`, `oidc:<issuer>#<sub>`,
+ * `anonymous:<mcp session>` and `flow:…`. An id it does not recognise is shown as it is.
+ */
+export function principalLabel(principal: string | null | undefined): string {
+  if (!principal) return 'an unknown caller'
+  if (principal === 'browser') return 'you'
+  const colon = principal.indexOf(':')
+  const kind = colon < 0 ? principal : principal.slice(0, colon)
+  const rest = colon < 0 ? '' : principal.slice(colon + 1)
+  switch (kind) {
+    case 'token':
+      return rest ? `MCP token ${rest}` : 'an MCP token'
+    case 'oidc': {
+      // The subject follows the last `#`; without one the rest is only the issuer.
+      const hash = rest.lastIndexOf('#')
+      const subject = hash < 0 ? '' : rest.slice(hash + 1)
+      return subject ? `OIDC user ${subject}` : 'an OIDC user'
+    }
+    case 'anonymous':
+      return 'an anonymous MCP client'
+    case 'flow':
+      return 'a flow'
+  }
+  return principal
+}
+
+/**
  * `mcp__scadbuddy__set_parameters` → `set_parameters`; a plugin's tool keeps its
  * server name (`hindsight: recall`). SDK MCP tools are named `mcp__<server>__<tool>`
  * (spec §5.1).
