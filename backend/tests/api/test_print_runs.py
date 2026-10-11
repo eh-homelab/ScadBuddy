@@ -703,7 +703,7 @@ def test_an_unavailable_temporal_may_have_started_the_run(
     assert response.json()["type"].endswith("/temporal-unavailable")
     assert "background service" in response.text and "Temporal" not in response.text
     assert "Nothing was queued" not in response.text
-    assert "follow it if it started" in response.text
+    assert "a retry picks this request up" in response.text
     # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
     assert response.json()["may_have_started"] is True
 
@@ -742,13 +742,13 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
     assert response.json()["type"].endswith("/temporal-unavailable")
     # Each may follow a persisted start, as `DEADLINE_EXCEEDED` does (review #1316 (8) 1).
     assert "Nothing was queued" not in response.text
-    assert "follow it if it started" in response.text
+    assert "a retry picks this request up" in response.text
     # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
     assert response.json()["may_have_started"] is True
     # Temporal answered (or gRPC ended the call): not a network problem (review #1316
     # (9) 1b).
-    assert "cannot reach" not in response.text
-    assert "could not start this print right now" in response.text
+    assert "answer" not in response.json()["detail"]
+    assert "busy right now" in response.text
 
 
 @respx.mock
