@@ -33,8 +33,15 @@ export function sameRepository(first: string, second: string): boolean {
  * itself is never held up by it.
  */
 async function pinAnswer(ctx: ToolContext, slug: string, name: string, pin: () => Promise<unknown>) {
-  const { data } = await ctx.backend.GET('/api/v1/models/{slug}', { params: { path: { slug } }, signal: ctx.signal })
-  const before = data ? { pinned_before: (data.libraries ?? []).some((library) => library.name === name) } : {}
+  let before: { pinned_before?: boolean } = {}
+  try {
+    const { data } = await ctx.backend.GET('/api/v1/models/{slug}', { params: { path: { slug } }, signal: ctx.signal })
+    if (data) before = { pinned_before: (data.libraries ?? []).some((library) => library.name === name) }
+  } catch (err) {
+    // A read that failed outright (a network error) is left out like a refused one; a
+    // cancelled call is cancelled, and does not go on to pin (#2124).
+    if (ctx.signal?.aborted) throw err
+  }
   const answer = await pin()
   return json(answer !== null && typeof answer === 'object' ? { ...answer, ...before } : answer)
 }
