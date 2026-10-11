@@ -1,5 +1,5 @@
-import { renameSync, writeFileSync } from 'node:fs'
-import { readdir, readFile, rm, stat } from 'node:fs/promises'
+import { constants, renameSync, writeFileSync } from 'node:fs'
+import { lstat, open, readdir, realpath, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { type SessionFiles, WorkspaceError, type WorkspaceRef } from '../workspace/store.js'
@@ -144,6 +144,9 @@ function numbered(name: string, n: number): string {
   return `${stem.slice(0, 128 - ext.length - String(n).length - 1)}-${n}${ext}`
 }
 
+/** A meta file is a URL, a name and a reason; anything larger is not the guard's. */
+const META_MAX_BYTES = 1024 * 1024
+
 type Meta = { url?: unknown; name?: unknown; error?: unknown; refused?: unknown }
 
 async function entries(dir: string): Promise<{ ended: string[]; running: number }> {
@@ -184,12 +187,16 @@ export async function drainDownloads(
   const drained: Drained = { saved: [], refused: [], running: found.running }
   if (found.ended.length === 0) return drained
   const { fileMaxBytes } = await target.files.limits()
+  const own = await realpath(dir)
   for (const id of found.ended) {
-    const metaFile = path.join(dir, `${id}.json`)
-    const binFile = path.join(dir, `${id}.bin`)
+    // Built here from the directory's real path and the entry's uuid, never from the meta.
+    const metaFile = path.join(own, `${id}.json`)
+    const binFile = path.join(own, `${id}.bin`)
     let name = 'download'
     try {
-      const meta = JSON.parse(await readFile(metaFile, 'utf8')) as Meta
+      const raw = await readOwn(metaFile, META_MAX_BYTES)
+      if (typeof raw === 'number') throw new Error('meta too large')
+      const meta = JSON.parse(raw.toString('utf8')) as Meta
       name = downloadName(typeof meta.name === 'string' ? meta.name : '')
       if (typeof meta.refused === 'string' && meta.refused) {
         drained.refused.push({ name, reason: `stopped by the download limits: ${meta.refused}` })
@@ -199,22 +206,48 @@ export async function drainDownloads(
         drained.refused.push({ name, reason: 'the download failed in the browser' })
         continue
       }
-      const size = (await stat(binFile)).size
-      if (size > fileMaxBytes) {
-        drained.refused.push({ name, reason: `${size} bytes, over the ${fileMaxBytes}-byte workspace file limit` })
+      const bytes = await readOwn(binFile, fileMaxBytes)
+      if (typeof bytes === 'number') {
+        drained.refused.push({ name, reason: `${bytes} bytes, over the ${fileMaxBytes}-byte workspace file limit` })
         continue
       }
-      const bytes = await readFile(binFile)
       const source = { tool: 'browser', url: downloadSource(typeof meta.url === 'string' ? meta.url : '') }
       drained.saved.push(await store(target, name, bytes, source))
     } catch (err) {
       drained.refused.push({ name, reason: err instanceof WorkspaceError ? err.message : 'the download could not be read' })
     } finally {
-      await rm(binFile, { force: true })
-      await rm(metaFile, { force: true })
+      await removeOwn(binFile)
+      await removeOwn(metaFile)
     }
   }
   return drained
+}
+
+/**
+ * A plain file's bytes, opened with O_NOFOLLOW so a symlink planted in the
+ * downloads directory is refused, never followed (ELOOP); its size instead
+ * when it is larger than `maxBytes`.
+ */
+async function readOwn(file: string, maxBytes: number): Promise<Buffer | number> {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const st = await handle.stat()
+    if (!st.isFile()) throw new Error('not a plain file')
+    if (st.size > maxBytes) return st.size
+    return await handle.readFile()
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Removes a file, or the link itself for a symlink (never its target); anything else is left. */
+async function removeOwn(file: string): Promise<void> {
+  try {
+    const st = await lstat(file)
+    if (st.isFile() || st.isSymbolicLink()) await unlink(file)
+  } catch {
+    // Already gone.
+  }
 }
 
 /** Stores the bytes under `downloads/<name>`, or the first numbered name not yet taken. */

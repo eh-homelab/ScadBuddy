@@ -222,6 +222,16 @@ export type DownloadBudget = {
   turnMaxCount: number
 }
 
+/**
+ * The most the request guard reads of any response that is not a download (a
+ * page, a script, an image): past it the read stops and the request is answered
+ * 502. A download's limit is the budget's `fileMaxBytes` instead.
+ */
+export const PAGE_MAX_BYTES = 50 * 1024 * 1024
+
+/** One request's deadline in the request guard, its body included: route.fetch's own default, 30 s. */
+export const FETCH_TIMEOUT_MS = 30_000
+
 /** No download at all: the budget before the harness writes one, and without a workspace. */
 export const NO_DOWNLOADS: DownloadBudget = { call: null, fileMaxBytes: 0, callMaxBytes: 0, callMaxCount: 0, turnMaxBytes: 0, turnMaxCount: 0 }
 
@@ -447,9 +457,9 @@ export function redirectGuardSource(options: {
 }): string {
   return `'use strict'
 // Written by agent/src/harness/headlessBrowser.ts (redirectGuardSource); do not edit.
-const { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } = require('node:fs')
+const { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } = require('node:fs')
 const { randomUUID } = require('node:crypto')
-const { join } = require('node:path')
+const { dirname, join } = require('node:path')
 const UI = ${JSON.stringify(options.ui)}
 const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}
 const SESSION = ${JSON.stringify(options.sessionId)}
@@ -521,48 +531,126 @@ const moveTo = (route, href) =>
     contentType: 'text/html',
     body: '<!doctype html><script>location.replace(' + JSON.stringify(href) + ')</script>',
   })
-async function guard(route) {
+// The request itself, made here with fetch and redirect: 'manual' rather than
+// route.fetch: route.fetch reads a whole body into memory with no bound, and an
+// endless response would take the agent pod, and every session on it, down.
+// One deadline for the answer and its body (FETCH_TIMEOUT_MS, route.fetch's 30 s).
+const FETCH_TIMEOUT_MS = ${FETCH_TIMEOUT_MS}
+const PAGE_MAX_BYTES = ${PAGE_MAX_BYTES}
+const HOP_BY_HOP = new Set(['host', 'connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te', 'trailer', 'content-length', 'expect'])
+// Not handed on: the body is fulfilled decoded, and its length is Playwright's to set.
+const DROPPED = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive'])
+async function boundedFetch(request, url, headers) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('timed out')), FETCH_TIMEOUT_MS)
+  timer.unref()
+  const method = request.method()
+  const body = method === 'GET' || method === 'HEAD' ? undefined : (request.postDataBuffer() ?? undefined)
+  let response
+  try {
+    response = await fetch(url, { method, headers, body, redirect: 'manual', signal: controller.signal })
+  } catch (e) {
+    clearTimeout(timer)
+    throw e
+  }
+  const answered = {}
+  response.headers.forEach((value, name) => {
+    if (name !== 'set-cookie' && !DROPPED.has(name)) answered[name] = value
+  })
+  const cookies = response.headers.getSetCookie()
+  // Playwright splits a fulfilled set-cookie on newlines, one cookie each.
+  if (cookies.length) answered['set-cookie'] = cookies.join('\\n')
+  const abort = () => {
+    clearTimeout(timer)
+    controller.abort()
+  }
+  return { status: response.status, headers: answered, response, abort, timer }
+}
+// The body, read a chunk at a time and given up on (the connection closed) the
+// moment it passes its limit: a download's is the budget's per-file cap, any
+// other response's PAGE_MAX_BYTES.
+async function readBounded(request, fetched) {
+  const download = request.isNavigationRequest() && downloadLike(fetched.headers)
+  const limit = download ? budget().fileMaxBytes : PAGE_MAX_BYTES
+  const over = { over: download ? 'download' : 'page', limit }
+  const declared = Number(fetched.headers['content-length'] ?? fetched.response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > limit) {
+    fetched.abort()
+    return over
+  }
+  const chunks = []
+  let size = 0
+  const reader = fetched.response.body ? fetched.response.body.getReader() : null
+  try {
+    while (reader) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > limit) {
+        // Stop reading and close the connection: nothing past the limit is held.
+        fetched.abort()
+        reader.cancel().catch(() => {})
+        return over
+      }
+      chunks.push(value)
+    }
+  } catch {
+    fetched.abort()
+    return { over: 'failed', limit }
+  }
+  clearTimeout(fetched.timer)
+  return { over: null, limit, body: Buffer.concat(chunks) }
+}
+async function guard(route, context) {
   const request = route.request()
   const getNavigation = request.isNavigationRequest() && request.method() === 'GET'
   const to = place(request.url())
   if (to === null) {
     return refuse(route, 403, 'Blocked: the headless browser may only open ' + UI.join(', ') + ' and the origins a human allowed in this session.')
   }
-  // Header names are lower-case here (Playwright request.headers()).
-  const headers = { ...request.headers() }
-  delete headers[MARKER]
-  if (to.ui) headers[MARKER] = SESSION
-  let response
+  // Header names are lower-case here (Playwright allHeaders(), which has the cookies).
+  let headers
   try {
-    response = await route.fetch({ maxRedirects: 0, headers })
+    headers = await request.allHeaders()
+  } catch {
+    headers = request.headers()
+  }
+  const sent = {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (!name.startsWith(':') && !HOP_BY_HOP.has(name) && name !== MARKER) sent[name] = value
+  }
+  if (to.ui) sent[MARKER] = SESSION
+  // The context's cookies for the URL, as route.fetch sent them, when the request's own headers lack them.
+  if (sent.cookie === undefined && request.method() !== 'OPTIONS') {
+    try {
+      const jar = await context.cookies(to.url)
+      if (jar.length) sent.cookie = jar.map((c) => c.name + '=' + c.value).join('; ')
+    } catch {}
+  }
+  // Only what fetch decodes, so the body handed on is never still encoded.
+  sent['accept-encoding'] = 'gzip, deflate, br'
+  let fetched
+  try {
+    fetched = await boundedFetch(request, to.url, sent)
   } catch {
     return refuse(route, 502, 'The request to ' + originOf(to.url) + ' failed.')
   }
-  const status = response.status()
+  const { status, headers: answered } = fetched
   if (status < 300 || status >= 400) {
-    // A navigation the browser would download is held to the download cap here,
-    // before a byte of it reaches the disk: by its Content-Length, then by the
-    // body route.fetch actually read (a missing or lying length).
-    if (request.isNavigationRequest() && downloadLike(response.headers())) {
-      const limit = budget().fileMaxBytes
-      const declared = Number(response.headers()['content-length'])
-      let size = Number.isFinite(declared) ? declared : 0
-      if (size <= limit) {
-        try {
-          size = Math.max(size, (await response.body()).length)
-        } catch {
-          size = Infinity
-        }
-      }
-      if (size > limit) {
-        refusedDownload(request.url(), nameOf(request.url(), response.headers()), 'over the ' + limit + '-byte download limit (the workspace file limit, or the room left in the workspace)')
-        return refuse(route, 413, 'Blocked: this download is larger than the ' + limit + ' bytes the session workspace can take.')
-      }
+    const reply = await readBounded(request, fetched)
+    if (reply.over === 'download') {
+      refusedDownload(request.url(), nameOf(request.url(), answered), 'over the ' + reply.limit + '-byte download limit (the workspace file limit, or the room left in the workspace)')
+      return refuse(route, 413, 'Blocked: this download is larger than the ' + reply.limit + ' bytes the session workspace can take.')
     }
-    return route.fulfill({ response })
+    if (reply.over === 'page') {
+      return refuse(route, 502, 'Blocked: the response from ' + originOf(to.url) + ' is larger than ' + reply.limit + ' bytes, the most the headless browser reads.')
+    }
+    if (reply.over === 'failed') return refuse(route, 502, 'The request to ' + originOf(to.url) + ' failed.')
+    return route.fulfill({ status, headers: answered, body: reply.body })
   }
-  const location = response.headers()['location']
-  if (location === undefined) return route.fulfill({ response })
+  fetched.abort()
+  const location = answered['location']
+  if (location === undefined) return route.fulfill({ status, headers: answered, body: '' })
   let next = null
   try {
     next = place(new URL(location, request.url()).href)
@@ -611,12 +699,67 @@ const nameOf = (url, headers) => {
 const refusedDownload = (url, name, refused) => {
   if (DOWNLOADS === null) return
   try {
-    const base = join(DOWNLOADS, randomUUID())
     mkdirSync(DOWNLOADS, { recursive: true })
-    writeFileSync(base + '.json.tmp', JSON.stringify({ url, name, error: null, refused }))
-    renameSync(base + '.json.tmp', base + '.json')
+    finishOwn(randomUUID(), { url, name, error: null, refused })
   } catch {}
 }
+// Every file this guard writes, measures or deletes is a path it built: one of
+// its own directories (DOWNLOADS, OUTPUT_DIR) resolved with realpath, joined with
+// one plain name, never a path the page or the server reported. A name with a
+// separator, '..' or a leading dot is refused; a symlink is never followed (lstat;
+// removing one unlinks the link, never its target); anything that is not a plain
+// file is left alone.
+const OWN_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/
+const ownPath = (dir, name) => {
+  if (dir === null || typeof name !== 'string' || !OWN_NAME.test(name) || name.includes('..')) return null
+  let real
+  try {
+    real = realpathSync(dir)
+  } catch {
+    return null
+  }
+  const file = join(real, name)
+  return dirname(file) === real ? file : null
+}
+const removeOwn = (dir, name) => {
+  const file = ownPath(dir, name)
+  if (file === null) return false
+  try {
+    const st = lstatSync(file)
+    if (!st.isFile() && !st.isSymbolicLink()) return false
+    unlinkSync(file)
+    return true
+  } catch {
+    return false
+  }
+}
+// A plain file's size (0 for a symlink or anything else): lstat, never followed.
+const existsAt = (file) => {
+  try {
+    lstatSync(file)
+    return true
+  } catch {
+    return false
+  }
+}
+const plainSize = (file) => {
+  try {
+    const st = lstatSync(file)
+    return st.isFile() ? st.size : 0
+  } catch {
+    return 0
+  }
+}
+// Writes <id>.json whole, through a fresh <id>.json.tmp ('wx': never through
+// something already there), for the harness to drain.
+const finishOwn = (id, meta) => {
+  const tmp = ownPath(DOWNLOADS, id + '.json.tmp')
+  const done = ownPath(DOWNLOADS, id + '.json')
+  if (tmp === null || done === null) return
+  writeFileSync(tmp, JSON.stringify(meta), { flag: 'wx' })
+  renameSync(tmp, done)
+}
+module.exports.ownFiles = { ownPath, removeOwn, plainSize, dropServerCopy: (s) => dropServerCopy(s), serverName: (s) => serverName(s) }
 // The server saves every download in its output directory too, under its
 // suggested name made safe (@playwright/mcp 0.0.83 Tab._downloadStarted,
 // sanitizeForFilePath). A refused one's copy is removed, now and once more
@@ -628,22 +771,14 @@ const serverName = (s) => {
 }
 const dropServerCopy = (suggested) => {
   if (OUTPUT_DIR === null || !suggested) return
-  const file = join(OUTPUT_DIR, serverName(suggested))
-  const drop = () => rmSync(file, { force: true })
+  const name = serverName(suggested)
+  const drop = () => removeOwn(OUTPUT_DIR, name)
   drop()
   setTimeout(drop, 1000).unref()
 }
 // This server lives for one query, so these totals are the turn's.
 const tally = { call: undefined, callCount: 0, callBytes: 0, turnCount: 0, turnBytes: 0, live: new Map() }
-const sizeOf = (file) => {
-  let size = 0
-  for (const f of [file, file + '.crdownload']) {
-    try {
-      size = Math.max(size, statSync(f).size)
-    } catch {}
-  }
-  return size
-}
+const sizeOf = (file) => Math.max(plainSize(file), plainSize(file + '.crdownload'))
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // Why a download of \`size\` bytes may not go on, or null, counting the others still running.
 const overBudget = (id, size, b) => {
@@ -700,10 +835,15 @@ const watchDownloads = (page) => {
   page[WATCHED] = true
   page.on('download', async (download) => {
     const id = randomUUID()
-    const base = join(DOWNLOADS, id)
     try {
       mkdirSync(DOWNLOADS, { recursive: true })
-      writeFileSync(base + '.pending', '')
+      const pending = ownPath(DOWNLOADS, id + '.pending')
+      const bin = ownPath(DOWNLOADS, id + '.bin')
+      if (pending === null || bin === null) {
+        await download.cancel().catch(() => {})
+        return
+      }
+      writeFileSync(pending, '', { flag: 'wx' })
       const b = budget()
       if (tally.call !== b.call) {
         tally.call = b.call
@@ -727,24 +867,25 @@ const watchDownloads = (page) => {
       } else {
         // Left for Playwright to delete with the context: the server is still copying it.
         try {
-          await download.saveAs(base + '.bin')
-          refused = settle(id, base + '.bin', b)
+          // Nothing may be there already: saveAs would write through a planted link.
+          if (existsAt(bin)) throw new Error('the download file already exists')
+          await download.saveAs(bin)
+          refused = settle(id, bin, b)
         } catch (e) {
           error = String((e && e.message) || e)
         }
       }
       tally.live.delete(id)
       if (refused !== null || error !== null) {
-        rmSync(base + '.bin', { force: true })
+        removeOwn(DOWNLOADS, id + '.bin')
         // The server's own copy, if it finished copying before the cancel (it names it as below).
         dropServerCopy(download.suggestedFilename())
       }
-      writeFileSync(base + '.json.tmp', JSON.stringify({ url: download.url(), name: download.suggestedFilename(), error, refused }))
-      renameSync(base + '.json.tmp', base + '.json')
+      finishOwn(id, { url: download.url(), name: download.suggestedFilename(), error, refused })
     } catch {
     } finally {
       tally.live.delete(id)
-      rmSync(base + '.pending', { force: true })
+      removeOwn(DOWNLOADS, id + '.pending')
     }
   })
 }
@@ -753,7 +894,7 @@ module.exports.default = async function requestGuard({ page }) {
   const context = page.context()
   if (context[INSTALLED]) return
   context[INSTALLED] = true
-  await context.route('**/*', guard)
+  await context.route('**/*', (route) => guard(route, context))
   await context.routeWebSocket(/.*/, (ws) => {
     const to = place(ws.url().replace(/^ws/, 'http'))
     if (to !== null) ws.connectToServer()

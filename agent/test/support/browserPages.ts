@@ -75,6 +75,31 @@ export const DOWNLOAD_BODY = 'solid part\nendsolid part\n'
 /** The size of the downloads the tests hold over the cap (`/files/stream.bin`, `/files/lying.bin`, "Blob big"). */
 export const BIG_DOWNLOAD = 5000
 
+/**
+ * What the endless responses (`/files/endless.bin`, `/endless.html`) sent before
+ * the client closed the connection, by path: they never end on their own, so
+ * this is how far the request guard read. Each stops at ENDLESS_CEILING, so a
+ * broken guard fails a test rather than hanging it.
+ */
+export const endlessSent = new Map<string, number>()
+export const ENDLESS_CEILING = 512 * 1024 * 1024
+
+async function sendEndless(url: string, res: ServerResponse, headers: Record<string, string>): Promise<void> {
+  res.writeHead(200, headers)
+  const chunk = Buffer.alloc(64 * 1024, 0x61)
+  let sent = 0
+  let closed = false
+  res.on('close', () => (closed = true))
+  endlessSent.set(url, 0)
+  while (!closed && sent < ENDLESS_CEILING) {
+    const more = res.write(chunk)
+    sent += chunk.byteLength
+    endlessSent.set(url, sent)
+    if (!more) await new Promise((resolve) => (closed ? resolve(undefined) : (res.once('drain', resolve), res.once('close', resolve))))
+  }
+  res.end()
+}
+
 /** The stand-in UI; `otherOrigin` is what its probe and redirect point at. */
 export async function startUi(otherOrigin: string, gate: OutwardGate = () => Promise.resolve(403)): Promise<PageServer> {
   const page = `<!doctype html>
@@ -99,6 +124,7 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <a id="download" href="/files/part.stl?token=abc">Download part</a>
   <a id="download-stream" href="/files/stream.bin">Download stream</a>
   <a id="download-lying" href="/files/lying.bin">Download lying</a>
+  <a id="download-endless" href="/files/endless.bin">Download endless</a>
   <button id="blob" onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob([new Uint8Array(${BIG_DOWNLOAD})])); a.download = 'big.bin'; a.click()">Blob big</button>
   <button id="blobs" onclick="for (let i = 0; i < 7; i++) { const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['small ' + i])); a.download = 'small-' + i + '.txt'; a.click() }">Blob many</button>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
@@ -132,6 +158,19 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
       res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="stream.bin"' })
       for (let sent = 0; sent < BIG_DOWNLOAD; sent += 1000) res.write(Buffer.alloc(1000, 0x61))
       res.end()
+      return
+    }
+    if (url === '/cookie-set') {
+      res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': ['sb_a=1; Path=/', 'sb_b=2; Path=/'] })
+      res.end('<!doctype html><title>Cookie</title><p>set</p>')
+      return
+    }
+    if (url === '/files/endless.bin') {
+      await sendEndless(url, res, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="endless.bin"' })
+      return
+    }
+    if (url === '/endless.html') {
+      await sendEndless(url, res, { 'content-type': 'text/html' })
       return
     }
     if (url === '/files/lying.bin') {

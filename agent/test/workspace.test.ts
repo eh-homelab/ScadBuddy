@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -241,6 +241,47 @@ describe('headless-browser downloads', () => {
     target.files.usage = async () => Promise.reject(new Error('down'))
     await before(`${TOOL_PREFIX}browser_click`)
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ ...NO_DOWNLOADS, call: 3 })
+  })
+
+  it('never reads or deletes through a symlink planted in the downloads directory', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'dl-'))
+    const downloads = path.join(dir, 'downloads')
+    await mkdir(downloads)
+    const outside = path.join(dir, 'secret.txt')
+    await writeFile(outside, 'keep me')
+    const outsideMeta = path.join(dir, 'meta.json')
+    await writeFile(outsideMeta, JSON.stringify({ url: 'https://x.test/a', name: 'a.txt', error: null, refused: null }))
+    // A .bin that links outside, with a real meta; and a meta that links outside.
+    const one = randomUUID()
+    await symlink(outside, path.join(downloads, `${one}.bin`))
+    await writeFile(path.join(downloads, `${one}.json`), JSON.stringify({ url: 'https://x.test/a', name: '../../secret.txt', error: null, refused: null }))
+    const two = randomUUID()
+    await symlink(outsideMeta, path.join(downloads, `${two}.json`))
+    await writeFile(path.join(downloads, `${two}.bin`), 'x')
+    const written: string[] = []
+    const target = {
+      ref: { kind: 'session', sessionId: 's' },
+      files: {
+        limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 1000 }),
+        write: async (_ref: unknown, p: string) => {
+          written.push(p)
+          return { path: p, size: 1, sha256: 'x', mediaType: 'text/plain' }
+        },
+      },
+    } as unknown as DownloadTarget
+    const drained = await drainDownloads(downloads, target)
+    expect(written).toEqual([])
+    expect(drained.saved).toEqual([])
+    expect(drained.refused).toEqual(
+      expect.arrayContaining([
+        { name: 'secret.txt', reason: 'the download could not be read' },
+        { name: 'download', reason: 'the download could not be read' },
+      ]),
+    )
+    // The links are gone, what they pointed at is not.
+    expect(await readdir(downloads)).toEqual([])
+    expect(readFileSync(outside, 'utf8')).toBe('keep me')
+    expect(existsSync(outsideMeta)).toBe(true)
   })
 
   it('wait for a running one, and say when it is still running', async () => {

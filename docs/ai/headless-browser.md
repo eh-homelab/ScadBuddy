@@ -129,8 +129,18 @@ In order, from the model outwards:
    from their first request) routes every request itself. A request may go to one of
    ScadBuddy's own origins (but never to the agent's paths there, the same
    `isAgentPath` check), or to an origin approved in this session. Anything else
-   is refused, sockets and redirect hops included. A request that may go is made with
-   `maxRedirects: 0`; a 3xx to a place the session may not go is refused, an allowed
+   is refused, sockets and redirect hops included. A request that may go is made by the
+   guard itself, with Node's `fetch` and `redirect: 'manual'` (not `route.fetch`, which
+   reads a whole body into memory with no bound), carrying the request's own headers and
+   the context's cookies for the URL, within one 30 s deadline for the answer and its
+   body (`FETCH_TIMEOUT_MS`, `route.fetch`'s own default). Its body is read a chunk at a
+   time and given up on, the connection closed, as soon as it passes its limit: a
+   response the browser would download is held to the download budget's per-file cap
+   (answered `413`, [Downloads](#downloads)), and any other page or subresource to
+   `PAGE_MAX_BYTES`, 50 MiB (answered `502`, a navigation with a page that says the
+   response is larger than the most the headless browser reads, which the model sees in
+   its snapshot). So an endless or enormous response costs the agent pod at most about
+   that much memory, never all of it. A 3xx to a place the session may not go is refused, an allowed
    3xx on a GET navigation becomes a new navigation (which the guard sees again), and
    any other 3xx is refused. So neither a ScadBuddy page redirecting off-origin nor an
    approved origin redirecting to an unapproved one gets through, whatever sits in
@@ -173,6 +183,16 @@ the server tracks, saves each download in the browser directory's `downloads/` a
 suggested name, or its error) once it has ended. The server also keeps its own copy in
 `output/`, which is removed with the browser directory at the end of the turn.
 
+Every file the guard and the drain write, read or delete is a path they built: their own
+directory (`downloads/`, or the server's `output/` for its copy) resolved with
+`realpath`, joined with one plain name (the download's uuid, or the server's sanitised
+name for its copy), never a path or name the page or the server reported. A name with a
+separator, `..` or a leading dot is refused; a symlink is never followed (`lstat`, and
+the drain opens with `O_NOFOLLOW`), so one planted in either directory is neither read
+into the workspace nor deleted through: removing it unlinks the link, never its target.
+The guard's own files are created with `wx`, so it never writes through something
+already there.
+
 After every browser tool call a `PostToolUse` hook in the harness
 ([`agent/src/harness/browserDownloads.ts`](../../agent/src/harness/browserDownloads.ts)
 `downloadsHook`, added in `run.ts`) drains that directory into the session's workspace
@@ -205,8 +225,9 @@ budget is zero: nothing downloads. The request guard reads it at every download:
 
 - **At the route, before the disk.** A navigation whose response the browser would
   download (`Content-Disposition: attachment`, or a type it does not render) is answered
-  `413` instead when its `Content-Length` is over the per-file cap, or when the body
-  `route.fetch` actually read is (a missing or lying length). A response that does not
+  `413` instead when its `Content-Length` is over the per-file cap, or as soon as the
+  body the guard is reading passes it (a missing or lying length, or one that never
+  ends): the guard stops reading and closes the connection. A response that does not
   parse (a `Content-Length` beside `Transfer-Encoding`) fails the fetch and is answered
   `502`. No download starts.
 - **On the disk, while it runs.** A download that starts anyway (one page script makes
@@ -218,8 +239,7 @@ budget is zero: nothing downloads. The request guard reads it at every download:
   once.
 
 Each refusal reaches the model through the drain, with its reason ("stopped by the
-download limits: …"). Not bounded: `route.fetch` holds a response's body in the server's
-memory until it ends or the fetch times out, as it does for every page.
+download limits: …").
 
 ## Beyond the backend: `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`
 
@@ -440,8 +460,8 @@ became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only 
   allowed roots"); the harness refuses them first. The browser directory (config,
   plugin copy) is outside the cwd, so no named file can overwrite them.
 - **Downloads** (#2329): a click on a link answered with `Content-Disposition:
-  attachment` through the request guard is a download (fulfilled by the guard's
-  `route.fetch`, it still downloads); the guard's `page.on('download')` saves it in
+  attachment` through the request guard is a download (fulfilled by the guard with the
+  body it read, it still downloads); the guard's `page.on('download')` saves it in
   `downloads/`, and `drainDownloads` stores it as `downloads/part.stl` with the URL's
   query dropped and leaves the directory empty. Over the cap, a chunked body with no
   `Content-Length` is answered 413 and a `Content-Length` beside `Transfer-Encoding`
@@ -454,6 +474,17 @@ became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only 
   copies it fails the tool call, so a kept download's artifact is left to Playwright. The
   hooks themselves are unit-tested (`agent/test/workspace.test.ts`), not yet through
   Claude Code.
+- **Bounded reads**: an endless attachment (a 64 KiB chunk at a time, never ending) is
+  answered 413 at a 1000-byte cap and an endless `text/html` page 502 at
+  `PAGE_MAX_BYTES`, each in under 3 s; the test server counts what it got out before the
+  guard closed the connection, under 16 MiB past the limit for both (the cap plus the
+  sockets' buffers). A cookie the site set reaches its next request through the guard's
+  own `fetch`. Paths: traversal and absolute suggested names, and a symlink planted
+  under the server's name for its copy, delete nothing outside; a `.bin` or `.json`
+  planted as a symlink in `downloads/` is neither read into the workspace nor followed
+  (`headlessBrowser.test.ts`, `workspace.test.ts`). Measured on 0.0.83 with
+  chromium-headless-shell 1246 on 2026-10-11 (server tests "stops reading an endless …",
+  "keeps a site's cookies …").
 - **`TMPDIR` must be short.** Chromium's profile goes under it and its `SingletonSocket`
   is a Unix socket (path limit about 107 bytes); under the session directory the launch
   fails with "Target page, context or browser has been closed". It is a folder per
