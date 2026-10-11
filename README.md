@@ -589,12 +589,14 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 - **What it needs:** `SCADBUDDY_DATABASE_URL`, the KEK (`SCADBUDDY_SECRET_KEY_FILE`: a
   flow's payloads are sealed per run, and the worker refuses to start without it),
   `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and `SCADBUDDY_API_INTERNAL_URL`: a flow's
-  `render`, `queue_print` and `arrange` call the API's own routes there. No data volume
+  `render`, `save_output`, `queue_print` and `arrange` call the API's own routes there
+  (`workflows/flow_routes.py`). No data volume
   and no Bambuddy key: nothing outward runs in it. Health and metrics on 9090.
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
-- **Memory:** `pydantic-monty` keeps a process-wide pool; about 180 MiB steady, so a
-  256 Mi request and a 1 Gi limit.
+- **Memory:** `pydantic-monty` keeps a process-wide pool, so the worker's memory does
+  not fall back after a large script; the homelab Deployment requests 256 Mi with a
+  1 Gi limit (eh-homelab/clusters#2123).
 - **Unversioned** (a flow may run for weeks): every change to `ProjectWorkflow`, its host
   functions or the harness pin must replay `backend/tests/fixtures/project_workflow_histories/`,
   or go behind `workflow.patched`. It stops without a drain; a run in flight resumes on

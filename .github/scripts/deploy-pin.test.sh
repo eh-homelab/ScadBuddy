@@ -190,6 +190,7 @@ fi
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-render "$IMAGE:$old")" "$(deployment scadbuddy-print "$IMAGE:$old")" "$(deployment scadbuddy-projects "$IMAGE:$old")"; then
   has_line "$pinned" "$MANIFEST_PROJECTS" || fail "projects worker: image not pinned"
   has_line "$pinned" "$MANIFEST_PRINT" || fail "projects worker: print worker not pinned"
+  has_line "$pinned" "$MANIFEST_WORKER" || fail "projects worker: render worker not pinned"
   grep -q "$MANIFEST_PROJECTS" "$work/out" || fail "projects worker: not among the changed files"
 else
   fail "projects worker: step failed: $(grep '::error' "$work/log")"
