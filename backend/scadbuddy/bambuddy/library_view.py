@@ -13,6 +13,8 @@ size nor ``updated_at`` follows such an edit, so neither can stand in for the ha
 
 Each read spends a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087). Only a
 view is kept, never a refusal, so a larger budget always reads a refused file again.
+The budget is the only bound: the file is downloaded whole whatever its size, spooled to
+the cache volume rather than held in memory (:func:`spooled_3mf`).
 """
 
 from __future__ import annotations
@@ -23,7 +25,9 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import BinaryIO
 
 from pydantic import ValidationError
 
@@ -53,8 +57,33 @@ class NotViewableError(Exception):
         self.reason = reason
 
 
+#: Where a library file is spooled while it is read, under the data volume's cache.
+SPOOL_DIRNAME = "library-spool"
+
+
+@contextlib.asynccontextmanager
+async def spooled_3mf(
+    client: BambuddyClient, source: LibrarySource, cache: Path
+) -> AsyncIterator[BinaryIO | None]:
+    """``source``'s 3MF downloaded whole into an unnamed file under ``cache``, open at
+    its start; ``None`` for an STL that holds no mesh. A library file of any size can be
+    read this way: what the read may cost is its budget's to say, not the file's size."""
+    spool = cache / SPOOL_DIRNAME
+    await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)
+    with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
+        if not await source.write_3mf(client, out):
+            yield None
+            return
+        await asyncio.to_thread(out.seek, 0)
+        yield out
+
+
 async def _read(
-    client: BambuddyClient, file: LibraryFile, plate: int, budget: ReadBudget | None
+    client: BambuddyClient,
+    cache: Path,
+    file: LibraryFile,
+    plate: int,
+    budget: ReadBudget | None,
 ) -> PlateRead:
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
@@ -67,13 +96,13 @@ async def _read(
     source = LibrarySource(
         file_id=file.id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
-    payload = await source.fetch_3mf(client)
-    if payload is None:
-        raise NotViewableError(file, "it is too large to read, or holds no mesh ScadBuddy can read")
-    try:
-        return await asyncio.to_thread(read_plate_parts, payload, plate, budget)
-    except UnreadableObjectsError as error:
-        raise NotViewableError(file, str(error)) from None
+    async with spooled_3mf(client, source, cache) as payload:
+        if payload is None:
+            raise NotViewableError(file, "it holds no mesh ScadBuddy can read")
+        try:
+            return await asyncio.to_thread(read_plate_parts, payload, plate, budget)
+        except UnreadableObjectsError as error:
+            raise NotViewableError(file, str(error)) from None
 
 
 def _cached(cache: Path, file: LibraryFile, name: str) -> Path | None:
@@ -150,7 +179,7 @@ async def library_preview(
         else:
             await asyncio.to_thread(_hit, path)
             return cached
-    data = await asyncio.to_thread(_glb, await _read(client, file, plate, budget))
+    data = await asyncio.to_thread(_glb, await _read(client, cache, file, plate, budget))
     if path is not None:
         await asyncio.to_thread(_store, path, data, MAX_CACHED)
     return data
@@ -176,7 +205,7 @@ async def library_geometry(
         if cached is not None and cached.version == ANALYSIS_VERSION:
             await asyncio.to_thread(_hit, path)
             return cached
-    read = await _read(client, file, plate, budget)
+    read = await _read(client, cache, file, plate, budget)
     analysis = await asyncio.to_thread(_analysis, read, plate)
     if path is not None:
         data = (analysis.model_dump_json(indent=2) + "\n").encode("utf-8")

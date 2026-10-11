@@ -3,10 +3,13 @@ ScadBuddy output stands behind has no manifest, so its objects are read from the
 the library print path fetches (:meth:`LibrarySource.fetch_3mf`, #1882: the file's
 bytes, an STL wrapped in ScadBuddy's own 3MF) and each is written into the blob store
 as a piece, the shape a render's Part has, so `write_output` places it like any other.
+The file is downloaded whole whatever its size, spooled to the cache volume
+(:func:`~scadbuddy.bambuddy.library_view.spooled_3mf`): its read budget, not its size,
+says whether it can be read.
 
 A piece's key is the file's sha256 and the object's place in it: the same bytes are
 the same pieces, whichever arrange reads them, and a changed file is new ones. A sliced
-file, one past the download cap, and one whose objects cannot be read faithfully
+file, an STL with no mesh, and one whose objects cannot be read faithfully
 (:mod:`scadbuddy.render.objects3mf`) are :class:`NotArrangeableError`, saying why.
 
 A file is read once per hash (#1973): reading took 13.5 s for a 13 MB file idle and
@@ -28,11 +31,12 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from pydantic import BaseModel, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.library_view import _HASH, _store
+from scadbuddy.bambuddy.library_view import _HASH, _store, spooled_3mf
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printable
 from scadbuddy.render.glb import bounding_box
@@ -58,6 +62,8 @@ LIBRARY_PIECE_PREFIX = "lib2"
 CACHE_DIRNAME = "library-objects"
 #: How many files' object lists are kept, newest first: each is a few hundred bytes.
 MAX_CACHED = 512
+#: The chunk a spooled file is hashed in.
+_CHUNK = 1024 * 1024
 #: Library pieces belong to no template.
 LIBRARY_SCOPE = BlobScope(slug=None, title=SHARED_TITLE)
 
@@ -90,6 +96,16 @@ class _Kept(BaseModel):
     refused: str | None = None
     #: The budget a refusal was read within: one kept before #2087 had the defaults.
     budget: ReadBudget = ReadBudget()
+
+
+def _digest(payload: BinaryIO) -> str:
+    """``payload``'s SHA-256, read from its start, left open at its start again."""
+    payload.seek(0)
+    digest = hashlib.sha256()
+    while chunk := payload.read(_CHUNK):
+        digest.update(chunk)
+    payload.seek(0)
+    return digest.hexdigest()
 
 
 def piece_key(digest: str, index: int) -> str:
@@ -161,19 +177,19 @@ async def read_library_objects(
     source = LibrarySource(
         file_id=file_id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
-    payload = await source.fetch_3mf(client)
-    if payload is None:
-        reason = "it is too large to read, or holds no mesh ScadBuddy can read"
-        # No budget decides this one, so no larger budget would read it: kept as the
-        # ceilings', which cover every budget.
-        await _keep(path, _Kept(refused=reason, budget=ReadBudget(**CEILINGS)))
-        raise NotArrangeableError(file_id, file.filename, reason)
-    digest = hashlib.sha256(payload).hexdigest()
-    try:
-        read = await asyncio.to_thread(read_objects, payload, spend)
-    except UnreadableObjectsError as error:
-        await _keep(path, _Kept(refused=str(error), budget=spend))
-        raise NotArrangeableError(file_id, file.filename, str(error)) from None
+    async with spooled_3mf(client, source, cache) as payload:
+        if payload is None:
+            reason = "it holds no mesh ScadBuddy can read"
+            # No budget decides this one, so no larger budget would read it: kept as the
+            # ceilings', which cover every budget.
+            await _keep(path, _Kept(refused=reason, budget=ReadBudget(**CEILINGS)))
+            raise NotArrangeableError(file_id, file.filename, reason)
+        digest = await asyncio.to_thread(_digest, payload)
+        try:
+            read = await asyncio.to_thread(read_objects, payload, spend)
+        except UnreadableObjectsError as error:
+            await _keep(path, _Kept(refused=str(error), budget=spend))
+            raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):
         box = bounding_box(obj.parts)

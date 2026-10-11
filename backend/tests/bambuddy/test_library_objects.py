@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import httpx
 import pytest
 import respx
 import trimesh
 
-from scadbuddy.bambuddy import library_objects
+from scadbuddy.bambuddy import library_objects, print_source
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.library_objects import NotArrangeableError, read_library_objects
 from scadbuddy.render.bambu3mf import write_bambu_3mf
@@ -65,8 +65,9 @@ def parses(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """One entry per 3MF parse, so a test can say none happened."""
     calls: list[int] = []
 
-    def counted(payload: bytes, budget: ReadBudget | None = None) -> Any:
-        calls.append(len(payload))
+    def counted(payload: BinaryIO, budget: ReadBudget | None = None) -> Any:
+        calls.append(len(payload.read()))
+        payload.seek(0)
         return read_objects(payload, budget)
 
     monkeypatch.setattr(library_objects, "read_objects", counted)
@@ -203,3 +204,20 @@ async def test_the_same_bytes_under_another_file_are_that_files_objects(
     assert len(parses) == 1
     assert copy.filename == "file-90.3mf"
     assert [o.library_file_id for o in copy.objects] == [90]
+
+
+@respx.mock
+async def test_a_file_past_the_print_paths_download_cap_is_still_arranged(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arrange reads a library file of any size: it is spooled to the cache volume, and
+    its read budget, not its size, says whether it can be read."""
+    payload = _project(tmp_path)
+    monkeypatch.setattr(print_source, "MAX_DOWNLOAD_BYTES", len(payload) - 1)
+    library_file(90, payload)
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    [obj] = (await read_library_objects(bambuddy, 90, blobs=blobs, cache=cache)).objects
+    assert obj.colours == ["#FF0000", "#0000FF"]
+    assert obj.part == f"lib2-{hashlib.sha256(payload).hexdigest()[:48]}-0"
+    # The spool is gone once the file is read.
+    assert not any((cache / "library-spool").iterdir())

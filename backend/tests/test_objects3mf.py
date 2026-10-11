@@ -589,3 +589,57 @@ def test_triangles_past_the_budget_are_refused() -> None:
     assert read_objects(_fan_out(1, 8), budget=budget)
     with pytest.raises(UnreadableObjectsError, match="more than 8 triangles"):
         read_objects(_fan_out(1, 9), budget=budget)
+
+
+def test_an_archive_of_any_size_is_read_by_what_its_models_hold() -> None:
+    # A real Bambu project carries thumbnails and attachments beside its models; their
+    # size says nothing of what reading its objects costs, so it refuses nothing.
+    payload = bambu_project(items=[at(0, 0)], parts={1: (_box(20, 10, 5), "normal_part", 1)})
+    buffer = io.BytesIO(payload)
+    with (
+        zipfile.ZipFile(buffer, "a", zipfile.ZIP_DEFLATED) as archive,
+        archive.open("Auxiliaries/huge.bin", "w", force_zip64=True) as entry,
+    ):
+        chunk = bytes(1024 * 1024)
+        for _ in range(300):  # past the 256 MB the whole archive was once capped at
+            entry.write(chunk)
+    [obj] = read_objects(io.BytesIO(buffer.getvalue()))
+    assert obj.count == 1
+
+
+def test_a_model_storing_more_triangles_than_the_budget_stops_as_it_is_parsed() -> None:
+    # Part 2 is never placed, so nothing expands it; storing it is what costs memory.
+    payload = bambu_project(items=[at(0, 0)], parts={1: (_box(20, 10, 5), "normal_part", 1)})
+    two = _zip(
+        {
+            "3D/3dmodel.model": (
+                f'<model unit="millimeter" xmlns="{CORE}"><resources>'
+                f"{_mesh_xml(_box(1, 1, 1), 1)}{_mesh_xml(_box(1, 1, 1), 2)}"
+                '</resources><build><item objectid="1"/></build></model>'
+            )
+        }
+    )
+    assert read_objects(payload, budget=ReadBudget(max_triangles=12))
+    assert read_objects(two, budget=ReadBudget(max_triangles=24))
+    with pytest.raises(UnreadableObjectsError, match="stores more than 23 triangles"):
+        read_objects(two, budget=ReadBudget(max_triangles=23))
+
+
+def test_model_files_past_what_the_triangle_budget_allows_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("scadbuddy.render.read_budget.MODEL_BYTES_OVERHEAD", 4096)
+    small = ReadBudget(max_triangles=12, max_paint_digits=1)
+    padding = "<metadata name='note'>" + "x" * 8192 + "</metadata>"
+    padded = _zip(
+        {
+            "3D/3dmodel.model": (
+                f'<model unit="millimeter" xmlns="{CORE}">{padding}<resources>'
+                f'{_mesh_xml(_box(1, 1, 1), 1)}</resources><build><item objectid="1"/>'
+                "</build></model>"
+            )
+        }
+    )
+    with pytest.raises(UnreadableObjectsError, match=r"inflate past 7,169 bytes.*max_triangles"):
+        read_objects(padded, budget=small)
+    assert read_objects(padded, budget=ReadBudget(max_triangles=100, max_paint_digits=1))

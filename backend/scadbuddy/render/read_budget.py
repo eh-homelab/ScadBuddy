@@ -56,6 +56,15 @@ PAST: Final[dict[Budget, str]] = {
 }
 
 
+#: What one triangle may cost of a model file's XML, about three times what one takes:
+#: a triangle and its share of the vertices measured 78 bytes in ScadBuddy's own Bambu
+#: 3MF (`write_bambu_3mf`, an icosphere of 81,920 triangles). A painted one adds its
+#: ``paint_color``, which the paint-digit budget allows for on its own.
+MODEL_BYTES_PER_TRIANGLE: Final = 256
+#: What a model file holds besides its meshes: metadata, resources, build items.
+MODEL_BYTES_OVERHEAD: Final = 64 * 1024 * 1024
+
+
 def setting_of(budget: Budget) -> str:
     """The setting that holds ``budget``'s default: ``read_max_triangles``, …"""
     return f"read_{budget}"
@@ -80,10 +89,24 @@ class ReadBudget(BaseModel):
         ``other`` would refuse too."""
         return all(getattr(self, name) >= getattr(other, name) for name in CEILINGS)
 
-    def refusal(self, budget: Budget) -> str:
-        """Why a read past ``budget`` was refused, and how to raise it."""
+    def model_bytes(self) -> int:
+        """How many bytes a read's model files may inflate to, all together: a generous
+        :data:`MODEL_BYTES_PER_TRIANGLE` for every triangle the budget allows, its paint
+        digits, and :data:`MODEL_BYTES_OVERHEAD`. What bounds the parse of a file's XML,
+        whose arrays the triangle budget bounds as they are read; the rest of the archive
+        (thumbnails, attachments) is never read, so its size counts for nothing."""
         return (
-            f"the 3MF {PAST[budget].format(getattr(self, budget))}, past the {budget} read"
+            self.max_triangles * MODEL_BYTES_PER_TRIANGLE
+            + self.max_paint_digits
+            + MODEL_BYTES_OVERHEAD
+        )
+
+    def refusal(self, budget: Budget, past: str | None = None) -> str:
+        """Why a read past ``budget`` was refused, and how to raise it: ``past`` says what
+        the file was found to hold, when not the budget's own (:data:`PAST`)."""
+        found = past if past is not None else PAST[budget].format(getattr(self, budget))
+        return (
+            f"the 3MF {found}, past the {budget} read"
             f" budget; raise it under Settings → Projects & files ({env_name(budget)}, at"
             f" most {CEILINGS[budget]:,}) or for one request (its read_budget.{budget},"
             f" or ?{budget}= on a GET)"

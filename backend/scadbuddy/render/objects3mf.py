@@ -19,12 +19,16 @@ guessed: a sliced file, PrusaSlicer's painting, painting in a file with no Bambu
 filaments for it to name, a painted part the file mirrors, a negative part. Modifiers
 and support blockers or enforcers print nothing and are dropped, with a note.
 
-The file is untrusted: the archive is bounded as the print path bounds it
-(:data:`~scadbuddy.render.bambu3mf.MAX_UNCOMPRESSED_BYTES`), every entry is read
-capped, and every read spends against a :class:`~scadbuddy.render.read_budget.ReadBudget`
-(#2087): distinct objects, and, since components may name one object many times, what the
-file expands to (objects visited, triangles produced, paint digits carried), however few
-bytes asked for them. Past one, the refusal names it and how to raise it.
+The file is untrusted, but its size alone is no reason to refuse it: every read spends
+against a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087), and that is what
+bounds it. Only the entries a read needs are inflated, each capped: the settings at
+their own small caps, the model files together at what the budget's triangles can take
+(:meth:`~scadbuddy.render.read_budget.ReadBudget.model_bytes`), their meshes stopped at
+its triangle count as they are parsed. Thumbnails and attachments are never read, so
+however large they are costs nothing. Past those, distinct objects and, since components
+may name one object many times, what the file expands to (objects visited, triangles
+produced, paint digits carried), however few bytes asked for them. Past any budget, the
+refusal names it and how to raise it.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from xml.sax.saxutils import quoteattr
 
 import numpy as np
@@ -45,15 +50,16 @@ from scadbuddy.render.bambu3mf import (
     _GCODE,
     CORE_NS,
     MAX_SETTINGS_BYTES,
-    MAX_UNCOMPRESSED_BYTES,
     MODEL_RELATIONSHIP,
     MODEL_SETTINGS_NAME,
     PRODUCTION_NS,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
     STL_COLOUR,
+    ArchiveTooLargeError,
     MeshArrays,
     PlateParts,
+    TooManyTrianglesError,
     _read_capped,
     parse_model,
 )
@@ -123,11 +129,17 @@ class _ObjectSettings:
 
 
 class _Archive:
-    """The archive's model files, each parsed once and read within the archive's cap."""
+    """The archive's model files, each parsed once, all of them together within what
+    ``budget`` allows them: its :meth:`~ReadBudget.model_bytes` inflated and its
+    triangles stored."""
 
-    def __init__(self, archive: zipfile.ZipFile) -> None:
+    def __init__(self, archive: zipfile.ZipFile, budget: ReadBudget) -> None:
         self.archive = archive
+        self.budget = budget
         self.names = set(archive.namelist())
+        #: What the model files parsed so far inflated to, and the triangles they store.
+        self.inflated = 0
+        self.stored = 0
         self.models: dict[str, tuple[ET.Element, dict[str, ET.Element], float]] = {}
         #: Every parsed model's meshes, by ``<mesh>`` element.
         self.meshes: dict[ET.Element, MeshArrays] = {}
@@ -136,10 +148,34 @@ class _Archive:
         if name not in self.models:
             if name not in self.names:
                 raise UnreadableObjectsError(f"the 3MF names a model file it lacks ({name})")
+            allowed = self.budget.model_bytes()
             try:
-                parsed = parse_model(self.archive, name)
+                parsed = parse_model(
+                    self.archive,
+                    name,
+                    cap=allowed - self.inflated,
+                    max_triangles=self.budget.max_triangles - self.stored,
+                )
             except ET.ParseError:
                 raise UnreadableObjectsError(f"{name} is not readable XML") from None
+            except TooManyTrianglesError:
+                raise UnreadableObjectsError(
+                    self.budget.refusal(
+                        "max_triangles",
+                        f"stores more than {self.budget.max_triangles:,} triangles",
+                    )
+                ) from None
+            except ArchiveTooLargeError:
+                raise UnreadableObjectsError(
+                    self.budget.refusal(
+                        "max_triangles",
+                        f"has model files that inflate past {allowed:,} bytes, more than"
+                        " that many triangles could take",
+                    )
+                ) from None
+            # zipfile stops an entry at its declared size (a longer one fails its CRC).
+            self.inflated += self.archive.getinfo(name).file_size
+            self.stored += sum(len(arrays.faces) for arrays in parsed.meshes.values())
             root = parsed.root
             self.meshes.update(parsed.meshes)
             resources = root.find(f"{_CORE}resources")
@@ -344,7 +380,7 @@ class _Reader:
         ):
             return
         # The budget counts what the arrays already hold: it bounds the work below, not
-        # the parse. The archive's size cap (`MAX_UNCOMPRESSED_BYTES`) bounds that.
+        # the parse. The archive's model allowance (`_Archive`) bounds that.
         self._spend(triangles=len(arrays.faces))
         points = arrays.vertices
         if not np.isfinite(points).all():
@@ -510,12 +546,13 @@ class _Reader:
         return parts, notes
 
 
-def read_objects(payload: bytes, budget: ReadBudget | None = None) -> list[ReadObject]:
+def read_objects(payload: bytes | BinaryIO, budget: ReadBudget | None = None) -> list[ReadObject]:
     """Every object ``payload``'s build places, each with its count, in build order,
-    read within ``budget`` (the defaults when None). Raises
+    read within ``budget`` (the defaults when None). ``payload`` is the file's bytes, or
+    the file open for reading, for one too large to hold whole. Raises
     :class:`UnreadableObjectsError` for a file whose objects cannot be read."""
     spend = budget or ReadBudget()
-    return _opened(payload, lambda archive: _read(archive, spend))
+    return _opened(payload, spend, lambda archive: _read(archive, spend))
 
 
 @dataclass(frozen=True)
@@ -526,7 +563,9 @@ class PlateRead:
     plates: int
 
 
-def read_plate_parts(payload: bytes, plate: int = 1, budget: ReadBudget | None = None) -> PlateRead:
+def read_plate_parts(
+    payload: bytes | BinaryIO, plate: int = 1, budget: ReadBudget | None = None
+) -> PlateRead:
     """The parts of ``payload``'s plate ``plate``, one per colour in the order colours
     appear, placed where the file places them: what a library file's preview and mesh
     checks read, as an output's read its own 3MF (#1753). Plates are Bambu Studio's
@@ -534,7 +573,7 @@ def read_plate_parts(payload: bytes, plate: int = 1, budget: ReadBudget | None =
     :func:`read_objects` refuses; a plate the file lacks is
     :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
     spend = budget or ReadBudget()
-    return _opened(payload, lambda archive: _read_plate(archive, plate, spend))
+    return _opened(payload, spend, lambda archive: _read_plate(archive, plate, spend))
 
 
 def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
@@ -584,17 +623,17 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     return PlateRead(found, count)
 
 
-def _opened[T](payload: bytes, read: Callable[[_Archive], T]) -> T:
-    """``read`` over ``payload``'s archive, every way it can fail an
-    :class:`UnreadableObjectsError`."""
+def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_Archive], T]) -> T:
+    """``read`` over ``payload``'s archive, within ``budget``, every way it can fail an
+    :class:`UnreadableObjectsError`. The archive's size is not one: what it may cost is
+    what ``budget`` allows the entries a read inflates (:class:`_Archive`)."""
     try:
-        with zipfile.ZipFile(io.BytesIO(payload)) as zipped:
-            archive = _Archive(zipped)
-            infos = zipped.infolist()
-            if any(_GCODE.fullmatch(info.filename) for info in infos):
+        with zipfile.ZipFile(
+            io.BytesIO(payload) if isinstance(payload, bytes) else payload
+        ) as zipped:
+            archive = _Archive(zipped, budget)
+            if any(_GCODE.fullmatch(name) for name in archive.names):
                 raise UnreadableObjectsError("the file is sliced already; print it from Bambuddy")
-            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
-                raise UnreadableObjectsError("the 3MF is too large to read")
             return read(archive)
     except zipfile.BadZipFile:
         raise UnreadableObjectsError("the file is not a 3MF archive") from None

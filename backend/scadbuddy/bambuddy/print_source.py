@@ -21,7 +21,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 import psycopg
 from fastapi import status
@@ -482,8 +482,10 @@ SLICED_TYPE = "gcode.3mf"
 #: The color of the one filament of a file Bambuddy reads none from (an STL, a 3MF
 #: without slice metadata). ``normalise_colour`` reads it as unknown.
 UNKNOWN_COLOUR = ""
-#: A library file is untrusted; one larger than the archive cap could not be laid out
-#: anyway, so it is never held whole (a 3MF's compressed size is below its inflated one).
+#: A library file is untrusted; one larger than the archive cap could not be rewritten
+#: for the print anyway, so it is never held whole here, and prints as it is (a 3MF's
+#: compressed size is below its inflated one). Arrange and a library file's preview
+#: read one of any size (:meth:`LibrarySource.write_3mf`).
 MAX_DOWNLOAD_BYTES = MAX_UNCOMPRESSED_BYTES
 
 
@@ -607,6 +609,33 @@ class LibrarySource(PrintPipeline):
                 extra={"library_file_id": self.file_id, "error": type(exc).__name__},
             )
             return None
+
+    async def write_3mf(self, client: BambuddyClient, out: BinaryIO) -> bool:
+        """Write the 3MF :meth:`fetch_3mf` would answer into ``out``, whatever its size:
+        what Arrange and a library file's preview read, which spend a read budget rather
+        than refuse a file for being large, so only a chunk at a time is held here.
+        ``False`` for an STL that holds no mesh."""
+        async with aclosing(client.download_library_file(self.file_id)) as chunks:
+            async for chunk in chunks:
+                await asyncio.to_thread(out.write, chunk)
+        if self.file_type != "stl":
+            return True
+        try:
+            await asyncio.to_thread(self._wrap_stl, out)
+        except Exception as exc:
+            logger.warning(
+                "could not read the STL's mesh",
+                extra={"library_file_id": self.file_id, "error": type(exc).__name__},
+            )
+            return False
+        return True
+
+    def _wrap_stl(self, out: BinaryIO) -> None:
+        out.seek(0)
+        wrapped = stl_3mf(out.read(), model_name=_file_stem(self.filename) or "model")
+        out.seek(0)
+        out.truncate()
+        out.write(wrapped)
 
     async def _download(self, client: BambuddyClient) -> bytes | None:
         """The file's bytes, counted as they stream in; ``None`` past
