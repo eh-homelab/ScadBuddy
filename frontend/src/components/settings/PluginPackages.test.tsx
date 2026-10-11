@@ -394,6 +394,33 @@ describe('PluginPackagesPanel', () => {
     expect(within(viewer).queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument()
   })
 
+  it('offers no "Show all" for a file too large to send whole (#2151)', async () => {
+    const huge = 'y'.repeat(PREVIEW_CHARS)
+    server.use(
+      http.get('/api/v1/ai/plugin-packages/:name/file', () =>
+        HttpResponse.json({
+          path: 'CHANGELOG.txt',
+          size: 2 * 1024 * 1024,
+          binary: false,
+          media_type: 'text/plain',
+          truncated: true,
+          too_large: true,
+          content: huge,
+        }),
+      ),
+    )
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await openFiles(user, card)
+    await user.click(await within(card).findByRole('button', { name: 'CHANGELOG.txt' }))
+    const viewer = await within(card).findByRole('region', { name: 'greeter: CHANGELOG.txt' })
+    expect(await within(viewer).findByTestId('file-content')).toHaveTextContent(huge)
+    expect(within(viewer).getByText(/Too large to show whole\./)).toBeInTheDocument()
+    expect(within(viewer).queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument()
+  })
+
   it("reads the re-pin's own files in its approval", async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
