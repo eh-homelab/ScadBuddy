@@ -190,7 +190,11 @@ type Caller = {
   tiers: readonly Tier[] | undefined
 }
 
-/** A flow run's call: its starter, no session, and the run's decisions as its approvals. */
+/**
+ * A flow run's call: its starter, no session, and the run's decisions as its approvals,
+ * each bound to this call's tool and input (#2318): the hash is made from what this call
+ * was given, so an approval of the parked call authorises no other tool or input.
+ */
 async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, toolUseId: string): Promise<Caller> {
   if (DURABLE_ONLY_NAMES.has(tool.name) || tool.name.startsWith('browser_')) {
     throw ApplicationFailure.nonRetryable(`${tool.name} is not for flows: a flow has no session and no browser tab`, NOT_FOR_FLOWS)
@@ -203,7 +207,10 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
   const runId = Context.current().info.workflowExecution?.runId ?? ''
   // A token starter's run acts with what its token holds now, as its sessions' turns do (#2320).
   const tiers = owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner)
-  return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals: deps.flows, tiers }
+  const flows = deps.flows
+  // The caller's binding is the hash of what this call was given; none approves nothing.
+  const approvals = flows && { approved: (requestId: string, call?: ApprovalBinding) => flows.approved(requestId, call?.inputHash) }
+  return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals, tiers }
 }
 
 /**

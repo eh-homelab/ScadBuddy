@@ -14,11 +14,12 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
+from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.manifest import use_manifest
-from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds
+from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
 from tests.flows.fake_api import Outward
-from tests.flows.flows_support import script
+from tests.flows.flows_support import HASH_KEY, Keys, script
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -106,10 +107,15 @@ async def test_an_outward_tool_waits_for_approval_and_runs_once(
     assert served.calls == []
     preview = await outward_since(outward.client, parked, 1)
     assert preview.calls == []
-    decide = next(k for k in flow_kinds(outward.store) if k.name == FLOW_DECIDE)
+    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
+    # #2318: the approval is bound to the tool and the arguments it parked with, as the
+    # agent hashes them again before it runs the call.
+    decision = await outward.store.get_decision(request_id(parked, call_id))
+    assert decision is not None
+    assert decision.input_hash == input_hash(HASH_KEY, "send_to_bambuddy", {"output_id": "o1"})
     run = await outward.finished(run_id)
     assert run.result == "result: 'sent'"
     assert served.calls == [("send_to_bambuddy", f"tool-{call_id}", {"output_id": "o1"})]

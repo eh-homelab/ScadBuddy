@@ -7,7 +7,10 @@ import type { Owner } from '../sessions/protocol.js'
 // `workflow_runs.started_by`, written by the backend from the request's author), and
 // an outward one only with a person's `approved` decision for it in
 // `workflow_run_decisions` (decision B), which only the backend's browser-only routes
-// write. Both tables are the backend's; this reads them and never writes.
+// write. The decision is bound to the call as it was parked (#2318): its `input_hash` is
+// inputHash (approvals/service.ts) of the tool and arguments the person approved, made
+// by the backend (flows/approval_hash.py), and it must equal the hash of the call being
+// run. Both tables are the backend's; this reads them and never writes.
 
 // Lowercase only, as the backend's run ids (uuid4) and the codec's subjects are.
 const FLOW_WORKFLOW = /^flow-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
@@ -21,8 +24,12 @@ export function flowOf(workflowId?: string): string | undefined {
 export interface FlowRuns {
   /** The run's starter as a session owner; undefined when there is no such run. */
   startedBy(runId: string): Promise<Owner | undefined>
-  /** Whether `workflow_run_decisions` approves the call `requestId` (`flow:<run>:<workflow run>:<call>`). */
-  approved(requestId: string): Promise<boolean>
+  /**
+   * Whether `workflow_run_decisions` approves the call `requestId`
+   * (`flow:<run>:<workflow run>:<call>`) with this `inputHash`: the call's tool and input
+   * as hashed now. Without a hash nothing is approved.
+   */
+  approved(requestId: string, inputHash?: string): Promise<boolean>
 }
 
 /** `started_by` as the backend writes it (core/authorship.py `current_author()`). */
@@ -68,10 +75,12 @@ export class PgFlowRuns implements FlowRuns {
     return ownerOfPrincipal(decoded(by.principal))
   }
 
-  async approved(requestId: string): Promise<boolean> {
+  async approved(requestId: string, inputHash?: string): Promise<boolean> {
+    if (inputHash === undefined) return false
     const rows = await this.#sql`
       SELECT 1 FROM workflow_run_decisions
-      WHERE request_id = ${requestId} AND kind = 'approval' AND outcome = 'approved'`
+      WHERE request_id = ${requestId} AND kind = 'approval' AND outcome = 'approved'
+        AND input_hash = ${inputHash}`
     return rows.length > 0
   }
 }

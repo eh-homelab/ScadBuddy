@@ -20,6 +20,7 @@ from scadbuddy.library.history import (
     DEFAULT_TIMEOUT,
     GITIGNORE_NAME,
     LOCK_NAME,
+    MAINTAIN_LOOSE_OBJECTS,
     MAX_SUBJECT,
     RECOVERED_MESSAGE,
     BlobTooLargeError,
@@ -241,6 +242,33 @@ def test_last_commits_is_empty_before_the_first_commit(models: Path) -> None:
     history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
 
     assert history.last_commits() == {}
+
+
+def test_maintain_leaves_a_small_repository_alone(models: Path, history: ModelHistory) -> None:
+    write_model(models, "box", "cube(1);")
+    history.ensure_repo()
+    assert history.maintain() is False
+    assert history.object_counts()["count"] > 0
+
+
+def test_maintain_packs_once_loose_objects_pile_up(models: Path, history: ModelHistory) -> None:
+    """#2289: thousands of loose objects on NFS made every listing's history walk 11 s."""
+    write_model(models, "box", "cube(1);")
+    head = history.ensure_repo()
+    for n in range(MAINTAIN_LOOSE_OBJECTS):
+        write_model(models, "box", f"cube({n + 2});")
+        history.commit(f"edit {n}", "box")
+    assert history.object_counts()["count"] >= MAINTAIN_LOOSE_OBJECTS
+    assert history.maintain() is True
+    counts = history.object_counts()
+    assert counts["count"] == 0
+    assert counts["packs"] == 1
+    assert history.last_commit("box") is not None
+    assert head in {r.commit for r in history.log(limit=MAINTAIN_LOOSE_OBJECTS + 1)}
+
+
+def test_maintain_is_a_no_op_without_a_repository(models: Path, history: ModelHistory) -> None:
+    assert history.maintain() is False
 
 
 def test_merge_file_merges_clean_edits_and_counts_conflicts(history: ModelHistory) -> None:

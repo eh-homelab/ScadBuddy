@@ -142,15 +142,22 @@ export function missingFonts(error: unknown): MissingFonts | undefined {
 }
 
 /**
+ * A family name as fontconfig compares it (backend `library/fonts.py`
+ * `normalise_family`): case and blanks ignored. The one copy, which the mock
+ * uses too, so the two can't disagree on a spelling (#2216).
+ */
+export function foldFamily(text: string): string {
+  return text.replace(/ /g, '').toLowerCase()
+}
+
+/**
  * The missing families one field's value names. The problem lists them for every
  * parameter together, so each field takes those its own value mentions; one it
  * mentions none of (a spelling the server normalised) takes them all.
  */
 export function missingFamiliesOf(problem: MissingFonts, name: string, value: string): string[] {
   if (!problem.parameters.includes(name)) return []
-  // Compared as fontconfig compares families (backend `normalise_family`): ignoring case and blanks.
-  const fold = (text: string) => text.replace(/ /g, '').toLowerCase()
-  const folded = fold(value)
-  const named = problem.families.filter((family) => folded.includes(fold(family)))
+  const folded = foldFamily(value)
+  const named = problem.families.filter((family) => folded.includes(foldFamily(family)))
   return named.length > 0 ? named : problem.families
 }

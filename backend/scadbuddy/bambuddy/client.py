@@ -110,6 +110,7 @@ Operation = Literal[
     "library.folders.by_project",
     "library.folders.create",
     "library.folders.list",
+    "library.folders.read",
     "library.listing",
     "library.plate_thumbnail",
     "library.plates",
@@ -738,6 +739,18 @@ class BambuddyClient:
             what=what,
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def folder(self, folder_id: int) -> Folder:
+        """``GET /api/v1/library/folders/{id}`` — one folder, 404 "Folder not found" when
+        Bambuddy cannot see it (#2263)."""
+        response = await self._send(
+            "GET",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.read",
+            what=f"read library folder {folder_id}",
+        )
+        return Folder.model_validate(response.json())
 
     async def create_folder(self, folder: FolderCreate) -> Folder:
         """``POST /api/v1/library/folders/`` — the trailing slash is the write route."""

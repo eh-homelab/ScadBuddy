@@ -357,6 +357,8 @@ export function CustomizePage() {
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  // One object per refusal, so a font field's install error answers this one only (#2215).
+  const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
   // Temporal UI, when Settings knows where that is.
   const settings = useAsync(() => api.getSettings(), []).data
@@ -1201,7 +1203,7 @@ export function CustomizePage() {
               reveal={reveal}
               rendered={renderedOutput}
               growsWithPage={!full}
-              missingFonts={missingFonts(renderError)}
+              missingFonts={fontRefusal}
               onFontInstalled={() => {
                 fontsState.reload()
                 retryRender()

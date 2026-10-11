@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from scadbuddy.bambuddy import projects
+from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.projects import (
     ProjectRequest,
@@ -105,7 +105,7 @@ def _not_found(detail: str = "Project not found") -> httpx.Response:
 
 @pytest.fixture
 def no_commit_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(projects, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
+    monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
 
 
 @respx.mock
@@ -159,7 +159,7 @@ async def test_a_project_bambuddy_never_kept_says_so_rather_than_no_such_resourc
     assert "did not keep it" in caught.value.detail
     assert "Create the project again" in caught.value.detail
     assert folder.call_count == 1
-    assert read.call_count == len(projects.COMMIT_WAITS)
+    assert read.call_count == len(commits.COMMIT_WAITS)
 
 
 @respx.mock
@@ -438,3 +438,95 @@ async def test_the_media_folder_is_never_mistaken_for_the_project_folder(
     project" could be it; a send must still land in the project folder itself."""
     project_folders(MEDIA_FOLDER, PROJECT_FOLDER)
     assert await folder_for(bambuddy, 7) == 9
+
+
+class Folderless:
+    """:class:`~scadbuddy.bambuddy.projects.FolderlessProjects` in memory."""
+
+    def __init__(self, *rows: tuple[int, str, int | None]) -> None:
+        self.rows = {project_id: (name, parent) for project_id, name, parent in rows}
+
+    async def folderless(self, name: str, parent_id: int | None) -> list[int]:
+        return sorted(
+            (pid for pid, row in self.rows.items() if row == (name, parent_id)), reverse=True
+        )
+
+    async def remember_folderless(self, project_id: int, name: str, parent_id: int | None) -> None:
+        self.rows[project_id] = (name, parent_id)
+
+    async def forget_folderless(self, project_id: int) -> None:
+        self.rows.pop(project_id, None)
+
+
+def _fidget(project_id: int = 7, name: str = "Fidget") -> httpx.Response:
+    return httpx.Response(200, json={"id": project_id, "name": name, "status": "active"})
+
+
+@respx.mock
+async def test_a_create_pressed_again_after_its_folder_failed_folders_the_same_project(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#2263: Bambuddy kept the project but its folder failed. Pressing Create again
+    gives *that* project its folder rather than making a second "Fidget"."""
+    created = respx.post(f"{API}/projects/").mock(return_value=_fidget())
+    respx.get(f"{API}/projects/7").mock(return_value=_fidget())
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    folder = respx.post(f"{API}/library/folders/").mock(
+        side_effect=[
+            httpx.Response(500, json={"detail": "database is locked"}),
+            httpx.Response(200, json={"id": 9, "name": "Fidget", "project_id": 7}),
+        ]
+    )
+    folderless = Folderless()
+
+    with pytest.raises(ApiError):
+        await ensure_project(bambuddy, ProjectRequest(name="Fidget"), folderless=folderless)
+    assert folderless.rows == {7: ("Fidget", None)}
+
+    view = await ensure_project(bambuddy, ProjectRequest(name=" Fidget "), folderless=folderless)
+    assert (view.id, view.folder_id) == (7, 9)
+    assert created.call_count == 1
+    assert folder.call_count == 2
+    assert folderless.rows == {}
+
+
+@respx.mock
+async def test_a_same_named_project_scadbuddy_did_not_leave_folderless_is_not_adopted(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Bambuddy allows two projects of one name, and a project made in its UI has no
+    folder either: only one this ScadBuddy created and failed to folder is adopted, never
+    one that merely shares the name — the user's "Fidget" (id 3) is left alone."""
+    created = respx.post(f"{API}/projects/").mock(return_value=_fidget(8))
+    respx.get(f"{API}/library/folders/by-project/8").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 9, "name": "Fidget", "project_id": 8})
+    )
+    folderless = Folderless((5, "Fidget", 2))  # the same name, nested elsewhere
+
+    view = await ensure_project(bambuddy, ProjectRequest(name="Fidget"), folderless=folderless)
+    assert view.id == 8
+    assert created.call_count == 1
+    assert folderless.rows == {5: ("Fidget", 2)}
+
+
+@respx.mock
+async def test_a_remembered_project_gone_or_renamed_is_forgotten_and_a_new_one_made(
+    bambuddy: BambuddyClient,
+) -> None:
+    """A record whose project Bambuddy never kept (or someone deleted) 404s, and one
+    renamed since is no longer this create's project: both are dropped, and the create
+    goes ahead."""
+    respx.get(f"{API}/projects/6").mock(return_value=_not_found())
+    respx.get(f"{API}/projects/5").mock(return_value=_fidget(5, "Fidget spinner"))
+    created = respx.post(f"{API}/projects/").mock(return_value=_fidget(8))
+    respx.get(f"{API}/library/folders/by-project/8").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 9, "name": "Fidget", "project_id": 8})
+    )
+    folderless = Folderless((5, "Fidget", None), (6, "Fidget", None))
+
+    view = await ensure_project(bambuddy, ProjectRequest(name="Fidget"), folderless=folderless)
+    assert view.id == 8
+    assert created.call_count == 1
+    assert folderless.rows == {}

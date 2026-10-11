@@ -23,6 +23,7 @@ from fastapi import status
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.commits import upload_into
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
 from scadbuddy.bambuddy.extruders import VOLUME_TYPE
 from scadbuddy.bambuddy.models import ExternalLink, LibraryFile, LibraryListRow
@@ -447,7 +448,9 @@ async def upload_copy(
             if project_stem is not None and folder is not None
             else printable.inbox_name
         )
-        uploaded = await client.upload_library_file(filename, payload, folder_id=folder)
+        # A project's folder `folder_for` made moments ago may not be committed yet
+        # (#2263): the upload waits for it rather than failing the file.
+        uploaded = await upload_into(client, filename, payload, folder_id=folder)
     await uploads.record(
         printable.key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
     )

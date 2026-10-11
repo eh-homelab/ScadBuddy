@@ -560,6 +560,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                 focusSession()
               }}
               onUnarchive={(session) => updateSession(session.id, { archived: false })}
+              unarchived={(id) => state.sessions[id]?.archived === false}
             />
           ) : (
             <>
