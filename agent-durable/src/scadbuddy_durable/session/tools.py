@@ -167,6 +167,8 @@ def apply_overrides(
 
 # agent/src/temporal/turnTools.ts: the activity a turn tool's call runs as.
 TURN_TOOL_PREFIX = "turn:"
+# How long a call pinned to a replica may take from scheduled to done.
+PINNED_DEADLINE = timedelta(minutes=11)
 
 
 def turn_tools(entries: Sequence[TurnTool]) -> list[DurableTool]:
@@ -181,8 +183,11 @@ def turn_tools(entries: Sequence[TurnTool]) -> list[DurableTool]:
             description=e.description,
             input_schema=e.input_schema,
             needs_approval=e.may_park,
-            task_queue=TOOLS_QUEUE,
+            task_queue=e.task_queue or TOOLS_QUEUE,
             start_to_close_timeout=timedelta(minutes=10),
+            # Pinned to a replica: if it is gone nothing polls its queue, and the call
+            # fails here rather than waiting for ever.
+            schedule_to_close_timeout=PINNED_DEADLINE if e.task_queue else None,
             heartbeat_timeout=timedelta(seconds=60),
             retry_policy=_ONCE if e.may_park else _RETRY,
         )

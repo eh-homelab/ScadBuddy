@@ -109,6 +109,9 @@ class TurnTool:
     input_schema: dict[str, Any]
     # Whether a call may be outward: it then asks turn_tool_tier before it parks.
     may_park: bool
+    # The replica's own queue when its server's state lives there (http_request's saved
+    # bodies, the headless browser); None: agent-tools.
+    task_queue: str | None = None
 
 
 @dataclass

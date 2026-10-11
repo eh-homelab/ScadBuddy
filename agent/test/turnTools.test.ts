@@ -23,6 +23,7 @@ import {
 const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
+const SECRET = 'sk-plugin-header-0123456789'
 
 function notes(calls: string[]): () => McpServer {
   return () => {
@@ -39,6 +40,14 @@ function notes(calls: string[]): () => McpServer {
       isError: true,
       content: [{ type: 'text', text: 'it broke' }],
     }))
+    // A plugin that echoes the header it was sent, as a classic turn's scrub expects one may.
+    server.registerTool('echo', { description: 'echoes', inputSchema: {} }, async () => ({
+      content: [{ type: 'text', text: `your token is ${SECRET}` }],
+    }))
+    server.registerTool('leak', { description: 'fails loudly', inputSchema: {} }, async () => ({
+      isError: true,
+      content: [{ type: 'text', text: `refused ${SECRET}` }],
+    }))
     return server
   }
 }
@@ -50,15 +59,23 @@ const tierOf = (name: string, input: unknown): RiskTier => {
   return 'outward'
 }
 
-function harness(options: { owner?: Owner & { turnTiers?: string[] }; offered?: boolean; problems?: string[] } = {}) {
+function harness(
+  options: { owner?: Owner & { turnTiers?: string[] }; offered?: boolean; problems?: string[]; pinned?: boolean } = {},
+) {
   const calls: string[] = []
   const audits: AuditEntry[] = []
   const reported: string[] = []
   const owner = options.owner ?? BROWSER
-  const server: TurnServer = { name: 'notes', connect: () => connectInProcess(notes(calls)), tierOf }
+  const server: TurnServer = { name: 'notes', connect: () => connectInProcess(notes(calls)), tierOf, ...(options.pinned ? { pinned: true } : {}) }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
-    servers: async () => ({ servers: options.offered === false ? [] : [server], problems: options.problems ?? [], release: () => {} }),
+    servers: async () => ({
+      servers: options.offered === false ? [] : [server],
+      problems: options.problems ?? [],
+      secrets: [SECRET],
+      release: () => {},
+    }),
+    hostQueue: 'agent-tools.host-1',
     approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
     audit: {
       record: async (entry) => void audits.push(entry),
@@ -91,7 +108,11 @@ describe('turn tools in a durable session', () => {
       ['notes__read_note', false],
       ['notes__post', true],
       ['notes__broken', true],
+      ['notes__echo', true],
+      ['notes__leak', true],
     ])
+    // Not pinned: its calls run on agent-tools, wherever.
+    expect(tools.every((t) => t.task_queue === undefined)).toBe(true)
     expect(tools[0]!.input_schema).toMatchObject({ type: 'object', properties: { id: { type: 'string' } } })
     // A configured server left out is said in the session, as a classic turn says it.
     expect(h.reported).toEqual(['plugin hindsight failed its check'])
@@ -139,5 +160,23 @@ describe('turn tools in a durable session', () => {
   it('refuses a workflow that is no durable session', async () => {
     const refused = await failure(env('turn:notes__read_note', 'tool-toolu_01', 'flow-x').run(harness().call, { id: 'a' }))
     expect(refused.type).toBe('UnknownSession')
+  })
+
+  it("pins a server's calls to the replica that listed it, when its state lives there", async () => {
+    const h = harness({ pinned: true })
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(new Set(tools.map((t) => t.task_queue))).toEqual(new Set(['agent-tools.host-1']))
+  })
+
+  it("redacts the turn's secrets from a result, an error and its audit row (security review of #2324)", async () => {
+    const h = harness()
+    const text = await env('turn:notes__echo', 'tool-toolu_approved').run(h.call, {})
+    expect(text).toBe('your token is [redacted]')
+    const refused = await failure(env('turn:notes__leak', 'tool-toolu_approved').run(h.call, {}))
+    expect(refused.message).toBe('refused [redacted]')
+    expect(JSON.stringify(h.audits)).not.toContain(SECRET)
+    const reported = harness({ problems: [`plugin x failed with header ${SECRET}`] })
+    await env(TURN_TOOLS_ACTIVITY).run(reported.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)
+    expect(reported.reported).toEqual(['plugin x failed with header [redacted]'])
   })
 })

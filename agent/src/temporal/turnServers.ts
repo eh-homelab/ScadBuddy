@@ -17,12 +17,16 @@ export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
   settings?: { get<T>(key: string): Promise<T | undefined> } | undefined
-  /** http_request, as a classic turn has it; its saved bodies under `saveRoot/<session>/http`. */
+  /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
+  credentialSecrets?: (() => Promise<readonly string[]>) | undefined
+  /**
+   * http_request, as a classic turn has it; its saved bodies under `saveRoot/<session>/http`,
+   * on this pod's own disk as a classic turn's are (never the shared payload volume), so
+   * the server is pinned to this replica.
+   */
   httpRequest?:
     | {
         saveRoot: string
-        /** What no request may carry: every usable credential's secret (fallback.ts candidates). */
-        secrets: () => Promise<readonly string[]>
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
@@ -34,7 +38,12 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
   return async (context) => {
     const servers: TurnServer[] = []
     const forwarded = deps.remotePlugins ? await deps.remotePlugins() : undefined
-    const secrets: string[] = [...(forwarded?.secrets ?? [])]
+    // The forwarder URLs carry the registration's token: as secret as the header it adds.
+    const secrets: string[] = [
+      ...(forwarded?.secrets ?? []),
+      ...(forwarded?.plugins ?? []).map((p) => p.url),
+      ...(deps.credentialSecrets ? await deps.credentialSecrets() : []),
+    ]
     for (const plugin of forwarded?.plugins ?? []) {
       const tiers = pluginTierResolver([plugin])
       servers.push({
@@ -46,9 +55,6 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     }
     const http = deps.httpRequest
     if (http && httpRequestEnabled(await deps.settings?.get<unknown>(SETTING_HTTP_REQUEST))) {
-      secrets.push(...(await http.secrets()))
-      // On the payload volume both sidecars and every replica share, so a body saved by
-      // one call is read by http_response_read on whichever replica the next call runs.
       const saveDir = path.join(http.saveRoot, context.session, 'http')
       await mkdir(saveDir, { recursive: true })
       servers.push({
@@ -68,11 +74,13 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
               }).instance,
           ),
         tierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
+        pinned: true,
       })
     }
     return {
       servers,
       problems: forwarded?.problems ?? [],
+      secrets,
       release: () => forwarded?.release(),
     }
   }

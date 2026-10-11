@@ -92,3 +92,16 @@ def test_each_turn_replaces_the_last_turns_tools_and_never_a_manifest_tool() -> 
     assert "notes__post" not in offered and "notes__post" not in held
     assert offered["render_preview"] is held["render_preview"]
     assert not offered["render_preview"].needs_approval
+
+
+def test_a_pinned_turn_tool_runs_on_its_replicas_queue_with_a_deadline() -> None:
+    [pinned, anywhere] = tools.turn_tools(
+        [
+            TurnTool("scadbuddy_http__http_request", "", {}, True, "agent-tools.pod-a"),
+            _turn_tool("notes__post"),
+        ]
+    )
+    assert pinned.task_queue == "agent-tools.pod-a"
+    assert pinned.schedule_to_close_timeout == tools.PINNED_DEADLINE
+    assert anywhere.task_queue == "agent-tools"
+    assert anywhere.schedule_to_close_timeout is None

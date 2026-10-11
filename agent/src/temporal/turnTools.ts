@@ -9,6 +9,7 @@ import type { Tier } from '../auth/principal.js'
 import { durableRequestId } from '../gate/ids.js'
 import type { RiskTier } from '../harness/permissions.js'
 import { harnessToolName } from '../plugins/registry.js'
+import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { turnPrincipal } from '../tools/harness.js'
 import {
@@ -54,12 +55,24 @@ export type TurnServer = {
   connect(): Promise<Client>
   /** The tier of a call by its harness name (`mcp__<server>__<tool>`) and input, as the permission seam resolves it. */
   tierOf(harnessName: string, input: unknown): RiskTier
+  /**
+   * Whether its calls must run on the replica that listed it (`TurnToolsDeps.hostQueue`):
+   * a server whose state lives in this process or on this pod's disk (http_request's
+   * saved bodies, the headless browser).
+   */
+  pinned?: boolean
 }
 
 export type TurnServers = {
   servers: TurnServer[]
   /** Why a configured server is not offered (a plugin that failed its check), said in the session. */
   problems: string[]
+  /**
+   * The turn's secrets (every credential's, each plugin's header and forwarder URL):
+   * redacted from every result, error, audit detail and problem before it leaves the
+   * agent, as a classic turn scrubs its event log (sessions/sdkEvents.ts `scrubForLog`).
+   */
+  secrets: readonly string[]
   release(): void | Promise<void>
 }
 
@@ -74,6 +87,8 @@ export type TurnToolsDeps = {
   currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
   /** Says in the session why a configured server was left out (code `plugin_unavailable`). */
   report?: ((session: string, problems: readonly string[]) => Promise<void>) | undefined
+  /** This replica's own queue (`agent-tools.<host>`), where a pinned server's calls run. */
+  hostQueue?: string | undefined
 }
 
 /** What DurableSession declares for one turn tool. */
@@ -83,6 +98,8 @@ export type TurnToolEntry = {
   input_schema: Record<string, unknown>
   /** Whether a call may be outward: it then parks unless `turn_tool_tier` says otherwise, and runs at most once. */
   may_park: boolean
+  /** The queue its calls run on when the server is pinned to the replica that listed it. */
+  task_queue?: string
 }
 
 export type TurnToolsResult = { tools: TurnToolEntry[] }
@@ -162,14 +179,15 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const { session, owner } = await durableSession(TURN_TOOLS_ACTIVITY, deps.sessions)
       const signal = Context.current().cancellationSignal
       return withServers(deps, { session, owner, signal }, async (set) => {
-        if (set.problems.length) await deps.report?.(session, set.problems)
+        const scrub = (text: string) => redact(text, set.secrets)
+        if (set.problems.length) await deps.report?.(session, set.problems.map(scrub))
         const tools: TurnToolEntry[] = []
         for (const server of set.servers) {
           let offered: Awaited<ReturnType<typeof listed>>
           try {
             offered = await listed(server, signal)
           } catch (err) {
-            await deps.report?.(session, [`plugin ${server.name} is not available in this turn: ${(err as Error).message}`])
+            await deps.report?.(session, [scrub(`plugin ${server.name} is not available in this turn: ${(err as Error).message}`)])
             continue
           }
           for (const { tool, name } of offered) {
@@ -178,6 +196,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
               description: tool.description ?? '',
               input_schema: tool.inputSchema as Record<string, unknown>,
               may_park: server.tierOf(`mcp__${server.name}__${name}`, undefined) === 'outward',
+              ...(server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}),
             })
           }
         }
@@ -217,6 +236,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const fields = inputObject(input)
     const signal = context.cancellationSignal
     return withServers(deps, { session, owner, signal }, async (set) => {
+      const scrub = (text: string) => redact(text, set.secrets)
       const { server, tool, harnessName } = await resolve(set, name, signal)
       const tier = server.tierOf(harnessName, input)
       const startedAt = new Date()
@@ -233,7 +253,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
           inputHash: deps.audit.hash(name, fields),
           inputSummary: deps.audit.summarise(name, fields),
           outcome,
-          ...(detail === undefined ? {} : { detail }),
+          ...(detail === undefined ? {} : { detail: scrub(detail) }),
           startedAt,
           finishedAt: new Date(),
         })
@@ -256,11 +276,11 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       } catch (err) {
         if (signal.aborted) throw new CancelledFailure('the call was cancelled')
         await record('error', (err as Error).message)
-        throw ApplicationFailure.nonRetryable(`${name} failed: ${(err as Error).message}`, TOOL_ERROR)
+        throw ApplicationFailure.nonRetryable(scrub(`${name} failed: ${(err as Error).message}`), TOOL_ERROR)
       } finally {
         clearInterval(heartbeat)
       }
-      const text = resultText((result.content ?? []) as { type: string; text?: string }[])
+      const text = scrub(resultText((result.content ?? []) as { type: string; text?: string }[]))
       await record(result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)
       return text
