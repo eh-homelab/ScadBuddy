@@ -1038,6 +1038,19 @@ jobs:
         with:
           fetch-depth: 1
 
+      # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), restored from
+      # the cache while the list of them is unchanged, so LFS is pulled from only
+      # after a fixture changes. They are mounted into the test container below; no
+      # image carries them (.dockerignore).
+      - name: List the LFS fixtures
+        run: git lfs ls-files --long --include "test-fixtures/**" > "$RUNNER_TEMP/lfs-fixtures.txt"
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ hashFiles(format('{0}/lfs-fixtures.txt', runner.temp)) }}
+      - name: Fetch the LFS fixtures
+        run: git lfs pull --include "test-fixtures/**"
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Build the test image
@@ -1055,6 +1068,7 @@ jobs:
         run: |
           set -euo pipefail
           line=$(docker run --rm -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro" \
+            -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
             --collect-only -q --splits 4 --group ${{ matrix.group }} | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
@@ -1086,6 +1100,7 @@ jobs:
           mkdir -p results && chmod 777 results &&
           docker run --rm --network host --shm-size=1g
           -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"
+          -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
