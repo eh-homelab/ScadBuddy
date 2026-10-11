@@ -92,6 +92,10 @@ export interface MockAgentSessions {
   /** #1885 — the archived sessions, newest first, as `GET /api/v1/ai/sessions?archived=true` lists them. */
   archived(): { id: string; title: string; origin: Origin; status: SessionStatus; parentId: string | null; costUsd: number; budgetUsd: number; archivedAt: string }[]
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
+  /** #1284 — for tests: the chat titled `title` is offered to `to`, as `sessions_handoff` would. */
+  offerChat(title: string, to: Owner): void
+  /** #1284 — `DELETE /api/v1/ai/sessions/:id/handoff`: withdraws the offer, the owner only. */
+  cancelOffer(sessionId: string): { cancelled: boolean } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
   /**
@@ -612,7 +616,7 @@ export function createMockAgentTransport({
   const snapshot = (): ServerEvent => ({
     v: PROTOCOL_VERSION,
     type: 'sessions.snapshot',
-    sessions: [...sessions.values()].filter((s) => !s.archivedAt).map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, mode }) => ({
+    sessions: [...sessions.values()].filter((s) => !s.archivedAt).map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, mode, offer }) => ({
       sessionId,
       title,
       origin,
@@ -623,6 +627,7 @@ export function createMockAgentTransport({
       costUsd,
       budgetUsd,
       ...(mode ? { mode } : {}),
+      offer: offer ?? null,
     })),
   })
 
@@ -694,6 +699,21 @@ export function createMockAgentTransport({
     },
     has(sessionId) {
       return sessions.has(sessionId)
+    },
+    offerChat(title, to) {
+      const s = [...sessions.values()].find((one) => one.title === title)
+      if (!s) throw new Error(`no chat titled ${title}`)
+      s.offer = { to, until: new Date(Date.now() + 3_600_000).toISOString() }
+      deliver(snapshot())
+    },
+    cancelOffer(sessionId) {
+      const s = sessions.get(sessionId)
+      if (!s) return { error: `no session ${sessionId}`, status: 404 }
+      if (s.owner.kind !== 'browser') return { error: `only the owner of session ${sessionId} can cancel the offer`, status: 403 }
+      const cancelled = !!s.offer
+      delete s.offer
+      deliver(snapshot())
+      return { cancelled }
     },
     respond(requestId, body) {
       const [store, id] = requestId.split(/:(.*)/s)

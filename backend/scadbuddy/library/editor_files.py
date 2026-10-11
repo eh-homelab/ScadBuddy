@@ -108,6 +108,38 @@ def read_file(root: Path, relative: str, *, limit: int) -> bytes:
     return data
 
 
+def list_files(root: Path, *, limit: int) -> tuple[list[tuple[str, int]], bool]:
+    """Every regular file under ``root`` that :func:`read_file` could serve, as its
+    relative ``/`` path and size in bytes, in path order; at most ``limit`` of them,
+    with True when more were left out (#1067).
+
+    A dot-file or dot-directory is neither listed nor walked into, and neither is a
+    symlink, so nothing listed is outside the root or on a hidden path. The walk goes
+    in sorted order and stops once past ``limit``, so a huge tree costs a bounded walk
+    and a cut listing is always the same prefix.
+    """
+    base = root.resolve(strict=True)
+    found: list[tuple[str, int]] = []
+    for directory, dirnames, filenames in os.walk(base):
+        # os.walk does not descend a symlinked directory unless asked to.
+        dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            path = Path(directory) / name
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            relative = path.relative_to(base).as_posix()
+            if not stat.S_ISREG(info.st_mode) or len(relative) > MAX_PATH_LENGTH:
+                continue
+            found.append((relative, info.st_size))
+            if len(found) > limit:
+                return sorted(found[:limit]), True
+    return sorted(found), False
+
+
 def opened_path(fd: int) -> Path | None:
     """The path an open descriptor is at, as the kernel has it; None where there is no
     ``/proc`` (not the image, which is Linux)."""

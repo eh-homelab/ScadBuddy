@@ -76,7 +76,7 @@ const state = {
 
 /** A fork or an edit the panel sent: the path under `/api/v1/ai` and the JSON body. */
 export interface SessionWrite {
-  method: 'POST' | 'PATCH'
+  method: 'POST' | 'PATCH' | 'DELETE'
   path: string
   body: Record<string, unknown>
 }
@@ -217,6 +217,16 @@ export const handlers = [
       { session: view({ id: forked.id, title: forked.title, parent_id: forked.parentId, budget_usd: forked.budgetUsd }) },
       { status: 201 },
     )
+  }),
+
+  http.delete(`${base}/sessions/:id/handoff`, ({ params }) => {
+    const id = String(params.id)
+    state.sessionWrites.push({ method: 'DELETE', path: `/sessions/${id}/handoff`, body: {} })
+    const agent = mockAgentSessions()
+    if (!agent) return detail('the assistant is not connected', 503)
+    const answer = agent.cancelOffer(id)
+    if ('error' in answer) return detail(answer.error, answer.status)
+    return HttpResponse.json({ cancelled: answer.cancelled, session: view({ id, offer: null }) })
   }),
 
   http.patch(`${base}/sessions/:id`, async ({ params, request }) => {

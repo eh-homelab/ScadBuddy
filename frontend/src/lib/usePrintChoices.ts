@@ -39,7 +39,15 @@ export function usePrintChoices(
 ) {
   const key = sourceKey(source)
   const latest = useLatest(source)
-  const [choices, setChoices] = useState<ChoicesView | null>(null)
+  /** The last read, with the source it was read for. */
+  const [read, setRead] = useState<{ key: string | undefined; view: ChoicesView } | null>(null)
+  /**
+   * #2186 — only the source's own read: the dialog stays mounted when it closes, so
+   * another file opened later would otherwise show the last one's slots, and be
+   * printable on them, until its own read lands. A re-arrange keeps the old output's
+   * on screen while the new one's is read.
+   */
+  const choices = read && (read.key === key || carry?.get()) ? read.view : null
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
   const [nozzles, setNozzles] = useState<NozzleChoice[]>(DEFAULT_NOZZLES)
@@ -100,7 +108,7 @@ export function usePrintChoices(
       .getChoices(askedPrinter)
       .then((next) => {
         if (token !== attempt.current) return
-        setChoices(next)
+        setRead({ key: sourceKey(current), view: next })
         setChoicesRead(token)
         // The server already applied last archive → remembered → default.
         setBedType(next.bed_type)
@@ -121,7 +129,7 @@ export function usePrintChoices(
         if (token !== attempt.current) return
         // A carry survives a failed read: a Retry of the same output still applies it.
         // A different output clears it (PrintPicker), and a stale read never lands here.
-        setChoices(null)
+        setRead(null)
         setLoadError(cause instanceof ApiError ? cause.detail : 'Could not read the print choices.')
       })
       .finally(() => {

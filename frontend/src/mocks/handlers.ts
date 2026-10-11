@@ -423,6 +423,11 @@ export function mockModels(): readonly ModelSummary[] {
   return state.models
 }
 
+/** #1290 — a model's `model.scad` as the mock has it now, for a feature module (`features/`). */
+export function mockSource(slug: string): string | undefined {
+  return state.sources[slug]
+}
+
 /** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
 export function replaceMockModel(model: ModelSummary): ModelSummary {
   state.models = state.models.map((m) => (m.slug === model.slug ? model : m))

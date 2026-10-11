@@ -134,13 +134,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'get_source_file and sees the image path in it.',
   },
   {
-    operation: 'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
-    reason:
-      "Serves the file a go-to-definition lands in to the source editor's read-only view (#185). The " +
-      'editor asks for the path openscad-lsp named; an agent has no definition to follow and reads a ' +
-      "model's own files through get_source and get_source_file.",
-  },
-  {
     operation: 'GET /api/v1/analyzers',
     reason: ANALYZERS_LATER,
   },
@@ -196,7 +189,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
-      "print time and open picks in the print check's rack options, for the hotends that job could use.",
+      "print time and open picks in the print check's rack options, for the hotends that job could use. " +
+      "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
   },
 ]
 

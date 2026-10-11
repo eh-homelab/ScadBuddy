@@ -21,6 +21,9 @@ const NewModelPage = lazy(async () => ({
 const EditSourcePage = lazy(async () => ({
   default: (await import('./pages/EditSourcePage')).EditSourcePage,
 }))
+const EditSourceFilePage = lazy(async () => ({
+  default: (await import('./pages/EditSourceFilePage')).EditSourceFilePage,
+}))
 
 function Editing({ children }: { children: ReactNode }) {
   return (
@@ -58,13 +61,21 @@ export function App() {
             </Editing>
           }
         />
+        <Route
+          path="m/:slug/source/:file"
+          element={
+            <Editing>
+              <EditSourceFilePage />
+            </Editing>
+          }
+        />
         <Route path="m/:slug/history" element={<HistoryPage />} />
         <Route path="m/:slug/versions" element={<VersionsPage />} />
         <Route path="m/:slug/prints" element={<TemplatePrintsPage />} />
         <Route path="prints" element={<PrintsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
-        <Route path="library" element={<LibraryPage />} />
+        <Route path="library/*" element={<LibraryPage />} />
         <Route path="workflows" element={<WorkflowsPage />} />
         <Route path="workflows/runs/:id" element={<WorkflowRunPage />} />
         <Route path="settings" element={<SettingsPage />} />

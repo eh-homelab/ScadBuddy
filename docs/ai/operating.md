@@ -898,4 +898,7 @@ so a change applies from the next turn.
   state volume, in `work/sessions/<id>/http/` (the 10 newest per session), so size
   that volume for it.
 - Every request is listed in Settings → **AI activity** under **HTTP requests**, with
-  its method, host, status and size.
+  its method, host, status and size. A request whose body was saved has a **View /
+  download body** link (#1292): plain text and JSON open as text, anything else
+  downloads. It works while the body is among the session's 10 newest, on the replica
+  that saved it.

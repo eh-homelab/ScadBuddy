@@ -71,6 +71,7 @@ function patchOf(view: AiSessionView): SessionPatch {
     budgetUsd: view.budget_usd,
     ...(view.mode ? { mode: view.mode } : {}),
     ...(view.archived === undefined ? {} : { archived: view.archived }),
+    ...(view.offer === undefined ? {} : { offer: view.offer }),
   }
 }
 
@@ -457,6 +458,14 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       throw reason(caught)
     }
   }
+  // #1284 — the answer carries the session as it now is, offer gone, ahead of the next list.
+  const cancelOffer = async (id: string) => {
+    try {
+      chat.patch(patchOf((await api.cancelAiSessionOffer(id)).session))
+    } catch (caught) {
+      throw reason(caught)
+    }
+  }
   // The raised budget arrives over the socket (`session.budget`), which clears the card.
   const raiseBudget = async (id: string, addUsd: number) => {
     try {
@@ -600,6 +609,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                   onRename={(id, title) => updateSession(id, { title })}
                   onDone={(id) => updateSession(id, { done: true })}
                   onArchive={(id) => updateSession(id, { archived: true })}
+                  onCancelOffer={cancelOffer}
                 />
               )}
             </>

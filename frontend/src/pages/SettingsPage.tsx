@@ -1175,7 +1175,7 @@ export function SettingsPage() {
           <Section
             id="remembered"
             title={sectionTitle('remembered')}
-            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults. A printer with a nozzle rack also lists what each hotend has printed, which Least used ranks by."
+            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults. A printer with a nozzle rack also lists each hotend: its serial, what it has loaded, what it has printed (which Least used ranks by) and every spool that ran through it."
           >
             <RememberedChoicesPanel targets={targetsState.data} projects={projectsState.data} />
             <HotendUsagePanel targets={targetsState.data} />

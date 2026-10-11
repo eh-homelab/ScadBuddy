@@ -24,6 +24,9 @@ class FlowStep(BaseModel):
     history_length: int
     #: The history length when the call ended: a Reset to before it reopens the step.
     ended_history_length: int | None = None
+    #: The execution whose write recorded it, set by the store (never by the script): a
+    #: Reset leaves the new execution's own records alone.
+    workflow_run_id: str | None = None
     #: The exception's type name, never its message.
     error: str | None = None
 
@@ -40,6 +43,8 @@ class FlowWaiting(BaseModel):
     #: Reset to between the two parks it again.
     history_length: int | None = None
     resolved_at: int | None = None
+    #: The execution whose write parked it, set by the store, as on `FlowStep`.
+    workflow_run_id: str | None = None
 
 
 class ProjectionWrite(BaseModel):
