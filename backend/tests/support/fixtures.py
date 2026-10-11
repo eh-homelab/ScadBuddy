@@ -4,7 +4,9 @@ They are outside `backend/` so no image carries them (the app stage copies all o
 `backend/`): CI mounts them into the test container at `/app/test-fixtures`
 (`.github/workflows/ci.yml`), and a checkout finds them beside `backend/`.
 `SCADBUDDY_TEST_FIXTURES` names another place. A checkout without `git lfs pull` holds
-only pointer files, which count as absent, so `requires_fixtures` tests skip.
+only pointer files, which count as absent, so `requires_fixtures` tests skip, naming the
+first such file; with `SCADBUDDY_TEST_FIXTURES` set (CI sets it) they fail instead, so
+fixtures that went missing never pass as a quiet skip.
 """
 
 from __future__ import annotations
@@ -33,16 +35,25 @@ def _manifest_root() -> Path | None:
 
 
 @cache
-def fixtures_root() -> Path | None:
-    """Where the fixtures are, or None when only their LFS pointers are."""
+def fixtures_missing() -> str | None:
+    """Why the fixtures cannot be used, naming the first file that is absent or only
+    an LFS pointer; None when every file is here."""
     root = _manifest_root()
     if root is None:
-        return None
+        return "test-fixtures/makerworld/manifest.json is not here"
     for entry in makerworld():
-        with (root / "makerworld" / entry["file"]).open("rb") as handle:
+        path = root / "makerworld" / entry["file"]
+        if not path.is_file():
+            return f"{path} is missing"
+        with path.open("rb") as handle:
             if handle.read(len(LFS_POINTER)).startswith(LFS_POINTER):
-                return None
-    return root
+                return f"{path} is a Git LFS pointer (git lfs pull --include 'test-fixtures/**')"
+    return None
+
+
+def fixtures_root() -> Path | None:
+    """Where the fixtures are, or None when any is missing (`fixtures_missing` says which)."""
+    return None if fixtures_missing() is not None else _manifest_root()
 
 
 def makerworld() -> list[dict[str, Any]]:

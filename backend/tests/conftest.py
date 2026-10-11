@@ -110,10 +110,10 @@ def openscad_binary() -> str | None:
     return shutil.which(load_config().openscad)
 
 
-def fixtures_root() -> Path | None:
-    from tests.support.fixtures import fixtures_root as root
+def fixtures_missing() -> str | None:
+    from tests.support.fixtures import fixtures_missing as missing
 
-    return root()
+    return missing()
 
 
 def openscad_lsp_binary() -> str | None:
@@ -171,8 +171,14 @@ def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
 
 @pytest.fixture(autouse=True)
 def _skip_without_fixtures(request: pytest.FixtureRequest) -> None:
-    if request.node.get_closest_marker("requires_fixtures") and fixtures_root() is None:
-        pytest.skip("test-fixtures/ is not checked out (git lfs pull, or SCADBUDDY_TEST_FIXTURES)")
+    if not request.node.get_closest_marker("requires_fixtures"):
+        return
+    missing = fixtures_missing()
+    if missing is None:
+        return
+    if os.environ.get("SCADBUDDY_TEST_FIXTURES"):
+        pytest.fail(f"SCADBUDDY_TEST_FIXTURES is set, but {missing}")
+    pytest.skip(missing)
 
 
 @pytest.fixture(autouse=True)

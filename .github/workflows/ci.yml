@@ -1042,12 +1042,14 @@ jobs:
       # the cache while the list of them is unchanged, so LFS is pulled from only
       # after a fixture changes. They are mounted into the test container below; no
       # image carries them (.dockerignore).
+      # hashFiles() reads only the workspace, so the list's hash is taken here.
       - name: List the LFS fixtures
-        run: git lfs ls-files --long --include "test-fixtures/**" > "$RUNNER_TEMP/lfs-fixtures.txt"
+        id: lfs
+        run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: .git/lfs/objects
-          key: lfs-fixtures-${{ hashFiles(format('{0}/lfs-fixtures.txt', runner.temp)) }}
+          key: lfs-fixtures-${{ steps.lfs.outputs.key }}
       - name: Fetch the LFS fixtures
         run: git lfs pull --include "test-fixtures/**"
 
@@ -1103,6 +1105,7 @@ jobs:
           -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
           --splits 4 --group ${{ matrix.group }}
           --junitxml=/results/junit.xml --durations=20
