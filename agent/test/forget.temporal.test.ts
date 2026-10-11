@@ -98,8 +98,11 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
     await plain.terminate()
 
     expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(1)
-    const forgotten = await forgetSubject({ sql: db.sql, client, keys }, subject)
+    const removed: string[] = []
+    const payloads = { forget: async (s: string) => void removed.push(s) }
+    const forgotten = await forgetSubject({ sql: db.sql, client, keys, payloads }, subject)
     expect(forgotten).toEqual({ key: true, workflow: 'deleted', rows: 1 })
+    expect(removed).toEqual([subject]) // its stored payloads' directory (#2243)
     expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
     expect(await db.sql`SELECT 1 FROM ai_sessions WHERE id = ${session.id}`).toHaveLength(0)
     expect(await db.sql`SELECT 1 FROM ai_session_events WHERE session_id = ${session.id}`).toHaveLength(0)

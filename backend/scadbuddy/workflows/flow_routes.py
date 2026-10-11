@@ -1,4 +1,4 @@
-"""The activities behind a flow's `render`, `save_output`, `print` and `arrange` (plan
+"""The activities behind a flow's `render`, `save_output`, `queue_print` and `arrange` (plan
 2026-10-09-durable-phase-6-flows.md Ruling 5): ScadBuddy's own routes, called at
 `SCADBUDDY_API_INTERNAL_URL`, so every check and record the routes make stays theirs.
 
@@ -10,7 +10,7 @@ route answers with is final: `RouteRefused`, carrying only the problem's `detail
 
 import asyncio
 import hashlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 import httpx
@@ -23,6 +23,10 @@ FLOW_ROUTE_FOLLOW = "flow_route_follow"
 ROUTE_REFUSED = "RouteRefused"
 API_URL_MISSING = "ApiUrlMissing"
 ROUTE_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+#: `follow` heartbeats this often while a GET is in flight, well inside the workflow's
+#: 30 s `heartbeat_timeout` (flow_tools.py `_HEARTBEAT`), which one slow GET under
+#: `ROUTE_TIMEOUT` (up to 30 s read plus 10 s connect) would otherwise outlast (#2247).
+HEARTBEAT_EVERY_S = 10.0
 #: A proxy's own answer rather than the backend's (no problem `detail`): re-sent.
 UNANSWERED = frozenset({502, 503, 504, 524})
 RESEND_S = 1.0
@@ -90,6 +94,17 @@ def api_client(base_url: str | None) -> httpx.AsyncClient | None:
     return httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=ROUTE_TIMEOUT)
 
 
+async def _heartbeating[T](request: Awaitable[T]) -> T:
+    """`request`, heartbeating every `HEARTBEAT_EVERY_S` until it answers."""
+    task = asyncio.ensure_future(request)
+    try:
+        while not (await asyncio.wait({task}, timeout=HEARTBEAT_EVERY_S))[0]:
+            activity.heartbeat()
+        return task.result()
+    finally:
+        task.cancel()
+
+
 class FlowRoutes:
     """The activities over one client on the API (`None`: no URL configured, and every
     call fails, naming the setting)."""
@@ -135,7 +150,7 @@ class FlowRoutes:
         while True:
             activity.heartbeat()
             try:
-                response = await api.get(follow.path)
+                response = await _heartbeating(api.get(follow.path))
             except httpx.TransportError:
                 response = None
             if response is not None and response.status_code < 500:

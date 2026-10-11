@@ -296,11 +296,17 @@ export class TabHub implements BrowserTabs {
     if (tabId === undefined) return false
     if (this.#tabs.has(tabId)) return true
     if (!this.#relay) return false
-    const answer = await this.#relay.forward(tabId, { op: 'status' }, {
-      signal: new AbortController().signal,
-      timeoutMs: this.#callTimeoutMs,
-    })
-    return answer?.op === 'status'
+    try {
+      const answer = await this.#relay.forward(tabId, { op: 'status' }, {
+        signal: new AbortController().signal,
+        timeoutMs: this.#callTimeoutMs,
+      })
+      return answer?.op === 'status'
+    } catch (err) {
+      // As for a call: a relay that cannot be asked is a tab not connected.
+      this.logError(err)
+      return false
+    }
   }
 
   forSession(sessionId: string): BrowserTabs {

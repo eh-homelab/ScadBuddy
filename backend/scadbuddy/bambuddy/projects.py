@@ -23,6 +23,7 @@ Three details of Bambuddy's shape are load-bearing:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Collection
 
@@ -31,6 +32,7 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, UpstreamAnswer
 from scadbuddy.bambuddy.linking import link_item
 from scadbuddy.bambuddy.models import Folder, FolderCreate, Project, ProjectCreate
 from scadbuddy.bambuddy.print_links import PrintLinkStore
@@ -175,14 +177,77 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             None,
         )
     if folder is None:
-        folder = await client.create_folder(
+        folder = await _create_folder(
+            client,
+            project,
             FolderCreate(
                 name=project.name,
                 project_id=project.id,
                 parent_id=await _parent_folder_id(client, project),
-            )
+            ),
+            created=request.project_id is None,
         )
     return _view(project, folder)
+
+
+#: Bambuddy's own detail when a write names a project it cannot see.
+PROJECT_NOT_FOUND = "Project not found"
+#: The pauses before each read-back of a project Bambuddy has not committed yet (#2065):
+#: about 2 s in all, as long as its write lock is normally held.
+COMMIT_WAITS: tuple[float, ...] = (0.1, 0.3, 0.6, 1.0)
+
+
+async def _create_folder(
+    client: BambuddyClient, project: Project, folder: FolderCreate, *, created: bool
+) -> Folder:
+    """Create the project's folder, waiting out a project Bambuddy has not committed.
+
+    Bambuddy answers ``POST /projects/`` before it commits the row: its route only
+    flushes, and the commit is the exit of its ``get_db`` dependency, which FastAPI runs
+    after the response is sent (#2065). The folder that follows at once runs on another
+    session, cannot see the project and is refused with 404 "Project not found". So for
+    a project created in this call, and only that refusal, the project is read back
+    until it is visible and the folder is created again. A linked project that 404s is
+    really gone and is never retried.
+    """
+    try:
+        return await client.create_folder(folder)
+    except ApiError as error:
+        if not created or not _project_missing(error):
+            raise
+    await _wait_for_commit(client, project)
+    return await client.create_folder(folder)
+
+
+async def _wait_for_commit(client: BambuddyClient, project: Project) -> None:
+    """Return once Bambuddy can read ``project`` back, or raise when it never can: its
+    commit failed (SQLite's "database is locked"), so the project does not exist and
+    nothing was linked to it."""
+    for wait in COMMIT_WAITS:
+        await asyncio.sleep(wait)
+        try:
+            await client.project(project.id)
+        except ApiError as error:
+            if not _project_missing(error):
+                raise
+            continue
+        return
+    raise ApiError(
+        status.HTTP_502_BAD_GATEWAY,
+        f"Bambuddy answered that it created the {project.name!r} project (id {project.id}) "
+        "but did not keep it, so it has no folder and nothing was linked to it. "
+        "Create the project again.",
+        type_=UNAVAILABLE_PROBLEM,
+    )
+
+
+def _project_missing(error: ApiError) -> bool:
+    upstream = error.upstream
+    return (
+        error.status == status.HTTP_404_NOT_FOUND
+        and isinstance(upstream, UpstreamAnswer)
+        and upstream.detail == PROJECT_NOT_FOUND
+    )
 
 
 async def _parent_folder_id(client: BambuddyClient, project: Project) -> int | None:

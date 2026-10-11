@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from claude_agent_sdk import ProcessError, ResultError
 from fake_anthropic import FakeAnthropic
 from session_support import (
     MANIFEST,
@@ -29,6 +30,7 @@ from session_support import (
     send,
     settled,
     start_session,
+    status,
     tools_worker,
 )
 from temporalio.claude_agent_sdk import ClaudeAgentSdkRunner, SegmentInput, SegmentOutput
@@ -41,7 +43,15 @@ from scadbuddy_durable.credentials import credential_aad
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.models import ImageRef
-from scadbuddy_durable.session.runner import NO_CREDENTIAL, VIEW_IMAGES_TOOL, ScadBuddyRunner
+from scadbuddy_durable.session.runner import (
+    IMAGE_TOO_LARGE,
+    NO_CREDENTIAL,
+    VIEW_IMAGES_TOOL,
+    Image,
+    ScadBuddyRunner,
+    image_problem,
+    image_size,
+)
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -283,3 +293,166 @@ async def test_a_turn_with_an_image_gets_it_from_view_user_images(
     finally:
         fake.close()
         await asyncio.sleep(0)
+
+
+class Failing:
+    """make_runner for the runner: each segment raises the next of ``errors``, then the
+    scripted model answers."""
+
+    def __init__(self, *errors: BaseException) -> None:
+        self.errors = list(errors)
+        self.calls = 0
+        self.scripted = ScriptedClaude(lambda prompt, _: Final("done"))
+
+    def __call__(self, **kwargs: Any) -> Any:
+        return self
+
+    async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return await self.scripted.run(inp, attempt)
+
+
+def _result_error(text: str, status: int | None = None) -> ResultError:
+    data: dict[str, Any] = {"subtype": "success", "is_error": True, "result": text}
+    if status is not None:
+        data["api_error_status"] = status
+    err = ResultError(f"Claude Code returned an error result: {text}", data=data, exit_code=1)
+    err.__cause__ = ProcessError("Command failed with exit code 1", 1, "Check stderr output")
+    return err
+
+
+async def _turn(
+    env: WorkflowEnvironment, conn: Conn, connect: Connect, cwd: Path, failing: Failing
+) -> tuple[str, Any]:
+    await insert_gateway(conn, KEK, "http://127.0.0.1:9")
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(cwd), make_runner=failing)
+    async with running(env, connect, runner) as (client, queue):
+        sid = await insert_session(conn)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            await settled(connect, sid)
+            history = await handle.fetch_history()
+        finally:
+            await handle.terminate()
+    return sid, history
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _result_error("Prompt is too long"),
+        _result_error("API Error: 413", status=413),
+        ProcessError("the request is too large for the model", 1, "x" * 3_000_000),
+    ],
+)
+async def test_a_failure_no_retry_fixes_ends_the_turn_once(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    error: BaseException,
+) -> None:
+    """#2243: an oversized request looped for ever, 100 s apart; it now ends the turn."""
+    failing = Failing(error, error, error)
+    sid, _ = await _turn(temporal_env, agent_db, connect, tmp_path, failing)
+    assert failing.calls == 1
+    assert await status(agent_db, sid) == "failed"
+    [event] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert event["code"] == "turn_failed"
+    assert len(event["message"]) <= 500
+    assert str(error).splitlines()[0][:40] in event["message"]
+
+
+async def test_a_retried_failure_reaches_temporal_bounded(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """A transient failure is retried, and what the server keeps of it is readable: 3 MB of
+    stderr once came back as only "Failure exceeds size limit."."""
+    huge = ProcessError("Command failed with exit code 1", 1, "overloaded\n" + "x" * 3_000_000)
+    huge.__cause__ = RuntimeError("y" * 100_000)
+    failing = Failing(huge)
+    sid, history = await _turn(temporal_env, agent_db, connect, tmp_path, failing)
+    assert failing.calls == 2
+    assert await status(agent_db, sid) == "idle"
+    [started] = [
+        e.activity_task_started_event_attributes
+        for e in history.events
+        if e.HasField("activity_task_started_event_attributes")
+        and e.activity_task_started_event_attributes.attempt == 2
+    ]
+    failure = started.last_failure
+    assert failure.ByteSize() < 4096  # limit.mutableStateActivityFailureSize.error
+    assert failure.message != "Failure exceeds size limit."
+    assert failure.application_failure_info.type == "ProcessError"
+    assert not failure.application_failure_info.non_retryable
+    assert not failure.HasField("cause")
+
+
+def _png(width: int, height: int) -> bytes:
+    """A PNG's signature and IHDR: all image_size reads."""
+    return (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+    )
+
+
+def test_image_sizes_are_read_from_the_header() -> None:
+    assert image_size(PNG) == (1, 1)
+    assert image_size(_png(4000, 300)) == (4000, 300)
+    assert image_size(b"GIF89a" + (640).to_bytes(2, "little") + (480).to_bytes(2, "little")) == (
+        640,
+        480,
+    )
+    jpeg = b"\xff\xd8\xff\xe0\x00\x04xx\xff\xc0\x00\x11\x08" + (300).to_bytes(2, "big")
+    assert image_size(jpeg + (500).to_bytes(2, "big") + b"\x03") == (500, 300)
+    webp = b"RIFF\x00\x00\x00\x00WEBPVP8X" + bytes(8) + (799).to_bytes(3, "little")
+    assert image_size(webp + (599).to_bytes(3, "little")) == (800, 600)
+    assert image_size(b"not an image") is None
+
+
+def test_image_problems() -> None:
+    ok = Image("a.png", "image/png", _png(1568, 900))
+    assert image_problem([ok], 1568) is None
+    assert IMAGE_TOO_LARGE in (
+        image_problem([Image("b.png", "image/png", _png(4000, 3000))], 1568) or ""
+    )
+    assert "at most 4" in (image_problem([ok] * 5, 1568) or "")
+    huge = Image("c.png", "image/png", _png(10, 10) + bytes(4 * 1024 * 1024))
+    assert "over 3.75 MB" in (image_problem([huge], 1568) or "")
+    assert "cannot be read" in (image_problem([Image("d.png", "image/png", b"xx")], 1568) or "")
+
+
+async def test_an_image_over_the_long_edge_ends_the_turn_before_any_model_call(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2243: an image nothing scaled made a request Claude refused, again on every retry."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    await agent_db.execute(
+        "INSERT INTO ai_settings (key, value) VALUES ('image_long_edge', '1000')"
+    )
+    recording = Recording()
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=recording)
+    big = _png(1200, 800)
+    name = hashlib.sha256(big).hexdigest() + ".png"
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        await agent_db.execute(
+            "INSERT INTO ai_session_blobs (session_id, name, media_type, data)"
+            " VALUES (%s, %s, 'image/png', %s)",
+            (sid, name, big),
+        )
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "look", [ImageRef(name, "image/png")])
+            assert await settled(connect, sid) == "failed"
+        finally:
+            await handle.terminate()
+    assert recording.made == []
+    [event] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert "input too large" in event["message"]
+    assert "1200x800" in event["message"] and "1000 px" in event["message"]

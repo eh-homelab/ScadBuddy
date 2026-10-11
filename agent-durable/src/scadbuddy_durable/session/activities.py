@@ -18,7 +18,7 @@ import psycopg
 from temporalio import activity
 
 from scadbuddy_durable.gate.store import PROTOCOL_VERSION, _append
-from scadbuddy_durable.session.models import FinishTurn, GateSettings
+from scadbuddy_durable.session.models import MESSAGE_MAX, FinishTurn, GateSettings
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 
@@ -29,7 +29,6 @@ DEFAULT_APPROVAL_EXPIRY_S = 600
 DEFAULT_QUESTION_EXPIRY_S = 3600
 EXPIRY_MIN_S = 10
 EXPIRY_MAX_S = 86_400
-MESSAGE_MAX = 500
 _RUNNING = ("running", "waiting_approval", "waiting_input")
 
 

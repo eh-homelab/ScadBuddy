@@ -330,3 +330,19 @@ def test_a_based_readme_whose_commit_fails_is_undone_and_refused(
 
     assert refused.status_code == 500, refused.text
     assert not (paths.model_dir(SLUG) / "README.md").exists()
+
+
+def test_a_based_readme_without_history_is_refused_and_writes_nothing(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A base can only be checked against the history, so with none the write is a
+    # 503 rather than an unchecked overwrite (#2237).
+    based = upload(client)["version"]
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(state.catalogue, "history", None)
+
+    refused = put_readme(client, "# New\n", base=based)
+
+    assert refused.status_code == 503, refused.text
+    assert "base cannot be checked" in refused.json()["detail"]
+    assert not (paths.model_dir(SLUG) / "README.md").exists()

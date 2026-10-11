@@ -99,6 +99,11 @@ export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, 
  * sends one, which can be after `until` has passed; so a timer drops it once it
  * lapses, and the row renders again then. An `until` that does not parse is left
  * to the agent to judge.
+ *
+ * `until` is on the agent's clock and is compared with the browser's, which is
+ * trusted: a browser running ahead hides the offer (and its Cancel offer) that much
+ * early (#2252). Only the display is affected. The agent judges the offer on its own
+ * clock (`cancelHandoff`), and a snapshot carries no server time to correct for skew.
  */
 function useLiveOffer(offer: HandoffOffer | null | undefined): HandoffOffer | null {
   const until = offer ? Date.parse(offer.until) : Number.NaN

@@ -53,6 +53,23 @@ describe('PluginPackagesPanel', () => {
     expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
   })
 
+  it('applies a change announced as soon as the list shows, before effects have run (#2238)', async () => {
+    // A MutationObserver fires in the microtask after the commit that adds the row,
+    // ahead of React's passive effects: the gap where a listener closing over the
+    // previous list would map the empty one and drop every row.
+    const observer = new MutationObserver(() => {
+      if (document.querySelector('[aria-label="Built-in plugin playwright"]')) {
+        observer.disconnect()
+        announceHeadlessBrowser(true)
+      }
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    renderPage(<PluginPackagesPanel />)
+    const browser = await screen.findByRole('listitem', { name: 'Built-in plugin playwright' })
+    expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
+    observer.disconnect()
+  })
+
   it('keeps a built-in and a package stored under its name apart', async () => {
     seedStoredPackage('playwright')
     const { user } = renderPage(<PluginPackagesPanel />)

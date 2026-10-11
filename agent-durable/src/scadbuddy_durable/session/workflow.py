@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.gate.ids import durable_request_id
     from scadbuddy_durable.gate.names import (
         CANCEL_INPUT_UPDATE,
+        END_SIGNAL,
         INTERRUPT_SIGNAL,
         PENDING_INPUT_QUERY,
         RESPOND_UPDATE,
@@ -60,6 +61,8 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
         MAX_SEGMENTS,
+        MESSAGE_MAX,
+        SEGMENT_ATTEMPTS,
         SEGMENT_CONTEXT_QUERY,
         SEND_MESSAGE_UPDATE,
         TOOLS_QUEUE,
@@ -149,6 +152,8 @@ class DurableSession:
         # run() returns before the gate is drained and the turn is written (review of #1958).
         self._in_turn = start.turn is not None
         self._interrupted: str | None = start.interrupted
+        # Marked done (#1056): the run returns once no turn runs.
+        self._ended = False
         self._settings = GateSettings(approval_expiry_s=600, question_expiry_s=3600)
         self._agent = DurableClaudeAgent(
             tools=manifest.durable_tools(entries),
@@ -160,6 +165,9 @@ class DurableSession:
             auto_continue_as_new=True,
             continue_as_new_args=self._next_run,
             live_output=True,
+            segment_retry_policy=RetryPolicy(
+                maximum_interval=timedelta(seconds=100), maximum_attempts=SEGMENT_ATTEMPTS
+            ),
         )
 
     def _next_run(self, state: AgentState) -> list[Any]:
@@ -176,7 +184,9 @@ class DurableSession:
                 # A turn handed over by continue-as-new: the prompt was sent already.
                 await self._run_turn(None)
             else:
-                await workflow.wait_condition(lambda: self._message is not None)
+                await workflow.wait_condition(lambda: self._message is not None or self._ended)
+                if self._message is None:
+                    return
                 message, self._message = self._message, None
                 assert message is not None
                 self._turn = TurnStart(message.turn_id, message.author, list(message.images))
@@ -226,7 +236,7 @@ class DurableSession:
             elif BUDGET_EXHAUSTED in text or "max_budget_usd" in text:
                 outcome = "budget_exhausted"
             else:
-                outcome, message = "failed", text
+                outcome, message = "failed", text[:MESSAGE_MAX]
         finally:
             self._task = None
         watcher.cancel()
@@ -419,6 +429,8 @@ class DurableSession:
     def _validate_send(self, message: Message) -> None:
         if self._in_turn or self._message is not None or self._task is not None or self._agent.busy:
             raise ApplicationError("the session is running a turn", type="busy", non_retryable=True)
+        if self._ended:
+            raise ApplicationError("the session was marked done", type="ended", non_retryable=True)
 
     def _request(self, args: dict[str, Any]) -> RespondRequest:
         responder = args.get("responder") or {}
@@ -489,6 +501,10 @@ class DurableSession:
         await self._cancel_parked(INTERRUPTED)
         if self._task is not None:
             self._task.cancel()
+
+    @workflow.signal(name=END_SIGNAL)
+    def end(self, args: dict[str, Any]) -> None:
+        self._ended = True
 
     @workflow.query(name=PENDING_INPUT_QUERY)
     def pending_input(self) -> list[dict[str, Any]]:
