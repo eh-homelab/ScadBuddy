@@ -6,8 +6,10 @@ output's, whose preview and analysis are read from its ``model.3mf``.
 
 Each plate is read where the file places it (:func:`read_plate_parts`). Both are cached
 under ``cache/library-views/`` by the file's SHA-256 as Bambuddy states it and the plate,
-the newest :data:`MAX_CACHED` files kept: the same bytes are the same view, and a changed
-file is a new one. A file Bambuddy states no hash for is read each time.
+the :data:`MAX_CACHED` most recently used files kept: the same bytes are the same view, and
+a changed file is a new one. A file Bambuddy states no hash for is read each time: those
+are files it indexes from an external folder, edited in place there, and neither their
+size nor ``updated_at`` follows such an edit, so neither can stand in for the hash (#2160).
 
 Each read spends a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087). Only a
 view is kept, never a refusal, so a larger budget always reads a refused file again.
@@ -16,6 +18,8 @@ view is kept, never a refusal, so a larger budget always reads a refused file ag
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import re
 import tempfile
 import uuid
@@ -33,7 +37,8 @@ from scadbuddy.render.read_budget import ReadBudget
 
 #: Where the views are kept, under the data volume's cache.
 CACHE_DIRNAME = "library-views"
-#: How many cached files are kept, newest first: a preview and an analysis each count.
+#: How many cached files are kept, most recently used first: a preview and an analysis
+#: each count.
 MAX_CACHED = 64
 #: Moves when what a view of the same bytes is changes, so an older one is not served.
 VIEW_VERSION = 1
@@ -79,18 +84,30 @@ def _cached(cache: Path, file: LibraryFile, name: str) -> Path | None:
 
 
 def _store(path: Path, data: bytes, keep: int) -> None:
-    """Write ``path`` aside and rename it in, then drop all but the ``keep`` newest files."""
+    """Write ``path`` aside and rename it in, then drop all but the ``keep`` most recently
+    used files (a hit touches its file: :func:`_hit`)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
     partial.write_bytes(data)
     partial.replace(path)
-    kept = sorted(
-        (entry for entry in path.parent.iterdir() if not entry.name.startswith(".")),
-        key=lambda entry: entry.stat().st_mtime_ns,
-        reverse=True,
-    )
-    for stale in kept[keep:]:
+    used: list[tuple[int, Path]] = []
+    for entry in path.parent.iterdir():
+        if entry.name.startswith("."):
+            continue
+        try:
+            used.append((entry.stat().st_mtime_ns, entry))
+        except FileNotFoundError:
+            continue  # another prune removed it between the listing and the stat
+    used.sort(key=lambda item: item[0], reverse=True)
+    for _, stale in used[keep:]:
         stale.unlink(missing_ok=True)
+
+
+def _hit(path: Path) -> None:
+    """Mark a cached file used, so the prune keeps it (#2160). One pruned meanwhile is
+    simply not marked."""
+    with contextlib.suppress(FileNotFoundError):
+        os.utime(path)
 
 
 def _glb(read: PlateRead) -> bytes:
@@ -125,8 +142,14 @@ async def library_preview(
     :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
     file = await client.library_file(file_id)
     path = _cached(cache, file, f"plate-{plate}.glb")
-    if path is not None and await asyncio.to_thread(path.is_file):
-        return await asyncio.to_thread(path.read_bytes)
+    if path is not None:
+        try:
+            cached = await asyncio.to_thread(path.read_bytes)
+        except FileNotFoundError:
+            pass
+        else:
+            await asyncio.to_thread(_hit, path)
+            return cached
     data = await asyncio.to_thread(_glb, await _read(client, file, plate, budget))
     if path is not None:
         await asyncio.to_thread(_store, path, data, MAX_CACHED)
@@ -151,6 +174,7 @@ async def library_geometry(
         except (OSError, ValidationError):
             cached = None
         if cached is not None and cached.version == ANALYSIS_VERSION:
+            await asyncio.to_thread(_hit, path)
             return cached
     read = await _read(client, file, plate, budget)
     analysis = await asyncio.to_thread(_analysis, read, plate)
