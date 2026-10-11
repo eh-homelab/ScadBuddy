@@ -30,6 +30,7 @@ from session_support import (
     until,
 )
 from temporalio import activity
+from temporalio.claude_agent_sdk import ClaudeAgentPlugin
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import (
     Client,
@@ -39,7 +40,8 @@ from temporalio.client import (
 )
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
@@ -55,7 +57,14 @@ from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
-from scadbuddy_durable.session.models import TURN_QUERY, FinishTurn, GateSettings
+from scadbuddy_durable.session.models import (
+    SEGMENT_CONTEXT_QUERY,
+    TURN_QUERY,
+    FinishTurn,
+    GateSettings,
+    SegmentContext,
+)
+from scadbuddy_durable.session.workflow import DurableSession
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -696,3 +705,126 @@ async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
         assert await settled(connect, sid) == "idle"
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+
+
+# ---- Settings → Plugins overrides (#2088) ----
+
+
+async def _overrides(conn: Conn, tool_tiers: dict[str, str], disabled: list[str]) -> None:
+    await conn.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)"
+        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (
+            tools.OVERRIDES_SETTING,
+            json.dumps({"tool_tiers": tool_tiers, "disabled_tools": disabled}),
+        ),
+    )
+
+
+async def _replays(harness: Harness, handle: WorkflowHandle[Any, Any]) -> None:
+    """The history replays on this code: the gates came from recorded results only."""
+    history = await handle.fetch_history()
+    await Replayer(
+        workflows=[DurableSession],
+        plugins=[ClaudeAgentPlugin(ScriptedClaude(policy))],
+        data_converter=harness.client.data_converter,
+        workflow_runner=SandboxedWorkflowRunner(
+            restrictions=SandboxRestrictions.default.with_passthrough_modules(
+                "scadbuddy_durable.session.tools"
+            )
+        ),
+    ).replay_workflow(history)
+
+
+async def test_a_tool_raised_to_outward_parks_and_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "render it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert entry["summary"] == "render_preview call"
+    assert harness.stand_in.ran == []
+    result = await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert result == {"kind": "approval", "outcome": "approved"}
+    assert await settled(connect, sid) == "idle"
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["render_preview: ok: rendered"]
+    # Taken away, the override is gone on the next turn: the call runs without parking.
+    await _overrides(agent_db, {}, [])
+    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+    await send_next(handle, "render it again")
+    assert await settled(connect, sid) == "idle"
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview", "render_preview"]
+    log = await events(agent_db, sid)
+    assert _types(log).count("approval.required") == 1
+    await _replays(harness, handle)
+
+
+async def test_an_override_never_lowers_a_tool_below_its_own_tier(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """TIGHTEN ONLY (builtInTools.ts): an outward tool set to read still parks."""
+    await _overrides(agent_db, {"print_output": "read"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "deny"})
+    )
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+
+
+async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    # Raised as well: a disabled tool is refused as disabled, never parked for approval.
+    await _overrides(agent_db, {"render_preview": "outward"}, ["render_preview"])
+    sid, handle = await harness.session(agent_db)
+    assert (await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)).disabled_tools == []
+    await send(handle, "render it")
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert len(texts) == 1
+    assert texts[0].startswith("render_preview: error")
+    assert "disabled in Settings → Plugins" in texts[0]
+    # What the segment runner reads, to leave the tool undeclared.
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert context.disabled_tools == ["render_preview"]
+    await _replays(harness, handle)
+
+
+class OlderSettings(SessionActivities):
+    """gate_settings as a worker before #2088 answered it: the timers alone."""
+
+    @activity.defn(name="gate_settings")
+    async def gate_settings(self) -> dict[str, int]:  # type: ignore[override]
+        return {"approval_expiry_s": 600, "question_expiry_s": 3600}
+
+
+async def test_a_turn_an_older_worker_started_parks_by_the_manifest_and_replays(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A history whose gate_settings result has no overrides keeps its old commands: the
+    raised call runs unparked (and is refused, as before #2088), and replays here."""
+    await harness.agent.shutdown()
+    harness.session_activities = OlderSettings(connect)
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "render it")
+        assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts and texts[0].startswith("render_preview: error")
+    await _replays(harness, handle)
