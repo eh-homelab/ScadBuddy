@@ -628,6 +628,9 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Inbox folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  Any file in a ScadBuddy `Work/` folder that ScadBuddy did not upload, such as one
+  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`: keep
+  your own files elsewhere.
   The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
   ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
   instance's folder ids (#683). Respelling the same URL (host case, a default port, a
