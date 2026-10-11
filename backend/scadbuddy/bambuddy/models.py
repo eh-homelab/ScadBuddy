@@ -469,6 +469,9 @@ class LibraryFile(BambuddyModel):
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None
+    #: A file Bambuddy only indexes from an external folder: a delete drops its record
+    #: for good instead of moving it to the trash (#2167).
+    is_external: bool = False
 
 
 class LibraryListRow(BambuddyModel):
@@ -486,6 +489,8 @@ class LibraryListRow(BambuddyModel):
     sliced_for_model: str | None = None
     #: When it was added to the library; naive, and UTC like Bambuddy's other times.
     created_at: datetime | None = None
+    #: Indexed from an external folder: a delete cannot be undone (#2167).
+    is_external: bool = False
 
 
 class LibraryPlate(BambuddyModel):

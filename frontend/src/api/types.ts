@@ -176,6 +176,8 @@ export type OutputPlate = Schemas['OutputPlate']
 export type LibraryListing = Schemas['LibraryListing']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
+export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
+export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
