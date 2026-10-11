@@ -312,6 +312,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         return
       }
       setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      // The save's key is kept only when its save may have started (no answer, or a start
+      // the server may hold): then the same key follows it. A definite failure is recorded
+      // under its key and would be answered again as it is, so the next press gets a new
+      // one; the finished job is kept, since nothing of it was saved.
+      if (attempt.current && !mayHaveRun(cause)) attempt.current.key = newRequestId()
       // A request the server refused as it is (a 4xx) fails the same way again.
       setRetryable(!(cause instanceof ApiError) || cause.status === 0 || cause.status >= 500 || mayHaveRun(cause))
     } finally {

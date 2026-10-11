@@ -61,7 +61,8 @@ class NotViewableError(Exception):
 #: Where a library file is spooled while it is read, under the data volume's cache.
 SPOOL_DIRNAME = "library-spool"
 #: What a spooled download leaves free on its volume: a file of any size is read, but
-#: never by filling the volume that holds the models, outputs and their history.
+#: not by filling the volume that holds the models, outputs and their history. Checked
+#: before each 1 MiB chunk, so spools running at once may each go one chunk past it.
 SPOOL_RESERVE_BYTES = 1024**3
 
 

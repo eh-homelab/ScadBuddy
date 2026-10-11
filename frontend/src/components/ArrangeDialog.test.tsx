@@ -466,7 +466,15 @@ describe('ArrangeDialog', () => {
   it('offers Try again after a failed save, which keeps the save key so one output is saved', async () => {
     const save = vi
       .spyOn(api, 'createOutput')
-      .mockRejectedValueOnce(new Error('ScadBuddy could not start this; its server log says why.'))
+      .mockRejectedValueOnce(
+        new ApiError({
+          type: 'https://scadbuddy.dev/problems/temporal-refused',
+          title: 'Refused',
+          status: 500,
+          detail: 'ScadBuddy could not start this; its server log says why.',
+          may_have_started: true,
+        }),
+      )
       .mockResolvedValueOnce({ ...first, id: 'o-new' })
     const onArranged = vi.fn()
     const { user } = renderPage(
@@ -497,6 +505,31 @@ describe('ArrangeDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('no such template')
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+  })
+
+  it('tries a save that definitely failed again under a new key, not the recorded failure', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ type: 'about:blank', title: 'Failed', status: 500, detail: 'ScadBuddy failed unexpectedly' }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    // The same finished job, but a new key: the old one would replay the recorded 500.
+    expect(arrange).not.toHaveBeenCalled()
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(again![5]).toBeTruthy()
+    expect(again![5]).not.toBe(failed![5])
   })
 
   it('saves a changed arrange under a new key', async () => {
