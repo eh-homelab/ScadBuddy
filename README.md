@@ -219,6 +219,10 @@ on shutdown.
     write), once the hold is an hour old. It needs the same `Recreate` rollout. It
     releases nothing when it finds no output at all, so an unmounted data volume
     cannot hand every Part to the blob sweep.
+  - **This release adds a sweep**, `housekeeping_maintain_models_git` (#2289): it runs
+    `git gc` on `/data/models` once it holds 256 loose objects or 20 packs, since git's
+    own `gc --auto` waits for 6700 and every model listing walks the whole history. It
+    needs the same `Recreate` rollout. Its first run is the boot's.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):

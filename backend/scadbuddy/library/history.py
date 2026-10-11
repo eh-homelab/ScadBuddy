@@ -74,6 +74,13 @@ LOCK_POLL_SECONDS = 0.05
 # git itself imposes no subject limit; this one keeps a listed revision readable
 # and bounds what a caller can write into the history.
 MAX_SUBJECT = 200
+#: `maintain` packs the repository once it holds this many loose objects or packs.
+#: Git's own `gc --auto` waits for 6700 loose objects, and on the NFS volume a
+#: history walk over a few thousand (#2289: 3029, 0 packs) took 11 s.
+MAINTAIN_LOOSE_OBJECTS = 256
+MAINTAIN_PACKS = 20
+#: A `gc` repacks the whole history: well past `DEFAULT_TIMEOUT` on a slow volume.
+MAINTAIN_TIMEOUT = 600.0
 
 AUTHOR_NAME = "ScadBuddy"
 AUTHOR_EMAIL = "scadbuddy@localhost"
@@ -268,6 +275,7 @@ class ModelHistory:
         check: bool = True,
         text: bool = True,
         env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         command = [
             self.git,
@@ -289,10 +297,12 @@ class ModelHistory:
                 capture_output=True,
                 text=text,
                 check=False,
-                timeout=self.timeout,
+                timeout=timeout or self.timeout,
             )
         except subprocess.TimeoutExpired as error:
-            raise GitTimeoutError(f"git {args[0]} timed out after {self.timeout:g}s") from error
+            raise GitTimeoutError(
+                f"git {args[0]} timed out after {timeout or self.timeout:g}s"
+            ) from error
         except OSError as error:
             raise GitUnavailableError(f"could not run {self.git!r}: {error}") from error
         if check and completed.returncode != 0:
@@ -406,6 +416,34 @@ class ModelHistory:
                 extra={"models": str(self.root)},
             )
             return None
+
+    def object_counts(self) -> dict[str, int]:
+        """``git count-objects -v`` as numbers: ``count`` (loose), ``packs``, ``size-pack``…"""
+        counts: dict[str, int] = {}
+        for line in self._out("count-objects", "-v").splitlines():
+            key, _, value = line.partition(":")
+            if value.strip().isdigit():
+                counts[key.strip()] = int(value)
+        return counts
+
+    def maintain(self) -> bool:
+        """Pack the repository when it has piled up loose objects or packs (#2289).
+
+        Every listing walks the whole history (`last_commits`), and each loose object
+        is a file read on the volume. Not under the write lock: ``gc`` is safe beside
+        a commit (it is what git runs after one), and holding the lock would stall
+        every save for the length of a repack. True when it packed.
+        """
+        if not self.available:
+            return False
+        counts = self.object_counts()
+        if (
+            counts.get("count", 0) < MAINTAIN_LOOSE_OBJECTS
+            and counts.get("packs", 0) < MAINTAIN_PACKS
+        ):
+            return False
+        self._run("gc", "--quiet", timeout=MAINTAIN_TIMEOUT)
+        return True
 
     # ── writing ───────────────────────────────────────────────────────────────
 
