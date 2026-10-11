@@ -1037,6 +1037,7 @@ async def plan_run(
                 "process preset for the chosen nozzle.",
             )
         plan = SlicePlan(
+            whole_file=source.slices_whole_file,
             printer_preset=resolved.printer_preset,
             process_preset=resolved.process_preset,
             filament_presets=resolved.filament_presets,
