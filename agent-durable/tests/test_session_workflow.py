@@ -870,3 +870,18 @@ async def test_an_outward_turn_tool_call_parks_and_runs_once_approved(
     assert await settled(connect, sid) == "idle"
     assert harness.stand_in.ran == [("turn:notes__post", {"method": "POST", "body": "x"})]
     await _replays(harness, handle)
+
+
+async def test_a_turn_tool_call_the_agent_cannot_tier_parks(
+    harness: Harness, agent_db: Conn
+) -> None:
+    """Fail toward asking: a may_park tool whose turn_tool_tier fails is asked about, never
+    let through to be refused as unapproved without the user seeing it."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.tier_refuses = True
+    _, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+    await _replays(harness, handle)

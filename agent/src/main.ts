@@ -499,7 +499,7 @@ const temporalWorker =
 // This replica's own queue: a pinned turn tool's calls (#2320). Its tools die with the
 // pod; a call scheduled after that fails at its schedule-to-close timeout.
 const hostWorker =
-  temporal && turnToolDeps
+  temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,

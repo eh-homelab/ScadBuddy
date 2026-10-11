@@ -56,6 +56,13 @@ export type TurnServer = {
   /** The tier of a call by its harness name (`mcp__<server>__<tool>`) and input, as the permission seam resolves it. */
   tierOf(harnessName: string, input: unknown): RiskTier
   /**
+   * Whether some call of the tool could be outward, whatever its input. Listed as
+   * `may_park`: only a tool listed so is ever asked about, so a tool whose tier depends
+   * on its input (http_request's method, the headless browser's origin) must say yes.
+   * Absent: every tool may (fail toward asking).
+   */
+  mayPark?(harnessName: string): boolean
+  /**
    * Whether its calls must run on the replica that listed it (`TurnToolsDeps.hostQueue`):
    * a server whose state lives in this process or on this pod's disk (http_request's
    * saved bodies, the headless browser).
@@ -139,11 +146,18 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
   }
 }
 
-/** The server's tools as {original name, harness name}, as Claude Code would list them. */
+/**
+ * The server's tools as {original name, harness name}, as Claude Code would list them.
+ * Tools whose harness names collide are left out, as a classic turn hides them
+ * (plugins/forwarder.ts), so a name never stands for two tools.
+ */
 async function listed(server: TurnServer, signal: AbortSignal) {
   return withClient(server, async (client) => {
     const { tools } = await client.listTools(undefined, { signal })
-    return tools.map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+    const named = tools.map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+    const seen = new Map<string, number>()
+    for (const { name } of named) seen.set(name, (seen.get(name) ?? 0) + 1)
+    return named.filter(({ name }) => seen.get(name) === 1)
   })
 }
 
@@ -195,7 +209,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
               name: turnToolName(server.name, tool.name),
               description: tool.description ?? '',
               input_schema: tool.inputSchema as Record<string, unknown>,
-              may_park: server.tierOf(`mcp__${server.name}__${name}`, undefined) === 'outward',
+              may_park: server.mayPark?.(`mcp__${server.name}__${name}`) ?? true,
               ...(server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}),
             })
           }

@@ -1,3 +1,6 @@
+import { mkdtemp } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
@@ -6,6 +9,8 @@ import { z } from 'zod'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
+import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
+import { turnServers } from '../src/temporal/turnServers.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -52,21 +57,36 @@ function notes(calls: string[]): () => McpServer {
   }
 }
 
-// read.note is read; post is read for GET and outward otherwise, as http_request is tiered.
+// read.note is read; post is tiered as httpTierOf tiers http_request: no method or a
+// GET is read, anything else outward. So only its input says whether a call is outward.
 const tierOf = (name: string, input: unknown): RiskTier => {
   if (name.endsWith('__read_note')) return 'read'
-  if (name.endsWith('__post')) return (input as { method?: string } | undefined)?.method === 'GET' ? 'read' : 'outward'
+  if (name.endsWith('__post')) return ((input as { method?: string } | undefined)?.method ?? 'GET') === 'GET' ? 'read' : 'outward'
   return 'outward'
 }
+const mayPark = (name: string) => !name.endsWith('__read_note')
 
 function harness(
-  options: { owner?: Owner & { turnTiers?: string[] }; offered?: boolean; problems?: string[]; pinned?: boolean } = {},
+  options: {
+    owner?: Owner & { turnTiers?: string[] }
+    offered?: boolean
+    problems?: string[]
+    pinned?: boolean
+    server?: (calls: string[]) => () => McpServer
+    mayPark?: boolean
+  } = {},
 ) {
   const calls: string[] = []
   const audits: AuditEntry[] = []
   const reported: string[] = []
   const owner = options.owner ?? BROWSER
-  const server: TurnServer = { name: 'notes', connect: () => connectInProcess(notes(calls)), tierOf, ...(options.pinned ? { pinned: true } : {}) }
+  const server: TurnServer = {
+    name: 'notes',
+    connect: () => connectInProcess((options.server ?? notes)(calls)),
+    tierOf,
+    ...(options.mayPark === false ? {} : { mayPark }),
+    ...(options.pinned ? { pinned: true } : {}),
+  }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
     servers: async () => ({
@@ -118,11 +138,51 @@ describe('turn tools in a durable session', () => {
     expect(h.reported).toEqual(['plugin hindsight failed its check'])
   })
 
+  it('lists every tool of a server that cannot say which never park as may_park (fail toward asking)', async () => {
+    const h = harness({ mayPark: false })
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(tools.every((t) => t.may_park)).toBe(true)
+  })
+
+  it('leaves out tools whose names collide once Claude Code renames them, as a classic turn hides them', async () => {
+    const colliding = (calls: string[]) => () => {
+      const server = notes(calls)()
+      server.registerTool('read_note', { description: 'another', inputSchema: {} }, async () => ({ content: [] }))
+      return server
+    }
+    const h = harness({ server: colliding })
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(tools.map((t) => t.name)).not.toContain('notes__read_note')
+    expect((await failure(env('turn:notes__read_note').run(h.call, { id: 'a' }))).message).toContain('not offered any more')
+  })
+
   it('tiers a call from its input', async () => {
     const h = harness()
     const tier = (input: unknown) => env(TURN_TOOL_TIER_ACTIVITY).run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input })
     expect(await tier({ method: 'GET', body: '' })).toEqual({ tier: 'read' })
     expect(await tier({ method: 'POST', body: '' })).toEqual({ tier: 'outward' })
+  })
+
+  it("lists the real http_request as may_park, and tiers a POST outward and refuses it unapproved (review of #2324)", async () => {
+    const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: turnServers({ httpRequest: { saveRoot } }),
+      approvals: { approved: async () => false },
+    }
+    const activities = turnToolActivities(deps)
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    const parks = Object.fromEntries(tools.map((t) => [t.name, t.may_park]))
+    expect(parks[`${HTTP_SERVER}__${HTTP_TOOL}`]).toBe(true)
+    expect(parks[`${HTTP_SERVER}__${HTTP_READ_TOOL}`]).toBe(false)
+    const tier = (input: unknown) =>
+      env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
+    expect(await tier({ url: 'http://example.test/', method: 'POST' })).toEqual({ tier: 'outward' })
+    expect(await tier({ url: 'http://example.test/' })).toEqual({ tier: 'read' })
+    const refused = await failure(
+      env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://example.test/', method: 'POST' }),
+    )
+    expect(refused.type).toBe('NotApproved')
   })
 
   it('runs a read call and returns its text, with an audit row', async () => {
