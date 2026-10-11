@@ -1,5 +1,7 @@
 import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/common'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Sql } from 'postgres'
 import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes } from '../secrets.js'
 
@@ -23,9 +25,10 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 //
 // A session's large payloads never enter history (#2243). agent-durable gives its
 // Temporal client External Storage (payload_store.py): a sealed session payload of
-// OFFLOAD_BYTES or more is kept in `ai_payload_blobs` by its SHA-256, and history holds a
-// Temporal ExternalStorageReference to it (driver `scadbuddy-pg`, claim
-// `{subject, digest}`). This codec reads those references (the tool calls this service
+// OFFLOAD_BYTES or more is a file on the data share, `<SCADBUDDY_PAYLOAD_DIR>/<subject>/
+// <sha256 of the sealed bytes>`, and history holds a Temporal ExternalStorageReference
+// to it (driver `scadbuddy-file`, claim `{subject, digest}`). The file is ciphertext
+// under the subject's key; forgetSubject deletes the key and then the directory. This codec reads those references (the tool calls this service
 // runs on agent-tools, the session's queries and updates it reads) and writes its own
 // large payloads the same way (a tool's result), so agent-durable's External Storage
 // reads them back. Flows' payloads stay inline: the backend's codec has no store.
@@ -33,7 +36,7 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 export const SUBJECT_ENCODING = 'binary/scadbuddy-subject'
 export const SUBJECT_METADATA = 'scadbuddy-subject'
 
-export const STORE_DRIVER = 'scadbuddy-pg'
+export const STORE_DRIVER = 'scadbuddy-file'
 /** Sealed bytes from which a session's payload is stored by reference (payload_store.OFFLOAD_BYTES). */
 export const OFFLOAD_BYTES = 128 * 1024
 const REFERENCE_TYPE = 'temporal.api.sdk.v1.ExternalStorageReference'
@@ -196,30 +199,45 @@ export interface PayloadStore {
   get(subject: string, digest: string): Promise<Uint8Array | undefined>
 }
 
-/** `ai_payload_blobs`: rows go with their subject's key (ON DELETE CASCADE). */
-export class PgPayloadStore implements PayloadStore {
-  readonly #sql: Sql
+/** The data share's payload directory (payload_store.py FileStorageDriver), content-addressed. */
+export class FilePayloadStore implements PayloadStore {
+  readonly root: string
 
-  constructor(sql: Sql) {
-    this.#sql = sql
+  constructor(root: string) {
+    this.root = root
+  }
+
+  #path(subject: string, digest: string): string {
+    if (!SESSION.test(subject) || !DIGEST.test(digest)) throw new SealError("a stored payload's reference names no session or digest")
+    return join(this.root, subject, digest)
   }
 
   async put(subject: string, digest: string, data: Uint8Array): Promise<void> {
-    const [there] = await this.#sql`SELECT 1 FROM ai_payload_blobs WHERE subject = ${subject} AND digest = ${digest}`
-    if (there) return // the same payload, stored already: its bytes are not sent again
-    await this.#sql`
-      INSERT INTO ai_payload_blobs (subject, digest, data) VALUES (${subject}, ${digest}, ${Buffer.from(data)})
-      ON CONFLICT (subject, digest) DO NOTHING`
+    const path = this.#path(subject, digest)
+    if (await stat(path).then(() => true, () => false)) return // the same bytes are there already
+    await mkdir(join(this.root, subject), { recursive: true })
+    const staging = join(this.root, subject, `.${digest}.${randomUUID()}`)
+    await writeFile(staging, data)
+    await rename(staging, path)
   }
 
   async get(subject: string, digest: string): Promise<Uint8Array | undefined> {
-    const [row] = await this.#sql<{ data: Buffer }[]>`
-      SELECT data FROM ai_payload_blobs WHERE subject = ${subject} AND digest = ${digest}`
-    return row ? new Uint8Array(row.data) : undefined
+    try {
+      return new Uint8Array(await readFile(this.#path(subject, digest)))
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw err
+    }
+  }
+
+  /** Removes everything stored for a subject (forgetSubject, after its key is gone). */
+  async forget(subject: string): Promise<void> {
+    if (!SESSION.test(subject)) return
+    await rm(join(this.root, subject), { recursive: true, force: true })
   }
 }
 
-/** A Temporal reference to a payload `ai_payload_blobs` holds, as External Storage writes it. */
+/** A Temporal reference to a stored payload, as External Storage writes it. */
 export function referencePayload(subject: string, digest: string): Payload {
   return {
     metadata: { encoding: encoder.encode('json/protobuf'), messageType: encoder.encode(REFERENCE_TYPE) },

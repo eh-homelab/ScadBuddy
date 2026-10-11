@@ -13,7 +13,7 @@ pins the two together.
 
 A payload of ``DEDUP_BYTES`` or more is sealed with a synthetic IV, a keyed digest of
 its own bytes (``dedup_iv``), so the same payload seals to the same bytes: such a payload
-leaves history for ``ai_payload_blobs`` (``payload_store``, #2243), and one sealed twice
+leaves history for the data share (``payload_store``, #2243), and one sealed twice
 (the tool manifest every segment declares) is one row there.
 """
 
@@ -254,7 +254,7 @@ def data_converter(
     Failure messages and stack traces are moved into an encoded payload, so the codec
     seals them too: a tool's error text is a session's content as much as its result.
     With ``external_storage`` (payload_store.external_storage), a session's large sealed
-    payloads are kept in Postgres and history holds a reference.
+    payloads are kept on the data share and history holds a reference.
     """
     return dataclasses.replace(
         DataConverter.default,

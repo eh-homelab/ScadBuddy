@@ -10,11 +10,15 @@ container's (spec 2026-10-01 §6.3a):
 - ``SCADBUDDY_DURABLE_CWD``: the engine's working directory (default ``/srv/agent``);
 - ``SCADBUDDY_DURABLE_SKILLS_DIR``: a plugin directory the engine loads skills from
   (optional);
+- ``SCADBUDDY_PAYLOAD_DIR``: where a session's large payloads are kept, on the data
+  share the agent mounts at the same path (``payload_store``). Unset, they stay in
+  history, and the plugin fails a turn whose conversation outgrows 2 MB;
 - ``SCADBUDDY_DURABLE_SCRIPTED=1``: tests only. The segment runner is a scripted model
   (``session/scripted.py``) instead of Claude, for the agent service's end-to-end test.
 
 The client and the worker seal every payload of a durable subject (``codec``), and keep a
-session's large payloads in Postgres, history holding a reference (``payload_store``).
+session's large payloads on the data share, history holding a reference
+(``payload_store``).
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -57,6 +62,7 @@ class Config:
     kek_file: str
     previous_kek_file: str | None
     scripted: bool = False
+    payload_dir: str | None = None
 
     def __repr__(self) -> str:  # the database URL can carry a password
         return f"Config(temporal={self.temporal_address}, namespace={self.namespace})"
@@ -86,6 +92,7 @@ def config_from_env(env: dict[str, str] | None = None) -> Config:
         kek_file=e["SCADBUDDY_SECRET_KEY_FILE"],
         previous_kek_file=e.get("SCADBUDDY_SECRET_KEY_PREVIOUS_FILE") or None,
         scripted=e.get("SCADBUDDY_DURABLE_SCRIPTED") == "1",
+        payload_dir=e.get("SCADBUDDY_PAYLOAD_DIR") or None,
     )
 
 
@@ -149,7 +156,9 @@ async def connect_client(cfg: Config, connect: Connect, kek: Kek, previous: Kek 
     return await Client.connect(
         cfg.temporal_address,
         namespace=cfg.namespace,
-        data_converter=data_converter(keys, external_storage(connect)),
+        data_converter=data_converter(
+            keys, external_storage(Path(cfg.payload_dir)) if cfg.payload_dir else None
+        ),
     )
 
 

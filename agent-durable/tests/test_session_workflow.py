@@ -11,6 +11,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -100,6 +101,7 @@ class Harness:
     queue: str
     agent: Worker
     handles: list[WorkflowHandle[Any, Any]]
+    payload_dir: Path = Path()
     session_activities: SessionActivities | None = None
     gate_activities: GateActivities | None = None
 
@@ -122,17 +124,19 @@ class Harness:
 
 
 @pytest.fixture
-async def harness(temporal_env: WorkflowEnvironment, connect: Connect) -> AsyncIterator[Harness]:
+async def harness(
+    temporal_env: WorkflowEnvironment, connect: Connect, tmp_path: Path
+) -> AsyncIterator[Harness]:
     tools.use_manifest(MANIFEST)
     keys = PgPayloadKeys(connect, KEK)
     client = await Client.connect(
         temporal_env.client.service_client.config.target_host,
         namespace=temporal_env.client.namespace,
-        data_converter=data_converter(keys, external_storage(connect)),
+        data_converter=data_converter(keys, external_storage(tmp_path)),
     )
     stand_in = StandInTools(connect)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
-    h = Harness(client, connect, stand_in, queue, None, [])  # type: ignore[arg-type]
+    h = Harness(client, connect, stand_in, queue, None, [], payload_dir=tmp_path)  # type: ignore[arg-type]
     agent = h.restart_agent()
     async with tools_worker(client, stand_in):
         task = asyncio.create_task(agent.run())
@@ -233,11 +237,7 @@ async def test_a_large_turn_crosses_history_as_references(
     # Nothing at the threshold or over it is inline: the message alone is four times it.
     assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
     assert b"zzzz" not in b"".join(e.SerializeToString() for e in history.events)
-    cur = await agent_db.execute(
-        "SELECT count(*) FROM ai_payload_blobs WHERE subject = %s", (f"session-{sid}",)
-    )
-    row = await cur.fetchone()
-    assert row is not None and row[0] > 0
+    assert any((harness.payload_dir / f"session-{sid}").iterdir())
 
 
 async def test_an_approved_call_runs_once_and_is_reported(
