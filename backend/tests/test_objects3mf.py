@@ -463,13 +463,41 @@ def test_a_non_finite_vertex_or_prusa_painting_is_refused() -> None:
         read_objects(_one_triangle('<vertex x="0" y="1" z="0"/>', ' slic3rpe:mmu_segmentation="4"'))
 
 
-@pytest.mark.parametrize("transform", ["nan 0 0 0 1 0 0 0 1 0 0 0", "1 0 0 0 1 0 0 0 1 inf 0 0"])
-def test_a_non_finite_transform_is_refused(transform: str) -> None:
+def _with(index: int, value: str) -> str:
+    """The identity transform with value ``index`` (of 12) replaced."""
+    values = ["1", "0", "0", "0", "1", "0", "0", "0", "1", "0", "0", "0"]
+    values[index] = value
+    return " ".join(values)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+@pytest.mark.parametrize("index", range(12))
+def test_a_non_finite_transform_value_is_refused_wherever_it_sits(index: int, value: str) -> None:
+    # Each of the 12 values (the 3x3 part and the translation), on a build item and on
+    # a component.
     box = {1: (_box(20, 10, 5), "normal_part", None)}
+    transform = _with(index, value)
     with pytest.raises(UnreadableObjectsError, match="finite"):
         read_objects(bambu_project(items=[transform], parts=box))
     with pytest.raises(UnreadableObjectsError, match="finite"):
         read_objects(bambu_project(items=[at(0, 0)], parts=box, component_transform=transform))
+
+
+def test_finite_transforms_that_overflow_together_are_refused() -> None:
+    box = {1: (_box(20, 10, 5), "normal_part", None)}
+    huge = "1e200 0 0 0 1e200 0 0 0 1e200 0 0 0"
+    # Combined: a build item and a component each finite, their product is not.
+    with pytest.raises(UnreadableObjectsError, match="finite"):
+        read_objects(bambu_project(items=[huge], parts=box, component_transform=huge))
+    # Applied: a finite transform whose product with a vertex overflows.
+    with pytest.raises(UnreadableObjectsError, match="finite"):
+        read_objects(bambu_project(items=["1e308 0 0 0 1e308 0 0 0 1e308 0 0 0"], parts=box))
+
+
+def test_a_plates_parts_are_read_with_the_same_refusal() -> None:
+    box = {1: (_box(20, 10, 5), "normal_part", None)}
+    with pytest.raises(UnreadableObjectsError, match="finite"):
+        read_plate_parts(bambu_project(items=["1e308 0 0 0 1e308 0 0 0 1e308 0 0 0"], parts=box), 1)
 
 
 def test_a_plates_parts_are_placed_as_the_file_places_them() -> None:
