@@ -2496,14 +2496,17 @@ export const handlers = [
 
     // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
     // chose that names a family not installed is refused, naming both.
-    const installedFamilies = new Set(state.fonts.map((font) => font.family.toLowerCase()))
+    const fold = (family: string) => family.replace(/ /g, '').toLowerCase()
+    const installedFamilies = new Set(state.fonts.map((font) => fold(font.family)))
     const unfontedParams: string[] = []
     const unfontedFamilies: string[] = []
     for (const param of schema.parameters ?? []) {
       const value = renderParams[param.name]
       if (param.type !== 'font' || typeof value !== 'string' || value === param.initial) continue
+      // The template's own options are its business, as on the server.
+      if ((param.options ?? []).some((option) => option.value === value)) continue
       const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
-      const missing = families.filter((family) => !installedFamilies.has(family.toLowerCase()))
+      const missing = families.filter((family) => !installedFamilies.has(fold(family)))
       if (missing.length === 0) continue
       unfontedParams.push(param.name)
       for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)

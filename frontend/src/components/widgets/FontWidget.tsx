@@ -38,7 +38,8 @@ export function FontWidget({
   const [open, setOpen] = useState(false)
   const [justInstalled, setJustInstalled] = useState<Record<string, string[]>>({})
   const [installing, setInstalling] = useState<string | null>(null)
-  const [installError, setInstallError] = useState<string | null>(null)
+  // Kept with the refusal it answered, so a later refusal of other families starts clean.
+  const [installError, setInstallError] = useState<{ missing: string; message: string } | null>(null)
 
   const label = param.caption ?? param.name
   const { family, style } = parseFontValue(value)
@@ -57,9 +58,13 @@ export function FontWidget({
     onChange(formatFontValue(installed.family, preferredStyle(names)))
   }
 
+  const missingKey = missing.join('\n')
+  const shownInstallError = installError?.missing === missingKey ? installError.message : null
+
   // The same install the picker makes; the value stays as it is, since it already
   // names the family.
   async function install(missingFamily: string): Promise<void> {
+    const refused = missingKey
     setInstalling(missingFamily)
     setInstallError(null)
     try {
@@ -67,9 +72,10 @@ export function FontWidget({
       setJustInstalled((current) => ({ ...current, [installed.family]: installed.styles ?? [] }))
       onInstalled?.(installed)
     } catch (cause) {
-      setInstallError(
-        cause instanceof ApiError ? cause.detail : `${missingFamily} could not be installed. Check the connection.`,
-      )
+      setInstallError({
+        missing: refused,
+        message: cause instanceof ApiError ? cause.detail : `${missingFamily} could not be installed. Check the connection.`,
+      })
     } finally {
       setInstalling(null)
     }
@@ -119,9 +125,9 @@ export function FontWidget({
               {installing === missingFamily ? `Installing ${missingFamily}…` : `Install ${missingFamily}`}
             </button>
           ))}
-          {installError && (
+          {shownInstallError && (
             <p role="alert" className="text-[12px] text-warn">
-              {installError}
+              {shownInstallError}
             </p>
           )}
         </div>
