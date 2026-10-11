@@ -29,7 +29,7 @@ from scadbuddy.flows.operations import (
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, ProjectionWrite
 from scadbuddy.workflows.flows_client import harness_plugins
-from tests.flows.flows_support import Flows, Keys, script
+from tests.flows.flows_support import HASH_KEY, Flows, Keys, script
 from tests.flows.harness_probe import (
     PROBE_TOOLS,
     PROBE_WORKFLOW,
@@ -42,7 +42,7 @@ pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 
 def kinds(flows: Flows) -> dict[str, OperationKind]:
-    return {kind.name: kind for kind in flow_kinds(flows.store, Keys())}
+    return {kind.name: kind for kind in flow_kinds(flows.store, Keys(), HASH_KEY)}
 
 
 async def operate(flows: Flows, kind: OperationKind, request: dict[str, Any]) -> dict[str, Any]:
@@ -189,6 +189,9 @@ async def test_an_approval_lets_the_call_run(flows: Flows) -> None:
     assert result["outcome"] == "approved"
     status = await AgentClient(flows.client, run.workflow_id).get_status()
     assert status.pending_approvals == []
+    # Not an agent tool (`approved_tool`): the workflow runs it, so nothing is bound.
+    decision = await flows.store.get_decision(request_id(run, call_id))
+    assert decision is not None and decision.input_hash is None
 
 
 async def test_a_resolved_approval_deletes_the_decision(flows: Flows) -> None:

@@ -34,7 +34,8 @@ from scadbuddy.flows.models import (
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
 
 _DECISION = (
-    "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder, created_at"
+    "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
+    " input_hash, created_at"
 )
 _DEFINITION = "id, name, version, script, approval_timeout_s, created_by, created_at"
 _SUMMARY = "id, name, version, approval_timeout_s, created_by, created_at"
@@ -236,8 +237,8 @@ class FlowStore:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
-                " call_id, kind, outcome, response, responder)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " call_id, kind, outcome, response, responder, input_hash)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
                 (
                     decision.request_id,
@@ -248,6 +249,7 @@ class FlowStore:
                     decision.outcome,
                     Jsonb(decision.response),
                     decision.responder,
+                    decision.input_hash,
                 ),
             ).fetchone()
             if row is not None:

@@ -50,7 +50,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
-from scadbuddy.flows.keys import payload_keys
+from scadbuddy.flows.keys import approval_key, payload_keys
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
@@ -894,7 +894,7 @@ async def run_projects_worker(
         decisions = operation_activities(
             OperationStore(settings_store.pool, events=events),
             settings_store,
-            {kind.name: kind for kind in flow_kinds(store, keys[0])},
+            {kind.name: kind for kind in flow_kinds(store, keys[0], approval_key(settings))},
         )
         routes = FlowRoutes(api_client(settings.api_internal_url))
         worker = projects_worker(
