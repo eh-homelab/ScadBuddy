@@ -85,10 +85,12 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
   const highlighted = matches[index] as SkillChoice | undefined
   const current = highlighted ? index : -1
 
+  // Only when the highlight moves: the chat re-renders on every streamed token, and
+  // scrolling then would snap back a list the user is scrolling with the mouse (#2104).
   useEffect(() => {
-    if (current < 0) return
-    document.getElementById(optionId(current))?.scrollIntoView?.({ block: 'nearest' })
-  })
+    if (!open || current < 0) return
+    document.getElementById(`${id}-skill-${current}`)?.scrollIntoView?.({ block: 'nearest' })
+  }, [id, open, current])
 
   const choose = (skill: SkillChoice) => {
     const text = skillInvocation(skill)
@@ -104,6 +106,13 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
       setDismissed(true)
       return true
     }
+    const enter = event.key === 'Enter' && !event.shiftKey
+    // #2104: while the list is still loading, Enter would send the half-typed "/pr" as a
+    // message. Hold it until the list arrives; a failed read lets it send as ever.
+    if (!skills.list && !skills.error) {
+      if (enter) event.preventDefault()
+      return enter
+    }
     if (!highlighted) return false
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
@@ -111,7 +120,9 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
       setActive({ query, index: (index + step + matches.length) % matches.length, moved: true })
       return true
     }
-    if ((event.key === 'Enter' && !event.shiftKey) || (event.key === 'Tab' && !event.shiftKey)) {
+    // A draft that already names the highlighted skill sends on the first Enter (#2104).
+    if (enter && query === highlighted.name) return false
+    if (enter || (event.key === 'Tab' && !event.shiftKey)) {
       event.preventDefault()
       choose(highlighted)
       return true
