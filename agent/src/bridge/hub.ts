@@ -286,10 +286,27 @@ export class TabHub implements BrowserTabs {
     void listener(sessionId).catch((err: unknown) => this.logError(err))
   }
 
-  /** Whether `sessionId` has a tab that is connected here now. */
-  sessionHasTab(sessionId: string): boolean {
-    const tabId = this.#sessionTabs.get(sessionId)
-    return tabId !== undefined && this.#tabs.has(tabId)
+  /**
+   * Whether `sessionId`'s tab is connected to any replica now. The tab is the
+   * store's row when there is one, as for a call (`#resolve`): this replica's map
+   * goes stale as soon as another replica pairs the session elsewhere.
+   */
+  async sessionHasTab(sessionId: string): Promise<boolean> {
+    const tabId = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
+    if (tabId === undefined) return false
+    if (this.#tabs.has(tabId)) return true
+    if (!this.#relay) return false
+    try {
+      const answer = await this.#relay.forward(tabId, { op: 'status' }, {
+        signal: new AbortController().signal,
+        timeoutMs: this.#callTimeoutMs,
+      })
+      return answer?.op === 'status'
+    } catch (err) {
+      // As for a call: a relay that cannot be asked is a tab not connected.
+      this.logError(err)
+      return false
+    }
   }
 
   forSession(sessionId: string): BrowserTabs {

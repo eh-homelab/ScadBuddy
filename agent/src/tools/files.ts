@@ -730,7 +730,12 @@ export const fileTools: Tool[] = [
     input: z.object({
       pattern: z.string().min(1).max(1000).describe('A JavaScript regular expression, matched per line'),
       slug: slug.optional().describe('Search only this model; every model when omitted'),
-      library: libraryName.optional().describe('Search this library the model pins instead of the model; needs `slug`'),
+      library: libraryName
+        .optional()
+        .describe(
+          'Search this library the model pins instead of the model; needs `slug`. Without `glob` every .scad file in the ' +
+            'checkout is read, so give a `glob` to narrow a large library such as BOSL2',
+        ),
       path: filePath.optional().describe('Search only this file in each model (or in the library)'),
       glob: z.string().min(1).max(200).optional().describe('Only the files whose paths match, e.g. "*.scad", "ui/**" or "**"'),
       output_mode: z.enum(['content', 'files_with_matches', 'count']).default('files_with_matches'),

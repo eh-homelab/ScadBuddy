@@ -11,6 +11,7 @@ import type { TouchedCall } from '../src/sessions/touched.js'
 import { answerResult } from '../src/gate/answers.js'
 import { answeredText, timedOutText } from '../src/harness/attention.js'
 import { answersText } from '../src/harness/questions.js'
+import type { FlowRuns } from '../src/temporal/flowRuns.js'
 import { DESCRIBE_CALL_ACTIVITY, DURABLE_IMAGE_NOTE, gateActivities, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
@@ -282,6 +283,86 @@ describe('tool activities', () => {
     const running = e.run(h.activities.slow!, {})
     setTimeout(() => e.cancel(), 20)
     await expect(running).rejects.toBeInstanceOf(CancelledFailure)
+  })
+})
+
+// #1057 (plan 2026-10-09 Task D1): a flow run's call, from ProjectWorkflow
+// (`flow-<run id>`), runs as the run's starter, and an outward one only with a person's
+// approval recorded for `flow:<run>:<workflow run>:<call>`.
+describe('flow runs in tool activities', () => {
+  const RUN = '7e2a1c3b-4d5e-4f60-8a9b-0c1d2e3f4a5b'
+  const FLOW = `flow-${RUN}`
+
+  function flowRuns(owner: Owner | undefined = BROWSER, asked: string[] = []): FlowRuns {
+    return {
+      startedBy: async (id) => (id === RUN ? owner : undefined),
+      approved: async (requestId) => {
+        asked.push(requestId)
+        return requestId.endsWith(':call_ok')
+      },
+    }
+  }
+
+  it("runs a flow's read tool as the run's starter, in no session, and asks no session owner", async () => {
+    const owners: string[] = []
+    const h = harness({ flows: flowRuns(), sessions: { ownerOf: async (id) => void owners.push(id) } })
+    const content = await env(FLOW, 'tool-call_1').run(h.activities.whoami!, {})
+    expect(text(content)).toContain('"id": "browser"')
+    expect(text(content)).toContain('"gate": "workflow"')
+    expect(text(content)).not.toContain('"session"')
+    expect(owners).toEqual([])
+    expect(h.headers[0]!.get(AUTHOR_SESSION_HEADER)).toBeNull()
+    expect(h.audits).toEqual([
+      expect.objectContaining({
+        action: 'whoami',
+        actor: BROWSER,
+        sessionId: null,
+        toolUseId: 'call_1',
+        requestId: `flow:${RUN}:run-1:call_1`,
+        outcome: 'ok',
+      }),
+    ])
+    expect(h.touched).toEqual([])
+  })
+
+  it('refuses a gated call with no approval recorded for it, and runs it once one is', async () => {
+    const asked: string[] = []
+    const h = harness({ flows: flowRuns(BROWSER, asked) })
+    const refused = await failure(env(FLOW, 'tool-call_2').run(h.activities.send!, { to: 'printer' }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('NotApproved')
+    expect(asked).toEqual([`flow:${RUN}:run-1:call_2`])
+    expect(h.audits).toEqual([
+      expect.objectContaining({ action: 'send', outcome: 'refused', sessionId: null, requestId: `flow:${RUN}:run-1:call_2` }),
+    ])
+    const content = await env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'printer' })
+    expect(text(content)).toContain('"sent": "printer"')
+  })
+
+  it('holds a token starter to its read tier, as its durable sessions are', async () => {
+    const h = harness({ flows: flowRuns(BEARER) })
+    const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'x' }))
+    expect(refused.message).toContain('needs the "outward" tier')
+  })
+
+  it('refuses a flow with no run recorded, or with no store to read it from, and runs nothing', async () => {
+    const other = `flow-${'1'.repeat(8)}-0000-4000-8000-000000000000`
+    const unknown = await failure(env(other, 'tool-call_1').run(harness({ flows: flowRuns() }).activities.whoami!, {}))
+    expect(unknown.nonRetryable).toBe(true)
+    expect(unknown.type).toBe('UnknownFlow')
+    const unread = await failure(env(FLOW, 'tool-call_1').run(harness().activities.whoami!, {}))
+    expect(unread.type).toBe('UnknownFlow')
+  })
+
+  it('refuses the browser and answer tools: a flow has no tab and no session', async () => {
+    const tools = [...browserTools, ...DURABLE_ONLY_TOOLS]
+    const h = harness({ flows: flowRuns() }, tools)
+    for (const name of ['browser_click', DURABLE_ONLY_TOOLS[0]!.name]) {
+      const refused = await failure(env(FLOW, 'tool-call_1').run(h.activities[name]!, {}))
+      expect(refused.nonRetryable).toBe(true)
+      expect(refused.type).toBe('NotForFlows')
+    }
+    expect(h.audits).toEqual([])
   })
 })
 

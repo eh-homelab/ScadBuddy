@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import os from 'node:os'
@@ -374,6 +374,18 @@ describe('a saved body in the audit (#1292)', () => {
     const { url } = await serve((_req, res) => res.writeHead(200, { 'content-type': 'text/plain' }).end('short'))
     const ctx = await context()
     expect(json(await runHttpRequest(args({ url }), ctx)).saved).toBeNull()
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
+  })
+
+  it('names nothing when the save failed, and still writes the row (#2224)', async () => {
+    const { url } = await serve((_req, res) => res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(Buffer.from([0, 1])))
+    // A directory that cannot be made: its parent is a regular file.
+    const file = path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-http-')), 'not-a-dir')
+    await writeFile(file, '')
+    const ctx = await context({ saveDir: path.join(file, 'http') })
+    await expect(runHttpRequest(args({ url }), ctx)).rejects.toThrow()
+    expect(ctx.audit.entries).toHaveLength(1)
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).toMatchObject({ status: 200, size_bytes: 2 })
     expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
   })
 

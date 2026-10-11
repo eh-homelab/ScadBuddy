@@ -11,6 +11,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -44,11 +45,13 @@ from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
 from scadbuddy_durable.gate.names import (
     CANCEL_INPUT_UPDATE,
+    END_SIGNAL,
     INTERRUPT_SIGNAL,
     PENDING_INPUT_QUERY,
     RESPOND_UPDATE,
 )
 from scadbuddy_durable.gate.store import ResolveInput
+from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
@@ -99,6 +102,7 @@ class Harness:
     queue: str
     agent: Worker
     handles: list[WorkflowHandle[Any, Any]]
+    payload_dir: Path = Path()
     session_activities: SessionActivities | None = None
     gate_activities: GateActivities | None = None
 
@@ -121,17 +125,19 @@ class Harness:
 
 
 @pytest.fixture
-async def harness(temporal_env: WorkflowEnvironment, connect: Connect) -> AsyncIterator[Harness]:
+async def harness(
+    temporal_env: WorkflowEnvironment, connect: Connect, tmp_path: Path
+) -> AsyncIterator[Harness]:
     tools.use_manifest(MANIFEST)
     keys = PgPayloadKeys(connect, KEK)
     client = await Client.connect(
         temporal_env.client.service_client.config.target_host,
         namespace=temporal_env.client.namespace,
-        data_converter=data_converter(keys),
+        data_converter=data_converter(keys, external_storage(tmp_path)),
     )
     stand_in = StandInTools(connect)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
-    h = Harness(client, connect, stand_in, queue, None, [])  # type: ignore[arg-type]
+    h = Harness(client, connect, stand_in, queue, None, [], payload_dir=tmp_path)  # type: ignore[arg-type]
     agent = h.restart_agent()
     async with tools_worker(client, stand_in):
         task = asyncio.create_task(agent.run())
@@ -212,6 +218,27 @@ async def test_history_holds_no_plaintext(
     raw = b"".join(e.SerializeToString() for e in history.events)
     assert b"red bracket" not in raw
     assert b"binary/scadbuddy-subject" in raw
+
+
+async def test_a_large_turn_crosses_history_as_references(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2243: the message, the segment's input and its answer, the stream and the turn's
+    events all carry the text, and none of history's events does."""
+    sid, handle = await harness.session(agent_db)
+    text = "a long brief " + "z" * (OFFLOAD_BYTES * 4)
+    await send(handle, text)
+    assert await settled(connect, sid) == "idle"
+    deltas = [
+        e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"
+    ]
+    [delta] = deltas  # the panel's delta is cut to 32 KiB; the answer was whole
+    assert delta.startswith("you said: a long brief zzzz")
+    history = await handle.fetch_history()
+    # Nothing at the threshold or over it is inline: the message alone is four times it.
+    assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
+    assert b"zzzz" not in b"".join(e.SerializeToString() for e in history.events)
+    assert any((harness.payload_dir / f"session-{sid}").iterdir())
 
 
 async def test_an_approved_call_runs_once_and_is_reported(
@@ -406,6 +433,29 @@ async def test_interrupt_ends_the_turn_even_while_the_worker_is_down(
     assert harness.stand_in.ran == []
 
 
+async def test_end_completes_an_idle_session(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#1056: a session marked done ends its workflow."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hi")
+    await settled(connect, sid)
+    await handle.signal(END_SIGNAL, {})
+    await asyncio.wait_for(handle.result(), 30)
+
+
+async def test_end_during_a_turn_completes_the_session_after_it(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    await _parked(handle)
+    await handle.signal(END_SIGNAL, {})
+    await handle.execute_update(CANCEL_INPUT_UPDATE, {"reason": "done"})
+    assert await settled(connect, sid) == "idle"
+    await asyncio.wait_for(handle.result(), 30)
+
+
 async def test_the_handler_set_is_the_gates_and_the_plugins(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
@@ -418,13 +468,14 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     signals = {s.name for s in definition.signal_definitions}
     queries = {q.name for q in definition.query_definitions}
     assert {"send_message", "respond", "cancel_input"} <= updates
-    assert "interrupt" in signals
+    assert {"interrupt", "end"} <= signals
     assert {"pending_input", "segment_context", "turn"} <= queries
     ours = {
         "send_message",
         "respond",
         "cancel_input",
         "interrupt",
+        "end",
         "pending_input",
         "segment_context",
         "turn",
