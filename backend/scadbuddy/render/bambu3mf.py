@@ -19,7 +19,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import MAX_CODE_DIGITS
+from scadbuddy.render.paint import MAX_CODE_DIGITS, states
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -186,10 +186,14 @@ class PlateParts:
         """Whether this plate needs a prime tower: only when it uses more than one
         filament. One colour prints without one, so reserving room would refuse
         plates that are perfectly printable. A painted part prints with its painting's
-        filaments too (#1965)."""
-        return len(set(self.extruders)) > 1 or any(
-            part.paint is not None and part.paint.used() for part in self.parts
-        )
+        filaments too (#1965), but a painting only in filaments the plate already uses
+        adds none (#2108). The painting must be numbered against the file's filament
+        list, as `write_plates_3mf` renumbers it before asking."""
+        used = set(self.extruders)
+        for part in self.parts:
+            if part.paint is not None:
+                used.update(state for code in part.paint.codes if code for state in states(code))
+        return len(used) > 1
 
 
 def single_plate(parts: Sequence[ColourPart]) -> PlateParts:
