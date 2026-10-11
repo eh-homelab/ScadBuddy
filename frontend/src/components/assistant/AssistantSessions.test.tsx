@@ -260,7 +260,10 @@ describe('handoff offers (#1284)', () => {
     await user.click(screen.getByRole('button', { name: 'Fork' }))
     await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
-    // The desktop agent's chat is not the user's: no offer to cancel there.
+    // The desktop agent's chat is offered too, but it is not the user's: its offer
+    // shows, and there is nothing for the user to cancel there.
+    mockAgentSessions()!.offerChat(PARENT, { kind: 'bearer', id: 'token:t2', label: 'MCP token:t2' })
+    expect(await within(picker()).findByText('Offered to MCP token t2')).toBeInTheDocument()
     expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${PARENT}` })).toBeNull()
 
     mockAgentSessions()!.offerChat(OWN, { kind: 'bearer', id: 'token:t1', label: 'MCP token:t1' })
@@ -269,6 +272,18 @@ describe('handoff offers (#1284)', () => {
     await user.click(within(picker()).getByRole('button', { name: `Cancel the offer of ${OWN}` }))
     expect(sessionWrites().at(-1)).toEqual({ method: 'DELETE', path: expect.stringMatching(/^\/sessions\/.+\/handoff$/), body: {} })
     await waitFor(() => expect(within(picker()).queryByText('Offered to MCP token t1')).toBeNull())
+    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
+  })
+  it('drops an offer once it lapses, with no new snapshot', async () => {
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+
+    mockAgentSessions()!.offerChat(OWN, { kind: 'bearer', id: 'token:t1', label: 'MCP token:t1' }, 400)
+    expect(await within(picker()).findByText('Offered to MCP token t1')).toBeInTheDocument()
+    // The agent sends nothing when the offer lapses; the row stops showing it anyway.
+    await waitFor(() => expect(within(picker()).queryByText('Offered to MCP token t1')).toBeNull(), { timeout: 3000 })
     expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
   })
 })
