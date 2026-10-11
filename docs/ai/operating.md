@@ -668,6 +668,13 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   [browser-bridge.md](browser-bridge.md#pairing-spec-85). Without a database only chat
   sessions reach a tab.
 
+- `ai_session_files`: the assistant's workspace (#2329,
+  `20261011T1502Z_session_files.sql`; [§13](#13-the-workspace-2329)): files keyed by
+  `workspace` (`session:<id>`, deleted with the session, or `principal:<kind>:<id>` for
+  an `/mcp` caller outside a session, swept 24 h after its last write) and `path`, with
+  the bytes, media type, sha256, size and `source`. `SessionFiles` in
+  [`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts).
+
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
   hash, the review, the approval and the enabled flag. See §9.
@@ -879,6 +886,27 @@ Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). 
 ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
 upstream's behaviour of retaining only the last result with no document id.
 
+**In a durable session** (#2320, superseding #825) the turn's Claude Code runs in
+`agent-durable`, which has none of ScadBuddy's hooks. So the agent builds the same hooks
+and calls them from two activities on `agent-tools`
+([`agent/src/temporal/memoryActivities.ts`](../../agent/src/temporal/memoryActivities.ts)),
+which the `DurableSession` workflow calls around each turn, behind the patch
+`memory-2320`:
+
+- `memory_recall` runs before the prompt is sent. It recalls against the user's words
+  in that turn's `user.turn` event, and returns the same `<hindsight_memories>` block.
+  The workflow appends that block to the prompt.
+- `memory_retain` runs after the turn's events are written and before `finish_turn`.
+  It runs the Stop hook over the session's transcript, rebuilt from its event log
+  (`transcriptOf`: user turns, the assistant's text, and the main agent's tool calls).
+  It upserts `conversation:<ScadBuddy session id>`.
+
+Each recall and retain gets the same audit row and `memory` event as in a classic
+turn. Neither is retried, and neither ever fails the turn: a failure is recorded and
+the turn goes on with no memories. Only the recalled block enters the workflow's history,
+sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
+retain before it is marked done (up to the 15 s retain limit).
+
 ## 12. The HTTP request tool (#827)
 
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
@@ -902,3 +930,32 @@ so a change applies from the next turn.
   download body** link (#1292): plain text and JSON open as text, anything else
   downloads. It works while the body is among the session's 10 newest, on the replica
   that saved it.
+
+## 13. The workspace (#2329)
+
+The assistant keeps files of its own in `ai_session_files`, in Postgres rather than on
+the pod's disk, so every replica, classic and durable sessions and `/mcp` see the same
+files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
+[`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
+
+- A session's files go with the session (deleting it, or `forgetSubject`, deletes them);
+  a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
+  principal's own workspace, whose files are swept 24 h after their last write (every
+  10 minutes, `WORKSPACE_SWEEP_MS`).
+- Caps: 25 MB a file and 200 MB a workspace by default, the `ai_settings` keys
+  `workspace_file_max_bytes` and `workspace_max_bytes` (bytes; no route writes them yet).
+  Each is read at every write. Size the database for them.
+- Tools, with their tiers: `workspace_list` and `workspace_read` (read),
+  `workspace_write`, `workspace_edit` and `workspace_delete` (write), and
+  `workspace_save` (read: it saves an output's 3MF, a model's file, thumbnail or media,
+  a print's image, timelapse or file, or a Bambuddy library file into the workspace
+  through the backend's own routes, so the bytes never pass through the model).
+  `workspace_read` pages text as `read_file` does, returns an image as an image (a
+  durable session sees a note in its place), and only the metadata of other binary
+  files. `workspace_edit` is made against the sha256 the model read.
+- `http_request` takes `save_to_workspace: "<path>"` (classic sessions): the whole body
+  becomes a workspace file instead of a saved body on the state volume (§12). A body cut
+  at the 20 MiB read cap, or one over the workspace caps, is not stored, and the result
+  says why.
+- Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
+  by the store and by the table. No Claude Code built-in reaches the workspace.

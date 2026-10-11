@@ -56,6 +56,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
 import { mockRackCheck, mockRackPicks } from './features/rack'
@@ -2505,8 +2506,7 @@ export const handlers = [
 
     // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
     // chose that names a family not installed is refused, naming both.
-    const fold = (family: string) => family.replace(/ /g, '').toLowerCase()
-    const installedFamilies = new Set(state.fonts.map((font) => fold(font.family)))
+    const installedFamilies = new Set(state.fonts.map((font) => foldFamily(font.family)))
     const unfontedParams: string[] = []
     const unfontedFamilies: string[] = []
     for (const param of schema.parameters ?? []) {
@@ -2515,7 +2515,7 @@ export const handlers = [
       // The template's own options are its business, as on the server.
       if ((param.options ?? []).some((option) => option.value === value)) continue
       const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
-      const missing = families.filter((family) => !installedFamilies.has(fold(family)))
+      const missing = families.filter((family) => !installedFamilies.has(foldFamily(family)))
       if (missing.length === 0) continue
       unfontedParams.push(param.name)
       for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)

@@ -171,9 +171,21 @@ def _matrix(text: str | None) -> np.ndarray:
         raise UnreadableObjectsError(f"transform {text!r} is not 12 numbers") from None
     if len(values) != 12:
         raise UnreadableObjectsError(f"transform {text!r} is not 12 numbers")
+    # float() reads "nan" and "inf": finite vertices would come out of such a transform
+    # non-finite, past the vertex check, and reach the packer and the plate check.
+    if not np.isfinite(values).all():
+        raise UnreadableObjectsError(f"transform {text!r} is not finite numbers")
     matrix[:3, :3] = np.array(values[:9]).reshape(3, 3).T
     matrix[:3, 3] = values[9:]
     return matrix
+
+
+def _combine(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
+    """``outer @ inner``. Large finite transforms can overflow to inf here; that is
+    refused once the product reaches the vertices (`_Reader._mesh`), not warned about."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        product: np.ndarray = outer @ inner
+    return product
 
 
 def _metadata(node: ET.Element) -> dict[str, str]:
@@ -302,7 +314,7 @@ class _Reader:
         mesh = obj.find(f"{_CORE}mesh")
         if mesh is not None:
             yield from self._mesh(
-                root, obj, mesh, matrix @ np.diag([scale, scale, scale, 1.0]), extruder
+                root, obj, mesh, _combine(matrix, np.diag([scale, scale, scale, 1.0])), extruder
             )
             return
         components = obj.find(f"{_CORE}components")
@@ -311,7 +323,7 @@ class _Reader:
             yield from self.meshes(
                 path,
                 component.get("objectid", ""),
-                matrix @ _matrix(component.get("transform")),
+                _combine(matrix, _matrix(component.get("transform"))),
                 extruder,
                 depth + 1,
             )
@@ -337,7 +349,16 @@ class _Reader:
         points = arrays.vertices
         if not np.isfinite(points).all():
             raise UnreadableObjectsError("a vertex of the 3MF is not a finite number")
-        points = (np.c_[points, np.ones(len(points))] @ matrix.T)[:, :3]
+        with np.errstate(over="ignore", invalid="ignore"):
+            points = (np.c_[points, np.ones(len(points))] @ matrix.T)[:, :3]
+        # Every transform is finite on its own (`_matrix`), but the build item's, the
+        # nested components' and the unit's scale are multiplied together and then
+        # applied: a product of large finite numbers can overflow to inf. Every path to
+        # the packer and the plate check passes through here.
+        if not np.isfinite(points).all():
+            raise UnreadableObjectsError(
+                "a transform of the 3MF places a vertex at a position that is not a finite number"
+            )
         name = obj.get("name") or obj.get("id")
         if arrays.prusa_painted:
             raise UnreadableObjectsError(
@@ -473,7 +494,7 @@ class _Reader:
                     self.meshes(
                         path,
                         cid,
-                        matrix @ _matrix(component.get("transform")),
+                        _combine(matrix, _matrix(component.get("transform"))),
                         part.extruder or settings.extruder or 1,
                     )
                 )
@@ -605,7 +626,11 @@ def _read(archive: _Archive, budget: ReadBudget) -> list[ReadObject]:
     for item in items:
         matrix = _matrix(item.get("transform"))
         path = (item.get(_PATH) or "").lstrip("/") or model
-        key = (path, item.get("objectid", ""), tuple(np.round(matrix[:3, :3], 6).ravel()))
+        # Rounding scales by 1e6, which overflows for a huge finite transform; such an
+        # item is refused when its vertices are placed (`_Reader._mesh`).
+        with np.errstate(over="ignore", invalid="ignore"):
+            rounded = tuple(np.round(matrix[:3, :3], 6).ravel())
+        key = (path, item.get("objectid", ""), rounded)
         if key in groups:
             groups[key] = (groups[key][0], groups[key][1] + 1)
             continue

@@ -9,6 +9,10 @@ counts when it made an outward call, which its wait's result says (decoded with 
 flows codec); a turn that has not answered may have, so it counts. The preview is pinned to the
 history's last event, `as_of_event_id`, so a Reset can refuse when more outward calls
 landed after the person looked.
+
+The history is not read whole (#2268): backwards from its last event to the point, and
+forwards only until the run's `execute` Update was accepted, which is in its first
+workflow task. A preview of a recent point in a long run reads only the tail.
 """
 
 from __future__ import annotations
@@ -16,12 +20,20 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from pydantic import BaseModel
+from temporal_agent_harness.harness.agent_protocol.agent_interface import (
+    SEND_AGENT_MESSAGE_UPDATE,
+)
+from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import EventType
 from temporalio.api.history.v1 import HistoryEvent
+from temporalio.api.workflowservice.v1 import GetWorkflowExecutionHistoryReverseRequest
 from temporalio.client import Client
 
 from scadbuddy.flows.models import Run
 from scadbuddy.workflows.flow_tools import OUTWARD_PREFIX, TOOL_PREFIX, TURN_PREFIX
+
+#: Events per page of a history read.
+PAGE_SIZE = 1000
 
 
 class OutwardCall(BaseModel):
@@ -45,6 +57,17 @@ class ResetPreview(BaseModel):
     calls: list[OutwardCall]
 
 
+def _executes(event: HistoryEvent) -> bool:
+    """Whether `event` accepted the run's `execute`: the harness's `send_agent_message`
+    Update (#2303). No other Update starts the script, so no other one makes a point
+    after it valid."""
+    return (
+        event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED
+        and event.workflow_execution_update_accepted_event_attributes.accepted_request.input.name
+        == SEND_AGENT_MESSAGE_UPDATE
+    )
+
+
 def preview_of(
     events: Iterable[HistoryEvent],
     event_id: int,
@@ -63,7 +86,7 @@ def preview_of(
     calls: list[OutwardCall] = []
     for event in events:
         last = event.event_id
-        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED:
+        if _executes(event):
             started = started or event.event_id < event_id
         if event.event_id == event_id:
             # After the script started: a Reset reapplies no Update (`flow_reset`), so
@@ -100,11 +123,50 @@ async def outward_since(
     """The preview of the run's execution `run_id`, else its current one."""
     if run_id is None:
         run_id = (await client.get_workflow_handle(run.workflow_id).describe()).run_id
-    history = await client.get_workflow_handle(run.workflow_id, run_id=run_id).fetch_history()
+    tail = await _tail(client, run.workflow_id, run_id, event_id)
+    head = await _head(client, run.workflow_id, run_id, event_id)
+    # Ascending, each once: the tail's last event can fall inside a short head.
+    events = sorted({e.event_id: e for e in [*head, *tail]}.values(), key=lambda e: e.event_id)
     tools = {s.call_id for s in run.steps if s.outward and s.fn.startswith("tool:")}
-    preview = preview_of(history.events, event_id, tools, await _turns(client, history.events))
+    preview = preview_of(events, event_id, tools, await _turns(client, tail))
     preview.workflow_run_id = run_id
     return preview
+
+
+async def _head(client: Client, workflow_id: str, run_id: str, before: int) -> list[HistoryEvent]:
+    """The events before `before`, read forwards only until `execute` was accepted."""
+    events: list[HistoryEvent] = []
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+    async for event in handle.fetch_history_events(page_size=PAGE_SIZE):
+        if event.event_id >= before:
+            break
+        events.append(event)
+        if _executes(event):
+            break
+    return events
+
+
+async def _tail(client: Client, workflow_id: str, run_id: str, since: int) -> list[HistoryEvent]:
+    """The events from `since` to the last, read backwards from the last; at least the
+    last, which pins the preview."""
+    events: list[HistoryEvent] = []
+    token = b""
+    while True:
+        page = await client.workflow_service.get_workflow_execution_history_reverse(
+            GetWorkflowExecutionHistoryReverseRequest(
+                namespace=client.namespace,
+                execution=WorkflowExecution(workflow_id=workflow_id, run_id=run_id),
+                maximum_page_size=PAGE_SIZE,
+                next_page_token=token,
+            )
+        )
+        for event in page.history.events:
+            if event.event_id < since and events:
+                return events[::-1]
+            events.append(event)
+        token = page.next_page_token
+        if not token:
+            return events[::-1]
 
 
 async def _turns(client: Client, events: Sequence[HistoryEvent]) -> dict[int, int]:

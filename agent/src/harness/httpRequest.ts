@@ -9,6 +9,7 @@ import { type AuditActor, type AuditSink, safeDetail } from '../audit/log.js'
 import { assertHostAllowed, assertHttpUrl, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
+import { type SessionFiles, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
 import { AGENT_ACTOR_HEADER } from './headlessBrowser.js'
 import type { RiskTier } from './permissions.js'
 
@@ -60,6 +61,10 @@ import type { RiskTier } from './permissions.js'
 //     human approved one URL.
 //   - Responses are untrusted data (safety/untrusted.ts): every result is
 //     wrapped in the `untrusted_data` envelope naming the URL's host.
+//   - `save_to_workspace: "<path>"` (#2329) stores the whole body as a file in
+//     the session's workspace (workspace/store.ts), under its caps, instead of
+//     on the pod's disk, so workspace_read reads it and an upload can send it.
+//     A body cut at SAVE_MAX_BYTES is not stored.
 //   - Every request (every hop) is an `http` audit row: method, scheme, host,
 //     status, size and timing, and on the hop that answered, the id its body
 //     was saved under, if it was (#1292: AI activity links to the body, served
@@ -142,6 +147,15 @@ export const HttpRequestInput = {
     .max(MAX_TIMEOUT_MS)
     .optional()
     .describe(`Deadline for the whole request, redirects included (default ${DEFAULT_TIMEOUT_MS}, at most ${MAX_TIMEOUT_MS})`),
+  save_to_workspace: z
+    .string()
+    .min(1)
+    .max(512)
+    .optional()
+    .describe(
+      'Save the whole response body as this file in your workspace (e.g. "downloads/part.stl"), replacing any ' +
+        'file there; workspace_read reads it, and uploads can send it',
+    ),
 }
 // Defaults are applied here, not with zod's `.default()`: the MCP server
 // bundled in the SDK validated tool input without applying them (measured on
@@ -199,6 +213,8 @@ export type HttpRequestContext = {
   signal?: AbortSignal | undefined
   resolve?: Resolver
   limits?: Partial<HttpLimits>
+  /** Where `save_to_workspace` stores a body (#2329): the session's workspace. Refused without it. */
+  workspace?: { files: SessionFiles; ref: WorkspaceRef } | undefined
 }
 
 function contains(value: string, secrets: readonly string[]): boolean {
@@ -526,6 +542,17 @@ export async function runHttpRequest(
     })
     return text({ error: `Not sent: ${problem}.` }, true)
   }
+  // The workspace path is checked before anything is sent.
+  let target: string | undefined
+  if (args.save_to_workspace !== undefined) {
+    if (!context.workspace) return text({ error: 'Not sent: save_to_workspace needs a session workspace, which is not available here.' }, true)
+    if (args.method === 'HEAD') return text({ error: 'Not sent: a HEAD request has no body to save_to_workspace.' }, true)
+    try {
+      target = workspacePath(args.save_to_workspace)
+    } catch (err) {
+      return text({ error: `Not sent: ${(err as Error).message}.` }, true)
+    }
+  }
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const outcome = await exchange(args, context, callSignal)
   if (!outcome.ok) return text({ error: `Not completed: ${outcome.reason}.` }, true)
@@ -533,9 +560,11 @@ export async function runHttpRequest(
   const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
   const isText = textual(contentType, hop.bytes)
   const fits = hop.bytes.length <= limits.inlineMaxBytes && hop.complete
-  // Saved when it does not fit inline, or is binary (not inlined at all), so it can be paged.
+  const workspace = target === undefined ? undefined : await saveToWorkspace(context, target, hop, contentType, outcome.url)
+  // Saved when it does not fit inline, or is binary (not inlined at all), so it can be paged;
+  // not when the workspace holds it.
   let saved: string | undefined
-  if (savesBody(hop, limits)) {
+  if (savesBody(hop, limits) && !(workspace && 'sha256' in workspace)) {
     try {
       saved = await save(context.saveDir, randomUUID(), hop.bytes, {
         content_type: contentType ?? null,
@@ -567,7 +596,11 @@ export async function runHttpRequest(
     body_complete: hop.complete,
     body: args.method === 'HEAD' ? null : inline,
     ...(inline === null && hop.bytes.length > 0 ? { body_omitted: 'binary content; read it from `saved` as base64' } : {}),
+    ...(inline === null && hop.bytes.length > 0 && workspace && 'sha256' in workspace
+      ? { body_omitted: `binary content; it is in the workspace at ${workspace.path}` }
+      : {}),
     inline_truncated: inline !== null && !fits,
+    ...(workspace ? { workspace } : {}),
     saved: saved
       ? {
           id: saved,
@@ -578,6 +611,32 @@ export async function runHttpRequest(
       : null,
   }
   return text(result)
+}
+
+type WorkspaceSaved =
+  | { path: string; size_bytes: number; sha256: string; media_type: string; read_with: string }
+  | { path: string; error: string }
+
+/** The body as a workspace file (#2329); a refusal (cut body, caps) is reported, never thrown. */
+async function saveToWorkspace(
+  context: HttpRequestContext,
+  target: string,
+  hop: Hop,
+  contentType: string | undefined,
+  url: URL,
+): Promise<WorkspaceSaved> {
+  if (!hop.complete) return { path: target, error: `not saved: the body was cut at ${hop.bytes.length} bytes` }
+  try {
+    const info = await context.workspace!.files.write(context.workspace!.ref, target, hop.bytes, {
+      mediaType: contentType?.split(';')[0]?.trim() || undefined,
+      // The URL without its query, which can carry a token of the server's.
+      source: { tool: HTTP_TOOL, url: `${url.origin}${url.pathname}`, status: hop.status },
+    })
+    return { path: info.path, size_bytes: info.size, sha256: info.sha256, media_type: info.mediaType, read_with: 'workspace_read' }
+  } catch (err) {
+    if (err instanceof WorkspaceError) return { path: target, error: `not saved: ${err.message}` }
+    throw err
+  }
 }
 
 /**
@@ -651,6 +710,7 @@ export function httpRequestServer(context: HttpRequestContext): McpSdkServerConf
       'GET and HEAD run at once; POST, PUT, PATCH and DELETE wait for the user to approve that exact request. ' +
       'Only the headers you give are sent. Returns the status, the response headers and the body ' +
       `(up to ${INLINE_MAX_BYTES} bytes inline); a longer or binary body is saved and read with ${HTTP_READ_TOOL}. ` +
+      'With save_to_workspace the body is stored as a workspace file instead (workspace_read reads it). ' +
       `Follows up to ${MAX_REDIRECTS} redirects.`,
     HttpRequestInput,
     async (args, extra) => {

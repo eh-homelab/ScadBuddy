@@ -20,6 +20,7 @@ export function FontWidget({
   fonts,
   sampleText = '',
   missing = [],
+  refusal,
   onInstalled,
   onChange,
 }: {
@@ -29,6 +30,12 @@ export function FontWidget({
   sampleText?: string
   /** #1286 — families this value names that the last render was refused for: not installed. */
   missing?: string[]
+  /**
+   * The refusal `missing` answers, by identity (#2215): an install error belongs to
+   * it, so a later refusal of the same families starts clean. Without one, the
+   * error is kept with the families themselves.
+   */
+  refusal?: object
   /** After one of `missing` is installed here, so the caller can render again. */
   onInstalled?: (installed: InstalledFamily) => void
   onChange: (next: string) => void
@@ -38,8 +45,12 @@ export function FontWidget({
   const [open, setOpen] = useState(false)
   const [justInstalled, setJustInstalled] = useState<Record<string, string[]>>({})
   const [installing, setInstalling] = useState<string | null>(null)
-  // Kept with the refusal it answered, so a later refusal of other families starts clean.
-  const [installError, setInstallError] = useState<{ missing: string; message: string } | null>(null)
+  // Kept with the refusal it answered, so a later refusal starts clean (#2215).
+  const [installError, setInstallError] = useState<{
+    refusal: object | undefined
+    missing: string
+    message: string
+  } | null>(null)
 
   const label = param.caption ?? param.name
   const { family, style } = parseFontValue(value)
@@ -59,12 +70,14 @@ export function FontWidget({
   }
 
   const missingKey = missing.join('\n')
-  const shownInstallError = installError?.missing === missingKey ? installError.message : null
+  const shownInstallError =
+    installError && installError.refusal === refusal && installError.missing === missingKey ? installError.message : null
 
   // The same install the picker makes; the value stays as it is, since it already
   // names the family.
   async function install(missingFamily: string): Promise<void> {
     const refused = missingKey
+    const answering = refusal
     setInstalling(missingFamily)
     setInstallError(null)
     try {
@@ -73,6 +86,7 @@ export function FontWidget({
       onInstalled?.(installed)
     } catch (cause) {
       setInstallError({
+        refusal: answering,
         missing: refused,
         message: cause instanceof ApiError ? cause.detail : `${missingFamily} could not be installed. Check the connection.`,
       })

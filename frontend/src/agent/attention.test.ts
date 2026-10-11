@@ -205,11 +205,25 @@ describe('useAttention', () => {
         return HttpResponse.json({ sessions: [{}] })
       }),
     )
+    // The late read's body, read: from there to its end is microtasks only, so one
+    // macrotask after it has settled the read, and the guard has run (#2214).
+    const reads: Promise<unknown>[] = []
+    const json = Response.prototype.json
+    const spy = vi.spyOn(Response.prototype, 'json').mockImplementation(function (this: Response) {
+      const read = json.call(this)
+      if (this.url.includes('/api/v1/ai/sessions')) reads.push(read)
+      return read
+    })
     const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: true } })
     await waitFor(() => expect(answer).toBeDefined())
     rerender({ on: false })
     act(() => answer?.())
-    await act(async () => {})
+    await waitFor(() => expect(reads).toHaveLength(1))
+    await act(async () => {
+      await reads[0]
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    spy.mockRestore()
     expect(result.current.running).toBeNull()
   })
 

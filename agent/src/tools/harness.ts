@@ -51,10 +51,9 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
       // Settings → Plugins (#1953): a disabled tool is not offered, and one raised
       // past the principal's tiers is not either.
       const builtIn = extras?.builtIn
+      const seamTierOf = (t: Tool) => (builtIn ? builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk) : t.risk)
       const allowed = tools.filter((t) =>
-        builtIn
-          ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk))
-          : hasTier(principal, t.risk),
+        builtIn ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, seamTierOf(t)) : hasTier(principal, t.risk),
       )
       // The browser_* tools reach the tab this session is paired with (#254, bridge/hub.ts).
       const bound =
@@ -68,7 +67,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
           : services
       // The session id too, so its commits name it (authorship.ts, #252).
       // The turn's context, for a call whose span is not found (telemetry/trace.ts toolContextFor).
-      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext) }
+      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext, seamTierOf) }
     },
   }
 }

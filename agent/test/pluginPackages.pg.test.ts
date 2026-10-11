@@ -351,6 +351,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         binary: false,
         media_type: 'text/markdown',
         truncated: false,
+        too_large: false,
         content: GREETER['README.md'],
       })
       // Only a path the pin lists: never one outside the package, or a file it does not have.

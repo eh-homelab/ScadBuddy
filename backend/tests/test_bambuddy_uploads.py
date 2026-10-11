@@ -173,3 +173,22 @@ async def test_a_library_file_resolves_to_the_output_that_uploaded_it(
 
     assert await uploads.outputs_for_files([11, 12, 13]) == {11: OUTPUT, 12: OUTPUT}
     assert await uploads.outputs_for_files([]) == {}
+
+
+@pytest.mark.requires_postgres
+async def test_folderless_projects_match_by_name_and_parent_newest_first(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#2263: a project created here whose folder failed, found again by the create it
+    came from — the same name under the same parent, a top-level one included."""
+    await uploads.remember_folderless(7, "Fidget", None)
+    await uploads.remember_folderless(8, "Fidget", None)
+    await uploads.remember_folderless(9, "Fidget", 2)
+
+    assert await uploads.folderless("Fidget", None) == [8, 7]
+    assert await uploads.folderless("Fidget", 2) == [9]
+    assert await uploads.folderless("Gifts", None) == []
+
+    await uploads.forget_folderless(8)
+    await uploads.forget_folderless(8)  # forgetting one not recorded is not an error
+    assert await uploads.folderless("Fidget", None) == [7]

@@ -93,10 +93,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       'the host migrates inputs as it opens a preset or output; the agent reads inputs already migrated',
   },
-  // #274: template media. An agent reads `media` (ids, captions, order) from the model record.
+  // #274: template media. An agent reads `media` (ids, captions, order) from the model record;
+  // workspace_save (#2329) saves an item's file into the workspace.
   ...(
     [
-      'GET /api/v1/models/{slug}/media/{item_id}',
       'GET /api/v1/models/{slug}/media/{item_id}/poster',
       'GET /api/v1/models/{slug}/media/{item_id}/thumbnail',
     ] as const

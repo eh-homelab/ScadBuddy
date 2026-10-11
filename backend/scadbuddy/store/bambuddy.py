@@ -38,6 +38,13 @@ from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.commits import (
+    FOLDER_NOT_FOUND,
+    PARENT_FOLDER_NOT_FOUND,
+    refused,
+    upload_into,
+    visible,
+)
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.core.problems import ApiError
@@ -213,13 +220,15 @@ class BambuddyContentBackend:
         media = _MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
         async with self._client() as (client, inbox):
             for attempt in (1, 2):
-                folder_id = await self._folder_for(client, inbox, scope)
                 try:
-                    uploaded = await client.upload_library_file(
-                        name, data, folder_id=folder_id, media_type=media
+                    folder_id = await self._folder_for(client, inbox, scope)
+                    # A folder made moments ago is waited for, not made again (#2263).
+                    uploaded = await upload_into(
+                        client, name, data, folder_id=folder_id, media_type=media
                     )
                 except ApiError as error:
-                    # The folder was deleted in Bambuddy's UI: forget it, make it again.
+                    # The folder (or its template folder) was deleted in Bambuddy's UI,
+                    # or never kept: forget it, make it again.
                     if error.status != 404 or attempt == 2:
                         raise
                     await asyncio.to_thread(self._forget, inbox, scope.slug or "")
@@ -356,7 +365,18 @@ class BambuddyContentBackend:
             for folder in root.walk():
                 if folder.parent_id == parent_id and folder.name == name:
                     return folder.id
-        return (await client.create_folder(FolderCreate(name=name, parent_id=parent_id))).id
+        create = FolderCreate(name=name, parent_id=parent_id)
+        try:
+            return (await client.create_folder(create)).id
+        except ApiError as error:
+            # The parent is the template folder this find made a moment ago, and Bambuddy
+            # has not committed it yet (#2263): wait for it rather than failing the upload
+            # into a forget that would make a second one.
+            if not refused(error, PARENT_FOLDER_NOT_FOUND) or not await visible(
+                lambda: client.folder(parent_id), FOLDER_NOT_FOUND
+            ):
+                raise
+        return (await client.create_folder(create)).id
 
     @asynccontextmanager
     async def _locked(self, key: int) -> AsyncIterator[AsyncConnection[DictRow]]:

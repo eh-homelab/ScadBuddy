@@ -32,7 +32,7 @@ from typing import Any, Literal
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError, FailureError
+from temporalio.exceptions import ActivityError, ApplicationError, FailureError
 
 with workflow.unsafe.imports_passed_through():
     from temporalio.claude_agent_sdk import AgentState, DurableClaudeAgent
@@ -75,6 +75,8 @@ with workflow.unsafe.imports_passed_through():
         FinishTurn,
         FollowArgs,
         GateSettings,
+        MemoryRecalled,
+        MemoryTurn,
         Message,
         SegmentContext,
         SendAnswer,
@@ -90,6 +92,16 @@ TURN_TOOLS = "turn_tools"
 TURN_TOOL_TIER = "turn_tool_tier"
 TURN_TOOLS_PATCH = "turn-tools-2320"
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
+# agent/src/temporal/memoryActivities.ts (#2320, superseding #825): automatic Hindsight
+# memory around a turn, as a classic turn's hooks do it.
+MEMORY_RECALL = "memory_recall"
+MEMORY_RETAIN = "memory_retain"
+MEMORY_PATCH = "memory-2320"
+# Past the hooks' own limits (3 s recall, 15 s retain) and the plugin lookup.
+MEMORY_RECALL_TIMEOUT = timedelta(seconds=30)
+MEMORY_RETAIN_TIMEOUT = timedelta(minutes=1)
+# Never retried, never failing the turn: the agent records a failure in the session.
+MEMORY_ONCE = RetryPolicy(maximum_attempts=1)
 FOLLOW_TIMEOUT = timedelta(days=30)
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_DRAIN = timedelta(seconds=30)
@@ -247,6 +259,8 @@ class DurableSession:
             self._turn_tools = manifest.offer_turn_tools(
                 self._agent._tools, self._tools, self._turn_tools, offered.tools
             )
+        if prompt is not None and workflow.patched(MEMORY_PATCH):
+            prompt += await self._recall(turn_id)
         follow = workflow.start_activity(
             "follow_session",
             FollowArgs(
@@ -292,11 +306,40 @@ class DurableSession:
             await workflow.wait_condition(follow.done, timeout=FOLLOW_DRAIN)
         except TimeoutError:
             follow.cancel()
+        if workflow.patched(MEMORY_PATCH):
+            await self._retain(turn_id)
         await workflow.execute_activity(
             "finish_turn",
             FinishTurn(session_id=sid, turn_id=turn_id, outcome=outcome, message=message),
             start_to_close_timeout=SHORT,
         )
+
+    async def _recall(self, turn_id: str) -> str:
+        """The memories a classic turn's recall hook would add, to follow the prompt;
+        nothing when memory is off, nothing matched, or the recall failed."""
+        try:
+            recalled = await workflow.execute_activity(
+                MEMORY_RECALL,
+                MemoryTurn(turn_id),
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=MEMORY_RECALL_TIMEOUT,
+                retry_policy=MEMORY_ONCE,
+                result_type=MemoryRecalled,
+            )
+        except ActivityError:
+            return ""
+        return f"\n\n{recalled.context}" if recalled.context else ""
+
+    async def _retain(self, turn_id: str) -> None:
+        """The session's transcript retained, as a classic turn's Stop hook does."""
+        with contextlib.suppress(ActivityError):
+            await workflow.execute_activity(
+                MEMORY_RETAIN,
+                MemoryTurn(turn_id),
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=MEMORY_RETAIN_TIMEOUT,
+                retry_policy=MEMORY_ONCE,
+            )
 
     # ---- the gate ----
     async def _watch_gate(self) -> None:
@@ -419,9 +462,10 @@ class DurableSession:
                 await self._resolve(parked, "timed_out", SYSTEM, None, None, timer=True)
 
     async def _outward(self, name: str, call: dict[str, Any]) -> bool:
-        """Whether a turn tool's call is outward, by its input (turn_tool_tier). One the
-        agent cannot tier (its plugin is gone) is let through: its activity refuses it,
-        saying why, and an outward one still needs the approval it does not have."""
+        """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a
+        tool listed as may_park is asked about, so one the agent cannot tier (its plugin
+        did not answer, or is gone) parks: fail toward asking. Its activity still refuses
+        a call whose tool is gone, saying why."""
         try:
             tiered = await workflow.execute_activity(
                 TURN_TOOL_TIER,
@@ -434,7 +478,7 @@ class DurableSession:
                 result_type=dict,
             )
         except FailureError:
-            return False
+            return True
         return bool(tiered.get("tier") == "outward")
 
     async def _resolve(

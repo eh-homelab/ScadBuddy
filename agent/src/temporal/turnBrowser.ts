@@ -8,6 +8,7 @@ import type { UiReachMap } from '../harness/browserReach.js'
 import {
   assertHeadlessPlugin,
   browserInputGuard,
+  browserTierDependsOnInput,
   browserTierOf,
   DISALLOWED_BROWSER_TOOLS,
   GRANT_SERVER,
@@ -202,6 +203,8 @@ export function turnBrowserServers(deps: TurnBrowserDeps): (context: TurnContext
       keepOpen: true,
       connect: async () => (await hosted()).client,
       tierOf: tier,
+      // browser_navigate and browser_tabs are outward by the origin they open.
+      mayPark: (name) => browserTierDependsOnInput(name) || tier(name, undefined) === 'outward',
       offers: (tool) => !DENIED.has(tool) && !policy?.isDisabled(PLUGIN_NAME, tool),
       refusal: (name, input) => {
         const verdict = guard(name, input)
@@ -225,6 +228,7 @@ export function turnBrowserServers(deps: TurnBrowserDeps): (context: TurnContext
         )
       },
       tierOf: (name) => browserTierOf(name) ?? 'outward',
+      mayPark: (name) => (browserTierOf(name) ?? 'outward') === 'outward',
     }
     return [browser, grant]
   }
