@@ -28,7 +28,8 @@ def test_only_raises_of_known_tools_are_kept() -> None:
 
 
 def test_a_row_of_the_wrong_shape_overrides_nothing() -> None:
-    for stored in (None, "x", [], {"tool_tiers": [], "disabled_tools": {}}):
+    shapes: list[object] = [None, "x", [], {"tool_tiers": [], "disabled_tools": {}}]
+    for stored in shapes:
         assert tools.sanitise_overrides(MANIFEST, stored) == ({}, [])
 
 

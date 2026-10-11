@@ -417,4 +417,79 @@ describe('the durable activities', () => {
     expect((err as ApplicationFailure).type).toBe('ToolError')
     expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
   })
+
+  // #2088: the workflow decides whether to park from the overrides as its turn started;
+  // the activity decides whether to run from the overrides as the call runs, once.
+  describe('decide from Settings as the call runs, in one read', () => {
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: [{ name: 'counted', harness_name: 'mcp__scadbuddy__counted', risk: 'read' as const }] }]
+    const KEY = builtInToolsSetting('scadbuddy')
+
+    function rig(approve: (requestId: string, call?: { inputHash: string }) => boolean) {
+      const { settings, values } = memorySettings({ [KEY]: { tool_tiers: {}, disabled_tools: [] } })
+      const reads = { n: 0 }
+      const counting: SettingsRepo = {
+        get: <T>(key: string) => {
+          if (key === KEY) reads.n += 1
+          return settings.get<T>(key)
+        },
+        set: settings.set,
+      }
+      const handler = vi.fn(async () => json({ ok: true }))
+      const counted = defineTool({ name: 'counted', description: 'counts', input: z.object({ n: z.number().optional() }), risk: 'read', routes: [], handler })
+      const a = toolActivities([counted], {
+        services: services({ toolOverrides: new BuiltInTools(counting, sets).registryOverrides() }),
+        sessions: { ownerOf: async () => ({ kind: 'browser', id: 'browser', label: 'You' }) },
+        approvals: { approved: async (requestId, call) => approve(requestId, call) },
+        audit: { record: vi.fn(async () => {}), hash: (t, i) => `${t}:${JSON.stringify(i)}`, summarise: () => '' },
+      })
+      const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) => values.set(KEY, { tool_tiers, disabled_tools })
+      const run = (id: string, input: Record<string, unknown> = {}) =>
+        env(`tool-${id}`).run(a.counted!, input).then(
+          (v: unknown) => v,
+          (e: unknown) => e,
+        )
+      return { set, run, handler, reads }
+    }
+
+    it('refuse a call raised to outward after the workflow let it through unparked', async () => {
+      const r = rig(() => false)
+      // The turn read no override, so the workflow scheduled the call without parking it;
+      // Settings raises the tool before the activity runs.
+      r.set({ counted: 'outward' }, [])
+      const err = await r.run('toolu_raised')
+      expect((err as ApplicationFailure).type).toBe('NotApproved')
+      expect(r.handler).not.toHaveBeenCalled()
+    })
+
+    it('refuse a call disabled between its approval and its run', async () => {
+      const r = rig(() => true)
+      r.set({ counted: 'outward' }, ['counted'])
+      const err = await r.run('toolu_approved_then_disabled')
+      expect((err as ApplicationFailure).type).toBe('ToolError')
+      expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
+      expect(r.handler).not.toHaveBeenCalled()
+    })
+
+    it('read the overrides once per call, so the check and the run cannot disagree', async () => {
+      const r = rig(() => true)
+      r.set({ counted: 'outward' }, [])
+      expect(await r.run('toolu_once')).toMatch(/ok/)
+      expect(r.handler).toHaveBeenCalledTimes(1)
+      expect(r.reads.n).toBe(1)
+    })
+
+    it('match the approval to the call it was given for: its tool and its input', async () => {
+      const seen: (string | undefined)[] = []
+      const r = rig((_, call) => {
+        seen.push(call?.inputHash)
+        return call?.inputHash === 'counted:{"n":1}'
+      })
+      r.set({ counted: 'outward' }, [])
+      expect(await r.run('toolu_same', { n: 1 })).toMatch(/ok/)
+      const err = await r.run('toolu_other', { n: 2 })
+      expect((err as ApplicationFailure).type).toBe('NotApproved')
+      expect(seen).toEqual(['counted:{"n":1}', 'counted:{"n":2}'])
+      expect(r.handler).toHaveBeenCalledTimes(1)
+    })
+  })
 })

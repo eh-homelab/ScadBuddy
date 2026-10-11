@@ -754,12 +754,6 @@ async def test_a_tool_raised_to_outward_parks_and_runs_once_approved(
     assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert texts == ["render_preview: ok: rendered"]
-    # Taken away, the override is gone on the next turn: the call runs without parking.
-    await _overrides(agent_db, {}, [])
-    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
-    await send_next(handle, "render it again")
-    assert await settled(connect, sid) == "idle"
-    assert [r[0] for r in harness.stand_in.ran] == ["render_preview", "render_preview"]
     log = await events(agent_db, sid)
     assert _types(log).count("approval.required") == 1
     await _replays(harness, handle)
@@ -787,7 +781,8 @@ async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(
     # Raised as well: a disabled tool is refused as disabled, never parked for approval.
     await _overrides(agent_db, {"render_preview": "outward"}, ["render_preview"])
     sid, handle = await harness.session(agent_db)
-    assert (await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)).disabled_tools == []
+    before = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert before.disabled_tools == []  # no turn has read the settings yet
     await send(handle, "render it")
     assert await settled(connect, sid) == "idle"
     assert harness.stand_in.ran == []

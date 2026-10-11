@@ -39,15 +39,29 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const record = (call: string, kind: string, outcome: string) => db.sql`
         INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder)
         VALUES (${id(call)}, ${session.id}, ${kind}, ${outcome}, ${db.sql.json({ kind: 'browser', id: 'browser', label: 'You' })})`
+      // resolve_input's audit row for an approval (gate/store.py `_audit`): its input hash.
+      const audited = (call: string, action: string, hash: string) => db.sql`
+        INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label,
+                              session_id, tool_use_id, tier, input_hash, input_summary, request_id,
+                              outcome, detail, started_at, finished_at, duration_ms)
+        VALUES ('approval', ${action}, 'http', 'browser', 'browser', 'You', ${session.id}, ${call}, 'outward',
+                ${hash}, '{}', ${id(call)}, 'ok', '', now(), now(), 0)`
       await record('a', 'approval', 'approved')
+      await audited('a', 'approved', 'h-a')
       await record('d', 'approval', 'denied')
+      await audited('d', 'denied', 'h-d')
       await record('q', 'answer', 'answered')
+      await record('u', 'approval', 'approved') // no audit row: nothing binds it to a call
       const approvals = new PgApprovalRecords(db.sql)
-      expect(await approvals.approved(id('a'))).toBe(true)
-      expect(await approvals.approved(id('d'))).toBe(false)
-      expect(await approvals.approved(id('q'))).toBe(false)
-      expect(await approvals.approved(id('none'))).toBe(false)
-      expect(await approvals.approved(`durable:${session.id}:run-2:a`)).toBe(false)
+      expect(await approvals.approved(id('a'), { inputHash: 'h-a' })).toBe(true)
+      // #2088: only for the call it was given for, and never without the call's hash.
+      expect(await approvals.approved(id('a'), { inputHash: 'h-other' })).toBe(false)
+      expect(await approvals.approved(id('a'))).toBe(false)
+      expect(await approvals.approved(id('u'), { inputHash: 'h-a' })).toBe(false)
+      expect(await approvals.approved(id('d'), { inputHash: 'h-d' })).toBe(false)
+      expect(await approvals.approved(id('q'), { inputHash: 'h-a' })).toBe(false)
+      expect(await approvals.approved(id('none'), { inputHash: 'h-a' })).toBe(false)
+      expect(await approvals.approved(`durable:${session.id}:run-2:a`, { inputHash: 'h-a' })).toBe(false)
     })
   },
 )

@@ -49,13 +49,19 @@ export class PgSessionOwners implements SessionOwners {
   }
 }
 
+/** What an approval was given for: the call's input hash, which keys the tool and its input. */
+export type ApprovalBinding = { inputHash: string }
+
 /**
  * The gate's recorded decisions (spec §6.6): whether `ai_input_responses` holds an
  * `approved` outcome for a durable call's request id, which resolve_input writes
- * before the workflow lets the call through.
+ * before the workflow lets the call through, given for this very call (#2088): the
+ * approval's audit row, written in the same transaction, carries the input hash
+ * describe_call computed for the parked call (the approvals' HMAC key over the tool's
+ * name and its input), so an approval never authorises another tool or other input.
  */
 export interface ApprovalRecords {
-  approved(requestId: string): Promise<boolean>
+  approved(requestId: string, call?: ApprovalBinding): Promise<boolean>
 }
 
 export class PgApprovalRecords implements ApprovalRecords {
@@ -65,10 +71,14 @@ export class PgApprovalRecords implements ApprovalRecords {
     this.#sql = sql
   }
 
-  async approved(requestId: string): Promise<boolean> {
+  async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
+    // Without the call's hash nothing can be matched, so nothing is approved.
+    if (call === undefined) return false
     const rows = await this.#sql`
-      SELECT 1 FROM ai_input_responses
-      WHERE request_id = ${requestId} AND kind = 'approval' AND outcome = 'approved'`
+      SELECT 1 FROM ai_input_responses r
+      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
+      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
+        AND a.input_hash = ${call.inputHash}`
     return rows.length > 0
   }
 }
@@ -192,10 +202,15 @@ async function runAsActivity(
   // the namespace can name a workflow after a durable session (security review of 5b).
   // Gated as the tool runs now (#1953): a tier Settings raised to outward needs the
   // approval too, whatever tier the durable worker's manifest declared it at.
-  // A disabled tool is never parked (#2088), so it skips this check and is refused below,
-  // by runToolWithOutcome, naming Settings → Plugins rather than a missing approval.
+  //
+  // One read decides the call (#2088): the tier and disabled state are resolved here, as
+  // the call runs, never taken from the workflow's decision to park it, and that same
+  // resolution is handed to runToolWithOutcome (`effective`), which does not read them
+  // again. So a tool raised to outward after the workflow let it through unparked has no
+  // approval and is refused NotApproved; one disabled after its approval is refused as
+  // disabled; and no second read can disagree with the one that was checked.
   const effective = await effectiveTool(tool, deps.services)
-  if (effective.gated && !effective.disabled && !(await caller.approvals?.approved(requestId))) {
+  const refuse = async (detail: string, message: string, type: string): Promise<never> => {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({
@@ -210,11 +225,25 @@ async function runAsActivity(
       inputHash: deps.audit.hash(tool.name, parsed),
       inputSummary: deps.audit.summarise(tool.name, parsed),
       outcome: 'refused',
-      detail: 'no approval is recorded for this call',
+      detail,
       startedAt: now,
       finishedAt: now,
     })
-    throw ApplicationFailure.nonRetryable(`${tool.name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
+    throw ApplicationFailure.nonRetryable(message, type)
+  }
+  if (effective.disabled) {
+    const message = `${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`
+    await refuse(message, message, TOOL_ERROR)
+  }
+  // The approval binds to this call's tool and input (ApprovalRecords): the hash
+  // describe_call gave the parked call, computed again from what this call was given.
+  const binding = deps.audit ? { inputHash: deps.audit.hash(tool.name, (input ?? {}) as Record<string, unknown>) } : undefined
+  if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
+    await refuse(
+      'no approval is recorded for this call',
+      `${tool.name} needs an approval, and none is recorded for this call`,
+      NOT_APPROVED,
+    )
   }
   const principal = harnessPrincipal(owner)
   const services = deps.services
@@ -232,6 +261,7 @@ async function runAsActivity(
       signal: context.cancellationSignal,
       lookup,
       gate: 'workflow',
+      effective,
     })
   } finally {
     clearInterval(heartbeat)
