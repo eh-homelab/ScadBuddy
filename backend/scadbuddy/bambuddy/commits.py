@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import status
 
-from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE, BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import UpstreamAnswer
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.core.problems import ApiError
@@ -69,7 +69,7 @@ async def upload_into(
     content: bytes,
     *,
     folder_id: int | None,
-    media_type: str = THREE_MF_MEDIA_TYPE,
+    media_type: str | None = None,
 ) -> LibraryFile:
     """Upload into ``folder_id``, waiting out a folder Bambuddy has not committed yet.
 
@@ -80,14 +80,25 @@ async def upload_into(
     that makes the folder again (the store, for one deleted in Bambuddy's UI) still can.
     """
     try:
-        return await client.upload_library_file(
-            filename, content, folder_id=folder_id, media_type=media_type
-        )
+        return await _upload(client, filename, content, folder_id, media_type)
     except ApiError as error:
         if folder_id is None or not refused(error, FOLDER_NOT_FOUND):
             raise
         if not await visible(lambda: client.folder(folder_id), FOLDER_NOT_FOUND):
             raise
+    return await _upload(client, filename, content, folder_id, media_type)
+
+
+async def _upload(
+    client: BambuddyClient,
+    filename: str,
+    content: bytes,
+    folder_id: int | None,
+    media_type: str | None,
+) -> LibraryFile:
+    # The client's own default (a 3MF) unless the caller names one.
+    if media_type is None:
+        return await client.upload_library_file(filename, content, folder_id=folder_id)
     return await client.upload_library_file(
         filename, content, folder_id=folder_id, media_type=media_type
     )
