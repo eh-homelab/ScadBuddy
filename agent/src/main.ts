@@ -427,6 +427,8 @@ const browserHost = new BrowserHost({ paths })
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
+      // A flow's tool(name, ...) reaches the same tools, as the run's starter (#2320).
+      flows: new PgFlowRuns(temporal.sql),
       servers: turnServers({
         ...(plugins
           ? { remotePlugins: async () => forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder) }

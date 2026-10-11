@@ -19,6 +19,7 @@ HOST_FN = {
     "approved_print": "queue_print",
     "approved_arrange": "arrange",
     "approved_tool": "tool",
+    "approved_turn_tool": "tool",
 }
 
 
