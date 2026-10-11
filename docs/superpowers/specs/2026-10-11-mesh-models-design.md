@@ -77,6 +77,7 @@ the UI both edit `scene.json`, only through `scene_edit` (§5).
 ```json
 {
   "version": 1,
+  "generated_sha256": "…",
   "source": {"kind": "bambuddy_library", "file_id": 688,
              "name": "2 Carrot Garden Print by Object.3mf", "sha256": "…"},
   "objects": [
@@ -115,7 +116,12 @@ it, so customizing a mesh model works like any template (e.g. `cut_height`,
 deterministic. Output: a header line `// Generated from scene.json by ScadBuddy; edit
 the scene, or eject (scene_eject) to edit this file`, the exposed parameters, one
 `module <id>() { … }` per object, and at the end each object placed with
-`multmatrix(<transform>)`. Each part is `color("<colour>") import("meshes/…3mf");`, so
+`multmatrix(<transform>)`. Each part is `color("<colour>") import("meshes/…3mf");`.
+A part's mesh file is written with no `basematerials` and no colour of its own (one
+object, one mesh): OpenSCAD keeps the innermost colour (§2 measured an imported 3MF's
+`basematerials` reaching the output), so a mesh that carried one would ignore the outer
+`color()` and `set_colour`. With the colour only in `color()`, `render/solids.py`'s
+per-colour re-render (which shadows `color`) still yields one closed solid per colour, so
 `render/solids.py`'s per-colour re-render (which shadows `color`) still yields one
 closed solid per colour. Ops apply to the object's union of parts, each part keeping
 its `color()`.
@@ -153,8 +159,13 @@ cap. Nothing is written to Bambuddy.
 `scene_edit` is one `OperationKind` taking a list of **edits**; all apply or none do,
 in one git commit (so undo is the existing version history and restore).
 
-Check: the model has a scene; `model.scad` equals `compile_scene(scene.json)` (else
-409 "model.scad was edited by hand; eject the scene to keep editing it as source");
+Check: the model has a scene; the sha256 of `model.scad` equals the scene's
+`generated_sha256` (else 409 "model.scad was edited by hand; eject the scene to keep
+editing it as source"). The hash is of the text the compiler last wrote, recorded in
+`scene.json` with every write, never a fresh `compile_scene` of the stored scene: a
+later release whose compiler emits different text must not read every existing mesh
+model as hand-edited. Each edit recompiles with the current compiler and records the
+new hash;
 each edit validates against the scene (ids exist, numbers in range).
 
 Edits (what callers send; they expand into ops):
@@ -250,7 +261,7 @@ still shows exposed parameters.
 
 `render/geometry.py` gains `weak_joints`: for each part, sections at every layer height
 (0.2 mm default) along print Z; a section whose area is below 25 % of the larger of the
-sections 2 mm below and above, with at least 1 cm² of the part above it, is reported
+sections 2 mm below and above, with at least 1 cm³ of the part's volume above it, is reported
 with its Z, area, and a suggested `split_at_plane` (the plane, and a joint sized to the
 section). The agent's carrot loop: `analyze_geometry` → `edit_scene` with the suggested
 split → `lay_flat` the tuft → render → `analyze_geometry` again.
@@ -259,8 +270,9 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
 
 - Unit: `compile_scene` golden files per op; every edit, including world-to-object plane
   mapping under rotation and non-uniform scale (the normal by `Mᵀ`); `lay_flat` by
-  normal and `largest_flat` after a cut; the preset refusal and `drop_from_presets`; peg sizing and its refusal; `expose` naming; the
-  hand-edit 409.
+  normal and `largest_flat` after a cut; the preset refusal and `drop_from_presets`;
+  peg sizing and its refusal; `expose` naming; the hand-edit 409 (by `generated_sha256`), and no 409 when only the compiler's output
+  changed.
 - Paint transfer: on a synthetic painted mesh, an op-free object keeps 100 % of its
   codes verbatim; a cut object keeps every uncut face's code verbatim and gives cut faces
   the part's own colour.
@@ -269,7 +281,8 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
   `scene_eject` through `run_operation`; claim release.
 - `requires_openscad` (the image): a 3MF made with OpenSCAD is opened, split with a
   keyed joint, rendered; both parts are watertight, the peg's diameter is the socket's
-  less `2*clearance`, and colours survive. This re-measures §2's first fact on the
+  less `2*clearance`, and colours survive; a `set_colour` edit changes the rendered
+  part's colour (the mesh files carry none, §3.3). This re-measures §2's first fact on the
   pinned image.
 - Bundled template `models/mesh-joint-demo/` with `verify.sh`: a small two-colour mesh
   made with OpenSCAD in the verify run (never a user's library file), split, jointed,
