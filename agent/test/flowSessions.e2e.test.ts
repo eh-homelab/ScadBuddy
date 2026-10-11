@@ -155,11 +155,16 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     const script = ['import asyncio', 'async def main():', ...body.map((b) => `    ${b}`), 'asyncio.run(main())'].join('\n')
     const answer = new Promise<string>((resolve) => waiting.push(resolve))
     projects!.child.stdin!.write(`${JSON.stringify({ script })}\n`)
-    const line = await Promise.race([
-      answer,
-      new Promise<never>((_, reject) => projects!.child.once('exit', () => reject(new Error(`the projects worker exited: ${projects!.log()}`)))),
-    ])
-    return JSON.parse(line) as FlowAnswer
+    let onExit: (() => void) | undefined
+    const exited = new Promise<never>((_, reject) => {
+      onExit = () => reject(new Error(`the projects worker exited: ${projects!.log()}`))
+      projects!.child.once('exit', onExit)
+    })
+    try {
+      return JSON.parse(await Promise.race([answer, exited])) as FlowAnswer
+    } finally {
+      projects!.child.off('exit', onExit!)
+    }
   }
 
   beforeAll(async () => {
@@ -292,12 +297,16 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     await env?.teardown()
   }, 60_000)
 
-  /** Denies the session's first outward call once it parks at the gate. */
-  async function denyTheOutwardCall(): Promise<string> {
+  /** Denies the first outward call that parks at a gate, unless `done` settles first. */
+  async function denyTheOutwardCall(done: Promise<unknown>): Promise<string | undefined> {
+    let settled = false
+    void done.finally(() => (settled = true)).catch(() => {})
     const deadline = Date.now() + 180_000
     for (;;) {
+      if (settled) return undefined
       const [parked] = await db.sql<{ request_id: string; session_id: string; tool: string }[]>`
-        SELECT request_id, session_id::text, tool FROM ai_pending_input WHERE kind = 'approval'`
+        SELECT p.request_id, p.session_id::text, p.tool FROM ai_pending_input p
+         WHERE p.kind = 'approval' AND NOT EXISTS (SELECT 1 FROM ai_input_responses r WHERE r.request_id = p.request_id)`
       if (parked) {
         const answer = await gate.respond(parked.session_id, {
           request_id: parked.request_id,
@@ -314,10 +323,9 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
   }
 
   it("agent() starts a durable session, waits for its turn and parses the answer its result_schema asks for", async () => {
-    const [run, denied] = await Promise.all([
-      flow(`answer = await agent(${JSON.stringify(SIZE_PROMPT)}, [], ${JSON.stringify(SCHEMA)})`, "return answer['width'] + 2"),
-      denyTheOutwardCall(),
-    ])
+    const running = flow(`answer = await agent(${JSON.stringify(SIZE_PROMPT)}, [], ${JSON.stringify(SCHEMA)})`, "return answer['width'] + 2")
+    // A run that ends without parking a call fails below with its own result.
+    const [run, denied] = await Promise.all([running, denyTheOutwardCall(running)])
     expect(denied).toBe('delete_output')
     // The fenced JSON was parsed and checked against the schema: the script did arithmetic on it.
     expect([run.status, run.result]).toEqual(['succeeded', 'result: 42'])

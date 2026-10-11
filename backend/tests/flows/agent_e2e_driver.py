@@ -61,11 +61,16 @@ async def _preview(client: Client, run: Run, tools_queue: str) -> list[list[str]
     """The outward calls a Reset to before the run's first agent-tools call would repeat."""
     history = await client.get_workflow_handle(run.workflow_id).fetch_history()
     first = min(
-        e.event_id
-        for e in history.events
-        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
-        and e.activity_task_scheduled_event_attributes.task_queue.name == tools_queue
+        (
+            e.event_id
+            for e in history.events
+            if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+            and e.activity_task_scheduled_event_attributes.task_queue.name == tools_queue
+        ),
+        default=None,
     )
+    if first is None:
+        return []
     point = max(
         e.event_id
         for e in history.events
