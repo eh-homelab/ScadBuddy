@@ -356,6 +356,35 @@ async def test_without_an_api_url_the_call_names_the_setting(
         assert "SCADBUDDY_API_INTERNAL_URL" in (run.result or "")
 
 
+async def test_a_script_cannot_steer_a_call_to_another_route(
+    outward: Outward, api: FakeApi
+) -> None:
+    """A slug or id from the script is one path segment: anything that would reach
+    another route is refused before a send, and the rest arrives quoted, intact."""
+    run_id = await outward.run(
+        script(
+            "out = []",
+            "for slug in ['x/../../jobs/j', '..', 'a\\\\b', '']:",
+            "    try:",
+            "        await render(slug, {})",
+            "    except Exception as e:",
+            "        out.append(type(e).__name__)",
+            "try:",
+            "    await queue_print({'output_id': '../x'}, {})",
+            "except Exception as e:",
+            "    out.append(type(e).__name__)",
+            "r = await render('a?b#c%2Fd', {})",
+            "out.append(r['job_id'])",
+            "return out",
+        )
+    )
+    run = await outward.finished(run_id)
+    # The render route got the slug whole (its job id carries it), and that id came
+    # back through the job route intact too.
+    assert run.result == "result: " + repr(["ValueError"] * 5 + ["job-a?b#c%2Fd"])
+    assert len(api.sent) == 1
+
+
 async def test_printed(outward: Outward, api: FakeApi) -> None:
     """Records `project_workflow_histories/printed.json` (test_project_replay.py): a
     render, its output saved, and a print approved inside its approval timeout."""
