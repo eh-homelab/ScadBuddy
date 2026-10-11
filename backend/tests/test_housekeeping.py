@@ -19,9 +19,12 @@ from temporalio.client import (
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
+from scadbuddy.library.history import MAINTAIN_TIMEOUT
 from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
 from scadbuddy.workflows.housekeeping import (
     CLAIMS_TIMEOUT,
+    GIT_SWEEP,
+    GIT_TIMEOUT,
     HEARTBEAT_TIMEOUT,
     PREVIEWS_SWEEP,
     PREVIEWS_TIMEOUT,
@@ -104,9 +107,16 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         PRUNE_SWEEPS[0]: PRUNE_TIMEOUT,
         PRUNE_SWEEPS[1]: CLAIMS_TIMEOUT,
         PREVIEWS_SWEEP: PREVIEWS_TIMEOUT,
+        GIT_SWEEP: GIT_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
+
+
+def test_the_git_sweeps_timeout_covers_its_gc_and_no_more() -> None:
+    """#2342: the models-git sweep is bounded by its `git gc`'s own timeout plus a
+    margin, not the asset sweep's 30 minutes."""
+    assert timedelta(seconds=MAINTAIN_TIMEOUT) < GIT_TIMEOUT < SWEEP_TIMEOUT
 
 
 def test_the_prunes_timeout_covers_its_settle() -> None:
