@@ -148,7 +148,9 @@ export function missingFonts(error: unknown): MissingFonts | undefined {
  */
 export function missingFamiliesOf(problem: MissingFonts, name: string, value: string): string[] {
   if (!problem.parameters.includes(name)) return []
-  const lower = value.toLowerCase()
-  const named = problem.families.filter((family) => lower.includes(family.toLowerCase()))
+  // Compared as fontconfig compares families (backend `normalise_family`): ignoring case and blanks.
+  const fold = (text: string) => text.replace(/ /g, '').toLowerCase()
+  const folded = fold(value)
+  const named = problem.families.filter((family) => folded.includes(fold(family)))
   return named.length > 0 ? named : problem.families
 }

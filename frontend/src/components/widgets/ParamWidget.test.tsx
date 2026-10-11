@@ -556,6 +556,20 @@ describe('font', () => {
     expect(onFontInstalled).not.toHaveBeenCalled()
   })
 
+  it('drops a failed install\u2019s message once a different family is refused', async () => {
+    const user = userEvent.setup()
+    const props = { slug: 'name-keychain', param, fonts, onChange: vi.fn() }
+    const { rerender } = render(
+      <ParamWidget {...props} value={UNINSTALLABLE_FONT} missingFonts={[UNINSTALLABLE_FONT]} />,
+    )
+    await user.click(screen.getByRole('button', { name: `Install ${UNINSTALLABLE_FONT}` }))
+    expect(await screen.findByText(/could not be downloaded/)).toBeInTheDocument()
+
+    rerender(<ParamWidget {...props} value="Roboto:style=Bold" missingFonts={['Roboto']} />)
+    expect(screen.getByRole('button', { name: 'Install Roboto' })).toBeInTheDocument()
+    expect(screen.queryByText(/could not be downloaded/)).not.toBeInTheDocument()
+  })
+
   it('is not flagged when nothing is missing', () => {
     setup(param, 'Liberation Sans:style=Bold')
     expect(screen.getByRole('combobox', { name: 'Typeface' })).not.toHaveAttribute('aria-invalid')
