@@ -33,6 +33,8 @@ export type ModelSummary = Schemas['ModelRecord']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
 export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
+/** #1290 — one `.scad` file of a model's directory, `model.scad` (`main`) first. */
+export type SourceFile = Schemas['SourceFile']
 export type Diagnostic = Schemas['Diagnostic']
 
 export type PastedSource = Schemas['PastedSource']

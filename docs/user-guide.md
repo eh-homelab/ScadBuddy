@@ -357,8 +357,14 @@ project, the same as an output's.
   volume. You can diff two revisions, **Customize this version** (render an old
   revision without restoring it), or **Restore this version** (restoring adds a new
   commit and never rewrites history).
-- **Edit source** opens the model's source in the editor. Saving it creates a new
-  revision.
+- **Edit source** opens the model's source in the editor. Saving it creates a
+  new revision. The row above the editor lists the model's `.scad` files:
+  `model.scad`, which every render opens, and any files beside it that it can
+  `include` or `use`. Open one to edit it on its own page, where **Save file**
+  and **Delete file** are each a revision too. **New file** adds one (`.scad` is
+  added to the name if you leave it off). If the model changed elsewhere since
+  you opened a file, saving it is refused and you can reload the file or keep
+  editing and save over it.
 
 ![Versions](images/versions.png)
 

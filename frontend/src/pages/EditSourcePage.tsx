@@ -3,12 +3,14 @@ import { Link, useParams, useSearchParams } from 'react-router'
 import { ApiError, api } from '../api/client'
 import { DuplicateModelButton } from '../components/DuplicateModelButton'
 import { SourceDiff } from '../components/SourceDiff'
+import { SourceFileTabs } from '../components/SourceFileTabs'
 import { SourceWorkbench } from '../components/SourceWorkbench'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { countConflicts } from '../lib/upstream'
 import { useSubscription } from '../lib/realtime'
+import { MAIN_SOURCE } from '../lib/sourceFiles'
 import { useAsync } from '../lib/useAsync'
 
 /** The read of the record a save's `base` comes from failed. */
@@ -238,6 +240,8 @@ export function EditSourcePage() {
                   'There is no update to resolve any more; this is the source as it is.'}
           </p>
         )}
+        {/* #1290 — the model's other .scad files; not while resolving an update. */}
+        {!merging && <SourceFileTabs slug={slug} current={MAIN_SOURCE} canEdit={model.data?.origin === 'mine'} />}
         </>
       }
       uri={`file:///models/${slug}/model.scad`}
