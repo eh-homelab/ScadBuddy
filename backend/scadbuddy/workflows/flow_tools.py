@@ -5,6 +5,8 @@ Every function records its step on the run's row (plan 2026-10-09 Ruling 7). No
 scripts and to coerce their arguments.
 """
 
+import json
+import re
 from datetime import timedelta
 from typing import Any
 from urllib.parse import quote
@@ -15,6 +17,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
+    import jsonschema
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
@@ -104,6 +107,16 @@ class RouteRefusedError(Exception):
     """ScadBuddy refused the call; the message is the problem's `detail`."""
 
 
+class ToolFailedError(Exception):
+    """An agent tool failed; the message is the tool's own text."""
+
+
+#: The agent's activity refusals (`agent/src/temporal/toolActivities.ts`) and a tool's
+#: own error: final, the call is never sent again.
+_TOOL_REFUSALS = ["ToolError", "NotApproved", "UnknownFlow", "NotForFlows"]
+_TOOL_TIMEOUT = timedelta(seconds=120)
+
+
 #: Sends re-send with their key while ScadBuddy has not answered, past a print's worst
 #: accept (three 60 s checks, `agent/src/tools/command.ts` `ACCEPTING_MS`).
 _SEND = timedelta(seconds=300)
@@ -113,6 +126,8 @@ _HEARTBEAT = timedelta(seconds=30)
 _JOB_SETTLED = ["done", "failed", "cancelled"]
 _RUN_SETTLED = ["succeeded", "failed"]
 OUTWARD_PREFIX = "outward-"
+#: An agent tool's activity id prefix, which the agent strips to find the call id.
+TOOL_PREFIX = "tool-"
 
 
 def _refusal(err: ActivityError) -> BaseException:
@@ -333,6 +348,217 @@ async def arrange(
     return result
 
 
+async def _call_tool(call_id: str, name: str, args: dict[str, Any], *, attempts: int) -> str:
+    """The agent tool `name` as an activity on the agent's `agent-tools` queue, under the
+    activity id `tool-<call id>` the agent reads the call (and its approval) from."""
+    owner: StepOwner = workflow.instance()
+    try:
+        text: str = await workflow.execute_activity(
+            name,
+            args,
+            activity_id=f"{TOOL_PREFIX}{call_id}",
+            task_queue=owner.tools_queue,
+            result_type=str,
+            start_to_close_timeout=_TOOL_TIMEOUT,
+            retry_policy=RetryPolicy(
+                maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
+            ),
+        )
+    except ActivityError as err:
+        if isinstance(err.cause, ApplicationError):
+            raise ToolFailedError(err.cause.message) from None
+        raise
+    return text
+
+
+@agent.tool_defn()
+async def approved_tool(call: str, name: str, args: dict[str, Any]) -> str:
+    """An outward agent tool, run once a person approved it, and at most once."""
+    await _approved(call)
+    return await _call_tool(call, name, args, attempts=1)
+
+
+@agent.tool_defn(inherently_safe=True)
+async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]) -> str:
+    """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
+    started this run; returns its text. An outward tool (one that changes something
+    outside ScadBuddy) waits for a person to approve it first."""
+    owner: StepOwner = workflow.instance()
+    tier = owner.tool_tier(name)
+    if tier is None:
+        raise ValueError(f"there is no tool {name!r}")
+    call_id = str(workflow.uuid4())
+    if tier == "outward":
+        text: str = await _gated(
+            f"tool:{name}", runner, approved_tool, call_id, call=call_id, name=name, args=args
+        )
+        return text
+    async with step(f"tool:{name}", call_id, outward=False):
+        # Only a read is retried: a write that landed and then lost its answer would
+        # land again.
+        return await _call_tool(call_id, name, args, attempts=3 if tier == "read" else 1)
+
+
+#: The agent's refusals of a session (`agent/src/temporal/flowSessions.ts`) and a turn
+#: that ended in an error: final.
+_TURN_REFUSALS = ["SessionRefused", "TurnFailed", "NotForFlows", "UnknownFlow"]
+#: A turn may wait on its own approvals and questions; the wait heartbeats throughout.
+_TURN_TIMEOUT = timedelta(days=7)
+#: A turn's wait's activity id prefix: `turn-<fn>-<call id>`, which a Reset preview reads.
+TURN_PREFIX = "turn-"
+_FENCED = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+
+
+def turn_activity_id(fn: str, call_id: str) -> str:
+    return f"{TURN_PREFIX}{fn}-{call_id}"
+
+
+def _untrusted(text: str) -> dict[str, Any]:
+    """A session tool's answer, out of the untrusted-data envelope the agent wraps it in
+    (`agent/src/safety/untrusted.ts`)."""
+    try:
+        value: Any = json.loads(text)
+        if isinstance(value, dict) and "untrusted_data" in value:
+            value = value["untrusted_data"].get("content")
+            if isinstance(value, str):
+                value = json.loads(value)
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        raise ToolFailedError("the agent's answer names no session")
+    return value
+
+
+async def _check_session(session_id: str) -> None:
+    """That this run may talk to `session_id`: a durable session its starter owns."""
+    owner: StepOwner = workflow.instance()
+    try:
+        await workflow.execute_activity(
+            "flow_session_check",
+            {"session_id": session_id},
+            task_queue=owner.tools_queue,
+            result_type=dict,
+            start_to_close_timeout=_TOOL_TIMEOUT,
+            retry_policy=RetryPolicy(non_retryable_error_types=_TURN_REFUSALS),
+        )
+    except ActivityError as err:
+        if isinstance(err.cause, ApplicationError):
+            raise ToolFailedError(err.cause.message) from None
+        raise
+
+
+async def _wait_turn(fn: str, call_id: str, session_id: str, turn_id: str) -> str:
+    """The turn's last message, once it ended."""
+    owner: StepOwner = workflow.instance()
+    try:
+        answer: dict[str, Any] = await workflow.execute_activity(
+            "flow_session_turn",
+            {"session_id": session_id, "turn_id": turn_id},
+            activity_id=turn_activity_id(fn, call_id),
+            task_queue=owner.tools_queue,
+            result_type=dict,
+            start_to_close_timeout=_TURN_TIMEOUT,
+            heartbeat_timeout=_HEARTBEAT,
+            retry_policy=RetryPolicy(non_retryable_error_types=_TURN_REFUSALS),
+        )
+    except ActivityError as err:
+        if isinstance(err.cause, ApplicationError):
+            raise ToolFailedError(err.cause.message) from None
+        raise
+    return str(answer["text"])
+
+
+def _check_schema(schema: dict[str, Any]) -> None:
+    try:
+        jsonschema.validators.validator_for(schema).check_schema(schema)
+    except jsonschema.SchemaError as err:
+        raise ValueError(f"result_schema is not a JSON Schema: {err.message}") from None
+
+
+def _answer(text: str, schema: dict[str, Any] | None) -> Any:
+    """The text, or with `schema` the JSON value it holds (a fenced block's included)."""
+    if schema is None:
+        return text
+    fenced = _FENCED.match(text.strip())
+    try:
+        value = json.loads(fenced.group(1) if fenced else text)
+    except ValueError:
+        raise ValueError("the session's answer is not JSON") from None
+    try:
+        jsonschema.validators.validator_for(schema)(schema).validate(value)
+    except jsonschema.ValidationError as err:
+        raise ValueError(
+            f"the session's answer does not match result_schema: {err.message}"
+        ) from None
+    return value
+
+
+def _prompt(prompt: str, skills: list[str], schema: dict[str, Any] | None) -> str:
+    text = prompt
+    if skills:
+        text += "\n\nUse these ScadBuddy skills: " + ", ".join(skills) + "."
+    if schema is not None:
+        text += (
+            "\n\nWhen you are done, answer with only a JSON value that matches this JSON "
+            "Schema, and nothing else:\n" + json.dumps(schema)
+        )
+    return text
+
+
+async def _agent_session(
+    prompt: str, skills: list[str], result_schema: dict[str, Any] | None
+) -> Any:
+    """Start a durable agent session with `prompt`, as the person who started this run,
+    and wait for its answer. `skills` names ScadBuddy skills for it to use (may be
+    empty). With `result_schema` (a JSON Schema, or None) the answer is the JSON value
+    it answered with, checked against the schema; without, its text. The session's own
+    outward calls wait for approval in its chat."""
+    if result_schema is not None:
+        _check_schema(result_schema)
+    call_id = str(workflow.uuid4())
+    async with step("agent", call_id, outward=False) as at:
+        # Never retried: a lost answer would start a second session (Ruling 4's key is
+        # not one a session start takes).
+        started = _untrusted(
+            await _call_tool(
+                call_id,
+                "sessions_start",
+                {"prompt": _prompt(prompt, skills, result_schema), "mode": "durable"},
+                attempts=1,
+            )
+        )
+        try:
+            session_id, turn_id = str(started["session"]["id"]), str(started["turn_id"])
+        except (KeyError, TypeError):
+            raise ToolFailedError("the agent started no turn") from None
+        await at.note_session(session_id)
+        return _answer(await _wait_turn("agent", call_id, session_id, turn_id), result_schema)
+
+
+# `agent` is the harness's module here; the host function takes the name the script calls.
+_agent_session.__name__ = _agent_session.__qualname__ = "agent"
+agent_session = agent.tool_defn(inherently_safe=True)(_agent_session)
+
+
+@agent.tool_defn(inherently_safe=True)
+async def ask_session(session_id: str, message: str) -> str:
+    """Send `message` to the durable agent session `session_id` (one the person who
+    started this run owns) and wait for its answer's text."""
+    call_id = str(workflow.uuid4())
+    async with step("ask_session", call_id, outward=False) as at:
+        await _check_session(session_id)
+        await at.note_session(session_id)
+        # Never retried: a lost answer would send the message twice.
+        sent = _untrusted(
+            await _call_tool(
+                call_id, "sessions_send", {"session_id": session_id, "text": message}, attempts=1
+            )
+        )
+        if "turn_id" not in sent:
+            raise ToolFailedError("the agent started no turn")
+        return await _wait_turn("ask_session", call_id, session_id, str(sent["turn_id"]))
+
+
 #: Registered with the harness plugin. `human_answer` is the callback behind
 #: `wait_for_human`, and the `approved_*` gated bodies, are never offered to a script.
 FLOW_TOOLS: list[Any] = [
@@ -345,8 +571,12 @@ FLOW_TOOLS: list[Any] = [
     arrange,
     approved_print,
     approved_arrange,
+    tool,
+    approved_tool,
+    agent_session,
+    ask_session,
 ]
-_INNER = (human_answer, approved_print, approved_arrange)
+_INNER = (human_answer, approved_print, approved_arrange, approved_tool)
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]
 
 

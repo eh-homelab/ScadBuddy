@@ -22,6 +22,7 @@ from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
 from scadbuddy.flows.keys import payload_keys
+from scadbuddy.flows.manifest import load_manifest
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
@@ -63,6 +64,9 @@ FLOWS: Key[Flows] = Key("flows")
 
 def _build(core: Core, components: Components) -> Flows:
     keys = payload_keys(core.settings)
+    if core.settings.flow_tools_json is not None:
+        # The in-process worker's `tool(...)`, and the Reset preview's outward tools.
+        load_manifest(core.settings.flow_tools_json)
 
     def projects_operations() -> list[Callable[..., Any]]:
         from scadbuddy.operations.component import OPERATIONS

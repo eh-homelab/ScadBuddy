@@ -39,6 +39,7 @@ from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.forget import forget_run
 from scadbuddy.flows.history import ResetPreview, outward_since
+from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import (
     HOST_FN,
     TERMINAL,
@@ -258,6 +259,8 @@ async def start_flow_run(
         )
         if value is not None
     )
+    # As the agent will enforce them: Settings may have raised a tool to outward.
+    overrides = await flows.store.tool_overrides()
     try:
         async with asyncio.timeout(COMMAND_ANSWER_DEADLINE.total_seconds()):
             # Started already, its row not yet written: the same run, nothing new.
@@ -280,6 +283,8 @@ async def start_flow_run(
                     name=definition.name,
                     started_by=_started_by(),
                     approval_timeout_s=timeout,
+                    tools_queue=flows.settings.temporal_task_queue_agent_tools,
+                    tool_tiers=raise_tiers(tiers(), overrides),
                     search_attributes=flows.search_attributes,
                 ),
                 update_id=key,
@@ -546,7 +551,7 @@ async def preview_flow_reset(
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     if flows.client is None:
         raise _unavailable()
-    return await outward_since(flows.client, run.workflow_id, event_id)
+    return await outward_since(flows.client, run, event_id)
 
 
 @router.post(

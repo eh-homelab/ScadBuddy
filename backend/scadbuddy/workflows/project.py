@@ -57,6 +57,10 @@ class FlowStart(BaseModel):
     started_by: dict[str, Any]
     #: Seconds an outward call waits for a decision; 0 is never.
     approval_timeout_s: int = 0
+    #: Where the agent serves the tools `tool(...)` calls.
+    tools_queue: str = "agent-tools"
+    #: The agent's tools and their tiers when the run started (`flows/manifest.py`).
+    tool_tiers: dict[str, str] = {}
     search_attributes: bool = False
 
 
@@ -89,6 +93,13 @@ class ProjectWorkflow:
     def approval_timeout_s(self) -> int:
         """Seconds a gated call waits for a decision before it is denied; 0 is never."""
         return self._start.approval_timeout_s
+
+    @property
+    def tools_queue(self) -> str:
+        return self._start.tools_queue
+
+    def tool_tier(self, name: str) -> str | None:
+        return self._start.tool_tiers.get(name)
 
     def mark_started(self, call_id: str) -> None:
         """A gated call was approved and its body runs: its timer is over."""

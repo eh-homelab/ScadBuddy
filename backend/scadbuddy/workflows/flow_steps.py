@@ -30,6 +30,11 @@ class StepOwner(Protocol):
     @property
     def approval_timeout_s(self) -> int: ...
 
+    @property
+    def tools_queue(self) -> str: ...
+
+    def tool_tier(self, name: str) -> str | None: ...
+
     def mark_started(self, call_id: str) -> None: ...
 
     def started(self, call_id: str) -> bool: ...
@@ -47,6 +52,23 @@ async def project(write: ProjectionWrite) -> None:
     )
 
 
+class StepHandle:
+    """The step a call is in, for a body that learns something the page shows."""
+
+    def __init__(self, started: FlowStep) -> None:
+        self.step = started
+
+    async def note_session(self, session_id: str) -> None:
+        """Record the session the call talks to, while it runs."""
+        owner: StepOwner = workflow.instance()
+        self.step = self.step.model_copy(update={"session_id": session_id})
+        await project(
+            ProjectionWrite(
+                run_id=owner.run_id, workflow_run_id=workflow.info().run_id, step=self.step
+            )
+        )
+
+
 @asynccontextmanager
 async def step(
     fn: str,
@@ -55,7 +77,7 @@ async def step(
     outward: bool,
     waiting: Literal["approval", "answer"] | None = None,
     prompt: str | None = None,
-) -> AsyncIterator[None]:
+) -> AsyncIterator[StepHandle]:
     """Record a host call around its body: `running` on enter (and parked, with
     `waiting`), `succeeded` or `failed` on exit. A failure records only the exception's
     type, never its message, and is re-raised."""
@@ -89,8 +111,9 @@ async def step(
     )
     error: str | None = None
     closing = False
+    handle = StepHandle(started)
     try:
-        yield
+        yield handle
     except GeneratorExit:
         # The call's coroutine is closed after its workflow was evicted, maybe while
         # another workflow's event loop is current: a write here would be a command of
@@ -107,7 +130,7 @@ async def step(
                 ProjectionWrite(
                     run_id=owner.run_id,
                     workflow_run_id=workflow.info().run_id,
-                    step=started.model_copy(
+                    step=handle.step.model_copy(
                         update={
                             "status": "failed" if error is not None else "succeeded",
                             "ended_at": workflow.now(),
