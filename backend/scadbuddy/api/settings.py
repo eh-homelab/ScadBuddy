@@ -543,7 +543,6 @@ SCOPES: tuple[tuple[Scope, bool, str], ...] = (
     (Scope.MANAGE_PROJECTS, False, "Sending to a Bambuddy project."),
     (Scope.MANAGE_ARCHIVES, False, "Attaching photos and timelapses to a print."),
     (Scope.MANAGE_INVENTORY, False, "Recording which spool is in a tray, when you confirm it."),
-    (Scope.MANAGE_INVENTORY, False, "Recording which spool is in a tray, when you confirm it."),
 )
 
 
