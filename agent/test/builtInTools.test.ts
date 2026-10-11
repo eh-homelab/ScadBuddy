@@ -456,4 +456,15 @@ describe('the durable activities', () => {
     )
     expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
   })
+
+  it('refuse a disabled tool raised to outward as disabled, not as unapproved (#2088)', async () => {
+    // The durable gate never parks a disabled tool, so no approval is ever recorded for it.
+    const a = activities({ whoami: 'outward' }, ['whoami'])
+    const err = await env('tool-toolu_03').run(a.whoami!, {}).then(
+      () => undefined,
+      (e: unknown) => e,
+    )
+    expect((err as ApplicationFailure).type).toBe('ToolError')
+    expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
+  })
 })
