@@ -6,12 +6,12 @@ import {
   formatFontValue,
   googleFontsCssUrl,
   installedAsCatalogue,
+  missingFamiliesOf,
+  missingFonts,
   orderFonts,
   parseFontValue,
   preferredStyle,
   readRecentFonts,
-  missingFamiliesOf,
-  missingFonts,
   rememberFont,
 } from './fonts'
 
@@ -160,5 +160,10 @@ describe('a font the render was refused for (#1286)', () => {
     expect(missingFamiliesOf(problem, 'other', 'Roboto')).toEqual([])
     // A spelling the server normalised past matching: the field still says what is missing.
     expect(missingFamiliesOf(problem, 'font', 'Robot\\o')).toEqual(['Roboto', 'Pacifico'])
+  })
+
+  it('matches a family as fontconfig does, ignoring blanks as well as case', () => {
+    const problem = { parameters: ['font'], families: ['Roboto Slab', 'Pacifico'] }
+    expect(missingFamiliesOf(problem, 'font', 'RobotoSlab:style=Bold')).toEqual(['Roboto Slab'])
   })
 })

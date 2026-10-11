@@ -220,6 +220,10 @@ function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
 
 /** Tool name → extractor. A name that is not a registered tool fails test/touched.test.ts. */
 export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
+  // Flows (#1057) touch no kind of resource here: a session's runs are found by
+  // list_flow_runs' `session`, and a run's own steps say what it did.
+  register_flow: () => [],
+  start_flow_run: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),

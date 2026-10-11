@@ -6,6 +6,7 @@ import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
 import { farmTools } from './farm.js'
 import { fileTools } from './files.js'
+import { flowTools } from './flows.js'
 import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
 import { inspectTools } from './inspect.js'
@@ -47,6 +48,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...browserTools,
   ...approvalTools,
   ...sessionTools,
+  ...flowTools,
 ]
 
 const byName = new Map<string, Tool>()

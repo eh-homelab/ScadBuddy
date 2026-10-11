@@ -220,6 +220,14 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     advanced: true,
   },
   {
+    name: 'flow_approval_timeout_seconds',
+    section: 'rendering',
+    label: 'Deny a flow step waiting for approval after',
+    kind: 'seconds',
+    help: '0 is never. A flow, or one of its runs, can set its own.',
+    advanced: true,
+  },
+  {
     name: 'google_fonts_api_key',
     section: 'fonts',
     label: 'Google Fonts API key',

@@ -120,6 +120,8 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "PUT /api/v1/print/library/{file_id}/choices",
     "PUT /api/v1/print/printers/{printer_id}/bed-type",
     "PUT /api/v1/print/projects/last",
+    "POST /api/v1/workflows",
+    "POST /api/v1/workflows/{definition_id}/runs",
 )
 # agent-allowed-writes:end
 

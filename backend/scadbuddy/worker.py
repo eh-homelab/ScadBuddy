@@ -50,6 +50,8 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flows.keys import payload_keys
+from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
@@ -70,6 +72,7 @@ from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
@@ -86,11 +89,14 @@ from scadbuddy.workflows.client import (
     make_current,
     render_worker,
 )
+from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.follow import FOLLOW_WORKFLOW
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.projects_worker import projects_worker
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -111,7 +117,11 @@ MAKE_CURRENT_EVERY = 5.0
 MAKE_CURRENT_DEADLINE = 60.0
 
 
-def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
+def build_worker_deps(
+    settings: Settings, *, stopping: Callable[[], bool] = lambda: False
+) -> tuple[WorkerDeps, StoreBundle]:
+    """``stopping`` ends the wait for the API's schema and grants
+    (`WorkerStoppedError`)."""
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
@@ -134,7 +144,9 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     projection = JobProjection(
         settings.database_url, pool_size=settings.database_pool_size, events=events
     )
-    projection.open()
+    # Never migrated here (#601): the worker's own role may not, and in a rollout the
+    # API, which does, may not have started yet. Wait for it instead.
+    projection.open(migrate_schema=False)
     # The leases in Postgres, where the API's removals see them (#872).
     checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -148,6 +160,7 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         max_count=config.asset_max_count,
     )
     try:
+        wait_until_ready(projection.pool, stopping=stopping)
         source = RenderSettingsSource(projection.pool, settings)
         current = load_render_store_settings(projection.pool, settings)
         source.seed(current)
@@ -628,8 +641,13 @@ async def run_worker(
 ) -> None:
     stop = stop or asyncio.Event()
     # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
-    # the rest opens the projection's pool and reads the store settings.
-    deps, store = await asyncio.to_thread(build_worker_deps, settings)
+    # the rest opens the projection's pool, waits for the API's schema and grants
+    # (#601), and reads the store settings. A stop meanwhile ends the wait.
+    try:
+        deps, store = await asyncio.to_thread(build_worker_deps, settings, stopping=stop.is_set)
+    except WorkerStoppedError:
+        logger.info("stopped before the database was ready for this worker")
+        return
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
@@ -830,7 +848,61 @@ async def run_print_worker(
         await deps.aclose()
 
 
-Queue = Literal["render", "bambuddy"]
+class ProjectsKeyMissingError(ValueError):
+    pass
+
+
+async def run_projects_worker(
+    settings: Settings,
+    *,
+    stop: asyncio.Event | None = None,
+    health_port: int | None = HEALTH_PORT,
+) -> None:
+    """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
+    §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never
+    runs unsealed. Unversioned (plan 2026-10-09 Ruling 13), so it stops without a drain;
+    a run in flight resumes on the next worker from its history."""
+    stop = stop or asyncio.Event()
+    keys = payload_keys(settings)
+    if keys is None:
+        raise ProjectsKeyMissingError(
+            "SCADBUDDY_SECRET_KEY_FILE is required for --queue projects: a flow's payloads"
+            " are sealed under keys the KEK protects (spec 2026-10-01 §6.5)"
+        )
+    metrics = Metrics()
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    events = PgNotifyEventBus(
+        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
+    )
+    settings_store = SettingsStore(settings, events=events)
+    await asyncio.to_thread(settings_store.open)
+    try:
+        await events.start()
+        client = await connect_flows(
+            settings.temporal_address, settings.temporal_namespace, keys[0]
+        )
+        store = FlowStore(settings_store.pool, events=events)
+        queue = settings.temporal_task_queue_projects
+        worker = projects_worker(client, queue, FlowActivities(store).all())
+        server = (
+            _health_server(settings, metrics, None, health_port, queue)
+            if health_port is not None
+            else None
+        )
+        serving = asyncio.create_task(server.serve()) if server is not None else None
+        try:
+            async with worker:
+                await stop.wait()
+        finally:
+            if server is not None and serving is not None:
+                server.should_exit = True
+                await serving
+    finally:
+        await events.aclose()
+        await asyncio.to_thread(settings_store.close)
+
+
+Queue = Literal["render", "bambuddy", "projects"]
 
 
 def _on_signal(stop: asyncio.Event, stop_now: asyncio.Event) -> Callable[[], None]:
@@ -852,6 +924,8 @@ async def _main(settings: Settings, queue: Queue = "render") -> None:
         loop.add_signal_handler(sig, _on_signal(stop, stop_now))
     if queue == "bambuddy":
         await run_print_worker(settings, stop=stop, stop_now=stop_now)
+    elif queue == "projects":
+        await run_projects_worker(settings, stop=stop)
     else:
         await run_worker(settings, stop=stop, stop_now=stop_now)
 
@@ -860,10 +934,10 @@ def parse_queue(argv: Sequence[str] | None = None) -> Queue:
     parser = argparse.ArgumentParser(prog="python -m scadbuddy.worker")
     parser.add_argument(
         "--queue",
-        choices=("render", "bambuddy"),
+        choices=("render", "bambuddy", "projects"),
         default="render",
         help="render: the render worker (scadbuddy-render); bambuddy: the print worker"
-        " (scadbuddy-print, #1060)",
+        " (scadbuddy-print, #1060); projects: flow runs (scadbuddy-projects, #1057)",
     )
     queue: Queue = parser.parse_args(argv).queue
     return queue

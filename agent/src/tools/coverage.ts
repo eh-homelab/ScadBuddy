@@ -12,6 +12,12 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'DELETE /api/v1/workflow-runs/{run_id}',
+    reason:
+      "Forgets a flow run: its payload key, workflow and row (#1057). A person's decision on the Workflows " +
+      'page; the route refuses an agent-authored request.',
+  },
+  {
     operation: 'GET /api/v1/print/library/{file_id}/objects',
     reason:
       "The Arrange dialog's list of a library file's objects, with a count each (#1863). The arrange " +

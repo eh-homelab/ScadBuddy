@@ -31,6 +31,7 @@ import { traceAction } from '../lib/traceAction'
 import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
+import { ColoursDialog } from './ColoursDialog'
 import { ImageDialog } from './ImageDialog'
 import { PrintPicker } from './PrintPicker'
 import { useProjectList } from '../lib/projects'
@@ -39,6 +40,9 @@ import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
+
+/** #1289 — the most colours the breakdown draws (backend `MAX_BREAKDOWN_COLOURS`). */
+const MAX_BREAKDOWN_COLOURS = 16
 
 /** What a template UI's `host.openPrint` reaches (spec §4.3). */
 export interface ActionBarHandle {
@@ -114,12 +118,13 @@ export function ActionBar({
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [imageOpen, setImageOpen] = useState(false)
+  const [coloursOpen, setColoursOpen] = useState(false)
   /** #1741 — at a phone's width the project, Download, Send and Print wait behind More. */
   const phone = useMediaQuery(PHONE_QUERY)
   const [moreOpen, setMoreOpen] = useState(false)
   const moreId = useId()
   const footer = useRef<HTMLElement>(null)
-  const dialogOpen = sendOpen || printOpen || imageOpen
+  const dialogOpen = sendOpen || printOpen || imageOpen || coloursOpen
   const [error, setError] = useState<string | null>(null)
   /** A job whose first output was saved but not the rest: Generate saves only those. */
   const [unfinished, setUnfinished] = useState<ExtraOutputsError | null>(null)
@@ -393,7 +398,17 @@ export function ActionBar({
         {generating && <Spinner />}
         {generating ? 'Generating' : 'Generate'}
       </Button>
-      <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
+      <GenerateMenu
+        disabled={!ready}
+        onImage={() => setImageOpen(true)}
+        // #1289 — a breakdown says something only with two colours or more, and the
+        // backend draws at most 16.
+        onColours={
+          job?.colors && job.colors.length > 1 && job.colors.length <= MAX_BREAKDOWN_COLOURS
+            ? () => setColoursOpen(true)
+            : undefined
+        }
+      />
     </div>
   )
   const downloadButton = (
@@ -541,6 +556,13 @@ export function ActionBar({
         onClose={() => setImageOpen(false)}
       />
 
+      <ColoursDialog
+        open={coloursOpen}
+        jobId={job?.id}
+        colors={job?.colors ?? []}
+        onClose={() => setColoursOpen(false)}
+      />
+
       <SendDialog
         open={sendOpen}
         output={output}
@@ -568,13 +590,23 @@ export function ActionBar({
 }
 
 /**
- * The other things Generate can make from the preview: for now, an image to share.
+ * The other things Generate can make from the preview: an image to share, and (#1289)
+ * the render broken down by colour.
  *
  * #968 — the WAI-ARIA menu button pattern. Opening it (click, Enter, Space or the
  * arrows) puts focus on an item; the arrows, Home and End move between items, which are
  * out of the Tab order; Escape closes it back to the button, and Tab out closes it.
  */
-function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () => void }) {
+function GenerateMenu({
+  disabled,
+  onImage,
+  onColours,
+}: {
+  disabled: boolean
+  onImage: () => void
+  /** Offered only when the render has colours to break down. */
+  onColours?: (() => void) | undefined
+}) {
   // Which item takes focus as it opens: the first, or the last for ArrowUp.
   const [open, setOpen] = useState<'first' | 'last' | null>(null)
   const root = useRef<HTMLDivElement>(null)
@@ -684,6 +716,22 @@ function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () =>
             Rendered image…
             <span className="block text-[11px] text-faint">A high-resolution PNG of the view</span>
           </button>
+          {onColours && (
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              data-testid="generate-colours"
+              className="block w-full px-3 py-1.5 text-left text-[13px] outline-none hover:bg-surface-2 focus-visible:bg-surface-2"
+              onClick={() => {
+                close(true)
+                onColours()
+              }}
+            >
+              Colours…
+              <span className="block text-[11px] text-faint">Where each colour goes, one view per colour</span>
+            </button>
+          )}
         </div>
       )}
     </div>

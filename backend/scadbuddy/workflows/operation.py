@@ -117,6 +117,8 @@ class OperationWorkflow:
             elif isinstance(error, ActivityError) and isinstance(error.cause, TemporalTimeoutError):
                 # No attempt answered in time (#2065): not a refusal the check made, and
                 # not "unexpected" either. Nothing was written, so it may be sent again.
+                # Any timeout type counts, schedule-to-start included: a check queued
+                # with no worker to take it is the worker not answering in time too.
                 self.refusal = OPERATION_CHECK_TIMED_OUT
             else:
                 self.refusal = problem_of(error, unexpected=OPERATION_UNEXPECTED_DETAIL)

@@ -16,8 +16,8 @@ export function statusLabel(status: SessionStatus): string {
 /**
  * #1288 — who an agent-made revision ran for, from its `ScadBuddy-Agent-Principal`
  * trailer (backend `core/authorship.py`): the principal ids of agent
- * `src/auth/principal.ts`, `browser`, `token:<id>`, `oidc:<issuer>#<sub>` and
- * `anonymous:<mcp session>`. An id it does not recognise is shown as it is.
+ * `src/auth/principal.ts`, `browser`, `token:<id>`, `oidc:<issuer>#<sub>`,
+ * `anonymous:<mcp session>` and `flow:…`. An id it does not recognise is shown as it is.
  */
 export function principalLabel(principal: string | null | undefined): string {
   if (!principal) return 'an unknown caller'
@@ -29,7 +29,9 @@ export function principalLabel(principal: string | null | undefined): string {
     case 'token':
       return rest ? `MCP token ${rest}` : 'an MCP token'
     case 'oidc': {
-      const subject = rest.slice(rest.lastIndexOf('#') + 1)
+      // The subject follows the last `#`; without one the rest is only the issuer.
+      const hash = rest.lastIndexOf('#')
+      const subject = hash < 0 ? '' : rest.slice(hash + 1)
       return subject ? `OIDC user ${subject}` : 'an OIDC user'
     }
     case 'anonymous':

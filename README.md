@@ -424,14 +424,35 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   may mount it. A piece no job references any more is removed by the API's periodic
   upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention as
   the jobs.
-- **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
-  the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
+- **Environment:** `SCADBUDDY_DATABASE_URL` (the same database, ideally as its own
+  role, below: the worker writes the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
   `SCADBUDDY_DATA_DIR`, and `SCADBUDDY_REVISION`, which is the worker's **build
   id** (the image stamps it). Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
   `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
+- **Its own database role (#601).** The worker can, and in production should,
+  connect as a role of its own named exactly `scadbuddy_render`, so it never holds
+  the API's settings store (spec 2026-09-27 §9). Create the role with a password
+  (`CREATE ROLE scadbuddy_render LOGIN PASSWORD '…'`; on CNPG a `managed.roles`
+  entry) and point the worker's `SCADBUDDY_DATABASE_URL` at it; nothing else is set
+  up by hand. At every start the API grants that role exactly
+  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `render_jobs`,
+  `events`, `blob_refs`, the blob index `store_blobs` and `store_folders`, `assets`,
+  the library leases (`library_leases`, `library_pin_holds`,
+  `library_install_slots`), the migrations ledger (read only) and the
+  `render_settings` view. It gets nothing on `settings`: the view shows only the
+  store's settings (backend, Bambuddy URL, library folder, render key), plus the full
+  Bambuddy key **only while no render key is saved** in Settings, the fallback
+  `/healthz` reports as `render_key_fallback`. Save a render key and the worker
+  cannot read the full key at all. A role created after the API started is granted
+  on the API's next start.
+- **The worker never migrates.** It waits at start, logging what it waits for,
+  until the API has applied every migration its build has and its role holds
+  `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
+  worker comes up first, it starts once the API has. On the API's own role (the
+  same `SCADBUDDY_DATABASE_URL`) the grants are there already.
 - **Versioning:** workflows are pinned to the build that started them. At start
   the worker makes its own build the deployment's current version, so a new build
   receives new workflows once it is polling. It retries that for a minute after it

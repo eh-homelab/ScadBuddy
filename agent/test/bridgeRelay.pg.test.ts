@@ -4,6 +4,7 @@ import { TabHub, type TabConnection } from '../src/bridge/hub.js'
 import { PostgresPairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame, CallOutcome } from '../src/bridge/protocol.js'
 import { PgTabRelay } from '../src/bridge/relay.js'
+import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
 import type { Database } from '../src/db.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -47,7 +48,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
       log: () => {},
     })
     listener.start()
-    const hub = new TabHub({ pairings: new PostgresPairingStore(db.sql), relay, callTimeoutMs: 2_000, log: () => {} })
+    const hub = new TabHub({
+      pairings: new PostgresPairingStore(db.sql),
+      relay,
+      sessionTabs: new PostgresSessionTabStore(db.sql),
+      callTimeoutMs: 2_000,
+      log: () => {},
+    })
     return { hub, relay, listener }
   }
 
@@ -56,7 +63,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     expect(await db.ready()).toBe(true)
   })
   beforeEach(async () => {
-    await db.sql`TRUNCATE ai_browser_pairings, ai_bridge_messages`
+    await db.sql`TRUNCATE ai_browser_pairings, ai_bridge_messages, ai_session_tabs`
     a = replica()
     b = replica()
     await Promise.all([a.listener.ready(), b.listener.ready()])
@@ -119,6 +126,52 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     await expect(call).rejects.toMatchObject({ name: 'AbortError' })
   })
 
+  // #2086: a durable session's tool call is an activity on `agent-tools`, which
+  // any replica's worker may take, so it can run where the session's chat
+  // socket never paired it. The pairing is read from Postgres there.
+  async function chatSession(): Promise<string> {
+    const [row] = await db.sql<{ id: string }[]>`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (gen_random_uuid(), 'chat', 'browser', 'browser', 'you', 'browser', 'browser', 'idle', 10, 1)
+      RETURNING id`
+    return row!.id
+  }
+  const until = async (check: () => Promise<boolean>) => {
+    const deadline = performance.now() + 3_000
+    while (!(await check())) {
+      if (performance.now() > deadline) throw new Error('timed out')
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+
+  it("runs a durable session's call on a replica its messages never reached, on the tab it paired", async () => {
+    const t = await tab(b.hub, () => ({ ok: true, result: 'from b' }))
+    const session = await chatSession()
+    // The chat socket (and the tab) are on B; the activity runs on A.
+    b.hub.pairSession(session, TAB)
+    await until(async () => (await db.sql`SELECT 1 FROM ai_session_tabs WHERE session_id = ${session}`).length === 1)
+    expect(await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
+      ok: true,
+      result: 'from b',
+    })
+    expect(t.calls).toHaveLength(1)
+    expect(await a.hub.status({ principal: browser, sessionId: session })).toMatchObject({ attached: true, via: 'session' })
+  })
+
+  it('follows the session to the tab the user sends from next, whatever the replica', async () => {
+    await tab(b.hub, () => ({ ok: true, result: 'old tab' }))
+    const session = await chatSession()
+    b.hub.pairSession(session, TAB)
+    b.hub.pairSession(session, 'tab-bbbbbbbbbbbbbbbbbbbbbb')
+    await until(async () => {
+      const [row] = await db.sql<{ tab_id: string }[]>`SELECT tab_id FROM ai_session_tabs WHERE session_id = ${session}`
+      return row?.tab_id === 'tab-bbbbbbbbbbbbbbbbbbbbbb'
+    })
+    // That tab is connected nowhere: not the old one's answer.
+    const outcome = await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })
+    expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser' } })
+  })
+
   it('waits for a call an owner took although its ack never arrived, rather than answer not connected', async () => {
     a.hub.close()
     await a.listener.close()
@@ -149,6 +202,53 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
       ok: false,
       error: { code: 'no_answer', message: expect.stringMatching(/replica holding the tab did not answer/) },
     })
+  })
+
+  it("prefers another replica's newer pairing over this replica's own older one", async () => {
+    const t1 = await tab(a.hub, () => ({ ok: true, result: 'T1 on a' }))
+    const t2Calls: unknown[] = []
+    const t2 = b.hub.open((frame) => {
+      if (frame.type !== 'call') return
+      t2Calls.push(frame)
+      queueMicrotask(() => void t2.receive(JSON.stringify({ v: 1, type: 'result', id: frame.id, outcome: { ok: true, result: 'T2 on b' } })))
+    })
+    await t2.receive(JSON.stringify({ v: 1, type: 'hello', tabId: 'tab-bbbbbbbbbbbbbbbbbbbbbb', route: '/', live: ['snapshot'] }))
+    const session = await chatSession()
+    // The user chatted from T1 (socket on A), then moved to T2 (socket on B).
+    a.hub.pairSession(session, TAB)
+    await until(async () => (await db.sql`SELECT 1 FROM ai_session_tabs WHERE session_id = ${session}`).length === 1)
+    b.hub.pairSession(session, 'tab-bbbbbbbbbbbbbbbbbbbbbb')
+    await until(async () => {
+      const [row] = await db.sql<{ tab_id: string }[]>`SELECT tab_id FROM ai_session_tabs WHERE session_id = ${session}`
+      return row?.tab_id === 'tab-bbbbbbbbbbbbbbbbbbbbbb'
+    })
+    // A durable activity on A: T2, not the T1 A's own map still names.
+    expect(await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
+      ok: true,
+      result: 'T2 on b',
+    })
+    expect(t1.calls).toHaveLength(0)
+    expect(t2Calls).toHaveLength(1)
+  })
+
+  it('follows the session back to a tab it used before, through the replica it used before', async () => {
+    await tab(a.hub, () => ({ ok: true, result: 'T1 on a' }))
+    const session = await chatSession()
+    const stored = async () =>
+      (await db.sql<{ tab_id: string }[]>`SELECT tab_id FROM ai_session_tabs WHERE session_id = ${session}`)[0]?.tab_id
+    // T1 (on A), then T2 (on B), then T1 again.
+    a.hub.pairSession(session, TAB)
+    await until(async () => (await stored()) === TAB)
+    b.hub.pairSession(session, 'tab-bbbbbbbbbbbbbbbbbbbbbb')
+    await until(async () => (await stored()) === 'tab-bbbbbbbbbbbbbbbbbbbbbb')
+    a.hub.pairSession(session, TAB)
+    await until(async () => (await stored()) === TAB)
+    for (const r of [a, b]) {
+      expect(await r.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
+        ok: true,
+        result: 'T1 on a',
+      })
+    }
   })
 
   it('keeps a tab connected here local: nothing goes through the database', async () => {

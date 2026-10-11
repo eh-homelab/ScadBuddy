@@ -55,13 +55,22 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   // or by a pin, would otherwise land late and put back what it replaced.
   const generation = useRef(0)
 
-  // #1285 — bumped whenever the pins are read or changed: the includes are checked again.
-  const [pinsRead, setPinsRead] = useState(0)
+  // #1285 — bumped when this model's pins change: the includes are checked again. Every
+  // `libraries` signal reads the model again, including signals for other models' pins,
+  // so a read that finds the same pins does not bump it (#2193).
+  const [pinsChanged, setPinsChanged] = useState(0)
+  const pinsSeen = useRef<string | null>(null)
 
   function showModel(model: ModelSummary) {
-    setPins(model.libraries ?? [])
-    setInvalid(model.invalid_libraries ?? [])
-    setPinsRead((n) => n + 1)
+    const libraries = model.libraries ?? []
+    const invalidLibraries = model.invalid_libraries ?? []
+    setPins(libraries)
+    setInvalid(invalidLibraries)
+    const seen = JSON.stringify([libraries, invalidLibraries])
+    if (seen !== pinsSeen.current) {
+      pinsSeen.current = seen
+      setPinsChanged((n) => n + 1)
+    }
   }
 
   useEffect(() => {
@@ -239,7 +248,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
               </section>
             )}
 
-            <Includes slug={slug} checkAgain={pinsRead} apply={apply} />
+            <Includes slug={slug} checkAgain={pinsChanged} apply={apply} />
 
             <AddByUrl slug={slug} apply={apply} />
           </div>
@@ -514,10 +523,14 @@ function Includes({ slug, checkAgain, apply }: { slug: string; checkAgain: numbe
   const [error, setError] = useState<string | null>(null)
   // Bumped by a font install: the families it adds resolve now.
   const [installed, setInstalled] = useState(0)
+  // A check is running. A re-check keeps the last report on screen until it answers, so
+  // this is what says that report is about to be replaced (#2193).
+  const [checking, setChecking] = useState(true)
 
   useEffect(() => {
     let live = true
     setError(null)
+    setChecking(true)
     api
       .checkDependencies(slug)
       .then((answer) => {
@@ -525,6 +538,9 @@ function Includes({ slug, checkAgain, apply }: { slug: string; checkAgain: numbe
       })
       .catch((caught: unknown) => {
         if (live) setError(message(caught))
+      })
+      .finally(() => {
+        if (live) setChecking(false)
       })
     return () => {
       live = false
@@ -536,8 +552,15 @@ function Includes({ slug, checkAgain, apply }: { slug: string; checkAgain: numbe
   const missingCheckouts = report?.missing_checkouts ?? []
 
   return (
-    <section aria-label="Includes">
-      <h3 className="text-[13px] font-medium">Includes</h3>
+    <section aria-label="Includes" aria-busy={checking}>
+      <h3 className="flex items-center gap-2 text-[13px] font-medium">
+        Includes
+        {checking && report !== null && (
+          <span className="flex items-center gap-1 text-[12px] font-normal text-muted">
+            <Spinner /> Checking again
+          </span>
+        )}
+      </h3>
       {error ? (
         <p role="alert" className="mt-1 text-[12px] text-warn">
           Could not check the includes: {error}

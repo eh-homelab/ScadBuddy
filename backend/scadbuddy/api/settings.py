@@ -142,6 +142,7 @@ class SettingsView(BaseModel):
     fonts_catalogue_ttl: float
     event_log_retention_seconds: float
     event_log_retention_rows: int
+    flow_approval_timeout_seconds: int
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None
