@@ -5,8 +5,10 @@ For each segment, ``ScadBuddyRunner``:
 - reads the session (from the activity's workflow ID; only a durable one) and what
   its lineage may still spend. A segment with nothing left to spend ends the task as
   ``budget_exhausted``, without a model call;
-- opens the first usable credential (``credentials.usable_credentials``), so the
-  workflow never holds it, and nothing of it enters history;
+- opens the usable credentials (``credentials.usable_credentials``), so the workflow
+  never holds one, and nothing of them enters history; the segment runs on the first,
+  and on the next whenever a failure was the credential's (``fallback.py``), as a
+  classic turn falls back (``harness/fallback.ts``);
 - runs the segment with the plugin's ``ClaudeAgentSdkRunner``, built for this segment
   with that credential's environment and the remaining budget as its cap;
 - adds what the segment cost to ``ai_sessions.cost_usd`` and one to ``turns``. Every
@@ -32,6 +34,9 @@ image sent another way (MCP, the attachment store), and an oversized request rea
 Claude, failed, and was sent again on every retry. One over a bound ends the turn with a
 readable error and no retry.
 
+Settings → Model is the segment's model, and the own plugin's skills load only while
+Settings → Plugins has it on, read per segment as a classic turn reads them per turn.
+
 The tools Settings → Plugins disabled (the workflow's ``segment_context``) are left out
 of the segment's declared tools (#2088), so Claude is never offered them.
 """
@@ -39,7 +44,6 @@ of the segment's declared tools (#2088), so Claude is never offered them.
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import re
@@ -54,8 +58,9 @@ from temporalio import activity
 from temporalio.claude_agent_sdk import ClaudeAgentSdkRunner, SegmentInput, SegmentOutput
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy_durable.credentials import credential_env, usable_credentials
+from scadbuddy_durable.credentials import Credential, credential_env, usable_credentials
 from scadbuddy_durable.secrets import Kek
+from scadbuddy_durable.session.fallback import credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
     SEGMENT_CONTEXT_QUERY,
@@ -108,6 +113,10 @@ IMAGES_BYTES_MAX = 8 * 1024 * 1024 * 3 // 4
 LONG_EDGE_KEY = "image_long_edge"
 DEFAULT_LONG_EDGE = 1568
 MIN_LONG_EDGE, MAX_LONG_EDGE = 200, 2576
+# agent/src/sessions/manager.ts SETTING_MODEL; plugins/packages/builtins.ts, the own
+# plugin's switch (on unless stored false).
+MODEL_KEY = "model"
+OWN_PLUGIN_KEY = "scadbuddy_plugin_enabled"
 IMAGE_TOO_LARGE = "input too large: "
 
 
@@ -229,6 +238,13 @@ MakeRunner = Callable[..., SegmentRunner]
 
 
 @dataclass(frozen=True)
+class TurnSettings:
+    long_edge: int
+    model: str | None
+    own_plugin: bool
+
+
+@dataclass(frozen=True)
 class Image:
     name: str
     media_type: str
@@ -279,16 +295,24 @@ class ScadBuddyRunner:
     def __repr__(self) -> str:
         return f"ScadBuddyRunner(kek={self._kek.id})"
 
-    async def _long_edge(self) -> int:
+    async def _settings(self) -> TurnSettings:
+        """What Settings says about this segment, read as it starts, as a classic turn reads it."""
         async with self._connect() as conn:
             cur = await conn.execute(
-                "SELECT value FROM ai_settings WHERE key = %s", (LONG_EDGE_KEY,)
+                "SELECT key, value FROM ai_settings WHERE key = ANY(%s)",
+                ([LONG_EDGE_KEY, MODEL_KEY, OWN_PLUGIN_KEY],),
             )
-            row = await cur.fetchone()
-        value = None if row is None else json.loads(row[0]) if isinstance(row[0], str) else row[0]
-        if isinstance(value, bool) or not isinstance(value, int):
-            return DEFAULT_LONG_EDGE
-        return min(max(value, MIN_LONG_EDGE), MAX_LONG_EDGE)
+            # psycopg hands jsonb back decoded: a stored string is already a str.
+            values = dict(await cur.fetchall())
+        edge = values.get(LONG_EDGE_KEY)
+        if isinstance(edge, bool) or not isinstance(edge, int):
+            edge = DEFAULT_LONG_EDGE
+        model = values.get(MODEL_KEY)
+        return TurnSettings(
+            long_edge=min(max(edge, MIN_LONG_EDGE), MAX_LONG_EDGE),
+            model=model if isinstance(model, str) and model else None,
+            own_plugin=values.get(OWN_PLUGIN_KEY) is not False,
+        )
 
     async def _images(self, session: str, context: SegmentContext) -> list[Image]:
         names = [r.name for r in context.images]
@@ -302,6 +326,71 @@ class ScadBuddyRunner:
             )
             found = {r[0]: Image(r[0], r[1], bytes(r[2])) for r in await cur.fetchall()}
         return [found[n] for n in names if n in found]
+
+    async def _on_credentials(
+        self,
+        session: str,
+        workflow_id: str,
+        inp: SegmentInput,
+        attempt: int,
+        credentials: list[Credential],
+        left: float,
+        extra: dict[str, Any],
+        settings: TurnSettings,
+    ) -> SegmentOutput:
+        """Runs the segment on each usable credential in priority order, moving on only
+        when the failure was the credential's (``fallback.credentials_fault``), as a classic
+        turn does; each credential at most once per attempt. What a failed one spent is
+        counted, and the next runs on what is left."""
+        for i, credential in enumerate(credentials):
+            runner = self._make(
+                cwd=self._cwd,
+                env={**worker_env_blanked(), **ENGINE_ENV, **credential_env(credential)},
+                max_budget_usd=left,
+                extra_options=extra,
+                **({"model": settings.model} if settings.model else {}),
+            )
+            try:
+                return await runner.run(inp, attempt)
+            except Exception as err:
+                # Never the text: like the codec's sealed failures, it is the session's content.
+                logger.warning(
+                    "segment of %s failed (attempt %d, %s): %s, %d bytes of text",
+                    workflow_id,
+                    attempt,
+                    credential.label,
+                    type(err).__name__,
+                    len(error_text(err).encode()),
+                )
+                if credentials_fault(err) and i + 1 < len(credentials):
+                    cost = _cost(err)
+                    if cost > 0:
+                        left -= cost
+                        async with self._connect() as conn:
+                            await conn.execute(
+                                "UPDATE ai_sessions SET cost_usd = cost_usd + %s,"
+                                " updated_at = now() WHERE id = %s",
+                                (cost, session),
+                            )
+                    if left <= 0:
+                        # Spent by the refused attempt: no other credential runs past it.
+                        return SegmentOutput(
+                            session_id=inp.session_id, is_error=True, error=BUDGET_EXHAUSTED
+                        )
+                    logger.warning(
+                        "segment of %s continues on %s", workflow_id, credentials[i + 1].label
+                    )
+                    continue
+                if not final_failure(err):
+                    raise bounded_failure(err) from None
+                # Ends the turn with the reason, as the plugin's own final errors do.
+                return SegmentOutput(
+                    session_id=inp.session_id,
+                    is_error=True,
+                    error=bounded(str(err)),
+                    cost_usd=_cost(err),
+                )
+        raise AssertionError("unreachable: the last credential returns or raises")
 
     async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
         workflow_id = activity.info().workflow_id
@@ -337,41 +426,19 @@ class ScadBuddyRunner:
             # Settings → Plugins turned them off (#2088): Claude is not offered them.
             off = set(context.disabled_tools)
             inp = replace(inp, tools=[t for t in inp.tools if t.name not in off])
+        settings = await self._settings()
         images = await self._images(session, context)
-        problem = image_problem(images, await self._long_edge()) if images else None
+        problem = image_problem(images, settings.long_edge) if images else None
         if problem is not None:
             return SegmentOutput(session_id=inp.session_id, is_error=True, error=problem)
         if images:
             extra["mcp_servers"] = {IMAGES_SERVER: images_server(images)}
             extra["allowed_tools"] = [VIEW_IMAGES_TOOL]
-        if self._plugin_dir:
+        if self._plugin_dir and settings.own_plugin:
             extra["plugins"] = [{"type": "local", "path": self._plugin_dir}]
-        runner = self._make(
-            cwd=self._cwd,
-            env={**worker_env_blanked(), **ENGINE_ENV, **credential_env(credentials[0])},
-            max_budget_usd=budget - spent,
-            extra_options=extra,
+        out = await self._on_credentials(
+            session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings
         )
-        try:
-            out = await runner.run(inp, attempt)
-        except Exception as err:
-            # Never the text: like the codec's sealed failures, it is the session's content.
-            logger.warning(
-                "segment of %s failed (attempt %d): %s, %d bytes of text",
-                workflow_id,
-                attempt,
-                type(err).__name__,
-                len(error_text(err).encode()),
-            )
-            if not final_failure(err):
-                raise bounded_failure(err) from None
-            # Ends the turn with the reason, as the plugin's own final errors do.
-            out = SegmentOutput(
-                session_id=inp.session_id,
-                is_error=True,
-                error=bounded(str(err)),
-                cost_usd=_cost(err),
-            )
         if out.cost_usd > 0 or not out.is_error:
             async with self._connect() as conn:
                 await conn.execute(
