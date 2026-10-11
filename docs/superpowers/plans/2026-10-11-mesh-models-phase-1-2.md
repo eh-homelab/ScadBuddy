@@ -1610,6 +1610,27 @@ def test_lay_flat_largest_flat_after_a_split_lays_the_cut_face_down() -> None:
     assert value(top.transform.translate[2]) == pytest.approx(-5.0)
 
 
+def test_the_drop_to_the_bed_counts_a_peg() -> None:
+    # The top half's peg points down 6 mm from the cut at z = 32: standing it on the cut
+    # face puts the peg's tip, not the face, on the bed.
+    result = apply_edits(
+        garden(1),
+        edits(split(depth=6), {"edit": "lay_flat", "object": "o2", "normal": [0, 0, -1]}),
+        mesh_of,
+    )
+    assert value(result.objects[1].transform.translate[2]) == pytest.approx(-26.0)
+
+
+def test_largest_flat_never_picks_a_cut_face_with_a_peg() -> None:
+    cone = trimesh.creation.cone(radius=10, height=30, sections=64)
+    with pytest.raises(SceneEditError, match="no flat face"):
+        apply_edits(
+            garden(1),
+            edits(split(z=5.0, depth=2), {"edit": "lay_flat", "object": "o2", "normal": "largest_flat"}),
+            lambda _: cone,
+        )
+
+
 def test_edits_apply_in_order() -> None:
     result = apply_edits(
         garden(1), edits(split(), {"edit": "rename", "object": "o2", "name": "Leaves"}), mesh_of
@@ -1698,6 +1719,8 @@ own frame (`frames.to_object_plane`). Measuring reads the part meshes through
 
 from __future__ import annotations
 
+import itertools
+import math
 from collections.abc import Callable, Sequence
 from typing import Annotated, Literal
 
@@ -1705,7 +1728,7 @@ import numpy as np
 import trimesh
 from pydantic import BaseModel, ConfigDict, Field
 
-from scadbuddy.meshmodel.frames import euler, linear, normal_to_world, rotation, to_object_plane, turn_to_down, unit
+from scadbuddy.meshmodel.frames import euler, frame, linear, normal_to_world, rotation, to_object_plane, turn_to_down, unit
 from scadbuddy.meshmodel.scene import (
     COLOUR,
     Add,
@@ -1906,20 +1929,54 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
     return _replace(scene, index, lower, upper)
 
 
+def _has_peg_on(obj: SceneObject, point: Sequence[float], normal: Sequence[float]) -> bool:
+    n = unit(normal)
+    return any(
+        isinstance(op, Joint) and op.role == "peg" and abs(float(np.dot(np.asarray(op.at) - np.asarray(point), n))) < 1e-6
+        for op in obj.ops
+    )
+
+
 def _largest_flat(obj: SceneObject, mesh_of: MeshOf) -> np.ndarray:
-    """The object-frame outward normal of its largest flat face after its cuts."""
+    """The object-frame outward normal of its largest flat face after its cuts. A cut
+    face carrying a peg is no face to stand on: the peg would go into the bed."""
     mesh = object_mesh(obj, mesh_of)
     cuts = _cuts(obj)
-    best_area, best = 0.0, np.array([0.0, 0.0, -1.0])
+    best_area, best = 0.0, None
     centres = mesh.triangles_center
     for faces, area, normal in zip(mesh.facets, mesh.facets_area, mesh.facets_normal, strict=True):
         if area > best_area and len(kept(centres[faces], cuts)) == len(faces):
             best_area, best = float(area), np.asarray(normal)
     for point, normal, keep in cuts:
+        if _has_peg_on(obj, point, normal):
+            continue
         section = measure(mesh, point, normal)
         if section is not None and section.area > best_area:
             best_area, best = section.area, unit(normal) * (1 if keep == "below" else -1)
+    if best is None:
+        raise SceneEditError(f"{obj.id} has no flat face to lie on; give lay_flat a normal")
     return best
+
+
+def _added_points(obj: SceneObject) -> list[np.ndarray]:
+    """Points on what the ops add (pegs, ``add`` primitives' boxes), in the object's
+    frame, so a drop to the bed counts them."""
+    ring = np.array([(math.cos(a), math.sin(a), 0.0) for a in np.linspace(0, 2 * math.pi, 16, endpoint=False)])
+    out: list[np.ndarray] = []
+    for op in obj.ops:
+        if isinstance(op, Joint) and op.role == "peg":
+            turn = frame(op.axis)
+            for z in (0.0, value(op.depth)):
+                out.append((turn @ (ring * value(op.diameter) / 2 + (0.0, 0.0, z)).T).T + np.asarray(op.at))
+        elif isinstance(op, Add):
+            size = _floats(op.size)
+            half = np.array(size) / 2 if op.primitive == "cube" else (
+                np.array([size[0], size[0], size[2]]) / 2 if op.primitive == "cylinder" else np.full(3, size[0] / 2)
+            )
+            corners = np.array(list(itertools.product(*[(-h, h) for h in half])))
+            m, translate = _matrix(op.transform)
+            out.append((m @ corners.T).T + translate)
+    return out
 
 
 def _lay_flat(scene: Scene, edit: LayFlatEdit, mesh_of: MeshOf) -> Scene:
@@ -1935,7 +1992,7 @@ def _lay_flat(scene: Scene, edit: LayFlatEdit, mesh_of: MeshOf) -> Scene:
         except ValueError:
             raise SceneEditError("lay_flat's normal is zero") from None
     new_rotate = euler(turn_to_down(direction) @ rotation(rotate))
-    points = cut_points(object_mesh(obj, mesh_of), _cuts(obj))
+    points = np.concatenate([cut_points(object_mesh(obj, mesh_of), _cuts(obj)), *_added_points(obj)])
     world = (linear(new_rotate, scale) @ points.T).T
     translate = _floats(t.translate)
     transform = Transform(translate=(translate[0], translate[1], float(-world[:, 2].min())), rotate=new_rotate, scale=t.scale)
@@ -3162,15 +3219,15 @@ git commit -m "feat(agent): mesh model tools — create from a mesh, read, edit 
 **Interfaces:**
 - Consumes: Tasks 1–7.
 
-`make.py` builds the demo from scratch and is how its files are made and re-made: a two-colour "carrot" (orange body cylinder r=10 h=30, green neck-and-tuft: neck r=3 h=5 plus tuft box 8×8×10) made with trimesh, read into a scene with `scene_from_objects`, split at z=32 with a flat-keyed joint (depth 4, clearance 0.2), the top half laid flat with `largest_flat`, and `cut_height` exposed on the split's lower cut. It writes `scene.json`, `model.scad` and `meshes/` beside itself. Run it with the backend's environment: `cd backend && uv run --frozen python ../models/mesh-joint-demo/make.py`.
+`make.py` builds the demo from scratch and is how its files are made and re-made: a two-colour "carrot" (orange body r=10 h=30, green neck r=3 and leaves r=6 above it), read into a scene with `scene_from_objects`, split at z=32 with a flat-keyed joint (peg on the body, depth 4, clearance 0.2), the leaves laid on their side, and `cut_height` exposed on the body's cut. It writes `scene.json`, `model.scad` and `meshes/` beside itself. Run it with the backend's environment: `cd backend && uv run --frozen python ../models/mesh-joint-demo/make.py`.
 
 - [ ] **Step 1: Write `make.py`**
 
 ```python
 # models/mesh-joint-demo/make.py
 """Build this template from scratch (#2146): a two-colour carrot made with trimesh, read
-into a scene, split at the neck with a keyed peg and socket, the top laid flat on its
-cut face, the cut height exposed. Run from backend/:
+into a scene, split at the neck with a keyed peg on the body and the socket in the
+leaves, the leaves laid on their side, the cut height exposed. Run from backend/:
 `uv run --frozen python ../models/mesh-joint-demo/make.py`."""
 
 from __future__ import annotations
@@ -3214,8 +3271,9 @@ def main() -> None:
     edits = TypeAdapter(list[Edit])
     scene = apply_edits(scene, edits.validate_python([
         {"edit": "split_at_plane", "object": "o1", "point": [0, 0, 32], "normal": [0, 0, 1],
-         "joint": {"depth": 4, "clearance": 0.2, "key": "flat"}},
-        {"edit": "lay_flat", "object": "o2", "normal": "largest_flat"},
+         "joint": {"depth": 4, "clearance": 0.2, "key": "flat", "peg_on": "below"}},
+        # The leaves on their side, so layer lines run along them, not across the neck.
+        {"edit": "lay_flat", "object": "o2", "normal": [1, 0, 0]},
     ]), mesh_of)
     # Beside the body, keeping the height lay_flat dropped it to.
     dropped = scene.objects[1].transform.translate[2]
@@ -3234,7 +3292,7 @@ if __name__ == "__main__":
 
 Exposing `cut_height` on `o1`'s cut alone makes the bottom's cut a parameter while the top's stays at 32: that is the demo's point (the customizer moves where the bottom ends); say so in the README.
 
-- [ ] **Step 2: Run it and commit its output**, plus `model.json` (`{"name": "Mesh joint demo", "description": "A mesh opened as a scene: cut at the neck, joined with a keyed peg and socket, the top laid flat (#2146).", "tags": ["mesh", "demo"]}`) and a README saying what the template shows and that `make.py` regenerates it.
+- [ ] **Step 2: Run it and commit its output**, plus `model.json` (`{"name": "Mesh joint demo", "description": "A mesh opened as a scene: cut at the neck, joined with a keyed peg and socket, the leaves laid on their side (#2146).", "tags": ["mesh", "demo"]}`) and a README saying what the template shows and that `make.py` regenerates it.
 
 - [ ] **Step 3: Write `verify.sh`**
 
