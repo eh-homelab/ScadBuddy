@@ -82,7 +82,10 @@ async def _preview(client: Client, run: Run, tools_queue: str) -> list[list[str]
 
 
 async def _run(client: Client, store: FlowStore, queue: str, tools_queue: str, script: str) -> Any:
-    definition = await store.create_definition("e2e", script, {"kind": "browser"})
+    # A version row for the run to name; its commit is made up (the script goes as input).
+    definition = await asyncio.to_thread(
+        store.record_version, "e2e", uuid.uuid4().hex + "0" * 8, 1, {"kind": "browser"}, head=True
+    )
     run_id = str(uuid.uuid4())
     await AgentClient(client, f"flow-{run_id}").start_and_submit_message(
         "execute",

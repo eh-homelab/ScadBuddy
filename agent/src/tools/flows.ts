@@ -9,7 +9,14 @@ import { defineTool, json, type Tool } from './registry.js'
 // registered by name and run durably as a ProjectWorkflow. Routes:
 // backend/scadbuddy/api/flows.py. Deleting a run is a person's (coverage.ts).
 
-const definitionId = z.string().uuid().describe('A flow version id, as register_flow or list_flows returns it')
+const definitionId = z
+  .string()
+  .uuid()
+  .describe('A flow version id, as register_flow, list_flows or list_flow_versions returns it')
+const flowCommit = z
+  .string()
+  .regex(/^[0-9a-f]{7,40}$/)
+  .describe("A commit of the flow's script, as list_flow_versions returns it")
 const runId = z.string().uuid().describe('A flow run id, as start_flow_run returns it')
 const approvalTimeout = z
   .union([z.number().int().min(10).max(2_592_000), z.literal('never')])
@@ -33,8 +40,9 @@ export const flowTools: Tool[] = [
       'dicts; a refusal is an exception in ScadBuddy\'s words, and a denial a ToolApprovalDenied. The script ' +
       'is `import asyncio`, an `async def main()` that awaits host functions, and `asyncio.run(main())`; it may ' +
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
-      'Registering an existing `name` adds its next version; a version never changes. `approval_timeout` sets ' +
-      'how long its runs wait for approvals (omit for the global setting).',
+      'Registering an existing `name` adds its next version, one commit in its history (list_flow_versions); ' +
+      'a version never changes, and an unchanged script adds none. `approval_timeout` sets how long its runs ' +
+      'wait for approvals (omit for the global setting).',
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),
@@ -69,6 +77,81 @@ export const flowTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/workflows/{definition_id}', { params: { path: { definition_id } } }),
           `get flow ${definition_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'list_flow_versions',
+    description:
+      "A flow's history, newest first: each version's id, commit, version number, message and who made it " +
+      '(a person, or an agent with its principal and session). `definition_id` may be any of its versions. ' +
+      'Pass a version id to get_flow or start_flow_run.' +
+      PAGED,
+    input: z.object({ definition_id: definitionId, ...pageInput }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflows/{definition_id}/versions'],
+    handler: async ({ definition_id, ...args }, { backend }) => {
+      const items = await ok(
+        backend.GET('/api/v1/workflows/{definition_id}/versions', {
+          params: { path: { definition_id }, query: { limit: 500 } },
+        }),
+        `list versions of flow ${definition_id}`,
+      )
+      return json(page(items, { definition_id, ...args }, (item) => item.commit, 'list_flow_versions'))
+    },
+  }),
+
+  defineTool({
+    name: 'get_flow_version',
+    description: "A flow's version at a commit of its history, with its script.",
+    input: z.object({ definition_id: definitionId, commit: flowCommit }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflows/{definition_id}/versions/{commit}'],
+    handler: async ({ definition_id, commit }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/workflows/{definition_id}/versions/{commit}', {
+            params: { path: { definition_id, commit } },
+          }),
+          `get flow ${definition_id}@${commit}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'diff_flow_version',
+    description:
+      "The unified diff of a flow's script at a commit against its version before, or against `base` when given.",
+    input: z.object({ definition_id: definitionId, commit: flowCommit, base: flowCommit.optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflows/{definition_id}/versions/{commit}/diff'],
+    handler: async ({ definition_id, commit, base }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/workflows/{definition_id}/versions/{commit}/diff', {
+            params: { path: { definition_id, commit }, query: { base } },
+          }),
+          `diff flow ${definition_id}@${commit}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'restore_flow_version',
+    description:
+      "Restore a flow's script at an earlier commit as its newest version: a new commit on top of its history " +
+      '(nothing is lost). Runs already started keep the version they ran.',
+    input: z.object({ definition_id: definitionId, commit: flowCommit }),
+    risk: 'write',
+    routes: ['POST /api/v1/workflows/{definition_id}/versions/{commit}/restore'],
+    handler: async ({ definition_id, commit }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/workflows/{definition_id}/versions/{commit}/restore', {
+            params: { path: { definition_id, commit } },
+          }),
+          `restore flow ${definition_id}@${commit}`,
         ),
       ),
   }),

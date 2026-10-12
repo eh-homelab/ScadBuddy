@@ -11,11 +11,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 
 import psycopg
-from fastapi import APIRouter, Body, Query, Response, status
+from fastapi import APIRouter, Body, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from temporal_agent_harness.harness.agent_client import AgentClient, MidTurnRejectedError
@@ -34,9 +36,11 @@ from scadbuddy.api.operations import (
     still_accepting,
 )
 from scadbuddy.core.authorship import current_author
+from scadbuddy.core.gitstore import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.component import Flows, FlowsDep
+from scadbuddy.flows.definitions import FlowHistoryUnavailableError, UnknownFlowError
 from scadbuddy.flows.forget import forget_run
 from scadbuddy.flows.history import ResetPreview, outward_since
 from scadbuddy.flows.manifest import raise_tiers, tiers
@@ -45,6 +49,8 @@ from scadbuddy.flows.models import (
     TERMINAL,
     Definition,
     DefinitionSummary,
+    FlowDiff,
+    FlowVersion,
     Run,
     RunStatus,
 )
@@ -188,22 +194,107 @@ async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
         raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, "The script is over 64 KiB.")
     if problems := await check_script(body.script):
         raise _script_problems(problems, "The script does not type-check.")
-    return await flows.store.create_definition(
-        body.name, body.script, _started_by(), approval_timeout_s=_seconds(body.approval_timeout)
-    )
+    with _versioned():
+        return await flows.definitions.register(
+            body.name,
+            body.script,
+            _started_by(),
+            approval_timeout_s=_seconds(body.approval_timeout),
+        )
 
 
 @router.get("/workflows", response_model=list[DefinitionSummary], summary="List flows")
 async def list_flows(flows: FlowsDep) -> list[DefinitionSummary]:
-    return await flows.store.list_definitions()
+    return await flows.definitions.flows()
 
 
 @router.get("/workflows/{definition_id}", response_model=Definition, summary="Get a flow")
 async def get_flow(definition_id: str, flows: FlowsDep) -> Definition:
-    definition = await flows.store.get_definition(definition_id)
+    with _versioned():
+        definition = await flows.definitions.get(definition_id)
     if definition is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow.")
     return definition
+
+
+@contextmanager
+def _versioned() -> Iterator[None]:
+    """A flow's versions are git (#2503): its errors as the API answers them."""
+    try:
+        yield
+    except UnknownFlowError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow.") from None
+    except RevisionNotFoundError as error:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"No such version of the flow: {error}") from None
+    except FlowHistoryUnavailableError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Flow history is unavailable: no git repository under the data directory's flows.",
+            type_=FLOWS_UNAVAILABLE,
+        ) from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+
+
+CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]
+
+
+@router.get(
+    "/workflows/{definition_id}/versions",
+    response_model=list[FlowVersion],
+    summary="A flow's history: its versions, newest first",
+)
+async def list_flow_versions(
+    definition_id: str,
+    flows: FlowsDep,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+) -> list[FlowVersion]:
+    """Every commit of the flow's script in `data/flows`, whichever of its versions
+    `definition_id` names. Each carries its version id, which `GET /workflows/{id}` and
+    a run's start take."""
+    with _versioned():
+        return await flows.definitions.versions(definition_id, limit=limit)
+
+
+@router.get(
+    "/workflows/{definition_id}/versions/{commit}",
+    response_model=Definition,
+    summary="A flow's script at a commit",
+)
+async def get_flow_version(definition_id: str, commit: CommitPath, flows: FlowsDep) -> Definition:
+    """The flow's version at `commit`: the newest of its commits at or before it."""
+    with _versioned():
+        return await flows.definitions.at(definition_id, commit)
+
+
+@router.get(
+    "/workflows/{definition_id}/versions/{commit}/diff",
+    response_model=FlowDiff,
+    summary="Diff a flow's script between two commits (the version before by default)",
+)
+async def get_flow_diff(
+    definition_id: str,
+    commit: CommitPath,
+    flows: FlowsDep,
+    base: Annotated[str | None, Query(pattern=COMMIT_ID_PATTERN)] = None,
+) -> FlowDiff:
+    with _versioned():
+        return await flows.definitions.diff(definition_id, commit, base)
+
+
+@router.post(
+    "/workflows/{definition_id}/versions/{commit}/restore",
+    response_model=Definition,
+    summary="Restore a flow's script at a commit, as a new version",
+)
+async def restore_flow_version(
+    definition_id: str, commit: CommitPath, flows: FlowsDep
+) -> Definition:
+    """One new commit with the script as it was at `commit`, authored by the caller:
+    never a rewrite. Restoring the script the flow has already makes no commit and
+    answers its current version. The approval timeout is the flow's, unchanged."""
+    with _versioned():
+        return await flows.definitions.restore(definition_id, commit, _started_by())
 
 
 async def _execution(client: Client, run_id: str) -> WorkflowExecutionStatus | None:
@@ -238,7 +329,8 @@ async def start_flow_run(
         raise ApiError(
             status.HTTP_428_PRECONDITION_REQUIRED, KEY_REQUIRED_DETAIL, type_=KEY_REQUIRED_PROBLEM
         )
-    definition = await flows.store.get_definition(definition_id)
+    with _versioned():
+        definition = await flows.definitions.get(definition_id)
     if definition is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow.")
     run_id = str(uuid.uuid5(FLOW_NAMESPACE, f"{definition.id}:{definition.version}:{key}"))
@@ -286,6 +378,7 @@ async def start_flow_run(
                     tools_queue=flows.settings.temporal_task_queue_agent_tools,
                     tool_tiers=raise_tiers(tiers(), overrides),
                     search_attributes=flows.search_attributes,
+                    commit=definition.commit,
                 ),
                 update_id=key,
             )

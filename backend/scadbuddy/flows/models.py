@@ -23,11 +23,15 @@ HOST_FN = {
 
 
 class DefinitionSummary(BaseModel):
-    """A flow version, without its script."""
+    """A flow version, without its script. Its id is the version's: a flow's versions
+    are commits in `data/flows` (#2503), and `version` is the commit's place in the
+    flow's commit order."""
 
     id: str
     name: str
     version: int
+    #: The version's commit in `data/flows`; None for one not yet imported there.
+    commit: str | None = None
     #: Seconds an outward call of its runs waits for a decision: None takes the global
     #: setting, 0 is never. A run may override it.
     approval_timeout_s: int | None = None
@@ -39,6 +43,43 @@ class Definition(DefinitionSummary):
     """A flow version: immutable."""
 
     script: str
+
+
+class FlowVersion(BaseModel):
+    """One commit of a flow's history (#2503)."""
+
+    #: The version's id: what `GET /workflows/{id}` and a run's start take.
+    id: str
+    commit: str
+    short: str
+    version: int
+    message: str
+    #: Who made it, from the commit's author: `{"kind": "agent", "principal",
+    #: "session"}` or `{"kind": "browser"}`.
+    created_by: dict[str, Any]
+    created_at: datetime
+    #: The flow's newest version.
+    current: bool = False
+
+
+class FlowDiff(BaseModel):
+    """A flow's script between two commits, as a unified patch naming `flow.py`."""
+
+    name: str
+    base: str
+    head: str
+    patch: str
+
+
+class LegacyVersion(BaseModel):
+    """A version registered before flows were in git, still to be imported (#2503)."""
+
+    id: str
+    name: str
+    version: int
+    script: str
+    created_by: dict[str, Any]
+    created_at: datetime
 
 
 class Run(BaseModel):
@@ -58,6 +99,9 @@ class Run(BaseModel):
     result_truncated: bool = False
     #: Seconds an outward call of this run waits for a decision; 0 is never.
     approval_timeout_s: int = 0
+    #: The commit of the version it ran (#2503); None for a run whose version was not
+    #: imported into `data/flows` yet.
+    commit: str | None = None
     workflow_id: str
     workflow_run_id: str
     started_by: dict[str, Any]

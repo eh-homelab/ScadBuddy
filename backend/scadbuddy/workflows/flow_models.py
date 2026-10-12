@@ -77,3 +77,5 @@ class FlowRecord(BaseModel):
     started_by: dict[str, Any]
     #: Seconds an outward call waits for a decision; 0 is never.
     approval_timeout_s: int = 0
+    #: The commit of the version it runs (#2503); None from a run started before.
+    commit: str | None = None

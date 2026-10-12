@@ -17,6 +17,7 @@ from scadbuddy.flows.models import RESULT_MAX
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
+from tests.flows.flows_support import define
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -58,7 +59,7 @@ SCRIPT = "import asyncio\nasync def main():\n    return 1\nasyncio.run(main())"
 
 
 async def started(store: FlowStore, run_id: str = "r1", *, session: str | None = None) -> str:
-    definition = await store.create_definition("swap", SCRIPT, {"kind": "browser"})
+    definition = await define(store, "swap")
     author: dict[str, Any] = {"kind": "browser"}
     if session is not None:
         author = {"kind": "agent", "principal": "p", "session": session}
@@ -90,21 +91,64 @@ def step(call_id: str, seq: int, status: str = "running") -> FlowStep:
     )
 
 
-async def test_versions_count_up_per_name(store: FlowStore) -> None:
-    one = await store.create_definition("swap", SCRIPT, {"kind": "browser"})
-    two = await store.create_definition("swap", SCRIPT + "\n", {"kind": "browser"})
-    other = await store.create_definition("other", SCRIPT, {"kind": "browser"})
-    assert (one.version, two.version, other.version) == (1, 2, 1)
-    listed = await store.list_definitions()
-    assert [(d.name, d.version) for d in listed] == [("other", 1), ("swap", 2)]
-    got = await store.get_definition(one.id)
-    assert got is not None and got.script == SCRIPT
+A = "a" * 40
+B = "b" * 40
 
 
-async def test_a_definition_keeps_its_approval_timeout(store: FlowStore) -> None:
-    never = await store.create_definition("a", SCRIPT, {}, approval_timeout_s=0)
-    inherit = await store.create_definition("b", SCRIPT, {})
-    assert (never.approval_timeout_s, inherit.approval_timeout_s) == (0, None)
+async def test_a_commit_names_one_version_and_the_head_moves(store: FlowStore) -> None:
+    """The index (#2503): a version id per commit, made once; the head is the newest."""
+    one = store.record_version("swap", A, 1, {"kind": "browser"}, head=True)
+    again = store.record_version("swap", A, 1, {"kind": "browser"}, head=True)
+    two = store.record_version("swap", B, 2, {"kind": "browser"}, head=True)
+    store.record_version("other", A, 1, {"kind": "browser"}, head=True)
+    assert again.id == one.id and two.id != one.id
+    assert [(d.name, d.version, d.commit) for d in store.heads()] == [
+        ("other", 1, A),
+        ("swap", 2, B),
+    ]
+    got = store.version(one.id)
+    assert got is not None and (got.commit, got.version) == (A, 1)
+    assert store.version_at("swap", B) == two
+    assert store.head_commits() == {"swap": B, "other": A}
+
+
+async def test_the_approval_timeout_is_the_flows_and_kept_unless_set(store: FlowStore) -> None:
+    store.record_version("a", A, 1, {}, head=True, approval_timeout_s=0)
+    store.record_version("b", A, 1, {}, head=True, approval_timeout_s=None)
+    kept = store.record_version("a", B, 2, {}, head=True)
+    [a, b] = store.heads()
+    assert (a.approval_timeout_s, b.approval_timeout_s, kept.approval_timeout_s) == (0, None, 0)
+    store.record_version("a", B, 2, {}, head=True, approval_timeout_s=60)
+    assert store.heads()[0].approval_timeout_s == 60
+
+
+async def test_a_run_records_its_commit(store: FlowStore) -> None:
+    definition = store.record_version("swap", A, 1, {"kind": "browser"}, head=True)
+    run = await store.insert_run(
+        FlowRecord(
+            run_id="r1",
+            definition_id=definition.id,
+            version=1,
+            name="swap",
+            workflow_id="flow-r1",
+            workflow_run_id="wr1",
+            started_by={},
+            commit=B,
+        )
+    )
+    # One started before #2503 names none: it runs its version's.
+    legacy = await store.insert_run(
+        FlowRecord(
+            run_id="r2",
+            definition_id=definition.id,
+            version=1,
+            name="swap",
+            workflow_id="flow-r2",
+            workflow_run_id="wr2",
+            started_by={},
+        )
+    )
+    assert (run.commit, legacy.commit) == (B, A)
 
 
 async def test_insert_run_twice_returns_the_first_row_and_publishes_once(
