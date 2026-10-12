@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -75,3 +76,28 @@ def test_cut_points_are_the_kept_vertices_and_the_cut_rim() -> None:
     points = cut_points(neck(), [((0, 0, 32), (0, 0, 1), "above")])
     assert points[:, 2].min() == pytest.approx(32)
     assert points[:, 2].max() == pytest.approx(45)
+
+
+def test_two_cuts_add_the_points_where_their_planes_meet_the_surface() -> None:
+    vertices = 5 * np.vstack([np.eye(3), -np.eye(3)])
+    faces = [(0, 1, 2), (1, 3, 2), (3, 4, 2), (4, 0, 2), (1, 0, 5), (3, 1, 5), (4, 3, 5), (0, 4, 5)]
+    octahedron = trimesh.Trimesh(vertices, faces)
+    assert octahedron.is_winding_consistent
+    points = cut_points(
+        octahedron, [((0, 0, 1), (0, 0, 1), "above"), ((0, 1, 0), (0, 1, 0), "above")]
+    )
+    assert points[:, 0].min() == pytest.approx(-3)
+    assert points[:, 0].max() == pytest.approx(3)
+
+
+def test_three_cuts_add_the_corner_they_share() -> None:
+    box = trimesh.creation.box((10, 10, 10))
+    cuts: list[
+        tuple[tuple[float, float, float], tuple[float, float, float], Literal["above", "below"]]
+    ] = [
+        ((0, 0, 0), (1, 0, 0), "above"),
+        ((0, 0, 0), (0, 1, 0), "above"),
+        ((0, 0, 0), (0, 0, 1), "above"),
+    ]
+    points = cut_points(box, cuts)
+    assert np.any(np.all(np.isclose(points, 0), axis=1))

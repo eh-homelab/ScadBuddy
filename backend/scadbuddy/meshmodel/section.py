@@ -48,6 +48,16 @@ def _segments(
     return np.where(flip[:, None], end, start), np.where(flip[:, None], start, end)
 
 
+def _encloses(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
+    """Whether ``c`` is inside the 2D segments ``a``->``b``: a ray in +x crosses an odd
+    number of them."""
+    ab = b - a
+    straddles = (a[:, 1] > c[1]) != (b[:, 1] > c[1])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x = a[:, 0] + (c[1] - a[:, 1]) * ab[:, 0] / ab[:, 1]
+    return bool(np.count_nonzero(straddles & (x > c[0])) % 2)
+
+
 def measure(
     mesh: trimesh.Trimesh,
     point: Sequence[float],
@@ -83,11 +93,7 @@ def measure(
     ab = b - a
     t = np.clip(((c - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-18), 0.0, 1.0)
     room = float(np.linalg.norm(c - (a + t[:, None] * ab), axis=1).min())
-    straddles = (a[:, 1] > c[1]) != (b[:, 1] > c[1])
-    with np.errstate(divide="ignore", invalid="ignore"):
-        x = a[:, 0] + (c[1] - a[:, 1]) * ab[:, 0] / ab[:, 1]
-    inside = bool(np.count_nonzero(straddles & (x > c[0])) % 2)
-    return Section(area, origin + c[0] * u + c[1] * v, room, inside)
+    return Section(area, origin + c[0] * u + c[1] * v, room, _encloses(a, b, c))
 
 
 def kept(points: np.ndarray, cuts: Sequence[CutSpec]) -> np.ndarray:
@@ -99,10 +105,42 @@ def kept(points: np.ndarray, cuts: Sequence[CutSpec]) -> np.ndarray:
 
 
 def cut_points(mesh: trimesh.Trimesh, cuts: Sequence[CutSpec]) -> np.ndarray:
+    """The vertices the cut mesh would have: the mesh's own that every cut keeps, each
+    cut's section segment ends, each section segment's crossing of another cut's
+    plane, and the point three cuts' planes share when it is inside the first's
+    section; each kept by every other cut."""
+    spots = [(np.asarray(p, dtype=float), unit(n)) for p, n, _ in cuts]
+
+    def others(*skip: int) -> list[CutSpec]:
+        return [c for i, c in enumerate(cuts) if i not in skip]
+
     points = [kept(np.asarray(mesh.vertices, dtype=float), cuts)]
-    for index, (point, normal, _) in enumerate(cuts):
-        found = _segments(mesh, np.asarray(point, dtype=float), unit(normal))
-        if found is not None:
-            others = [c for i, c in enumerate(cuts) if i != index]
-            points.append(kept(np.concatenate(found), others))
+    for i, (origin, n) in enumerate(spots):
+        found = _segments(mesh, origin, n)
+        if found is None:
+            continue
+        start, end = found
+        points.append(kept(np.concatenate(found), others(i)))
+        for j, (other, m) in enumerate(spots):
+            if j == i or np.linalg.norm(np.cross(n, m)) < 1e-9:
+                continue
+            s0, s1 = (start - other) @ m, (end - other) @ m
+            crossing = s0 * s1 < 0
+            t = s0[crossing] / (s0[crossing] - s1[crossing])
+            at = start[crossing] + t[:, None] * (end[crossing] - start[crossing])
+            points.append(kept(at, others(i, j)))
+            for k in range(j + 1, len(spots)):
+                if k == i:
+                    continue
+                normals = np.stack([n, m, spots[k][1]])
+                if abs(np.linalg.det(normals)) < 1e-9:
+                    continue
+                d = [n @ origin, m @ other, spots[k][1] @ spots[k][0]]
+                common = np.linalg.solve(normals, d)
+                u, v = _basis(n)
+                plane = np.stack([u, v], axis=1)
+                if _encloses(
+                    (start - origin) @ plane, (end - origin) @ plane, (common - origin) @ plane
+                ):
+                    points.append(kept(common[None, :], others(i, j, k)))
     return np.concatenate(points)
