@@ -662,7 +662,14 @@ class ModelHistory:
     def _landed(self, parent: str | None) -> str:
         """The commit just made, once HEAD is shown to be a new commit on ``parent``,
         and recorded as HEAD for the other replicas. A commit git reported but HEAD
-        does not show is an error, never a revision answered as made."""
+        does not show is an error, never a revision answered as made.
+
+        Once it does, the commit is made, and nothing after that fails it: a HEAD
+        that could not be recorded (Postgres lost mid-write) is logged, not raised.
+        Raising would roll the change back on disk under a history that keeps it, and
+        tell the caller it failed. The next writer copes with the stale record: a HEAD
+        that descends from the recorded one is current (`_settle`).
+        """
         created = self.head()
         if created is None or created == parent or self._parent_of(created) != parent:
             raise GitError(
@@ -670,7 +677,13 @@ class ModelHistory:
                 f" not a new commit on {parent[:7] if parent else 'no revision'}"
             )
         if self._hold is not None:
-            self._hold.record(created)
+            try:
+                self._hold.record(created)
+            except GitError:
+                logger.exception(
+                    "a commit landed, but its HEAD could not be recorded for the other replicas",
+                    extra={"commit": created},
+                )
         return created
 
     def _touched_by(self, commit: str | None) -> list[str]:
@@ -723,8 +736,10 @@ class ModelHistory:
 
     def restore(self, slug: str, commit: str) -> str:
         """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite."""
-        resolved = self.resolve(commit)
         with self._exclusive():
+            # Under the lock, once settled: a revision another replica just made is
+            # not yet visible before (#2385).
+            resolved = self.resolve(commit)
             present = set(self._files_at(resolved, slug))
             if not present:
                 raise RevisionNotFoundError(f"{slug!r} does not exist at {commit}")

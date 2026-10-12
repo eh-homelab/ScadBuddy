@@ -49,7 +49,12 @@ class _PgHold:
 
 
 class PgRepoCoordinator:
-    """`history.RepoCoordinator` on the app's database."""
+    """`history.RepoCoordinator` on the app's database.
+
+    A connection per hold, never the shared pool: the lock is session-level, so a
+    pooled connection would carry it to whoever borrows the connection next. Writes
+    are a person's or an agent's saves, so a connect each costs nothing noticeable.
+    """
 
     def __init__(self, conninfo: str) -> None:
         self.conninfo = conninfo

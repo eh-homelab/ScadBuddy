@@ -13,7 +13,8 @@ import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import history as history_module
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, StaleVersionError
 from scadbuddy.library.history import GitError, ModelHistory
-from scadbuddy.library.repo_lock import PgRepoCoordinator
+from scadbuddy.library.repo_lock import PgRepoCoordinator, RepoLockError
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
@@ -232,6 +233,42 @@ def test_a_create_whose_commit_never_lands_fails_and_leaves_nothing(
 
     assert not paths.model_dir("keychain").exists()
     assert history.head() == head
+
+
+class _Unrecordable:
+    """A cross-replica lock whose database goes away between commit and record."""
+
+    expected: str | None = None
+
+    def record(self, commit: str) -> None:
+        raise RepoLockError(f"could not record {commit[:7]} as the models HEAD")
+
+
+class _LosesPostgres:
+    @contextmanager
+    def hold(self, timeout: float) -> Iterator[_Unrecordable]:
+        yield _Unrecordable()
+
+
+def test_a_commit_that_landed_is_made_even_when_its_head_cannot_be_recorded(
+    paths: DataPaths,
+) -> None:
+    # Review of #2492: failing it would roll the change back on disk under a history
+    # that keeps it, and tell the caller it failed.
+    history = ModelHistory(
+        paths.models, wrapper_prefix=WRAPPER_PREFIX, coordinator=_LosesPostgres()
+    )
+    catalogue = Catalogue(
+        paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
+    history.ensure_repo()
+
+    record = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    catalogue.write_source("keychain", "cube(20);\n", expected_version=record.version)
+
+    assert history.log("keychain", limit=1)[0].message == "Edit keychain source"
+    assert paths.model_source("keychain").read_text() == "cube(20);\n"
+    assert history.clean("keychain")
 
 
 def test_a_commit_git_reports_but_head_does_not_show_is_an_error(
