@@ -41,8 +41,8 @@ export const workspaceShaInput = z
 export function fromWorkspace(inline: string): string {
   return (
     ` Give ${inline}, or \`workspace_path\` (with its \`workspace_sha256\`) to send a file from your workspace: ` +
-    'exactly one of the two. Save a file there first with workspace_save, http_request `save_to_workspace`, a ' +
-    'headless-browser download or workspace_write.'
+    'exactly one of the two. Save a file there first with workspace_save, http_request `save_to_workspace` ' +
+    'or workspace_write.'
   )
 }
 

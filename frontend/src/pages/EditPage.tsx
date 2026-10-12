@@ -1,5 +1,6 @@
 import { Link, Navigate, useLocation, useParams } from 'react-router'
 import { api } from '../api/client'
+import { arrangedSources } from '../lib/arrange'
 import { modelPath, type EditNavigationState } from '../lib/deeplink'
 import { Spinner } from '../components/ui/Spinner'
 import { useAsync } from '../lib/useAsync'
@@ -53,7 +54,7 @@ export function EditPage() {
   // there is no one set of template inputs to reopen.
   const arrangedFrom = (target.data.arranged_from ?? []).length
   if (arrangedFrom > 0) {
-    const sources = `${arrangedFrom} ${arrangedFrom === 1 ? 'output' : 'outputs'}`
+    const sources = arrangedSources(target.data.arranged_from ?? [])
     return (
       <div className="mx-auto max-w-lg px-4 py-16 text-center">
         <h1 className="text-[15px] font-medium">

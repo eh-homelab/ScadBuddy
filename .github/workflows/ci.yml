@@ -512,14 +512,6 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      # The headless browser's tests (#349: test/headlessBrowser.server.test.ts
-      # and .e2e.test.ts) drive the pinned @playwright/mcp with a real Chromium
-      # and skip without one. The same build the Dockerfile's `agent` stage
-      # installs, through the pinned package, so it matches the pin.
-      - name: Install the headless browser's Chromium
-        # --with-deps runs apt through sudo itself when it is not root.
-        run: node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium
-
       # The agent-tools worker's tests (#1055: test/*.temporal.test.ts,
       # test/temporal.worker.test.ts) start their own dev server from this CLI and
       # skip without one. The same version and amd64 digest as the Dockerfile's

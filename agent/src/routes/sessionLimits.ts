@@ -12,7 +12,7 @@ import {
   SETTING_SESSION_MAX_TURNS,
 } from '../sessions/manager.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './headlessBrowser.js'
+import type { SettingsRepo } from './httpRequest.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/session-limits (#790): what a new assistant session may

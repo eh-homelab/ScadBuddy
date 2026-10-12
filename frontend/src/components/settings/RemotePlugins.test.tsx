@@ -92,18 +92,14 @@ describe('RemotePluginsPanel', () => {
     renderPage(<RemotePluginsPanel />)
     const builtIns = await screen.findByRole('list', { name: 'Built-in tools' })
     const cards = within(builtIns).getAllByRole('listitem')
-    expect(cards.map((c) => c.getAttribute('aria-label'))).toEqual([
-      'Built-in tools scadbuddy',
-      'Built-in tools playwright',
-    ])
+    expect(cards.map((c) => c.getAttribute('aria-label'))).toEqual(['Built-in tools scadbuddy'])
     for (const card of cards) {
       expect(within(card).getByText('Built in')).toBeInTheDocument()
       expect(within(card).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
       expect(within(card).queryByRole('button', { name: 'Test connection' })).not.toBeInTheDocument()
     }
-    // ScadBuddy's own tools have no switch as a set; the headless browser's does.
+    // ScadBuddy's own tools have no switch as a set.
     expect(within(cards[0]!).queryByRole('button', { name: /^(Enable|Disable)$/ })).not.toBeInTheDocument()
-    expect(within(cards[1]!).getByRole('button', { name: 'Enable' })).toBeInTheDocument()
   })
 
   it('offers only tiers at or above a built-in tool’s own, and saves raised tiers and disabled tools', async () => {
@@ -128,13 +124,6 @@ describe('RemotePluginsPanel', () => {
     expect(await within(card).findByText(/1 raised, 1 disabled/)).toBeInTheDocument()
   })
 
-  it('switches the headless browser set with its own switch', async () => {
-    const { user } = renderPage(<RemotePluginsPanel />)
-    const card = await screen.findByRole('listitem', { name: 'Built-in tools playwright' })
-    await user.click(within(card).getByRole('button', { name: 'Enable' }))
-    expect(await within(card).findByText('Enabled')).toBeInTheDocument()
-  })
-
   it('marks every write user-only', async () => {
     renderPage(<RemotePluginsPanel />)
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
@@ -142,8 +131,6 @@ describe('RemotePluginsPanel', () => {
       expect(isUserOnly(within(card).getByRole('button', { name }))).toBe(true)
     }
     expect(isUserOnly(screen.getByRole('button', { name: 'Add endpoint' }))).toBe(true)
-    const browser = screen.getByRole('listitem', { name: 'Built-in tools playwright' })
-    expect(isUserOnly(within(browser).getByRole('button', { name: 'Enable' }))).toBe(true)
     expect(isUserOnly(screen.getByLabelText('Header value'))).toBe(true)
   })
 })

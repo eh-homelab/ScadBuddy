@@ -165,12 +165,11 @@ describe('agent authorship (#252)', () => {
     expect(authorHeaders(principal, 'sess-1')).toHaveProperty(AUTHOR_SESSION_HEADER, 'sess-1')
   })
 
-  it('leaves out the session outside one, and never sends the headless-browser marker', async () => {
+  it('leaves out the session outside one', async () => {
     const { client, seen } = backend()
     await runTool(tool('get_model'), { slug: 'box' }, ctx(client))
     expect(seen[0]!.headers.get(AUTHOR_HEADER)).toBe('token:t1')
     expect(seen[0]!.headers.has(AUTHOR_SESSION_HEADER)).toBe(false)
-    expect(seen[0]!.headers.has('X-ScadBuddy-Agent-Session')).toBe(false)
   })
 
   it('percent-encodes what the backend would refuse in a principal id', () => {

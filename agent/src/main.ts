@@ -17,10 +17,8 @@ import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
-import { probeChromiumSandbox } from './harness/headlessSandbox.js'
-import { UiOriginProbe } from './harness/browserReach.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
-import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
+import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
@@ -50,12 +48,12 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
-import { BrowserHost, type HeadlessBrowserDeps, turnBrowserServers } from './temporal/turnBrowser.js'
 import { SHARED_PACKAGES } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { subagentKey } from './temporal/subagentToken.js'
@@ -110,8 +108,8 @@ try {
   console.error(err instanceof StateDirError ? err.message : err)
   process.exit(1)
 }
-// No turn runs here yet: headless-browser folders left now are from a crash.
-await sweepBrowserDirs({ stateDir: DEFAULT_STATE_DIR }).catch((err: unknown) =>
+// The removed built-in headless browser's folders, left on the volume by an older image.
+await removeLegacyBrowserDir({ stateDir: DEFAULT_STATE_DIR }).catch((err: unknown) =>
   console.error(`cannot remove leftover headless-browser folders: ${String(err)}`),
 )
 
@@ -277,28 +275,6 @@ const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cache
 const tokens =
   database && audit ? auditedTokenStore(new PostgresTokenStore(database.sql), audit) : new FailClosedTokenStore()
 
-// Which of ScadBuddy's UI origins the headless browser reaches without a
-// login (harness/browserReach.ts): asked on each browser turn, each answer kept
-// 30 s; a changed answer is logged, and /healthz says only whether any is
-// reachable (`browser_origins`).
-const uiOriginProbe = new UiOriginProbe()
-
-// Whether the headless browser's Chromium can keep its sandbox in this pod
-// (harness/headlessSandbox.ts): probed once, on the first turn that uses the
-// browser, and said loudly either way.
-let sandboxProbe: Promise<boolean> | undefined
-const chromiumSandbox = (): Promise<boolean> =>
-  (sandboxProbe ??= probeChromiumSandbox().then((probe) => {
-    if (probe.available) console.log(`headless browser: Chromium runs with its sandbox (${probe.detail})`)
-    else {
-      console.warn(
-        `headless browser: Chromium's sandbox is unavailable here, so it runs with --no-sandbox (${probe.detail}); ` +
-          'allow user namespaces in the pod to enable it (docs/ai/headless-browser.md, "Sandbox")',
-      )
-    }
-    return probe.available
-  }))
-
 // `session.*` on the event bus (#300, sessions/busEvents.ts): every event-log
 // append is announced on `scadbuddy_events`, and this replica's LISTEN
 // consumer (below) wakes its followers for sessions other replicas write.
@@ -309,25 +285,6 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
-// The headless browser's deployment (#349, #983), for classic and durable turns alike.
-const headlessBrowserDeps: HeadlessBrowserDeps = {
-  backendUrl: config.backendUrl,
-  livePublicUrl: async () => {
-    try {
-      const { data, response } = await backend.GET('/api/v1/settings')
-      if (!data) console.warn(`headless browser: GET /api/v1/settings answered ${response.status}; the stored public_url is left out this turn`)
-      return data?.public_url ?? undefined
-    } catch (err) {
-      console.warn(`headless browser: could not read the stored public_url, left out this turn: ${String(err)}`)
-      return undefined
-    }
-  },
-  ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
-  ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
-  ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
-  sandbox: chromiumSandbox,
-  probe: (origins) => uiOriginProbe.probe(origins),
-}
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -361,14 +318,6 @@ const sessions =
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder),
-        // The headless browser (#349): on for a turn only when the
-        // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
-        // It opens ScadBuddy's own origins as they are (#983): the public URL
-        // (the variable, and the backend's stored setting read each turn) and
-        // SCADBUDDY_ALLOWED_ORIGINS, or the backend when none is configured;
-        // SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what else a human may let it
-        // open (harness/browserOrigins.ts).
-        headlessBrowser: headlessBrowserDeps,
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
@@ -450,8 +399,6 @@ const workerDataConverter = dataConverter
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
 // own queue, HOST_QUEUE, served by `hostWorker` below.
 const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
-// The headless browsers this replica runs for durable sessions' pinned calls.
-const browserHost = new BrowserHost({ paths })
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
@@ -482,18 +429,6 @@ const turnToolDeps = temporal
                 localRoot: path.join(paths.stateDir, 'plugins-local'),
                 forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
               },
-            }
-          : {}),
-        ...(database
-          ? {
-              extra: turnBrowserServers({
-                sql: database.sql,
-                paths,
-                host: browserHost,
-                headless: headlessBrowserDeps,
-                ...(settings ? { settings } : {}),
-                builtIn: () => builtInTools.policy(),
-              }),
             }
           : {}),
       }),
@@ -531,6 +466,8 @@ const temporalWorker =
             currentTiers: liveTokenTiers(tokens),
             // A result's images, for the durable segment's view_tool_images (#2320).
             blobs: new SessionBlobs(temporal.sql),
+            // A flow call's images, sealed under its run's payload key (#2477).
+            ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
@@ -646,7 +583,6 @@ const app = createApp({
   upgradeWebSocket,
   tabs,
   ...(temporalWorker ? { temporal: () => temporalWorker.state() } : {}),
-  ...(sessions ? { browserReach: () => uiOriginProbe.summary() } : {}),
   commands,
   remoteAddress: (c) => {
     try {
@@ -726,7 +662,6 @@ async function stop(): Promise<void> {
   await Promise.all([
     temporalWorker?.stop(),
     hostWorker?.stop(),
-    browserHost.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])
   stopSessionWake?.()

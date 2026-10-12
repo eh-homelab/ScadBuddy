@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_serializer
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan
+from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
     PlatePlan,
@@ -44,6 +45,11 @@ class SourceSpec(BaseModel):
     #: them refuses the run (#770).
     stem: str | None = None
     print_settings: dict[str, str] = Field(default_factory=dict)
+    #: A library file's filament slots, read from the file itself by the route that
+    #: starts the run (#2550): every activity reads them from here, since the print
+    #: worker mounts no cache, and Bambuddy's filament-requirements outlasts a large
+    #: 3MF. ``None`` when the route could not read them, and Bambuddy is asked.
+    filaments: LocalFilaments | None = None
 
 
 class PrintRunInput(BaseModel):
