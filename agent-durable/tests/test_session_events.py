@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from typing import cast
@@ -266,3 +268,58 @@ async def test_a_carried_over_turn_ends_on_its_own_end_not_an_earlier_turns(
         "assistant.text.delta",
         "assistant.text.done",
     ]
+
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+@pytest.mark.requires_postgres
+async def test_a_tool_result_names_the_images_its_call_produced(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2478: the agent-tools activity kept the call's images (ai_session_blobs) and
+    recorded them under its tool_use_id; the tool.result names them, never holds them."""
+    sid = await insert_session(agent_db)
+    name = f"{hashlib.sha256(PNG).hexdigest()}.png"
+    await agent_db.execute(
+        "INSERT INTO ai_session_blobs (session_id, name, media_type, data)"
+        " VALUES (%s, %s, 'image/png', %s)",
+        (sid, name, PNG),
+    )
+    await agent_db.execute(
+        "INSERT INTO ai_session_tool_images (session_id, tool_use_id, ord, name)"
+        " VALUES (%s, 'toolu_img', 0, %s)",
+        (sid, name),
+    )
+    stream = [
+        {"type": "prompt", "text": "show me", "offset": 0},
+        {"type": "tool_call", "id": "toolu_img", "name": "render_preview", "offset": 1},
+        {"type": "tool_result", "id": "toolu_img", "status": "done", "offset": 2},
+        # A call that produced none, as every event before #2478 was.
+        {"type": "tool_call", "id": "toolu_txt", "name": "render_preview", "offset": 3},
+        {"type": "tool_result", "id": "toolu_txt", "status": "done", "offset": 4},
+        {"type": "done", "result": "ok", "offset": 5},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    await env.run(
+        acts.follow_session,
+        FollowArgs(session_id=sid, workflow_id=f"session-{sid}", prompted=True),
+    )
+    results = [e for e in await events(agent_db, sid) if e["type"] == "tool.result"]
+    assert results[0]["images"] == [{"name": name, "mediaType": "image/png"}]
+    assert "images" not in results[1]
+    cur = await agent_db.execute(
+        "SELECT event FROM ai_session_events WHERE session_id = %s", (sid,)
+    )
+    logged = "".join(str(r[0]) for r in await cur.fetchall())
+    assert base64.b64encode(PNG).decode()[:24] not in logged
+    assert PNG.hex()[:24] not in logged

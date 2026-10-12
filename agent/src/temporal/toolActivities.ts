@@ -152,7 +152,7 @@ export const UNUSABLE_IMAGE = '[an image the model cannot take]'
 export const FLOW_IMAGE = '[an image]'
 
 /** Where a durable activity keeps a result's images: the session's blobs (sessions/blobs.ts). */
-export type ResultBlobs = { put(sessionId: string, images: readonly SessionImage[]): Promise<void> }
+export type ResultBlobs = { put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void> }
 
 type Block = { type: string; text?: string; data?: unknown; mimeType?: unknown }
 
@@ -182,15 +182,19 @@ function namedImages(content: readonly Block[]): { parts: string[]; images: Sess
  * and named in the text, which tells the model to call `view_tool_images` with the
  * names: that tool returns them as image blocks, as a classic turn's tool result is.
  * At most RESULT_IMAGES_MAX are kept; one past it is a placeholder, and with nowhere to
- * keep them every image is FLOW_IMAGE.
+ * keep them every image is FLOW_IMAGE. They are kept as what call `toolUseId` produced,
+ * which follow_session names on that call's `tool.result` for the panel (#2478).
  */
-export async function resultText(content: readonly Block[], keep?: { session: string; blobs: ResultBlobs }): Promise<string> {
+export async function resultText(
+  content: readonly Block[],
+  keep?: { session: string; blobs: ResultBlobs; toolUseId: string },
+): Promise<string> {
   if (!keep) {
     return content.map((block) => (block.type === 'text' ? (block.text ?? '') : block.type === 'image' ? FLOW_IMAGE : `[${block.type}]`)).join('\n')
   }
   const { parts, images } = namedImages(content)
   if (images.length) {
-    await keep.blobs.put(keep.session, images)
+    await keep.blobs.put(keep.session, images, keep.toolUseId)
     const n = images.length
     parts.push(
       `[The tool returned ${n === 1 ? 'an image' : `${n} images`}. Call ${TOOL_IMAGES_TOOL} with ${n === 1 ? 'its name' : 'their names'} (${images
@@ -433,7 +437,7 @@ async function runAsActivity(
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
   if (flow !== undefined) return flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
-  return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs } : undefined)
+  return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs, toolUseId } : undefined)
 }
 
 /**

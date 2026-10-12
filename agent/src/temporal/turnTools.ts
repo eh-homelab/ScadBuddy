@@ -453,7 +453,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       const text = scrub(
         await resultText(
           (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
-          deps.blobs && session ? { session, blobs: deps.blobs } : undefined,
+          deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined,
         ),
       )
       await record(result.isError ? 'error' : 'ok')
