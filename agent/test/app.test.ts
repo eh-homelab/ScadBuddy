@@ -5,7 +5,6 @@ import type { Credential } from '../src/credentials.js'
 import type { ConnectionTest } from '../src/harness/testConnection.js'
 import { originPolicy } from '../src/http/origins.js'
 import { kekFromBase64, type KekStatus, loadKek } from '../src/secrets.js'
-import { AGENT_ACTOR_HEADER } from '../src/harness/headlessBrowser.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 
@@ -74,13 +73,6 @@ describe('GET /healthz', () => {
       expect(status).toBe(200)
       expect(body.temporal).toBe(state)
     }
-  })
-
-  it('says whether the headless browser reaches any of ScadBuddy\'s UI origins, and no more, when it is wired', async () => {
-    const { status, body } = await health(createApp(deps({ browserReach: () => 'none reachable' })))
-    expect(status).toBe(200)
-    expect(body.browser_origins).toBe('none reachable')
-    expect((await health(createApp(deps()))).body).not.toHaveProperty('browser_origins')
   })
 
   it('stays 200 and says why when the database or backend is down', async () => {
@@ -582,35 +574,5 @@ describe('/api/v1/ai/pending-input (#815; the store is covered in test/attention
     expect(read.status).toBe(503)
     expect(await read.json()).toEqual({ detail: expect.stringMatching(/migrations have not applied/) })
     expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
-  })
-})
-
-describe('requests from the headless browser (the agent-actor marker)', () => {
-  // Since #983 the headless browser opens ScadBuddy's public origin, where the ingress
-  // routes /api/v1/ai/* and /mcp here. Its request guard keeps it off those paths; this
-  // is the second line (review of #1934): a request carrying the marker never reaches a
-  // route, so a page there cannot answer the session's own parked approvals.
-  const marked = { ...UI, [AGENT_ACTOR_HEADER]: '00000000-0000-4000-8000-000000000001' }
-
-  it.each([
-    ['POST', '/api/v1/ai/pending-input/approval:1'],
-    ['PUT', '/api/v1/ai/credentials'],
-    ['GET', '/api/v1/ai/pending-input'],
-    ['POST', '/mcp'],
-  ])('refuses %s %s', async (method, path) => {
-    const app = createApp(deps())
-    const res = await app.request(path, {
-      method,
-      headers: { ...marked, 'content-type': 'application/json' },
-      body: method === 'GET' ? null : '{}',
-    })
-    expect(res.status).toBe(403)
-    expect(await res.json()).toEqual({ detail: expect.stringMatching(/headless browser/) })
-  })
-
-  it('leaves the same request without the marker to its route', async () => {
-    const app = createApp(deps())
-    const res = await app.request('/api/v1/ai/credentials', { headers: UI })
-    expect(res.status).not.toBe(403)
   })
 })

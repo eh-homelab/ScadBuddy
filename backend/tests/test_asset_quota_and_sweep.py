@@ -396,6 +396,21 @@ def test_the_sweep_removes_an_old_asset_nothing_references(
     assert store.usage().count == 0
 
 
+def test_a_stopped_sweep_removes_nothing_more(
+    paths: DataPaths, store: AssetStore, pg_pool: PgPool
+) -> None:
+    """#2140: the library worker's stop ends the sweep before its next asset, so a
+    shutdown's join is not spent on the rest; the next sweep takes them."""
+    meta = store.put(svg(1), "a.svg")
+    age(pg_pool, meta, GRACE + DAY)
+    stop = threading.Event()
+    stop.set()
+
+    assert store.sweep(referenced_asset_ids(paths), grace=GRACE, stop=stop) == []
+    assert exists(store, meta)
+    assert store.sweep(referenced_asset_ids(paths), grace=GRACE) == [meta.id]
+
+
 def test_the_sweep_never_removes_a_referenced_asset(
     paths: DataPaths, store: AssetStore, pg_pool: PgPool
 ) -> None:

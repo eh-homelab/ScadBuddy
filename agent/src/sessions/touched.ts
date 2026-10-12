@@ -230,6 +230,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // Flows (#1057) touch no kind of resource here: a session's runs are found by
   // list_flow_runs' `session`, and a run's own steps say what it did.
   register_flow: () => [],
+  restore_flow_version: () => [],
   start_flow_run: () => [],
   reset_flow_run: () => [],
   // Models.
@@ -237,6 +238,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   import_model: (_input, result) => modelCreated(result),
   create_from_template: (input, result) => modelCreated(result, input.from === 'blank' ? null : str(input.from)),
   duplicate_model: (input, result) => modelCreated(result, str(input.slug)),
+  create_model_from_mesh: (_input, result) => modelCreated(result),
+  // Scene edits and eject are revisions of the model.
+  edit_scene: revision,
+  eject_scene: revision,
   update_model_details: (input, result) => {
     const slug = str(input.slug)
     if (!slug) return []

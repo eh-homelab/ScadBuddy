@@ -9,8 +9,7 @@ import { Spinner } from './ui/Spinner'
  * the internet and the local network. Stored by the agent service
  * (`/api/v1/ai/settings/http-request`), on by default.
  *
- * Hidden when the agent service or its database is not there, like the headless
- * browser switch. Only the user may flip it: it is a settings write, and an agent must
+ * Hidden when the agent service or its database is not there. Only the user may flip it: it is a settings write, and an agent must
  * not grant itself network reach (AI design spec §8.1).
  */
 export function HttpRequestSetting() {

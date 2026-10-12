@@ -429,9 +429,8 @@ move them), and one that is rate limited is skipped until its limit resets. The 
 encrypted on the server and never sent back to the browser.
 
 The same section sets **Assistant chat limits** (each new chat's budget in USD and its
-turns per reply), **Assistant images**, and two switches that are off by default:
-**AI headless browser** ([below](#the-headless-browser)) and **AI HTTP requests** (GET
-and HEAD run at once; anything else waits for your approval). **AI activity** is the
+turns per reply), **Assistant images**, and **AI HTTP requests** (GET and HEAD run at
+once; anything else waits for your approval). **AI activity** is the
 log of what the assistant did.
 
 ### The assistant panel
@@ -582,7 +581,7 @@ The assistant has a workspace of its own for files: a session's files stay with 
 there (an output's 3MF, a model's file or picture, a print's photo or timelapse, a
 Bambuddy library file), download one from the web into it, and read, write, edit and
 delete its files, so a file it fetched does not have to pass through the conversation.
-What the headless browser downloads lands there too. It sends a workspace file on by
+It sends a workspace file on by
 name to any upload (an asset, a picture or video for the gallery, a thumbnail, a
 model's source, a README), and an approval it asks for names the file and its sha256.
 A file holds at most 25 MB and a session's workspace 200 MB. An MCP client working
@@ -607,21 +606,19 @@ listed and downloaded. Settings → **Assistant workspace** sets the caps (25 Mi
 and 200 MiB a chat by default), and they apply to uploads as to the assistant's own
 files ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
 
-### The headless browser
+### A browser for the assistant
 
-A session with no tab of yours (one started over MCP, say) can still look at
-ScadBuddy's pages in a headless browser inside the agent container, once you tick
-**AI headless browser** (off by default). It opens only ScadBuddy itself, unless the
-operator allows more sites, and each of those waits for your approval once per
-session. Anything it would send, print or delete waits as an ordinary approval card,
-and it can never change Settings ([headless-browser.md](ai/headless-browser.md)).
+A session with no tab of yours (one started over MCP, say) can drive a browser of its
+own when an admin adds Microsoft's Playwright MCP server as a plugin named
+`playwright` (**Plugins** below). Its tools ask before every call until their tiers
+are set ([headless-browser.md](ai/headless-browser.md)).
 
 ### Plugins
 
 **Settings → Assistant → Assistant plugins** adds to what the assistant can do
 ([operating.md §9](ai/operating.md#9-plugin-packages-297),
-[security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin and the headless
-browser are built in, each with **Enable**/**Disable**.
+[security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin is built in, with
+**Enable**/**Disable**.
 
 - **Plugin packages** (skills, agents and hooks). Give a **Git repository** or a
   **Marketplace entry** and press **Fetch and review**. Nothing loads yet: the package
@@ -632,7 +629,7 @@ browser are built in, each with **Enable**/**Disable**.
   code with the assistant service's own access. A newer commit is **Fetch re-pin**,
   approved the same way.
 - **Plugins**. ScadBuddy's own tools come first, marked **Built in**: `scadbuddy` (the
-  assistant's ScadBuddy tools) and `playwright` (the headless browser's). **Review tools**
+  assistant's ScadBuddy tools). **Review tools**
   lists each one with its tier and **Disable**. A tier can only be raised above the one
   ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
   built-in is never removed. Every setting here applies to classic and durable chats

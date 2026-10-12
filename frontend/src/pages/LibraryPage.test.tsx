@@ -44,10 +44,20 @@ describe('LibraryPage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
     expect(await within(dialog).findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
     expect(await within(dialog).findByLabelText("Copies of Wand — Clara's Wand.3mf")).toHaveValue(1)
+    // #2284 — a plain file in the mix: where the result is filed is shown, by name.
+    expect(within(dialog).getByLabelText('File under')).toHaveDisplayValue('Name Keychain')
     await user.click(within(dialog).getByRole('button', { name: 'Arrange' }))
-    expect(await screen.findByRole('status', { name: 'Arranged' })).toHaveTextContent('Arranged onto 2 plates.')
+    const done = await screen.findByRole('status', { name: 'Arranged' })
+    expect(done).toHaveTextContent('Arranged onto 2 plates.')
+    expect(done).toHaveTextContent("Saved in Name Keychain's history.")
     expect(screen.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/name-keychain/history')
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    // #2287 — it is not sent anywhere yet; Print opens the print dialog with the result.
+    const next = screen.getByRole('group', { name: 'Next step' })
+    expect(next).toHaveTextContent('Not sent to Bambuddy yet')
+    expect(within(next).getByRole('button', { name: 'Download' })).toBeInTheDocument()
+    await user.click(within(next).getByRole('button', { name: 'Print' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
   it('Advanced lists the sliced file without Print and is remembered', async () => {

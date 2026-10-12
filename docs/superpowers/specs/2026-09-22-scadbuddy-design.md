@@ -197,6 +197,15 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   "Please log in to download models". Some PMM sources are also marked
   `protected`. So the URL import refuses MakerWorld links with a pointer to
   Upload, and a resolver needs a signed-in token (#174).
+- **OpenSCAD imports a colourless 3MF inside `color()` and cuts it** (measured
+  2026-10-12, #2146, in an image built from the Dockerfile's `test` target on the pinned
+  `openscad/openscad:dev.2026-10-05`, `openscad --version` 2026.10.05, `--backend=Manifold`,
+  by `backend/tests/test_mesh_models_openscad.py`). A core 3MF with no `basematerials`
+  imported as `color("#F08A24") import("part.3mf")` renders in that colour; the same
+  import cut with `intersection()` against a half-space cube and joined with a
+  `difference()`-ed socket exports a closed solid per piece (watertight once the split
+  parts' per-triangle vertices are welded); a socket cut as the peg grown by the clearance
+  has the expected cross-section (within 2 %).
 
 ## 4. Architecture
 
@@ -343,7 +352,11 @@ on the volume sees the same thing.
   `safe.directory` is passed as command-line — *protected-scope* — config,
   because a PVC's ownership need not match the runtime uid.
 - **Writes are serialised** by a thread lock plus an `flock`, so nothing can
-  interleave an `add`/`commit` pair.
+  interleave an `add`/`commit` pair. Across the API's replicas, which share the
+  volume over NFS, a Postgres advisory lock serialises too, and it carries the
+  HEAD the last writer left (`models_repo_head`, #2385): a writer waits until git
+  shows that HEAD before it checks or writes anything, because NFS can go on
+  serving another replica's `.git` as it was before that replica's commit.
 - **Generated files never enter the tree.** `render_solids` drops its wrapper
   next to the model source (it has to, for `include <>` to resolve); the prefix
   is the named `WRAPPER_PREFIX` constant and `ensure_repo` writes it into

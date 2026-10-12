@@ -8,6 +8,7 @@ images are proxied so the API key never reaches the browser.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import (
+    OutputsDep,
     PathsDep,
     PrintLinksDep,
     PrintProgressDep,
@@ -31,14 +33,19 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
-from scadbuddy.api.outputs import OutputPlate, read_plain_files
+from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
-from scadbuddy.bambuddy.library_view import NotViewableError, library_preview
+from scadbuddy.bambuddy.library_view import (
+    NotViewableError,
+    library_filaments,
+    library_preview,
+)
 from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
@@ -51,16 +58,18 @@ from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_r
 from scadbuddy.bambuddy.projects import AttachResult, ProjectAttach
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.library_file_operations import (
     LibraryDeleteResult,
     LibraryFilesRequest,
     LibraryRestoreResult,
 )
-from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
 
@@ -76,20 +85,23 @@ FileIdPath = Annotated[int, Path(ge=1)]
 async def get_library(
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    outputs: OutputsDep,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
     file_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
     Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
-    A file ScadBuddy uploaded names its ``output_id`` (#1864). ``file_id`` in place of
-    ``folder_id`` lists the folder that file is in, which a deep link to a file opens
-    (#2165); a file Bambuddy no longer has is its 404."""
+    A file ScadBuddy uploaded names its ``output_id`` (#1864), while that output still
+    exists: the upload row outlives a deleted output, and a file whose output is gone is
+    any other library file (#2138). ``file_id`` in place of ``folder_id`` lists the
+    folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy
+    no longer has is its 404."""
     async with client_for(store.load()) as client:
         if file_id is not None and folder_id is None:
             folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
-    made = await uploads.outputs_for_files(entry.id for entry in listing.files)
+    made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in listing.files))
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
@@ -314,14 +326,25 @@ async def get_library_choices(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     rack: RackUsageDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
-    printed with, so the dialog reopens on it."""
+    printed with, so the dialog reopens on it. The file's filament slots are read from
+    the file itself, the fetch its preview shares, and from Bambuddy only for a file
+    ScadBuddy cannot read them from (#2550)."""
     settings = store.load()
     remembered = store.library_choices(file_id)
     async with client_for(settings) as client:
-        source = await LibrarySource.load(client, file_id, uploads=uploads, settings=settings)
+        # Loaded alongside the printers and presets (#2504).
+        source = LibrarySource.load(
+            client,
+            file_id,
+            uploads=uploads,
+            settings=settings,
+            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+        )
         return await choices_for(
             client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
         )
@@ -348,6 +371,8 @@ async def get_library_filaments(
     file_id: FileIdPath,
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
@@ -362,6 +387,7 @@ async def get_library_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
+            filaments=partial(library_filaments, client, paths.cache, budget=budget),
         )
 
 
@@ -384,12 +410,21 @@ async def post_library_run(
     body: PrintRunRequest,
     response: Response,
     runs: PrintRunsDep,
+    store: SettingsStoreDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
 ) -> PrintRun:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
     202 and any slice. The run's ``subject`` is ``library:<file id>``, and so is its
-    ``output_id``, which older clients read."""
+    ``output_id``, which older clients read. The file's filament slots go with the run,
+    read from the file as ``/choices`` read them (#2550)."""
+
+    async def prepare(source: SourceSpec) -> SourceSpec:
+        filaments = await _run_filaments(store, paths, budget, file_id)
+        return source.model_copy(update={"filaments": filaments})
+
     return await accept_run(
         runs,
         response,
@@ -397,7 +432,27 @@ async def post_library_run(
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),
+        prepare=prepare,
     )
+
+
+async def _run_filaments(
+    store: SettingsStore, paths: DataPaths, budget: ReadBudget, file_id: int
+) -> LocalFilaments | None:
+    """The slots a run of library file ``file_id`` reads (#2550): from the cache the
+    dialog filled, or a download of the file that fills it. Only for a file Bambuddy
+    states a hash for: one with none is never cached, so reading it here would download
+    it a second time beside the run's own, and the run asks Bambuddy instead, as it
+    does for a file this cannot read. Never refuses the run: the run's own reads say
+    why a file cannot print."""
+    try:
+        async with client_for(store.load()) as client:
+            file = await client.library_file(file_id)
+            if not file.file_hash:
+                return None
+            return await library_filaments(client, paths.cache, file, budget)
+    except ApiError:
+        return None
 
 
 @router.get(
@@ -515,8 +570,19 @@ async def post_library_check(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     rack: RackUsageDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
 ) -> PrintCheck:
-    """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760)."""
+    """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
+    its slots read from the file itself, as ``/choices`` reads them (#2550)."""
     settings = store.load()
     async with client_for(settings) as client:
-        return await check_for_library(client, uploads, settings, file_id, body, rack=rack)
+        return await check_for_library(
+            client,
+            uploads,
+            settings,
+            file_id,
+            body,
+            rack=rack,
+            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+        )

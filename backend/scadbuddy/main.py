@@ -21,12 +21,26 @@ from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import health, libraries, media, metrics, models, outputs, telemetry
-from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
+from scadbuddy.api import (
+    health,
+    libraries,
+    media,
+    mesh_models,
+    metrics,
+    models,
+    outputs,
+    telemetry,
+)
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
-from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
+from scadbuddy.api.limits import (
+    BODY_LIMITS,
+    MEDIA_UPLOAD_PATH,
+    MESH_UPLOAD_PATH,
+    BodySizeGate,
+    RouteLimit,
+)
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.client import client_for
@@ -34,6 +48,7 @@ from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
+from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -177,18 +192,19 @@ async def _close_quietly(state: AppState) -> None:
             logger.exception("could not release what a failed start opened")
 
 
-def sweep_assets(state: AppState) -> list[str]:
+def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the projection, then every
     saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
+    ``stop``, once set, ends it before its next asset (#2140).
     """
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
-    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace)
+    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
         logger.info("removed unused uploads", extra={"count": len(removed)})
@@ -254,20 +270,28 @@ async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: date
         await remote.drop(removed, cutoff=cutoff)
 
 
-async def _sweep_assets_logged(state: AppState) -> None:
+async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = None) -> None:
     # Best effort: a store or volume error skips this sweep (removing nothing it could
     # not prove unused) and the next one retries. Only the Schedule's sweep runs it, so
     # a failure is logged and fails its activity, which reports it.
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
-        removed = await asyncio.to_thread(sweep_assets, state)
-        if remote is not None and cutoff is not None:
-            await drop_swept_assets(state, removed, cutoff=cutoff)
-            # What an earlier drop failed to remove, and what the store lost (a copy an
-            # `ensure` dropped, a race with a delete): both converge here, per sweep.
-            await remote.reconcile(state.assets, cutoff=cutoff)
-            await remote.backfill(state.assets)
+        removed = await asyncio.to_thread(sweep_assets, state, stop)
+        if remote is None or cutoff is None:
+            return
+        if stop is not None and stop.is_set():
+            # Stopped (#2140): only mark what it removed, which no later sweep could
+            # find otherwise -- `reconcile` retries marked copies, never a diff against
+            # the volume. The next sweep's reconcile removes them.
+            if removed:
+                await remote.mark_swept(removed, cutoff=cutoff)
+            return
+        await drop_swept_assets(state, removed, cutoff=cutoff)
+        # What an earlier drop failed to remove, and what the store lost (a copy an
+        # `ensure` dropped, a race with a delete): both converge here, per sweep.
+        await remote.reconcile(state.assets, cutoff=cutoff)
+        await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
         raise
@@ -295,16 +319,21 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
             )
         else:
-            removed = await sweep_content(
-                state.store.content, state.refs, grace=state.config.job_ttl
-            )
-            backend = state.store.content.backend
-            if isinstance(backend, BambuddyContentBackend):
-                # #701: an upload whose process died before its row was written.
-                cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
-                removed += await backend.sweep_unrecorded(cutoff=cutoff)
-            if isinstance(state.store.blobs, CachedBlobStore):
-                await asyncio.to_thread(state.store.blobs.evict)
+            try:
+                removed = await sweep_content(
+                    state.store.content, state.refs, grace=state.config.job_ttl
+                )
+                backend = state.store.content.backend
+                if isinstance(backend, BambuddyContentBackend):
+                    # #701: an upload whose process died before its row was written.
+                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
+                    removed += await backend.sweep_unrecorded(cutoff=cutoff)
+            finally:
+                # Both steps above need Bambuddy (a stale blob's release is a round
+                # trip too): one that is down must not stop the local cache being
+                # trimmed, or it grows for as long as Bambuddy stays down (#2115).
+                if isinstance(state.store.blobs, CachedBlobStore):
+                    await asyncio.to_thread(state.store.blobs.evict)
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
@@ -368,17 +397,20 @@ async def _join_background(stop: threading.Event, *tasks: asyncio.Task[Any] | No
             await task
 
 
-async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
+async def _heartbeating[T](work: Coroutine[Any, Any, T], stop: threading.Event | None = None) -> T:
     """Run ``work`` in the current activity, heartbeating until it ends (review #1095
     2): a worker lost mid-sweep is then noticed within the heartbeat timeout. One the
     worker's stop cancels first gets `SWEEP_SHUTDOWN_JOIN` to end by itself (#1708),
-    so its thread is not left running while the lifespan closes its stores."""
+    so its thread is not left running while the lifespan closes its stores; ``stop``
+    is set first, asking a sweep that checks it to end early (#2140)."""
     running = asyncio.create_task(work)
     try:
         while not (await asyncio.wait({running}, timeout=HEARTBEAT_EVERY))[0]:
             activity.heartbeat()
     except asyncio.CancelledError:
         if activity.is_worker_shutdown():
+            if stop is not None:
+                stop.set()
             await _join_at_shutdown(running)
         raise
     finally:
@@ -411,7 +443,11 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[1])
     async def sweep_assets() -> None:
-        await _heartbeating(_sweep_assets_logged(state))
+        # Its own stop, per run (#2140): one a worker's shutdown sets ends this run only,
+        # never the sweeps of the worker `_run_library_worker` starts after it. A sweep
+        # added here that runs a thread passes its own the same way.
+        stop = threading.Event()
+        await _heartbeating(_sweep_assets_logged(state, stop), stop)
 
     @activity.defn(name=SWEEPS[2])
     async def sweep_blobs() -> None:
@@ -1125,7 +1161,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.projection.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
-        await app.state.agent_grants.aclose()
         await state.store.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
@@ -1155,14 +1190,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
-    # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
-    # refused on the method, path and marker header alone, before any body is read.
-    grants = postgres_grants(app_settings.database_url)
-    # Closed by the lifespan, after everything else has stopped.
-    app.state.agent_grants = grants
-    # Inside the gate: a commit made for the agent is authored as the agent (#252).
+    # A commit made for the agent is authored as the agent (#252).
     app.add_middleware(AgentAuthorship)
-    app.add_middleware(AgentActorGate, grants=grants)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(
@@ -1176,6 +1205,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 lambda: state.settings.media_upload_max_bytes,
                 "a media upload",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
+                MESH_UPLOAD_PATH,
+                MAX_DOWNLOAD_BYTES + 64 * 1024,  # the file plus the form's framing
+                "a mesh upload",
+                "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
             ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
@@ -1199,7 +1235,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource, media.MediaUpload, outputs.NeedsBackfillProblem)
+    _name_in_openapi(
+        app,
+        models.PastedSource,
+        media.MediaUpload,
+        mesh_models.MeshUpload,
+        outputs.NeedsBackfillProblem,
+    )
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

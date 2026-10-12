@@ -10,13 +10,11 @@ import { assertHostAllowed, assertHttpUrl, type Resolver, systemResolver } from 
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
 import { type SessionFiles, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
-import { AGENT_ACTOR_HEADER } from './headlessBrowser.js'
 import type { RiskTier } from './permissions.js'
 
 // The assistant's `http_request` tool (#827): "curl" for a harness that runs
 // with `tools: []` (options.ts: no Bash, no WebFetch) and refuses plugins that
-// start a process (plugins.ts). An in-process SDK MCP server, like the
-// headless browser's grant tool (headlessGrants.ts), added to a session's
+// start a process (plugins.ts). An in-process SDK MCP server, added to a session's
 // turn when the `http_request_enabled` setting is not `false`
 // (routes/httpRequest.ts; on by default).
 //
@@ -40,8 +38,7 @@ import type { RiskTier } from './permissions.js'
 //     the request is built from the tool input alone, and Claude Code's
 //     environment, which holds the Claude credential (run.ts credentialEnv),
 //     never reaches this process's request code.
-//   - Never the agent-actor header (AGENT_ACTOR_HEADER): a request that names
-//     it is refused, as are the connection-level headers Node sets itself.
+//   - The connection-level headers Node sets itself are refused.
 //   - No request carries the turn's secrets (the Claude credential and the
 //     plugins' header tokens, the same list the event log is redacted of): a
 //     header value, the URL or the body that contains one is refused, so the
@@ -112,9 +109,8 @@ export function httpTierOf(toolName: string, input?: unknown): RiskTier | undefi
   return typeof method === 'string' && READ_METHODS.has(method) ? 'read' : 'outward'
 }
 
-/** Header names the model may not set: Node sets them from the request, or they are ScadBuddy's own. */
+/** Header names the model may not set: Node sets them from the request. */
 const FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
-  AGENT_ACTOR_HEADER.toLowerCase(),
   'host',
   'content-length',
   'transfer-encoding',
@@ -226,7 +222,6 @@ function contains(value: string, secrets: readonly string[]): boolean {
 export function requestProblem(args: HttpRequestArgs, secrets: readonly string[]): string | undefined {
   for (const [name, value] of Object.entries(args.headers ?? {})) {
     const lower = name.toLowerCase()
-    if (lower === AGENT_ACTOR_HEADER.toLowerCase()) return `the ${AGENT_ACTOR_HEADER} header is ScadBuddy's own and is never sent`
     if (FORBIDDEN_HEADERS.has(lower)) return `the ${name} header is set by the connection and cannot be given`
     if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) return `${JSON.stringify(name)} is not a valid header name`
     if (/[\r\n\0]/.test(value)) return `the ${name} header value contains a line break or NUL`
@@ -722,7 +717,8 @@ export function httpRequestServer(context: HttpRequestContext): McpSdkServerConf
   const read = tool(
     HTTP_READ_TOOL,
     `Read one page of a response body that ${HTTP_TOOL} saved (its \`saved.id\`), from a byte offset. ` +
-      'Text comes back as text, anything else as base64.',
+      'Text comes back as text, anything else as base64. A body saved in an earlier turn may be gone; ' +
+      `pass save_to_workspace to ${HTTP_TOOL} to keep one.`,
     HttpReadInput,
     async (args) => markUntrusted(await readSavedResponse(args, context), HTTP_READ_TOOL, 'a saved HTTP response body'),
     { annotations: { readOnlyHint: true } },

@@ -25,14 +25,14 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.0 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-10-05@sha256:6c1a07342e37afcd7e360d1cfa98d0e1cad3f32f2ac91a2943691e117ce4d3b4 AS base
+FROM openscad/openscad:dev.2026-10-12@sha256:4098a7c2c37d5a9110121635a568e6596b8619362ced5c84cc67f47d395e7fd0 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -238,25 +238,9 @@ RUN groupadd --gid 10001 scadbuddy \
 WORKDIR /app/agent
 COPY --from=agent-deps /src/agent/node_modules ./node_modules
 
-# The headless browser (#349, AI spec D11 and §5.3): the Chromium build the
-# pinned @playwright/mcp's own `playwright-core` expects, installed at build
-# time with its system libraries, so nothing is downloaded at runtime (the
-# upstream plugin's `npx @playwright/mcp@latest` is what spec D11 rejects).
-# `install-browser` is @playwright/mcp's cli.js passing through to
-# `playwright install`. `--only-shell` installs chromium-headless-shell alone,
-# which is what a headless launch without a `channel` uses
-# (agent/src/harness/headlessBrowser.ts `playwrightConfig`); measured on
-# 0.0.82: 603 MB for it and its libraries, against 740 MB for full Chromium.
-# The pin moved to 0.0.83 without re-measuring this; re-check the size when
-# the image is next built. Bump with @playwright/mcp in agent/package.json.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY --from=agent-build /src/agent/package.json ./
 COPY --from=agent-build /src/agent/dist ./dist
-# The vendored plugin manifest (agent/plugins/playwright/README.md); each
-# session gets a copy of it with its own `.mcp.json` (headlessBrowser.ts).
+# ScadBuddy's own plugin (agent/plugins/scadbuddy, harness/ownPlugin.ts).
 COPY --from=agent-build /src/agent/plugins ./plugins
 
 # The Agent SDK "runs the Claude Code binary"
@@ -447,7 +431,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.10.05
+ARG OPENSCAD_VERSION=2026.10.12
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.

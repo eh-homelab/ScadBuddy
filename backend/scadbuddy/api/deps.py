@@ -56,6 +56,8 @@ from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
+from scadbuddy.library.repo_lock import PgRepoCoordinator
+from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
@@ -299,7 +301,14 @@ def build_state(settings: Settings) -> AppState:
 def _build_core(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
-    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
+    # Every replica commits to the one repository on the share: the lock and the HEAD
+    # each writer leaves are in Postgres (#2385).
+    history = ModelHistory(
+        paths.models,
+        wrapper_prefix=WRAPPER_PREFIX,
+        timeout=config.git_timeout,
+        coordinator=PgRepoCoordinator(settings.database_url),
+    )
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
     # Nothing connects here: the projection's pool opens in the lifespan, and the
@@ -307,6 +316,10 @@ def _build_core(settings: Settings) -> AppState:
     # pool (#454).
     projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
     pool = projection.pool
+    # Registered on the shared listener before the bus (#2507): a commit's HEAD is
+    # refreshed here before the bus delivers the events the writer published after
+    # it, and a reconnect refreshes before subscribers are told to resync.
+    follower = ModelsHeadFollower(paths, history, projection.pg_listener)
     # One LISTEN connection per process: the bus shares the projection's.
     events = PgNotifyEventBus(
         settings.database_url,
@@ -352,6 +365,7 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
+    follower.catalogue = catalogue
     # Lazy, so the API boots while Temporal is down: a render is then refused with
     # `temporal-unavailable` (#1053) until it is back.
     temporal = connect_lazily(settings.temporal_address, settings.temporal_namespace)

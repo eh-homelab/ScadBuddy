@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
@@ -136,7 +136,8 @@ class OutputDetail(OutputSummary):
     #: The output's objects (spec 2026-09-27 §7); empty for one saved before phase 5,
     #: which therefore cannot be arranged.
     manifest: list[ManifestObject] = Field(default_factory=list)
-    #: For an arranged output, the outputs its objects came from (Task 5).
+    #: For an arranged output, the outputs its objects came from (Task 5), and each
+    #: library file ScadBuddy did not make as `library:<id>` (#2284).
     arranged_from: list[str] = Field(default_factory=list)
     #: The re-render queued to give it a manifest (#902): pending while ``error`` is
     #: None, failed with why otherwise; None when none was asked for or it attached.
@@ -342,7 +343,8 @@ class ArrangeRequest(BaseModel):
     colours: list[str] | None = None
     name: str | None = Field(default=None, max_length=200)
     #: The template the result is filed under (#1864): one of the outputs', omitted the
-    #: first one's. With library files only, any template, and required.
+    #: first one's. With a plain library file among them, any template (#2284); with
+    #: library files only, required.
     slug: str | None = Field(default=None, max_length=200)
     #: What reading each plain library file may spend (#2087), each omitted budget the
     #: setting's; none past its ceiling.
@@ -362,24 +364,40 @@ def _check_copies(total: int) -> None:
         raise ValueError(f"{total} copies is more than one arrange places ({MAX_ARRANGE_COPIES})")
 
 
+async def live_outputs_for_files(
+    uploads: BambuddyUploadStore, outputs: OutputStore, library_file_ids: Iterable[int]
+) -> dict[int, str]:
+    """The output each of ``library_file_ids`` ScadBuddy uploaded is a copy of (#1864),
+    while that output still exists: the upload row outlives a deleted output, and a file
+    whose output is gone is any other library file (#2138). The library listing and
+    Arrange both ask this, so they cannot disagree about a file."""
+    made = await uploads.outputs_for_files(library_file_ids)
+    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
+
+
+def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
+    """Those of ``output_ids`` the output store still has."""
+    found: set[str] = set()
+    for output_id in output_ids:
+        try:
+            outputs.directory(output_id)
+        except OutputNotFoundError:
+            continue
+        found.add(output_id)
+    return found
+
+
 async def resolve_library_files(
     uploads: BambuddyUploadStore, outputs: OutputStore, body: ArrangeRequest
 ) -> tuple[ArrangeRequest, list[int]]:
     """``body`` with each library file ScadBuddy uploaded named by the output it is a
     copy of (#1864), and the plain files left, which are read from their 3MF (#1863). A
-    file whose output has since been deleted is a 404 naming the file."""
+    file whose output has since been deleted is a plain file (#2138)."""
     wanted = list(dict.fromkeys(o.library_file_id for o in body.objects if o.library_file_id))
     if not wanted:
         return body, []
-    found = await uploads.outputs_for_files(wanted)
-    for file_id, output_id in found.items():
-        try:
-            await asyncio.to_thread(outputs.directory, output_id)
-        except OutputNotFoundError:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND,
-                f"library file {file_id} is a copy of output {output_id}, which has been deleted",
-            ) from None
+    found = await live_outputs_for_files(uploads, outputs, wanted)
     objects = [
         o
         if o.library_file_id not in found
@@ -435,6 +453,8 @@ def arrange_inputs(
     # name a slot no part uses, so it is never paired with `parts` by index.
     colours: list[str] = list(body.colours or [])
     slugs: list[str] = []
+    # Library files that placed an object, as `library:<id>` (#2284, #2540).
+    files: list[str] = []
     # Every output first, so one refusal names all that need a re-render (#902).
     chosen = list(dict.fromkeys(o.output_id for o in body.objects if o.output_id is not None))
     for output_id in chosen:
@@ -492,6 +512,9 @@ def arrange_inputs(
                     " output as it is",
                 )
             items.append(PackItem(part=part_of(entry), count=count, group=obj.group))
+            if obj.output_id is None and source not in files:
+                # Only a file that placed something is a source (#2540).
+                files.append(source)
             provenance.setdefault(
                 entry.part,
                 entry
@@ -513,18 +536,17 @@ def arrange_inputs(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "a result of library files alone is filed under a template: name one in slug",
         )
-    if slugs and body.slug is not None and body.slug not in slugs:
+    # #2284: with a library file in the mix the result is anyone's to file, so it may go
+    # under any template (`arrange_outputs` checks it exists), not only its outputs'.
+    if slugs and not files and body.slug is not None and body.slug not in slugs:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the result is filed under one of its objects' templates ({', '.join(slugs)}),"
             f" not {body.slug}",
         )
     slug = body.slug or slugs[0]
-    # A library file's objects belong to no template until this result files them.
-    provenance = {
-        key: entry.model_copy(update={"slug": slug}) if entry.library_file_id else entry
-        for key, entry in provenance.items()
-    }
+    # A library file's objects belong to no template: filing the result under one does
+    # not make them its (#2284), so their entries keep the empty slug they were read with.
     return slug, ArrangeInputs(
         items=items,
         goal=body.goal,
@@ -534,7 +556,8 @@ def arrange_inputs(
         colours=colours,
         name=body.name,
         provenance=provenance,
-        sources=chosen,
+        # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
+        sources=[*chosen, *files],
     )
 
 
@@ -590,7 +613,8 @@ async def arrange_outputs(
     slug, inputs = await asyncio.to_thread(
         arrange_inputs, outputs, body, plate_model=plate_model, library=library
     )
-    if not inputs.sources:
+    if plain:
+        # Filed under any template (#2284), so it must be one.
         await asyncio.to_thread(require_model_exists, catalogue, slug)
     with submit_problems():
         job = await render.arrange(slug, inputs)

@@ -307,6 +307,15 @@ jobs:
       - name: Test the plugin lint
         run: .github/scripts/lint-plugin.test.sh
 
+      # No image travels as base64 inside JSON or text (#2479): an image is a blob
+      # and moves as a pointer. This fails on new code in any package that builds
+      # base64 or a data: URL outside the allowlisted Messages API boundaries.
+      - name: Check that no image is built as base64
+        run: .github/scripts/lint-base64-images.sh
+
+      - name: Test the base64 image check
+        run: .github/scripts/lint-base64-images.test.sh
+
       # The payload codec is kept in agent/, agent-durable/ and backend/; the
       # backend's tests run in an image without agent/, so they read copies of the
       # agent's vectors and key migration (plan 2026-10-09-durable-phase-6-flows.md
@@ -361,7 +370,7 @@ jobs:
       # backend's spec with uv: the spec and the generated clients are not
       # committed (#492). Same pinned action as the `freshness` job.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -484,7 +493,7 @@ jobs:
       # session's end-to-end test (test/durable.e2e.test.ts) runs agent-durable's
       # worker with uv too.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -502,14 +511,6 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
-
-      # The headless browser's tests (#349: test/headlessBrowser.server.test.ts
-      # and .e2e.test.ts) drive the pinned @playwright/mcp with a real Chromium
-      # and skip without one. The same build the Dockerfile's `agent` stage
-      # installs, through the pinned package, so it matches the pin.
-      - name: Install the headless browser's Chromium
-        # --with-deps runs apt through sudo itself when it is not root.
-        run: node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium
 
       # The agent-tools worker's tests (#1055: test/*.temporal.test.ts,
       # test/temporal.worker.test.ts) start their own dev server from this CLI and
@@ -620,7 +621,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock
@@ -1030,7 +1031,7 @@ jobs:
       - name: List the LFS fixtures
         id: lfs
         run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: cache
         with:
           path: .git/lfs/objects
@@ -1070,7 +1071,7 @@ jobs:
       # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), from the cache
       # `lfs-fixtures` filled: no shard pulls from LFS itself. They are mounted into
       # the test container below; no image carries them (.dockerignore).
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: .git/lfs/objects
           key: lfs-fixtures-${{ needs.lfs-fixtures.outputs.key }}
@@ -1163,7 +1164,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: backend-pytest-count-*
           merge-multiple: true
@@ -1337,7 +1338,7 @@ jobs:
       # python3 the runner already has.
       - name: Set up uv
         if: ${{ steps.select.outputs.count != '0' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
 
       - name: Run the selected verify.sh scripts
         if: ${{ steps.select.outputs.count != '0' }}
@@ -1469,7 +1470,7 @@ jobs:
       # github-actions ecosystem bumps this line.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock

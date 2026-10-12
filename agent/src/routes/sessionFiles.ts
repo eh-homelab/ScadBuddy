@@ -1,10 +1,11 @@
 import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import type { TransactionSql } from 'postgres'
 import type { AuditOutcome, AuditRepo } from '../audit/log.js'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { archivedError, type SessionManager, SessionError, type SessionRecord } from '../sessions/manager.js'
-import { event, sameOwner } from '../sessions/protocol.js'
+import { event, type ServerEvent, sameOwner } from '../sessions/protocol.js'
 import {
   type SessionFiles,
   type WorkspaceFileInfo,
@@ -142,8 +143,15 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
     return (await deps.ready()) ? { sessions: deps.sessions, files: deps.workspace } : NOT_READY
   }
 
-  /** Guard, then the stores, then `fn`; SessionErrors and WorkspaceErrors become their status. */
-  function route(kind: 'read' | 'write', fn: (c: Context, ready: Ready, ws: WorkspaceRef, sessionId: string) => Promise<Response>) {
+  /**
+   * Guard, then the stores, then `fn`; SessionErrors and WorkspaceErrors become their status.
+   * A write names its audit `action`: a write refused for the session's owner or its archive is audited (#2400).
+   */
+  function route(
+    kind: 'read' | 'write',
+    fn: (c: Context, ready: Ready, ws: WorkspaceRef, sessionId: string) => Promise<Response>,
+    action?: string,
+  ) {
     return async (c: Context) => {
       const problem =
         kind === 'read'
@@ -155,7 +163,14 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
       const id = c.req.param('id') ?? ''
       try {
         const session = await got.sessions.get(id, BROWSER_USER)
-        if (kind === 'write') writable(session)
+        if (kind === 'write') {
+          try {
+            writable(session)
+          } catch (err) {
+            if (action && err instanceof SessionError) await auditRefused(c, action, session.id, `${err.code}: ${err.message}`)
+            throw err
+          }
+        }
         return await fn(c, got, { kind: 'session', sessionId: session.id }, session.id)
       } catch (err) {
         if (err instanceof SessionError) return c.json({ detail: err.message }, err.status)
@@ -266,6 +281,8 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
       const mediaType = declared === 'application/octet-stream' ? undefined : declared
       let name = rawPath
       let stored: WorkspaceFileInfo
+      // The event commits with the file (#2469); followers hear of it once it has.
+      let logged: { events: ServerEvent[]; seqs: number[] } | undefined
       try {
         name = workspacePath(rawPath)
         const bytes = new Uint8Array(await file.arrayBuffer())
@@ -274,26 +291,30 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
           source: { kind: 'upload', by: 'browser', ...(file.name ? { filename: file.name.slice(0, 255) } : {}) },
           // A new path must not exist yet; replacing one needs the sha256 it has now.
           expectedSha256: expected ?? null,
+          alongside: async (tx, file) => {
+            const events = [
+              event({
+                type: 'workspace.file',
+                sessionId,
+                path: file.path,
+                change: 'uploaded',
+                by: BROWSER_USER,
+                size: file.size,
+                mediaType: file.mediaType,
+                sha256: file.sha256,
+              }),
+            ]
+            logged = { events, seqs: await sessions.events.append(sessionId, events, tx) }
+          },
         })
       } catch (err) {
         if (err instanceof WorkspaceError) await auditRefused(c, 'workspace_upload', sessionId, `${JSON.stringify(name.slice(0, 200))}: ${err.code}`)
         throw err
       }
+      if (logged) sessions.events.committed(sessionId, logged.events, logged.seqs)
       await audited(c, 'workspace_upload', sessionId, 'ok', `${name} (${stored.size} bytes, ${stored.mediaType}, sha256 ${stored.sha256})`)
-      await sessions.events.append(sessionId, [
-        event({
-          type: 'workspace.file',
-          sessionId,
-          path: stored.path,
-          change: 'uploaded',
-          by: BROWSER_USER,
-          size: stored.size,
-          mediaType: stored.mediaType,
-          sha256: stored.sha256,
-        }),
-      ])
       return c.json({ file: fileView(stored) }, expected === undefined ? 201 : 200)
-    }),
+    }, 'workspace_upload'),
   )
 
   app.delete(
@@ -304,21 +325,25 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
         return c.json({ detail: 'expected_sha256: a lowercase hex sha256' }, 400)
       }
       let name = filePathOf(c) ?? ''
+      let logged: { events: ServerEvent[]; seqs: number[] } | undefined
       try {
         name = workspacePath(name)
-        if (!(await files.delete(ws, name, expected === undefined ? {} : { expectedSha256: expected }))) {
+        const checked = name
+        const alongside = async (tx: TransactionSql) => {
+          const events = [event({ type: 'workspace.file', sessionId, path: checked, change: 'deleted', by: BROWSER_USER })]
+          logged = { events, seqs: await sessions.events.append(sessionId, events, tx) }
+        }
+        if (!(await files.delete(ws, name, expected === undefined ? { alongside } : { expectedSha256: expected, alongside }))) {
           throw new WorkspaceError('not_found', `no file ${name} in this session's workspace`)
         }
       } catch (err) {
         if (err instanceof WorkspaceError) await auditRefused(c, 'workspace_delete', sessionId, `${JSON.stringify(name.slice(0, 200))}: ${err.code}`)
         throw err
       }
+      if (logged) sessions.events.committed(sessionId, logged.events, logged.seqs)
       await audited(c, 'workspace_delete', sessionId, 'ok', name)
-      await sessions.events.append(sessionId, [
-        event({ type: 'workspace.file', sessionId, path: name, change: 'deleted', by: BROWSER_USER }),
-      ])
       return c.body(null, 204)
-    }),
+    }, 'workspace_delete'),
   )
 }
 
