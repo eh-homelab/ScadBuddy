@@ -75,9 +75,12 @@ class ResetPoints(BaseModel):
     points: list[ResetPoint]
 
 
-def points_of(events: Iterable[HistoryEvent], steps: Sequence[FlowStep]) -> ResetPoints:
+def points_of(
+    events: Iterable[HistoryEvent], steps: Sequence[FlowStep], *, floor: int | None = None
+) -> ResetPoints:
     """The valid points over one execution's whole history: a completed workflow task
-    after `execute` was accepted and before the last event, as `preview_of` says."""
+    after `execute` was accepted and before the last event, as `preview_of` says, and
+    past the run's `floor` (`FlowStore.reset_floor`), which a Reset refuses."""
     completed: list[int] = []
     started = False
     last = 0
@@ -89,7 +92,7 @@ def points_of(events: Iterable[HistoryEvent], steps: Sequence[FlowStep]) -> Rese
             completed.append(event.event_id)
     points = []
     for event_id in completed:
-        if event_id >= last:
+        if event_id >= last or (floor is not None and event_id - 1 <= floor):
             continue
         # The Reset's task is done again: a step started in it or later runs again, and
         # one that ended in it or later is reopened (`FlowStore.reset`'s `redone`).
@@ -104,12 +107,12 @@ def points_of(events: Iterable[HistoryEvent], steps: Sequence[FlowStep]) -> Rese
     return ResetPoints(as_of_event_id=last, points=points)
 
 
-async def reset_points(client: Client, run: Run) -> ResetPoints:
+async def reset_points(client: Client, run: Run, *, floor: int | None = None) -> ResetPoints:
     """The points of the run's current execution, read whole."""
     run_id = (await client.get_workflow_handle(run.workflow_id).describe()).run_id
     handle = client.get_workflow_handle(run.workflow_id, run_id=run_id)
     events = [e async for e in handle.fetch_history_events(page_size=PAGE_SIZE)]
-    found = points_of(events, run.steps)
+    found = points_of(events, run.steps, floor=floor)
     found.workflow_run_id = run_id
     return found
 

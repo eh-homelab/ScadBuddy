@@ -579,7 +579,7 @@ async def flow_reset_points(run_id: str, flows: FlowsDep) -> ResetPoints:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     if flows.client is None:
         raise _unavailable()
-    return await reset_points(flows.client, run)
+    return await reset_points(flows.client, run, floor=await flows.store.reset_floor(run.id))
 
 
 @router.post(

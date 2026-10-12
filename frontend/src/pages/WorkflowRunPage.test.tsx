@@ -1,4 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
+import { http } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
@@ -10,6 +11,7 @@ import {
   setFlowRunStarting,
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
+import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { WorkflowRunPage } from './WorkflowRunPage'
 
@@ -187,6 +189,27 @@ describe('WorkflowRunPage, #2350', () => {
       },
     ])
     await waitFor(() => expect(screen.getByTestId('flow-run-status')).toHaveTextContent('Running'))
+  })
+
+  it('shows the preview of the point chosen last, though an earlier one answers after it', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/workflow-runs/:id/reset-preview', async ({ request }) => {
+        // Held, then answered by the feature's own handler.
+        if (new URL(request.url).searchParams.get('event_id') === '11') await held
+      }),
+    )
+    const { user } = render('run-done')
+    await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
+    const point = await screen.findByRole('combobox', { name: 'Reset point' })
+    await user.selectOptions(point, 'Event 11: before step 1 (render)')
+    await user.selectOptions(point, 'Event 31: before step 3 (sleep)')
+    await screen.findByRole('list', { name: 'Calls that run again' })
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const again = screen.getByRole('list', { name: 'Calls that run again' })
+    expect(within(again).getAllByRole('listitem').map((i) => i.textContent)).toEqual(['#3 sleep'])
   })
 
   it('a point past every step runs nothing again', async () => {

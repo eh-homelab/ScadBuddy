@@ -1,6 +1,6 @@
 import { Link, NavLink, useSearchParams } from 'react-router'
 import { api } from '../api/client'
-import type { FlowRun, FlowSummary } from '../api/types'
+import type { FlowRun } from '../api/types'
 import { timeAgo } from '../lib/format'
 import {
   actorText,
@@ -88,17 +88,6 @@ function Runs() {
   )
 }
 
-/** Each flow by name: its latest version, and who registered that and when. */
-function latestByName(versions: FlowSummary[]): { latest: FlowSummary; count: number }[] {
-  const byName = new Map<string, { latest: FlowSummary; count: number }>()
-  for (const v of versions) {
-    const seen = byName.get(v.name)
-    if (!seen) byName.set(v.name, { latest: v, count: 1 })
-    else byName.set(v.name, { latest: v.version > seen.latest.version ? v : seen.latest, count: seen.count + 1 })
-  }
-  return [...byName.values()].sort((a, b) => a.latest.name.localeCompare(b.latest.name))
-}
-
 function Flows() {
   const flows = useAsync(() => api.listFlows(), [])
   if (flows.error) {
@@ -109,22 +98,19 @@ function Flows() {
     )
   }
   if (!flows.data) return <p className="text-[13px] text-muted">Loading…</p>
-  const named = latestByName(flows.data)
-  if (named.length === 0) {
+  // `GET /workflows` is each name's newest version, by name.
+  if (flows.data.length === 0) {
     return <p className="text-[13px] text-muted">No flows registered yet. An assistant registers one with register_flow.</p>
   }
   return (
     <ul aria-label="Flows" className="divide-y divide-line rounded-[8px] border border-line">
-      {named.map(({ latest, count }) => (
+      {flows.data.map((latest) => (
         <li key={latest.name} data-flow={latest.name} className="px-3 py-2.5">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
             <Link to={flowPath(latest.id)} className="text-[13px] font-medium hover:underline">
               {latest.name}
             </Link>
-            <span className="text-[12px] text-muted">
-              v{latest.version}
-              {count > 1 ? ` · ${count} versions` : ''}
-            </span>
+            <span className="text-[12px] text-muted">latest v{latest.version}</span>
             <span className="ml-auto text-[12px] text-faint">{timeAgo(latest.created_at)}</span>
           </div>
           <p className="mt-0.5 text-[12.5px] text-muted">Registered by {actorText(latest.created_by)}</p>

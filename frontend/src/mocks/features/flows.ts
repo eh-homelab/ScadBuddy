@@ -15,7 +15,8 @@ import type {
  * backend's 409 `stale-entry`. Every answer, decision, start, reset and delete is kept,
  * with its `Idempotency-Key`, for tests (`flowRequests`).
  *
- * #2350 — the registered flows (`GET /workflows`, `GET /workflows/{id}`), a run started
+ * #2350 — the registered flows (`GET /workflows`, newest of each name; `GET /workflows/{id}`;
+ * #2503's `GET /workflows/names/{name}/versions`), a run started
  * from one, a run forgotten, and its reset points, preview and Reset. A step's reset
  * point is its `history_length + 1`, which runs it and every later step again; one more
  * after the last ended step runs none again.
@@ -214,6 +215,9 @@ function respond(outcome: (body: Record<string, unknown>) => string) {
   }
 }
 
+const newestFirst = (name: string) =>
+  definitions.filter((d) => d.name === name).sort((a, b) => b.version - a.version)
+
 const AS_OF = 100
 
 function points(found: FlowRun): FlowResetPoints {
@@ -253,9 +257,31 @@ async function keep(request: Request): Promise<Record<string, unknown>> {
 }
 
 export const handlers = [
+  // As `FlowStore.list_definitions`: each name's newest version only, by name.
   http.get('/api/v1/workflows', () =>
-    HttpResponse.json(definitions.map(({ script: _script, ...summary }) => summary)),
+    HttpResponse.json(
+      [...new Set(definitions.map((d) => d.name))].sort().map((name) => {
+        const { script: _script, ...summary } = newestFirst(name)[0]!
+        return summary
+      }),
+    ),
   ),
+  http.get('/api/v1/workflows/names/:name/versions', ({ params }) => {
+    const versions = newestFirst(String(params['name']))
+    if (versions.length === 0) return notFound('No such flow.')
+    return HttpResponse.json(
+      versions.map((d, i) => ({
+        id: d.id,
+        commit: `c0ffee${d.version}`.padEnd(40, '0'),
+        short: `c0ffee${d.version}`,
+        version: d.version,
+        message: `flow ${d.name} v${d.version}`,
+        created_by: d.created_by,
+        created_at: d.created_at,
+        current: i === 0,
+      })),
+    )
+  }),
   http.get('/api/v1/workflows/:id', ({ params }) => {
     const found = definitions.find((d) => d.id === params['id'])
     return found ? HttpResponse.json(found) : notFound('No such flow.')

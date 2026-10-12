@@ -140,6 +140,8 @@ export type FlowDecided = Schemas['Decided']
 /** #2350 — a registered flow version, with and without its script. */
 export type FlowDefinition = Schemas['Definition']
 export type FlowSummary = Schemas['DefinitionSummary']
+/** #2503 — one version of a flow's git history. */
+export type FlowVersion = Schemas['FlowVersion']
 export type FlowRunStarted = Schemas['RunAnswer']
 export type FlowResetPoints = Schemas['ResetPoints']
 export type FlowResetPreview = Schemas['ResetPreview']

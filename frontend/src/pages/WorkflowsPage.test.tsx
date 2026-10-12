@@ -54,10 +54,12 @@ describe('WorkflowsPage', () => {
     const flows = await screen.findByRole('list', { name: 'Flows' })
     const plates = flows.querySelector<HTMLElement>('[data-flow="plates"]')!
     expect(within(plates).getByRole('link', { name: 'plates' })).toHaveAttribute('href', '/workflows/flows/def-plates-2')
-    expect(plates).toHaveTextContent('v2 · 2 versions')
+    expect(plates).toHaveTextContent('latest v2')
+    // `GET /workflows` is each name's newest version: one row per flow.
+    expect(within(flows).getAllByRole('listitem')).toHaveLength(2)
     expect(plates).toHaveTextContent('Registered by you, in the browser')
     const swap = flows.querySelector<HTMLElement>('[data-flow="swap"]')!
-    expect(swap).toHaveTextContent('v1')
+    expect(swap).toHaveTextContent('latest v1')
     expect(swap).toHaveTextContent('Registered by an assistant (session sess-1)')
     expect(screen.getByRole('link', { name: 'Flows' })).toHaveAttribute('aria-current', 'page')
   })

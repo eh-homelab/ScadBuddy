@@ -217,6 +217,18 @@ def test_the_reset_points_are_the_valid_points_with_the_first_step_each_runs_aga
     assert reopened[before_second] == 1
 
 
+def test_the_reset_points_leave_out_those_before_the_runs_floor() -> None:
+    """A Reset refuses a point at or before the run's floor (`check_reset`), so the list
+    does not offer one."""
+    events = _events()
+    _, second = _sends(events)
+    floor = _task_before(events, second.event_id) - 1
+    every = [p.event_id for p in points_of(events, []).points]
+    offered = [p.event_id for p in points_of(events, [], floor=floor).points]
+    assert offered == [e for e in every if e - 1 > floor]
+    assert 0 < len(offered) < len(every)
+
+
 @pytest.mark.requires_temporal
 @pytest.mark.requires_postgres
 async def test_two_prints(outward: Outward) -> None:

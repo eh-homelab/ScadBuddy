@@ -89,6 +89,7 @@ import type {
   FlowRunStarted,
   FlowRunView,
   FlowSummary,
+  FlowVersion,
   Operation,
   OperationAccepted,
   PrintRunRequest,
@@ -695,11 +696,10 @@ export const api = {
   listFlows: () => request<FlowSummary[]>('/workflows'),
 
   /**
-   * One flow's versions, newest first. The one place the page reads them from: when
-   * flows move to git (#2503), this is the line that changes to the git-backed route.
+   * One flow's versions, newest first: the one place the page reads them from, its git
+   * history (#2503). `GET /workflows` lists only each name's newest version.
    */
-  listFlowVersions: async (name: string) =>
-    (await request<FlowSummary[]>('/workflows')).filter((f) => f.name === name).sort((a, b) => b.version - a.version),
+  listFlowVersions: (name: string) => request<FlowVersion[]>(`/workflows/names/${seg(name)}/versions`),
 
   getFlow: (id: string) => request<FlowDefinition>(`/workflows/${seg(id)}`),
 

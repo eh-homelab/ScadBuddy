@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { FlowResetPreview, FlowStep } from '../../api/types'
 import { USER_ONLY } from '../../agent/dom'
@@ -58,6 +58,7 @@ export function ResetPanel({ runId, steps, onReset }: { runId: string; steps: Fl
 function ResetChooser({ runId, steps, onReset }: { runId: string; steps: FlowStep[]; onReset: () => void }) {
   const points = useAsync(() => api.getFlowResetPoints(runId), [runId])
   const [eventId, setEventId] = useState<number>()
+  const chosen = useRef<number | undefined>(undefined)
   const [preview, setPreview] = useState<FlowResetPreview>()
   const [previewError, setPreviewError] = useState<string>()
   const [notice, setNotice] = useState<string>()
@@ -70,14 +71,17 @@ function ResetChooser({ runId, steps, onReset }: { runId: string; steps: FlowSte
   const outward = again?.filter((a) => a.outward) ?? []
 
   async function choose(next: number) {
+    chosen.current = next
     setEventId(next)
     setPreview(undefined)
     setPreviewError(undefined)
     setNotice(undefined)
     try {
-      setPreview(await api.previewFlowReset(runId, next))
+      const read = await api.previewFlowReset(runId, next)
+      // A preview of a point chosen before this one, answered late, is not shown.
+      if (chosen.current === next) setPreview(read)
     } catch (caught) {
-      setPreviewError(caught instanceof ApiError ? caught.detail : String(caught))
+      if (chosen.current === next) setPreviewError(caught instanceof ApiError ? caught.detail : String(caught))
     }
   }
 
@@ -88,6 +92,7 @@ function ResetChooser({ runId, steps, onReset }: { runId: string; steps: FlowSte
     try {
       await api.resetFlowRun(runId, preview)
       setConfirming(false)
+      chosen.current = undefined
       setPreview(undefined)
       setEventId(undefined)
       setNotice('Reset. The run continues from that point.')
@@ -102,10 +107,12 @@ function ResetChooser({ runId, steps, onReset }: { runId: string; steps: FlowSte
         setNotice(caught.detail)
         if (next) setPreview(next)
         else {
+          chosen.current = undefined
           setPreview(undefined)
           setEventId(undefined)
-          points.refresh()
         }
+        // Read with it, so what runs again is labelled from the same history.
+        points.refresh()
       } else {
         setError(caught instanceof ApiError ? caught.detail : String(caught))
       }

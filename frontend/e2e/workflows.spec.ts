@@ -40,7 +40,7 @@ for (const { name, viewport } of [
       await page.getByRole('navigation', { name: 'Workflows' }).getByRole('link', { name: 'Flows' }).click()
       await expect(page).toHaveURL(/\/workflows\/flows$/)
       const plates = page.locator('[data-flow="plates"]')
-      await expect(plates).toContainText('v2 · 2 versions')
+      await expect(plates).toContainText('latest v2')
       await expect(plates).toContainText('Registered by you, in the browser')
       await noSideScroll(page)
 
