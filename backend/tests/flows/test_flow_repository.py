@@ -135,3 +135,46 @@ def test_a_repository_with_no_commit_has_no_versions(tmp_path: Path) -> None:
     root.mkdir()
     subprocess.run(["git", "init", "-q", str(root)], env=git_env(), check=True)
     assert FlowHistory(root).commits() == []
+
+
+def test_a_delete_is_one_commit_removing_the_flow_and_its_history_stays(
+    history: FlowHistory,
+) -> None:
+    _, first, _ = register(history, "swap", ONE)
+    _, second, _ = register(history, "swap", TWO)
+    register(history, "other", ONE)
+    recorded: list[str] = []
+    with authored_as(AgentAuthor(principal="token:p1", session="s1")):
+        deleted = history.delete("swap", recorded.append)
+    assert deleted is not None and deleted == history.head() and recorded == [deleted]
+    assert not (history.root / "swap").exists()
+    assert (history.root / "other" / "flow.py").exists()
+    [revision] = history.log("swap", limit=1)
+    assert (revision.author, revision.message) == (AGENT_AUTHOR_NAME, "Delete swap")
+    trailers = history._out("log", "-1", "--format=%(trailers:only)")
+    assert "ScadBuddy-Flow-Deleted: swap" in trailers
+    assert "ScadBuddy-Agent-Principal: token:p1" in trailers
+    # Not a version: the history lists the two, and each one's script is still there.
+    assert [v.commit for v in history.versions("swap")] == [second, first]
+    assert history.script_at("swap", first) == ONE
+    # Deleting it again commits nothing, and records the delete that removed it.
+    assert history.delete("swap", recorded.append) == deleted
+    assert history.head() == deleted and recorded == [deleted, deleted]
+
+
+def test_a_deleted_flow_is_restored_as_its_next_version(history: FlowHistory) -> None:
+    _, first, _ = register(history, "swap", ONE)
+    register(history, "swap", TWO)
+    history.delete("swap", lambda _c: None)
+    restored, version = history.register(
+        "swap", str(uuid.uuid4()), lambda c, v: None, restore=first
+    )
+    assert version == 3 and restored == history.head()
+    assert (history.root / "swap" / "flow.py").read_text() == ONE
+    _, _, again = register(history, "swap", TWO)
+    assert again == 4
+
+
+def test_deleting_a_flow_with_no_version_is_refused(history: FlowHistory) -> None:
+    with pytest.raises(RevisionNotFoundError):
+        history.delete("nothing", lambda _c: None)

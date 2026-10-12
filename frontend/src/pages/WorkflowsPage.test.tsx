@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
-import { setFlowDefinitions, setFlowRuns } from '../mocks/features/flows'
+import { flowRequests, setFlowDefinitions, setFlowRuns, setFlowState } from '../mocks/features/flows'
 import { renderPage } from '../test/utils'
 import { WorkflowsPage } from './WorkflowsPage'
 
@@ -20,6 +20,7 @@ function render(route = '/workflows') {
 
 const list = () => screen.findByRole('list', { name: 'Flow runs' })
 const row = (id: string) => document.querySelector<HTMLElement>(`[data-run="${id}"]`)!
+const flowRow = (name: string) => document.querySelector<HTMLElement>(`[data-flow="${name}"]`)
 
 describe('WorkflowsPage', () => {
   it('lists each run with its flow and version, its status and what it waits on', async () => {
@@ -62,6 +63,57 @@ describe('WorkflowsPage', () => {
     expect(swap).toHaveTextContent('latest v1')
     expect(swap).toHaveTextContent('Registered by an assistant (session sess-1)')
     expect(screen.getByRole('link', { name: 'Flows' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('archives a flow from the Flows tab, after saying what happens to its runs, and shows it again (#2485)', async () => {
+    const { user } = renderPage(<WorkflowsPage tab="flows" />)
+    const flows = await screen.findByRole('list', { name: 'Flows' })
+    const swap = () => flowRow('swap')
+    await user.click(within(swap()!).getByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive swap?' })
+    expect(dialog).toHaveTextContent('Runs in progress keep running')
+    await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    await waitFor(() => expect(swap()).toBeNull())
+    expect(within(flows).getAllByRole('listitem')).toHaveLength(1)
+
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await waitFor(() => expect(swap()).not.toBeNull())
+    expect(swap()).toHaveTextContent('Archived by you, in the browser')
+    await user.click(within(swap()!).getByRole('button', { name: 'Unarchive' }))
+    await waitFor(() => expect(swap()).not.toHaveTextContent('Archived'))
+    expect(flowRequests().map((r) => r.path)).toEqual([
+      '/api/v1/workflows/names/swap/archive',
+      '/api/v1/workflows/names/swap/unarchive',
+    ])
+  })
+
+  it('deletes a flow from the Flows tab and restores it as its next version (#2485)', async () => {
+    const { user } = renderPage(<WorkflowsPage tab="flows" />)
+    const flows = await screen.findByRole('list', { name: 'Flows' })
+    const plates = () => flowRow('plates')
+    expect(flows).toBeInTheDocument()
+    await user.click(within(plates()!).getByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete plates?' })
+    expect(dialog).toHaveTextContent('Runs in progress keep running on the version they started with')
+    expect(dialog).toHaveTextContent('Finished runs still show the script they ran')
+    await user.click(within(dialog).getByRole('button', { name: 'Delete flow' }))
+    await waitFor(() => expect(plates()).toBeNull())
+
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await waitFor(() => expect(plates()).toHaveTextContent('Deleted by you, in the browser'))
+    expect(within(plates()!).queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+    await user.click(within(plates()!).getByRole('button', { name: 'Restore v2' }))
+    await waitFor(() => expect(plates()).toHaveTextContent('latest v3'))
+    expect(plates()).not.toHaveTextContent('Deleted')
+  })
+
+  it('lists archived and deleted flows only when asked (#2485)', async () => {
+    setFlowState({ name: 'swap', archived_at: '2026-10-12T00:00:00Z', archived_by: { kind: 'agent', session: 's9' } })
+    const { user } = renderPage(<WorkflowsPage tab="flows" />)
+    const flows = await screen.findByRole('list', { name: 'Flows' })
+    expect(flows.querySelector('[data-flow="swap"]')).toBeNull()
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await waitFor(() => expect(flowRow('swap')).toHaveTextContent('Archived by an assistant (session s9)'))
   })
 
   it('says when no flow is registered', async () => {

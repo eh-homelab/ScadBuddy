@@ -17,8 +17,15 @@ from typing import Any
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.flows.backfill import backfill, backfill_locked, created_by
-from scadbuddy.flows.models import Definition, DefinitionSummary, FlowDiff, FlowVersion
+from scadbuddy.flows.models import (
+    Definition,
+    DefinitionSummary,
+    FlowDiff,
+    FlowState,
+    FlowVersion,
+)
 from scadbuddy.flows.repository import FlowHistory
+from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 
 logger = logging.getLogger(__name__)
@@ -37,9 +44,10 @@ class ScriptMissingError(Exception):
 
 
 class FlowDefinitions:
-    def __init__(self, history: FlowHistory, store: FlowStore) -> None:
+    def __init__(self, history: FlowHistory, store: FlowStore, states: FlowStates) -> None:
         self.history = history
         self.store = store
+        self.states = states
 
     # -- start ------------------------------------------------------------------
 
@@ -104,6 +112,8 @@ class FlowDefinitions:
                     approval_timeout_s=approval_timeout_s,
                 )
             )
+            # A new version of a deleted flow brings it back (#2485).
+            self.states.revive(name)
 
         commit, _ = self.history.register(
             name,
@@ -114,8 +124,51 @@ class FlowDefinitions:
             reconcile=lambda: backfill_locked(self.history, self.store),
         )
         return Definition.model_validate(
-            {**rows[0].model_dump(), "script": self.history.script_at(name, commit)}
+            {
+                **rows[0].model_dump(),
+                **self._flags(self.states.state(name)),
+                "script": self.history.script_at(name, commit),
+            }
         )
+
+    async def archive(self, name: str, by: dict[str, Any]) -> FlowState:
+        """Archive every version of ``name`` (#2485): hidden by default, never started.
+        :class:`UnknownFlowError` for a name with no version."""
+        return await asyncio.to_thread(self._archive, name, by)
+
+    def _archive(self, name: str, by: dict[str, Any]) -> FlowState:
+        if not self.states.exists(name):
+            raise UnknownFlowError(name)
+        return self.states.archive(name, by)
+
+    async def unarchive(self, name: str) -> FlowState:
+        return await asyncio.to_thread(self._unarchive, name)
+
+    def _unarchive(self, name: str) -> FlowState:
+        if not self.states.exists(name):
+            raise UnknownFlowError(name)
+        return self.states.unarchive(name)
+
+    async def delete(self, name: str, by: dict[str, Any]) -> FlowState:
+        """Delete ``name`` (#2485): one commit removing ``<name>/``, recorded under the
+        repository's write lock. Its versions' rows and commits stay, so a run still
+        reads the script it ran, and a restore of a version brings it back. A flow
+        deleted already is answered as it is."""
+        return await asyncio.to_thread(self._delete, name, by)
+
+    def _delete(self, name: str, by: dict[str, Any]) -> FlowState:
+        self._require()
+        if not self.states.exists(name):
+            raise UnknownFlowError(name)
+        recorded: list[FlowState] = []
+        self.history.delete(
+            name, lambda commit: recorded.append(self.states.mark_deleted(name, by, commit))
+        )
+        return recorded[0]
+
+    @staticmethod
+    def _flags(state: FlowState) -> dict[str, Any]:
+        return state.model_dump(include={"archived_at", "archived_by", "deleted_at", "deleted_by"})
 
     # -- reads ------------------------------------------------------------------
 
@@ -136,11 +189,14 @@ class FlowDefinitions:
             except RevisionNotFoundError:
                 raise ScriptMissingError(row.commit) from None
         assert script is not None
-        return Definition.model_validate({**row.model_dump(), "script": script})
+        return Definition.model_validate(
+            {**row.model_dump(), **self._flags(self.states.state(row.name)), "script": script}
+        )
 
-    async def flows(self) -> list[DefinitionSummary]:
-        """Each flow at its newest version, by name."""
-        return await self.store.list_definitions()
+    async def flows(self, *, hidden: bool = False) -> list[DefinitionSummary]:
+        """Each flow at its newest version, by name; archived and deleted ones too when
+        ``hidden`` (#2485)."""
+        return await asyncio.to_thread(self.states.newest, hidden=hidden)
 
     async def versions(self, name: str, *, limit: int) -> list[FlowVersion]:
         """The flow's history, newest first, from git. :class:`UnknownFlowError` for a
