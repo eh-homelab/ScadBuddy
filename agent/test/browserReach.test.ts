@@ -93,6 +93,29 @@ describe('UiOriginProbe', () => {
     expect(open.hits.length).toBe(before + 2)
   })
 
+  it('keeps an unreachable answer for less than a good one (#2155)', async () => {
+    let now = 1_000
+    let fail = true
+    const flaky = await serve((_req, res) => res.writeHead(fail ? 503 : 200).end())
+    try {
+      const probe = new UiOriginProbe({ ttlMs: 30_000, failureTtlMs: 5_000, now: () => now })
+      expect((await probe.probe([flaky.origin]))[flaky.origin]).toEqual({ reach: 'unreachable', detail: 'answered 503' })
+      fail = false
+      now += 4_000
+      await probe.probe([flaky.origin])
+      expect(flaky.hits).toHaveLength(1)
+      now += 1_001
+      expect((await probe.probe([flaky.origin]))[flaky.origin]).toEqual({ reach: 'ok' })
+      expect(flaky.hits).toHaveLength(2)
+      // A good answer is kept for the full time to live.
+      now += 29_000
+      await probe.probe([flaky.origin])
+      expect(flaky.hits).toHaveLength(2)
+    } finally {
+      await flaky.close()
+    }
+  })
+
   it('shares one request among concurrent turns', async () => {
     const probe = new UiOriginProbe()
     const before = open.hits.length

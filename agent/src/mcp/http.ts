@@ -305,11 +305,14 @@ export function mountMcp(
 
   /** Sessions by `hash`, for the requests other replicas relay here. */
   const byHash = new Map<string, string>()
+  /** Sessions served here whose directory row could not be written: `counts` cannot see them (#2213). */
+  const unregistered = new Set<string>()
   const relay = deps.relay
 
   async function end(id: string): Promise<void> {
     const session = sessions.get(id)
     sessions.delete(id)
+    unregistered.delete(id)
     if (!session) return
     byHash.delete(session.hash)
     session.detach()
@@ -379,7 +382,17 @@ export function mountMcp(
   async function openSessions(key: string): Promise<{ total: number; caller: number }> {
     if (relay) {
       try {
-        return await relay.counts(key, idleSessionMs)
+        const counted = await relay.counts(key, idleSessionMs)
+        // Plus this replica's sessions that have no row, which no replica counts.
+        let total = counted.total
+        let caller = counted.caller
+        for (const id of unregistered) {
+          const session = sessions.get(id)
+          if (!session) continue
+          total += 1
+          if (session.callerKey === key) caller += 1
+        }
+        return { total, caller }
       } catch (err) {
         console.error(`mcp: counting sessions failed, counting this replica's: ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -479,6 +492,7 @@ export function mountMcp(
         // Before the initialize answer leaves: the client's next request may
         // reach another replica, which finds the session by this row.
         await relay?.register(hash, key).catch((err: unknown) => {
+          unregistered.add(sid)
           console.error(`mcp: recording a session for other replicas failed; it is served here only: ${err instanceof Error ? err.message : String(err)}`)
         })
       },

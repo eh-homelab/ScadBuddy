@@ -104,7 +104,7 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'projects',
     label: 'Read at most this many triangles from a library file',
     kind: 'count',
-    help: 'For Arrange, and a library file’s preview and print checks: a file that expands to more is refused, saying which limit it passed. Every copy an object’s components place counts. At most 10,000,000; one request may ask for its own.',
+    help: 'For Arrange, and a library file’s preview and print checks. 0 (the default) is no limit: any file is read, however large, so a huge one can use all of the server’s memory. Any other number refuses a file that expands to more, saying so. Every copy an object’s components place counts; one request may ask for its own.',
     advanced: true,
   },
   {

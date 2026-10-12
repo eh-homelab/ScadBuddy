@@ -66,6 +66,16 @@ type ScenarioReport = {
 }
 const reports: ScenarioReport[] = []
 
+// One scenario's whole budget, and the vitest timeout derived from it (#2110).
+// The run may take its 300 s abort and a real render's collection its 180 s,
+// so the test has room for both; `budgetMs` still cuts the collection to what
+// is left, so a scenario that runs long is reported (with its unsettled render)
+// rather than killed by vitest before `reports.push`.
+const RUN_TIMEOUT_MS = 300_000
+const REPORT_MARGIN_MS = 20_000
+const SCENARIO_BUDGET_MS = RUN_TIMEOUT_MS + 180_000
+const TEST_TIMEOUT_MS = SCENARIO_BUDGET_MS + REPORT_MARGIN_MS
+
 function citationReport(reply: string): Pick<ScenarioReport, 'citations'> {
   const scores = scoreCitations(reply)
   if (!scores.length) return {}
@@ -142,8 +152,10 @@ describe.skipIf(skip !== undefined)(`live evals${skip ? ` (skipped: ${skip})` : 
               paths: { stateDir },
               credential: found.credential,
               ...(found.model ? { model: found.model } : {}),
+              timeoutMs: RUN_TIMEOUT_MS,
+              budgetMs: SCENARIO_BUDGET_MS,
               // A real render takes seconds, not the recorded backend's none.
-              ...(real ? { renderWaitMs: 120_000, collect: { pollMs: 1000, deadlineMs: 180_000 } } : {}),
+              ...(real ? { renderWaitMs: 120_000, collect: { pollMs: 1000, deadlineMs: SCENARIO_BUDGET_MS - RUN_TIMEOUT_MS } } : {}),
             },
             ...(real ? [new RealBackend(real)] : []),
           )
@@ -153,7 +165,7 @@ describe.skipIf(skip !== undefined)(`live evals${skip ? ` (skipped: ${skip})` : 
         const checks = score(scenario, outcome)
         report('classic', scenario, outcome, checks, real ?? 'recorded')
         expect(checks.filter((c) => !c.pass)).toEqual([])
-      }, 360_000)
+      }, TEST_TIMEOUT_MS)
     }
   })
 
@@ -183,13 +195,13 @@ describe.skipIf(skip !== undefined)(`live evals${skip ? ` (skipped: ${skip})` : 
         const real = scenario.realBackend && backendUrl ? backendUrl : undefined
         const outcome = await stack.run(
           scenario,
-          { timeoutMs: 300_000, ...(real ? { collect: { pollMs: 1000, deadlineMs: 180_000 } } : {}) },
+          { timeoutMs: RUN_TIMEOUT_MS, ...(real ? { collect: { pollMs: 1000, deadlineMs: SCENARIO_BUDGET_MS - RUN_TIMEOUT_MS } } : {}) },
           ...(real ? [new RealBackend(real)] : []),
         )
         const checks = score(scenario, outcome)
         report('durable', scenario, outcome, checks, real ?? 'recorded')
         expect(checks.filter((c) => !c.pass)).toEqual([])
-      }, 360_000)
+      }, TEST_TIMEOUT_MS)
     }
   })
 })

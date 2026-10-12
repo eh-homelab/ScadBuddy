@@ -190,6 +190,24 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(seen.filter((a) => a.action === 'recall')).toHaveLength(1)
   })
 
+  it('does not reuse a failed recall: a rerun of the same message asks the bank again (#2144)', async () => {
+    fake.memories = ['The user prints in PETG.']
+    let calls = 0
+    fake.respond = () => (++calls === 1 ? { status: 500, text: 'busy' } : undefined)
+    const h = hooks()
+    const recall = h.hooks.UserPromptSubmit?.[0]?.hooks[0]
+    expect(await call(recall, prompt('Make a box'))).toEqual({})
+    // Another prompt still continues the message and asks nothing.
+    expect(await call(recall, prompt('Continue where you left off.'))).toEqual({})
+    const rerun = await call(recall, prompt('Make a box'))
+    expect((rerun as { hookSpecificOutput?: unknown }).hookSpecificOutput).toBeDefined()
+    // Once one answered, it is reused as before.
+    expect(await call(recall, prompt('Make a box'))).toEqual(rerun)
+    expect(await call(recall, prompt('Continue where you left off.'))).toEqual({})
+    await h.settled()
+    expect(fake.recalls()).toHaveLength(2)
+  })
+
   it('uses a fixed recallQuery, tags and budget when configured, and injects nothing for no results', async () => {
     const h = hooks({
       budget: 'low',

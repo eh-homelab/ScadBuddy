@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { mkdtemp } from 'node:fs/promises'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { mkdtemp, readdir, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -15,10 +16,12 @@ import {
   DISALLOWED_BROWSER_TOOLS,
   disallowedBrowserTools,
   materializeHeadlessBrowser,
+  NO_DOWNLOADS,
   originToApprove,
   PLAYWRIGHT_MCP_VERSION,
   playwrightMcpCli,
   redirectGuardSource,
+  SPOOL_OVER_BYTES,
   TOOL_PREFIX,
   VENDORED_PLUGIN_DIR,
 } from '../src/harness/headlessBrowser.js'
@@ -353,10 +356,12 @@ describe('the per-session plugin', () => {
         isolated: boolean
         userDataDir?: string
         launchOptions: { headless: boolean }
-        contextOptions: { extraHTTPHeaders?: Record<string, string> }
+        contextOptions: { extraHTTPHeaders?: Record<string, string>; acceptDownloads: boolean }
       }
     }
     const config = JSON.parse(readFileSync(configFile, 'utf8')) as Config
+    // #2329: downloads are accepted, and drained into the session's workspace.
+    expect(config.browser.contextOptions.acceptDownloads).toBe(true)
     expect(config.network).toEqual({ allowedOrigins: [ORIGIN] })
     expect(config.browser.isolated).toBe(true)
     expect(config.browser.userDataDir).toBeUndefined()
@@ -392,10 +397,187 @@ describe('the per-session plugin', () => {
     const guard = readFileSync(config.browser.initPage![0]!, 'utf8')
     expect(guard).toContain(`const UI = ${JSON.stringify([ORIGIN])}`)
     expect(guard).toContain(`const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}`)
-    expect(guard).toContain('maxRedirects: 0')
+    expect(guard).toContain("redirect: 'manual'")
     const approvedFile = path.join(dir, 'approved-origins.json')
-    expect(guard).toBe(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile }))
+    expect(guard).toBe(
+      redirectGuardSource({
+        ui: [ORIGIN],
+        sessionId,
+        approvedFile,
+        downloadsDir: path.join(dir, 'downloads'),
+        budgetFile: path.join(dir, 'download-budget.json'),
+        outputDir: path.join(dir, 'output'),
+        spoolDir: path.join(dir, 'spool'),
+      }),
+    )
+    // No download may run until the harness writes a budget before a browser call.
+    expect(JSON.parse(readFileSync(path.join(dir, 'download-budget.json'), 'utf8'))).toEqual(NO_DOWNLOADS)
+    // #2329: it saves each page's downloads where the harness drains them.
+    expect(guard).toContain(`const DOWNLOADS = ${JSON.stringify(path.join(dir, 'downloads'))}`)
+    expect(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile })).toContain('const DOWNLOADS = null')
     expect(JSON.parse(readFileSync(approvedFile, 'utf8'))).toEqual([])
+  })
+
+  it('deletes and writes only paths it built inside its own directories (traversal, absolute names, symlinks)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-own-'))
+    const outputDir = path.join(dir, 'output')
+    const downloadsDir = path.join(dir, 'downloads')
+    mkdirSync(outputDir)
+    mkdirSync(downloadsDir)
+    const outside = path.join(dir, 'outside.txt')
+    writeFileSync(outside, 'keep me')
+    const guardFile = path.join(dir, 'guard.cjs')
+    writeFileSync(guardFile, redirectGuardSource({ ui: [ORIGIN], sessionId: 's', approvedFile: path.join(dir, 'a.json'), downloadsDir, budgetFile: path.join(dir, 'b.json'), outputDir }))
+    type Own = {
+      ownPath: (dir: string, name: string) => string | null
+      removeOwn: (dir: string, name: string) => boolean
+      plainSize: (file: string) => number
+      dropServerCopy: (suggested: string) => void
+      serverName: (suggested: string) => string
+    }
+    const own = (createRequire(import.meta.url)(guardFile) as { ownFiles: Own }).ownFiles
+    for (const name of ['../outside.txt', '..', '.', '', outside, 'a/../../outside.txt', '..\\outside.txt']) {
+      expect(own.ownPath(outputDir, name)).toBeNull()
+      expect(own.removeOwn(outputDir, name)).toBe(false)
+    }
+    // A suggested name from the page goes through the server's sanitiser: no separator survives it.
+    for (const suggested of ['../outside.txt', '../../outside.txt', outside, '/etc/passwd', '..']) {
+      expect(own.serverName(suggested)).not.toMatch(/[/\\]/)
+      own.dropServerCopy(suggested)
+    }
+    // A symlink planted under the very name the server would use is unlinked, never followed.
+    const planted = path.join(outputDir, own.serverName('part.stl'))
+    symlinkSync(outside, planted)
+    expect(own.plainSize(planted)).toBe(0)
+    own.dropServerCopy('part.stl')
+    expect(existsSync(planted) || isLink(planted)).toBe(false)
+    // A link to a directory outside, under a download's own name, too.
+    symlinkSync(dir, path.join(downloadsDir, 'x.bin'))
+    expect(own.removeOwn(downloadsDir, 'x.bin')).toBe(true)
+    expect(readFileSync(outside, 'utf8')).toBe('keep me')
+    expect(existsSync(guardFile)).toBe(true)
+  })
+
+  describe('reading a body (#2401)', () => {
+    const CHUNK = 64 * 1024
+    type Reply = { over: string | null; limit: number; body?: Buffer; spooled?: string }
+    type Route = { fulfill(options: { status: number; headers: Record<string, string>; body: Buffer }): Promise<void> }
+    type Bodies = {
+      readBounded: (request: { isNavigationRequest(): boolean }, fetched: unknown) => Promise<Reply>
+      fulfillRead: (route: Route, status: number, headers: Record<string, string>, reply: Reply) => Promise<void>
+    }
+    async function guardFor(fileMaxBytes = 0) {
+      const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-spool-'))
+      const spoolDir = path.join(dir, 'spool')
+      mkdirSync(spoolDir)
+      const budgetFile = path.join(dir, 'budget.json')
+      writeFileSync(budgetFile, JSON.stringify({ ...NO_DOWNLOADS, fileMaxBytes }))
+      const guardFile = path.join(dir, 'guard.cjs')
+      writeFileSync(guardFile, redirectGuardSource({ ui: [ORIGIN], sessionId: 's', approvedFile: path.join(dir, 'a.json'), budgetFile, spoolDir }))
+      const { bodies } = createRequire(import.meta.url)(guardFile) as { bodies: Bodies }
+      return { dir, spoolDir, bodies }
+    }
+    /**
+     * A response of `total` bytes (endless when undefined), 64 KiB a pull, as
+     * boundedFetch hands it on; `pulled` is how far the guard read, and
+     * `seen(n)` runs once the stream has given out more than n bytes.
+     */
+    function streamed(contentType: string, total?: number, seen?: { after: number; run: () => void }) {
+      const state = { pulled: 0, aborted: false }
+      const stream = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (total !== undefined && state.pulled >= total) return controller.close()
+            if (seen && state.pulled > seen.after) seen.run()
+            const n = total === undefined ? CHUNK : Math.min(CHUNK, total - state.pulled)
+            state.pulled += n
+            controller.enqueue(new Uint8Array(n).fill(0x61))
+          },
+        },
+        { highWaterMark: 0 },
+      )
+      const fetched = {
+        status: 200,
+        headers: { 'content-type': contentType },
+        response: new Response(stream),
+        abort: () => (state.aborted = true),
+        timer: setTimeout(() => {}, 0),
+      }
+      return { fetched, state }
+    }
+    const page = { isNavigationRequest: () => false }
+    const navigation = { isNavigationRequest: () => true }
+    const captured = () => {
+      const bodies: Buffer[] = []
+      return { bodies, route: { fulfill: async (o: { body: Buffer }) => void bodies.push(o.body) } }
+    }
+
+    it('keeps a body up to the spool threshold in memory and writes nothing', async () => {
+      const { spoolDir, bodies } = await guardFor()
+      const { fetched } = streamed('text/html', SPOOL_OVER_BYTES)
+      const reply = await bodies.readBounded(page, fetched)
+      expect(reply.over).toBeNull()
+      expect(reply.body?.byteLength).toBe(SPOOL_OVER_BYTES)
+      expect(reply.spooled).toBeUndefined()
+      expect(await readdir(spoolDir)).toEqual([])
+    })
+
+    it('spools a larger body to a file while reading it, hands it on whole, then removes the file', async () => {
+      const { spoolDir, bodies } = await guardFor()
+      const total = 4 * SPOOL_OVER_BYTES
+      // Halfway through, what the guard holds is already on the disk, not in memory.
+      const midway: number[] = []
+      const { fetched } = streamed('text/html', total, {
+        after: 2 * SPOOL_OVER_BYTES,
+        run: () => {
+          if (midway.length) return
+          for (const name of readdirSync(spoolDir)) midway.push(lstatSync(path.join(spoolDir, name)).size)
+        },
+      })
+      const reply = await bodies.readBounded(page, fetched)
+      expect(reply.over).toBeNull()
+      expect(reply.body).toBeUndefined()
+      expect(midway).toHaveLength(1)
+      expect(midway[0]).toBeGreaterThan(SPOOL_OVER_BYTES)
+      expect(await readdir(spoolDir)).toEqual([reply.spooled])
+      expect((await readFile(path.join(spoolDir, reply.spooled!))).byteLength).toBe(total)
+      const { bodies: handed, route } = captured()
+      await bodies.fulfillRead(route, 200, {}, reply)
+      expect(handed.map((b) => b.byteLength)).toEqual([total])
+      expect(await readdir(spoolDir)).toEqual([])
+    })
+
+    it('still cuts an endless download off at its cap mid-stream, and removes what it spooled', async () => {
+      const cap = 3 * SPOOL_OVER_BYTES
+      const { spoolDir, bodies } = await guardFor(cap)
+      const { fetched, state } = streamed('application/octet-stream')
+      const reply = await bodies.readBounded(navigation, fetched)
+      expect(reply).toEqual({ over: 'download', limit: cap })
+      expect(state.aborted).toBe(true)
+      // One chunk past the cap, at most the stream's own queue more.
+      expect(state.pulled).toBeLessThanOrEqual(cap + 2 * CHUNK)
+      expect(await readdir(spoolDir)).toEqual([])
+    })
+
+    it('removes the spool file when the handoff fails, and never reads through a link', async () => {
+      const { dir, spoolDir, bodies } = await guardFor()
+      const { fetched } = streamed('text/html', 2 * SPOOL_OVER_BYTES)
+      const reply = await bodies.readBounded(page, fetched)
+      const failing = { fulfill: () => Promise.reject(new Error('target closed')) }
+      await expect(bodies.fulfillRead(failing, 200, {}, reply)).rejects.toThrow('target closed')
+      expect(await readdir(spoolDir)).toEqual([])
+      const outside = path.join(dir, 'outside.txt')
+      writeFileSync(outside, 'keep me')
+      symlinkSync(outside, path.join(spoolDir, 'x.body'))
+      const { bodies: handed, route } = captured()
+      await expect(bodies.fulfillRead(route, 200, {}, { over: null, limit: 0, spooled: 'x.body' })).rejects.toThrow()
+      for (const name of ['../outside.txt', outside]) {
+        await expect(bodies.fulfillRead(route, 200, {}, { over: null, limit: 0, spooled: name })).rejects.toThrow()
+      }
+      expect(handed).toEqual([])
+      expect(await readdir(spoolDir)).toEqual([])
+      expect(readFileSync(outside, 'utf8')).toBe('keep me')
+    })
   })
 
   it('sets the server allow-list to the UI origins and the listed origins, and drops it under `*`', async () => {
@@ -731,3 +913,11 @@ describe('browserToolsGuide', () => {
     expect(browserToolsGuide(false)).not.toContain(TOOL_PREFIX)
   })
 })
+
+function isLink(file: string): boolean {
+  try {
+    return lstatSync(file).isSymbolicLink()
+  } catch {
+    return false
+  }
+}

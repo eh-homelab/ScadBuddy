@@ -31,6 +31,14 @@ points at a Postgres they can create schemas in, e.g.
 postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
+`test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
+`manifest.json` says what each covers) and skip, naming every missing file, without
+them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
+it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
+and each shard mounts them at `/app/test-fixtures`. Add or change a fixture only on a
+branch of this repo: a fork's LFS objects live in the fork's store, which that job's
+`git lfs pull` cannot reach.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
@@ -510,7 +518,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
     with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
-    Never a file on the pod.
+    Never a file on the pod. Uploads take `workspace_path` + `workspace_sha256` instead of
+    inline content (`src/tools/workspaceUploads.ts`: binary streamed by
+    `SessionFiles.chunks` into the multipart route, text decoded as UTF-8); the headless
+    browser's downloads are drained into `downloads/` after each browser call by a
+    `PostToolUse` hook (`src/harness/browserDownloads.ts`).
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude

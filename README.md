@@ -348,6 +348,13 @@ public URL or listed in `SCADBUDDY_ALLOWED_ORIGINS`: from any other, browser wri
 are refused with a `403` and a `refused a ... from origin ...` log line (#962), and
 live updates are unavailable.
 
+Never mount a container-runtime socket (Docker, containerd, any CRI socket) or any
+other privileged Unix socket into the API container. The editor's language server,
+`openscad-lsp`, reads user-supplied source and is kept off the network by a seccomp
+filter (`backend/scadbuddy/editor/nonet.py`), but that filter still allows `AF_UNIX`:
+the process can connect to any filesystem socket the container can see, and a runtime
+socket would give it root on the node.
+
 A deploy that rolls the pod also migrates the database at startup
 (`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
 log, `20260928T0724Z_analyzer_decisions.sql` the print analyzers'

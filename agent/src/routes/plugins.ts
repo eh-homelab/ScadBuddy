@@ -14,6 +14,7 @@ import {
   type PluginRepo,
   type PluginSummary,
   type RemotePlugin,
+  reservedNameProblem,
   toolPrefix,
 } from '../plugins/registry.js'
 import { type PluginTest, testPlugin } from '../plugins/testConnection.js'
@@ -70,6 +71,8 @@ export type PluginView = {
   auth: { header: string; last4: string } | null
   /** False when the stored secret was sealed with a key other than the mounted one. */
   usable: boolean
+  /** Why the plugin is not handed to the harness whatever its state (#2127: a name Claude Code now reserves), or null. */
+  problem: string | null
   tool_tiers: PluginSummary['tool_tiers']
   disabled_tools: string[]
   created_at: string
@@ -108,6 +111,7 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
     tool_prefix: toolPrefix(plugin.name),
     auth: plugin.auth_header === null ? null : { header: plugin.auth_header, last4: plugin.secret_last4 ?? '' },
     usable: plugin.kekId === null || (kek.ok && kek.kek.id === plugin.kekId),
+    problem: reservedNameProblem(plugin.name),
     tool_tiers: plugin.tool_tiers,
     disabled_tools: plugin.disabled_tools,
     created_at: plugin.created_at,

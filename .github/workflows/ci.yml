@@ -1010,9 +1010,38 @@ jobs:
   # Each shard also counts what it selected and what the whole suite collects,
   # and `backend-pytest-split` checks the four counts add up to the whole, so no
   # test can fall between the shards unnoticed.
+  # The LFS fixtures, pulled once per change of them into the Actions cache the four
+  # shards restore from: a miss (a new fixture, or an eviction from the full cache)
+  # costs one ~290 MB pull of the LFS bandwidth quota, not four. A failure here
+  # skips the required backend-pytest, which CI Summary reports as a failure.
+  lfs-fixtures:
+    name: LFS fixtures
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      key: ${{ steps.lfs.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # hashFiles() reads only the workspace, so the list's hash is taken here.
+      - name: List the LFS fixtures
+        id: lfs
+        run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ steps.lfs.outputs.key }}
+      - name: Fetch the LFS fixtures
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: git lfs pull --include "test-fixtures/**"
+
   backend-pytest:
     name: Backend pytest (${{ matrix.group }}/4)
-    needs: layout
+    needs: [layout, lfs-fixtures]
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -1038,6 +1067,17 @@ jobs:
         with:
           fetch-depth: 1
 
+      # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), from the cache
+      # `lfs-fixtures` filled: no shard pulls from LFS itself. They are mounted into
+      # the test container below; no image carries them (.dockerignore).
+      - uses: actions/cache/restore@v4
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ needs.lfs-fixtures.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Check out the LFS fixtures
+        run: git lfs checkout
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Build the test image
@@ -1055,6 +1095,7 @@ jobs:
         run: |
           set -euo pipefail
           line=$(docker run --rm -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro" \
+            -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
             --collect-only -q --splits 4 --group ${{ matrix.group }} | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
@@ -1086,8 +1127,10 @@ jobs:
           mkdir -p results && chmod 777 results &&
           docker run --rm --network host --shm-size=1g
           -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"
+          -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
           --splits 4 --group ${{ matrix.group }}
           --junitxml=/results/junit.xml --durations=20

@@ -35,17 +35,22 @@ export const MAX_EXPORT_BATCH_SIZE = 64
  * `RUNNING_PATH`), the assistant's availability (`agent/chat/availability.ts`
  * `AI_STATUS_PATH`), a print's progress (`printSource.ts` `readPrintProgress`), and the
  * client's 1 s follows: a print run (`followPrintRun`), an operation (`followOperation`,
- * the backend's and the agent's) and a render job's fallback poll (`api.getJob`). Literal
- * paths, not those modules' constants: importing them would pull them into this lazy chunk.
+ * the backend's and the agent's), a render job's fallback poll (`api.getJob`) and Arrange's
+ * backfill follow of an output (`arrange.ts`, `followUntil('outputs', …)` → `api.getOutput`,
+ * every 500 ms while the realtime socket is unavailable). A one-off read of those same paths
+ * outside an action (an output page's load) is dropped with them. Only a `GET` is a poll: a
+ * write to one of these paths is sampled. Literal paths, not those modules' constants:
+ * importing them would pull them into this lazy chunk.
  */
-function isPoll(url: URL): boolean {
+function isPoll(method: unknown, url: URL): boolean {
+  if (method !== 'GET') return false
   const path = url.pathname
   return (
     path === '/api/v1/ai/pending-input' ||
     path === '/api/v1/ai/status' ||
     (path === '/api/v1/ai/sessions' && url.searchParams.get('status') === 'running') ||
     /^\/api\/v1\/print\/(outputs|library)\/[^/]+\/progress$/.test(path) ||
-    /^\/api\/v1\/(print\/runs|operations|ai\/operations|jobs)\/[^/]+$/.test(path)
+    /^\/api\/v1\/(print\/runs|operations|ai\/operations|jobs|outputs)\/[^/]+$/.test(path)
   )
 }
 
@@ -64,7 +69,8 @@ const noParentlessPolls: Sampler = {
     if (typeof full === 'string') {
       try {
         const url = new URL(full, location.href)
-        keep = url.origin === location.origin && !isPoll(url)
+        // `http.request.method` is set at span start too, normalised to upper case.
+        keep = url.origin === location.origin && !isPoll(attributes['http.request.method'], url)
       } catch {
         // Not a URL: dropped.
       }

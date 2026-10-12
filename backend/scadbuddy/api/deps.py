@@ -601,7 +601,7 @@ def get_read_budget(
     state: StateDep,
     max_objects: Annotated[int | None, Query(gt=0, le=CEILINGS["max_objects"])] = None,
     max_visits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_visits"])] = None,
-    max_triangles: Annotated[int | None, Query(gt=0, le=CEILINGS["max_triangles"])] = None,
+    max_triangles: Annotated[int | None, Query(ge=0)] = None,
     max_paint_digits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_paint_digits"])] = None,
 ) -> ReadBudget:
     """What a GET's read of a library 3MF may spend (#2087): the settings in effect, then

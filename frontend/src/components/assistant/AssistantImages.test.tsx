@@ -26,7 +26,8 @@ vi.mock('../../agent/chat/images', async (importOriginal) => {
         ? Promise.reject(new Error(`${file.name} is not a PNG, JPEG, GIF or WebP image.`))
         : Promise.resolve({
             mediaType: 'image/png' as const,
-            data: btoa(file.name),
+            // A `big` image is 5 MiB: two of them are past the 8 MiB total.
+            data: file.name.startsWith('big') ? 'A'.repeat(5 * 1024 * 1024) : btoa(file.name),
             preview: { mediaType: 'image/jpeg' as const, data: btoa(`preview of ${file.name}`) },
           })
     },
@@ -129,6 +130,32 @@ describe('assistant images (#1866)', () => {
     paste(box, [png()])
     expect(await screen.findByText('shot.png could not be uploaded: too many images waiting to be sent')).toBeInTheDocument()
     expect(queued()).not.toBeInTheDocument()
+  })
+
+  it('counts images still uploading against the total, so two attaches at once cannot pass it (#2119)', async () => {
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    let uploads = 0
+    server.use(
+      http.post('/api/v1/ai/attachments', async () => {
+        uploads += 1
+        await gate
+        return HttpResponse.json({ id: crypto.randomUUID() })
+      }),
+    )
+    const { box } = await openComposer()
+    paste(box, [png('big-1.png')])
+    await waitFor(() => expect(uploads).toBe(1))
+    // The first is still uploading: the second, which would pass the total
+    // on attached images alone, is refused.
+    paste(box, [png('big-2.png')])
+    expect(
+      await screen.findByText("big-2.png was not added: this message's images would be too large together."),
+    ).toBeInTheDocument()
+    release()
+    const list = await screen.findByRole('list', { name: 'Images to send' })
+    expect(within(list).getAllByRole('img').map((i) => i.getAttribute('alt'))).toEqual(['big-1.png'])
+    expect(uploads).toBe(1)
   })
 
   it('deletes the upload of an image removed before sending (#1941)', async () => {

@@ -46,7 +46,6 @@ from scadbuddy.core.config import (
     DEFAULT_WORKER_CACHE_MAX_BYTES,
     READ_MAX_OBJECTS_CEILING,
     READ_MAX_PAINT_DIGITS_CEILING,
-    READ_MAX_TRIANGLES_CEILING,
     READ_MAX_VISITS_CEILING,
     Config,
     StoreBackend,
@@ -115,9 +114,8 @@ class Settings(BaseSettings):
         default=DEFAULT_READ_MAX_OBJECTS, gt=0, le=READ_MAX_OBJECTS_CEILING
     )
     read_max_visits: int = Field(default=DEFAULT_READ_MAX_VISITS, gt=0, le=READ_MAX_VISITS_CEILING)
-    read_max_triangles: int = Field(
-        default=DEFAULT_READ_MAX_TRIANGLES, gt=0, le=READ_MAX_TRIANGLES_CEILING
-    )
+    # 0 is no limit, and there is no ceiling: an operator may set any limit or none.
+    read_max_triangles: int = Field(default=DEFAULT_READ_MAX_TRIANGLES, ge=0)
     read_max_paint_digits: int = Field(
         default=DEFAULT_READ_MAX_PAINT_DIGITS, gt=0, le=READ_MAX_PAINT_DIGITS_CEILING
     )

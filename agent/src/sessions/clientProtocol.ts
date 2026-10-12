@@ -16,6 +16,21 @@ export const MESSAGE_MAX = 32_000
 
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1).max(200)
+/** The id of an approval or a question the client answers. */
+const answerId = z.string().min(1).max(200)
+
+/**
+ * Whether a refused frame's `sessionId` is one the schema would take, so a
+ * refusal echoes only such an id (staleImages here, routes/chat.ts `refusedAnswer`).
+ */
+export function isSessionId(value: unknown): value is string {
+  return sessionId.safeParse(value).success
+}
+
+/** Whether a refused answer's `id` is one the schema would take (routes/chat.ts `refusedAnswer`). */
+export function isAnswerId(value: unknown): value is string {
+  return answerId.safeParse(value).success
+}
 
 /** frontend protocol.ts `PageContextSchema`; `page` is whatever the mounted page reports. */
 export const PageContextSchema = z.object({
@@ -54,13 +69,13 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      */
     mode: z.enum(SESSION_MODES).optional(),
   }),
-  z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
+  z.object({ v, type: z.literal('approval.decision'), sessionId, id: answerId, approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (questions/service.ts).
   z.object({
     v,
     type: z.literal('question.answer'),
     sessionId,
-    id: z.string().min(1).max(200),
+    id: answerId,
     answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
@@ -76,6 +91,12 @@ export type ClientMessage = z.infer<typeof ClientMessageSchema>
 /**
  * The answer to a `user.message` that carries its images inline, as a tab
  * loaded before #1941 does (#1959): the panel shows it as it is.
+ *
+ * TODO(2026-12-01): a shim for tabs loaded before #1941 (deployed 2026-10-09,
+ * #1955). Remove it after that date, when no such tab can reasonably still be open,
+ * together with `staleImages`, routes/chat.ts's `CHAT_FRAME_MAX` docstring,
+ * docs/ai/security.md's mention and the tests that pin it (chatImages,
+ * chat.limits, chat.e2e).
  */
 export const STALE_TAB_IMAGES =
   'This page is out of date: it sent your images in a way the assistant no longer takes, so your message was not sent. ' +
@@ -95,7 +116,7 @@ function staleImages(value: object): StaleFrame | undefined {
   if (type !== 'user.message' || !Array.isArray(images)) return undefined
   const inline = images.some((i: unknown) => typeof i === 'object' && i !== null && !('kind' in i) && 'data' in i)
   if (!inline) return undefined
-  return typeof sessionId === 'string' && sessionId.length > 0 && sessionId.length <= 200 ? { sessionId } : {}
+  return isSessionId(sessionId) ? { sessionId } : {}
 }
 
 /** A text frame from the socket. Never throws. */

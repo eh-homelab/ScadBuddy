@@ -37,6 +37,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    RETRY_FOLLOWS,
     STILL_ACCEPTING_PROBLEM,
     IdempotencyKey,
     operation_answer,
@@ -102,28 +103,19 @@ logger = logging.getLogger(__name__)
 #: ``TemporalRefusedError``. Not "nothing was queued": some refusals come after the start
 #: was persisted, and the same request sent again follows it (review #1316 4).
 TEMPORAL_REFUSED_DETAIL = (
-    "Temporal refused to start this print; see ScadBuddy's logs. Send the same request"
-    " again to follow it if it started."
+    "ScadBuddy could not start this print; its server log says why." + RETRY_FOLLOWS
 )
 #: ``TemporalUnreachableError``: the first connect failed, so no request was written.
 TEMPORAL_UNREACHABLE_DETAIL = (
-    "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued; try again shortly."
+    "ScadBuddy's background service is not answering. Nothing was queued; try again shortly."
 )
 #: ``TemporalUnavailableError``: no answer within the bound, or ``UNAVAILABLE``. Either
 #: may follow a persisted start (review #1316 (9) 1a).
-TEMPORAL_DOWN_DETAIL = (
-    "ScadBuddy cannot reach Temporal, where print runs run. Send the same request again"
-    " shortly to follow it if it started."
-)
+TEMPORAL_DOWN_DETAIL = "ScadBuddy's background service did not answer." + RETRY_FOLLOWS
 #: ``TemporalBusyError``: Temporal answered, or gRPC ended the call, so it is not "cannot
 #: reach" (review #1316 (9) 1b).
-TEMPORAL_BUSY_DETAIL = (
-    "Temporal could not start this print right now. Send the same request again shortly"
-    " to follow it if it started."
-)
-STILL_CHECKING_DETAIL = (
-    "ScadBuddy is still checking this print. Send the same request again to follow it."
-)
+TEMPORAL_BUSY_DETAIL = "ScadBuddy's background service is busy right now." + RETRY_FOLLOWS
+STILL_CHECKING_DETAIL = "ScadBuddy is still checking this print. Try again to follow it."
 
 #: What a print run's routes answer beside the 200 and 202, built from the details the
 #: route sends (review #1316 (10) 3, (11) 1, (12) 2).

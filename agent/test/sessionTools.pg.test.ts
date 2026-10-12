@@ -1,4 +1,5 @@
 import { AttachmentStore } from '../src/attachments/store.js'
+import { AuditLog } from '../src/audit/log.js'
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
@@ -81,6 +82,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     async function setup(
       turns: (run: HarnessRun) => FakeTurn = () => ({ reply: 'hello from the agent' }),
       extra: Partial<ToolServices> = {},
+      options: { audit?: AuditLog } = {},
     ) {
       const tokens = new InMemoryTokenStore()
       const publisher = new SessionEventPublisher(db.sql, { throttleMs: 10 })
@@ -93,6 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         onAppend: publisher.onAppend,
         approvalGrants: approvalGrantCheck(tokens),
         currentTiers: liveTokenTiers(tokens),
+        ...(options.audit ? { audit: options.audit } : {}),
         mcpServers: (_session, turn) => {
           principals.push(turn)
           return {}
@@ -330,6 +333,26 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(errorText(await a.call('sessions_fork', { session_id: session.id, up_to: 'msg_nowhere:0' }))).toMatch(
         /no finished reply msg_nowhere:0/,
       )
+    })
+
+    it('records a fork made through sessions_fork as a resource row on the child (#2159)', async () => {
+      const audit = new AuditLog({ sql: db.sql })
+      const { agent, sessions } = await setup(undefined, {}, { audit })
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string } }>(
+        await a.call('sessions_start', { prompt: 'first', wait_seconds: 10 }),
+      )
+      await sessions.store.append({ projectKey: 'p', sessionId: session.id }, [{ type: 'user', uuid: 'u1', message: {} }])
+      const child = ok<{ id: string }>(await a.call('sessions_fork', { session_id: session.id }))
+      expect((await audit.list({ kind: 'resource', action: 'session_fork' })).entries).toEqual([
+        expect.objectContaining({
+          outcome: 'ok',
+          surface: 'mcp',
+          session_id: child.id,
+          actor: expect.objectContaining({ kind: 'bearer', id: a.principal.id }),
+          detail: `forked from ${session.id}`,
+        }),
+      ])
     })
 
     it('lets only a token with the approval grant decide, and never its own', async () => {

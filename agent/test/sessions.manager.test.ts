@@ -762,6 +762,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         backendUrl,
         dir: sessionBrowserDir(paths, session.id),
         tmpDir: sessionBrowserTmpDir(session.id),
+        // Its downloads go into the session's workspace (#2329).
+        downloads: { files: expect.anything(), ref: { kind: 'session', sessionId: session.id } },
       })
       // Its directory is not the session's cwd, where named output files land.
       expect(runs[1]!.headlessBrowser!.dir).not.toBe(runs[1]!.cwd)
@@ -825,6 +827,32 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const ui = ['https://scadbuddy.live.example', 'https://scadbuddy.sso.example', 'https://scadbuddy.internal.example']
       expect(asked).toEqual([ui])
       expect(runs[0]!.headlessBrowser?.uiReach).toEqual(Object.fromEntries(ui.map((o) => [o, { reach: 'ok' }])))
+    })
+
+    it('does not probe when the backend is the only UI origin (#2155)', async () => {
+      const paths = await tempPaths()
+      const settings = new SettingsStore(db.sql)
+      await settings.set(SETTING_HEADLESS_BROWSER, true)
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      const asked: string[][] = []
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: runner,
+        settings,
+        headlessBrowser: {
+          backendUrl: 'http://127.0.0.1:8000',
+          probe: (origins) => {
+            asked.push([...origins])
+            return Promise.resolve(Object.fromEntries(origins.map((o) => [o, { reach: 'unreachable' as const, detail: 'x' }])))
+          },
+        },
+      })
+      const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
+      await turn!.done
+      expect(asked).toEqual([])
+      expect(runs[0]!.headlessBrowser).toBeDefined()
+      expect(runs[0]!.headlessBrowser?.uiReach).toBeUndefined()
     })
 
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {

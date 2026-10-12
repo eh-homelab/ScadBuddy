@@ -122,6 +122,10 @@ PRUNE_TIMEOUT = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND) +
 CLAIMS_TIMEOUT = timedelta(minutes=2)
 #: A few Bambuddy reads and deletes per background slice past its grace.
 PREVIEWS_TIMEOUT = timedelta(minutes=5)
+#: `ModelHistory.maintain`'s `git gc` is bounded by `history.MAINTAIN_TIMEOUT` (10 min);
+#: this adds a margin for the count and the kill (#2342). Not imported: the sandbox runs
+#: this module, and `library.history` is not passed through.
+GIT_TIMEOUT = timedelta(minutes=12)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -134,6 +138,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return CLAIMS_TIMEOUT
     if sweep == PREVIEWS_SWEEP:
         return PREVIEWS_TIMEOUT
+    if sweep == GIT_SWEEP:
+        return GIT_TIMEOUT
     return SWEEP_TIMEOUT
 
 
