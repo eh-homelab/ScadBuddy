@@ -84,7 +84,10 @@ CREATE TABLE flow_grant_uses (
 ```
 
 `run_id` is not a foreign key: a grant is inserted before the run's row exists (the first
-activity inserts `workflow_runs`). `forget_run` (`flows/forget.py`) deletes both.
+activity inserts `workflow_runs`). `forget_run` (`flows/forget.py`) deletes both. A start
+that fails after the insert leaves a grant with no run: the flow orphan sweep
+(`flows/sweep.py`) deletes grants older than one hour whose `run_id` has no
+`workflow_runs` row and no open `flow-<run id>` execution.
 
 **Interfaces (`flows/grants.py`):**
 
@@ -193,10 +196,12 @@ output's plate filament options when known, and `copies` defaulted as
 `print_run.py` resolves it. A failing lookup returns facts that admit nothing.
 
 **`_gated` change**, behind `workflow.patched("flow-grant-check")`: before
-`run_gated`, run `flow_grant_check` (start-to-close 10 s, retries 5). Inside: start the
-gated call as today, then run `flow_grant_approve` at once; the harness lets the body
-run and `_approved` clears the wait as for a person's decision. Outside: unchanged
-(parks for the person; Part B adds hops).
+`run_gated`, run `flow_grant_check` (start-to-close 10 s, retries 5). Inside: the step
+is opened with no `waiting` (so no `waiting_on` entry is projected and nobody is
+notified), the gated call is started, and `flow_grant_approve` runs at once; the harness
+holds it as a pending approval only until that Update lands, then runs the body.
+Outside: unchanged (parks for the person, with its `waiting_on` entry; Part B adds
+hops).
 
 **Steps:**
 - [ ] Test (time-skipping env, fake API as `test_outward_host_functions.py` does): a
@@ -435,8 +440,10 @@ starter.
 - Test: `backend/tests/test_history.py` **unchanged**; new `backend/tests/test_gitrepo.py`
 
 **`GitRepo` interface:** `__init__(root, *, timeout)`, `available`, `ensure_repo()`,
-`write_lock()`, `commit(message, *paths, prepare=None) -> str | None` (trailers from
-`current_author()`), `head()`, `resolve(commit)`, `log(path=None, *, limit)`,
+`write_lock()`, `commit(message, *paths, prepare=None, trailers=(), allow_empty=False,
+date=None) -> str | None` (author trailers from `current_author()`, then `trailers`;
+`None` only when nothing changed and `allow_empty` is false, as `ModelHistory` behaves
+today; `date` sets `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` for the backfill), `head()`, `resolve(commit)`, `log(path=None, *, limit)`,
 `show(commit, path) -> bytes`, `revision_range(base, head)`, `diff(range, path=None)`,
 `restore(path, commit, message) -> str`, `maintain()`, and a hook
 `_gitignore_body() -> str | None` for subclasses.
@@ -454,17 +461,21 @@ starter.
 
 ```python
 class FlowHistory(GitRepo):
-    def write(self, name: str, script: str) -> str          # commit "Register <name>"
+    def write(self, name: str, script: str, version_id: str) -> str
+        # always one commit ("Register <name> v<N>", --allow-empty when unchanged),
+        # trailers ScadBuddy-Flow: <name>, ScadBuddy-Flow-Version: <version_id>
     def script_at(self, name: str, commit: str) -> str
-    def versions(self, name: str) -> list[Revision]          # oldest last
-    def version_of(self, name: str, commit: str) -> int      # 1-based position
+    def versions(self, name: str) -> list[Revision]          # commits with the name's trailer, newest first
+    def version_of(self, name: str, commit: str) -> int      # 1-based position among them, oldest first
+    def commit_for(self, version_id: str) -> str | None      # by ScadBuddy-Flow-Version trailer
     def diff(self, name: str, base: str | None, head: str) -> str
-    def restore(self, name: str, commit: str) -> str         # "Restore <name> to <short>"
+    def restore(self, name: str, commit: str, version_id: str) -> str  # "Restore <name> to <short>", one commit
 ```
 
-- [ ] Tests: a write is one commit with the author trailers; identical script → no new
-  commit (returns the head's); versions and `version_of`; diff; restore; the lock file
-  is in `data/flows`. See them fail. Implement.
+- [ ] Tests: a write is one commit with the author and flow trailers; an identical
+  script is still a new commit (`--allow-empty`) with the next version number; restore
+  to the head's own content is a new commit; `versions`, `version_of`, `commit_for`;
+  diff; the lock file is in `data/flows`. See them fail. Implement.
 
 ### Task C3: Index rows and runs record the commit
 
@@ -481,8 +492,9 @@ ALTER TABLE workflow_runs ADD COLUMN commit text;
 
 `FlowStart.commit` defaults to `""` so recorded histories decode and replay unchanged.
 
-- [ ] Tests: register writes a commit and a row with it; version equals the commit's
-  position; start reads git (a script edited in the row but not in git is ignored); a
+- [ ] Tests: register writes a commit and a row with it; re-registering an unchanged
+  script (only `approval_timeout` changed) is a new commit and version, never a
+  `UNIQUE (name, version)` failure; version equals the commit's position; start reads git (a script edited in the row but not in git is ignored); a
   missing commit → 409; the run row's `commit` is set. Replay green. See them fail.
   Implement.
 
@@ -506,12 +518,14 @@ ALTER TABLE workflow_runs ADD COLUMN commit text;
 
 **Behaviour (amendment §6.4):** rows without `commit`, ordered `(created_at, version)`:
 write, commit with `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` = `created_at` and trailers from
-`created_by`, set `commit`; then map runs. Reconciler: a commit no row names gets a row
-(`created_by` from its trailers); a row whose script blob equals a commit's is joined to
-it. Idempotent.
+`created_by`, set `commit`; then map runs. Reconciler: a commit whose `ScadBuddy-Flow-Version`
+trailer no row names gets a row with that id (`created_by` from its trailers); a row
+with no `commit` whose id a commit's trailer names is joined to it. It never matches on
+content. Idempotent.
 
-- [ ] Tests: three versions of one name and one of another backfill in order with their
-  dates and authors; a second run changes nothing; a crash after commit before update
+- [ ] Tests: three versions of one name (two of them identical and consecutive) and one
+  of another backfill in order with their dates and authors and keep their version
+  numbers; a second run changes nothing; a crash after commit before update
   is repaired; runs map to their version's commit. See them fail. Implement.
 
 ### Task C6: Deployment and docs

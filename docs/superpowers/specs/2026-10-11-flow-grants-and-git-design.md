@@ -105,7 +105,8 @@ A grant is a JSON document, validated by one Pydantic model (`flows/grants.py`
     arguments and the values it may hold. A missing path does not match.
 - `expires_at`: required. At most 7 days after approval; the dialog's default is 24 h.
   After it, no call matches.
-- `sessions`: whether the grant extends to child sessions' flow turns (§3.4).
+- `sessions`: whether the grant extends to child sessions' flow turns (§3.4). Off unless
+  set; the start dialog shows it unchecked.
 - `ask_starter_session`: whether calls outside the grant go to the starter session
   before the person (§4.4). Ignored when there is no starter session.
 - The grant never names a read or write tool: those run at the starter's tiers without
@@ -321,12 +322,11 @@ agent("Slice and check plate 3", skills=["print"], result_schema=None,
 - `grant` **narrows** the run grant for that child: a child's call must be admitted by
   the run grant *and* by this narrowing (an intersection, so no subset check is needed
   and a script cannot widen anything). It uses the same shape without `expires_at`,
-  `sessions` and `ask_starter_session`. `None` (the default) leaves the run grant
-  as it is.
-- `on_outside` is `"escalate"` (the default: pass up) or `"deny"` (the call is refused at
-  once, never parked, and recorded as denied by the flow).
-- `ask_session(session_id, message, grant=None, on_outside="escalate")` takes the
-  same two.
+  `sessions` and `ask_starter_session`. Passing `None` means no narrowing: the run
+  grant as it is.
+- `on_outside` is `"escalate"` (pass up) or `"deny"` (the call is refused at once, never
+  parked, and recorded as denied by the flow).
+- `ask_session(session_id, message, grant, on_outside)` takes the same two.
 - The harness's Code Mode stubs render every parameter as required
   (`flow_tools.py` `wait_for_human`'s note), so both are new required parameters of the
   host functions, and the type check names them. Existing scripts that call `agent` or
@@ -416,14 +416,18 @@ its child sessions' parked calls from flow turns, and a requested grant.
   - At hop `person`, the existing timer **denies** (`flow_entry_timeout` for a flow-own
     call; the durable gate's timer for a child, 10-01 §6.6 "Timeouts").
   - The workflow's timer therefore covers both hops: a call parked with a parent hop
-    gets a timer of the parent hop's length plus the run's timeout, so the person always
-    has at least one full timeout. For `ProjectWorkflow` this changes `run_gated`'s
-    timeout, behind `workflow.patched("flow-escalation-timer")`.
+    gets a timer of the parent hop's length plus the run's timeout, so the person's
+    deadline is `hop_until` plus the run's timeout (later, if the parent passes up
+    early). The sweep may show the move up to one tick (30 s) late, but the person can
+    decide at any hop (§4.1), so no decision time is lost. For `ProjectWorkflow` this
+    changes `run_gated`'s timeout, behind `workflow.patched("flow-escalation-timer")`.
   - A child's entries in a flow turn use the run's approval timeout, not the session's
     `approval_expiry_seconds`. `flow_grant_check`'s outside verdict carries it.
   - **A run timeout of 0 ("never")** still bounds the parent hop: it then lasts
     `approval_expiry_seconds` (default 600 s), so a starter session that never answers
-    cannot hold the person's queue back. The person's hop has no timer, as today.
+    cannot hold the person's queue back. The parent hop is ended by the sweep, not by a
+    workflow timer: with a run timeout of 0 **no workflow timer is armed at all**, so
+    nothing ever denies the call, at either hop, as today.
 - **Each owner sweeps its own entries.** The agent's existing 30 s sweep
   (`APPROVAL_SWEEP_MS`, `gate/sweep.ts`) moves due child entries to `person`; the
   backend's flow sweep (`flows/sweep.py`) moves due flow-own entries. Both write the
@@ -495,18 +499,27 @@ its child sessions' parked calls from flow turns, and a requested grant.
   `(id, name, version, commit, approval_timeout_s, created_by, created_at)`. `commit`
   is new and required for new rows; `script` becomes nullable and is no longer written
   or read once the backfill (§6.4) has run, and a later migration drops it.
+- **Every version is its own commit.** Each registration, restore and backfilled row
+  makes exactly one commit, with `--allow-empty` when the script is unchanged (a
+  re-registration only to change `approval_timeout_s` is a version today,
+  `flows/store.py` `COALESCE(MAX(version), 0) + 1`, and stays one). The commit carries
+  two trailers, `ScadBuddy-Flow: <name>` and `ScadBuddy-Flow-Version: <definition id>`;
+  the definition id is chosen before the commit.
 - The **version number** shown to people is the commit's position among the commits
-  that touched `<name>/flow.py`, oldest first, which the registration computes and
-  stores. It equals the existing numbering for migrated rows (§6.4).
+  with that name's `ScadBuddy-Flow` trailer, oldest first. Because every version is a
+  commit, that is the row's version, which the registration stores as today
+  (`UNIQUE (name, version)` holds). For migrated rows it equals the existing numbering,
+  identical consecutive scripts included (§6.4).
 - `workflow_runs` gains `commit`, the commit its script was read from, set from
   `FlowStart.commit` by the run's first activity. Reset replays the run's own history,
   which carries the script itself, so a Reset always reruns that commit's script; the
   column is what the run page links to and what the queue shows (§4.5).
 - **Registering** (`register_flow` or the editor's Save, #2487) type-checks, then commits
-  `<name>/flow.py` (subject `Register <name>`; its author recorded as `ModelHistory`
+  `<name>/flow.py` (subject `Register <name> v<N>`; its author recorded as `ModelHistory`
   records one), then inserts the index row with that commit. If the insert fails after
   the commit, the commit stays (git is the source), and a reconciler at start indexes
-  any commit of `data/flows` that no row names, oldest first.
+  any commit whose `ScadBuddy-Flow-Version` trailer no row names, oldest first, with
+  that id. It matches on the trailer, never on the script's content.
 - **Starting a run** reads the script from git at the version's commit, not from the row.
   A missing commit (a damaged volume) is 409 "this version's script is missing".
 
@@ -532,9 +545,10 @@ tool per the coverage rule (`list_flow_versions`, `get_flow_version_source`,
   repository's lock: every `workflow_definitions` row with no `commit`, oldest first by
   `(created_at, version)`, is written to `<name>/flow.py` and committed with
   `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` set to `created_at` and trailers from
-  `created_by`; then the row's `commit` is set. It is idempotent: a row with a commit is
-  skipped, and a crash between commit and update is repaired by the reconciler matching
-  the script's blob.
+  `created_by`, one commit per row (`--allow-empty` for a script equal to the previous
+  version's), carrying the row's id in `ScadBuddy-Flow-Version`; then the row's `commit`
+  is set. It is idempotent: a row with a commit is skipped, and a crash between commit
+  and update is repaired by finding the commit whose trailer names the row.
 - Each existing run maps to its version row's commit:
   `UPDATE workflow_runs r SET commit = d.commit FROM workflow_definitions d WHERE
   r.definition_id = d.id AND r.commit IS NULL`, in the same backfill.
@@ -599,13 +613,13 @@ sees or what is safe, and are listed in the PR for the user.
 11. **(user) A parent hop that times out passes up; with a run timeout of 0 the parent hop
     still ends after `approval_expiry_seconds`** (§4.6).
 12. **Hops are Postgres state, outside the workflows** (§4.6), so no workflow changes
-    when an entry moves; only narrowing touches `ProjectWorkflow`, behind
-    `workflow.patched`.
+    when an entry moves. What does change `ProjectWorkflow` and `DurableSession` (the
+    grant check, narrowing and the escalation timer) goes behind `workflow.patched`.
 13. **(user) Delivering an escalation costs the starter session a turn** (§4.4); the person
     can turn the parent hop off when approving the grant.
 14. **Counters are never given back** (§3.3), and a Reset's replayed calls consume again
     (§7).
-15. **One row per version stays** in `workflow_definitions` (§6.2), rather than one row
+15. **Every version is its own commit, and one row per version stays** in `workflow_definitions` (§6.2), rather than one row
     per name, so existing ids and runs keep working.
 16. **No metadata file in `data/flows`** (§6.1).
 17. **`FlowHistory` lives in `flows/repository.py`**, since `flows/history.py` is the Reset
@@ -637,7 +651,8 @@ The plan's tasks carry the tests; these are what the spec requires to be shown:
 - A token lowered mid-run: the next outward call inside the grant is refused, not
   parked.
 - Git: registering commits once with the author trailers; history, diff, source and
-  restore; the backfill reproduces every existing version in order with its dates and
+  restore; re-registering an unchanged script is a new commit (`--allow-empty`) and a
+  new version; the backfill reproduces consecutive identical versions; the backfill reproduces every existing version in order with its dates and
   maps every run; `ModelHistory`'s test suite passes unchanged on the shared core.
 
 ## 10. Out of scope
