@@ -23,6 +23,9 @@ import type {
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
+  WorkspaceFile,
+  WorkspaceFileList,
+  WorkspaceSettings,
   AttachmentView,
   AiSessionEdit,
   AiSessionView,
@@ -49,6 +52,8 @@ import type {
   MigrateResult,
   ModelPatch,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -388,6 +393,10 @@ function bambuddyUnanswered(problem: Problem): boolean {
 }
 
 const seg = encodeURIComponent
+
+/** #2329 — a workspace file's route, each path segment encoded (under `API_BASE`). */
+const sessionFilePath = (id: string, path: string) =>
+  `/ai/sessions/${seg(id)}/files/${path.split('/').map(seg).join('/')}`
 
 /**
  * How often `runPrint` reads a running print run (#470), how many times it tries a
@@ -1335,9 +1344,9 @@ export const api = {
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
-   * the one the last send went to so the picker opens where it was left. ScadBuddy
-   * models no relationship between a model and a project: which prints belong to a
-   * project is on the project's own page.
+   * the one the last send went to. ScadBuddy keeps no project membership: which prints
+   * belong to a project is on the project's own page. What it remembers per model is
+   * only the default the Customize page's picker opens on (#1660).
    */
   getProjects: () => request<ProjectChoices>('/print/projects'),
 
@@ -1354,6 +1363,16 @@ export const api = {
     request<LastProject>('/print/projects/last', {
       method: 'PUT',
       body: JSON.stringify({ project_id: projectId } satisfies LastProject),
+    }),
+
+  /** #1660 — the project this model was last filed into, per preset it was generated with. */
+  getModelProjects: (slug: string) => request<ModelProjects>(`/print/models/${seg(slug)}/projects`),
+
+  /** #1660 — remember the project Generate filed this model into; a `null` project forgets it. */
+  putModelProject: (slug: string, body: ModelProjectPut) =>
+    request<ModelProjects>(`/print/models/${seg(slug)}/project`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     }),
 
   /**
@@ -1682,6 +1701,41 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ long_edge: longEdge }),
     }),
+
+  /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
+  getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
+
+  putWorkspaceSettings: (caps: { file_max_bytes: number; workspace_max_bytes: number }) =>
+    request<WorkspaceSettings>('/ai/settings/workspace', { method: 'PUT', body: JSON.stringify(caps) }),
+
+  /** #2329 — the files in a session's workspace, with its usage and caps. */
+  listAiSessionFiles: (id: string) => request<WorkspaceFileList>(`/ai/sessions/${seg(id)}/files`),
+
+  /**
+   * #2329 — one workspace file's bytes. The route always answers as an attachment, so
+   * the panel fetches it and hands the blob to `downloadBlob` or an object URL.
+   */
+  getAiSessionFile: async (id: string, path: string): Promise<Blob> => {
+    const response = await send(`${API_BASE}${sessionFilePath(id, path)}`)
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    return await response.blob()
+  },
+
+  /**
+   * #2329 — uploads a file into a session's workspace at `path`. A path that exists is
+   * refused (409) unless `expectedSha256` is the sha256 it has now.
+   */
+  uploadAiSessionFile: (id: string, file: File, path: string, expectedSha256?: string) => {
+    const body = new FormData()
+    body.set('file', file)
+    body.set('path', path)
+    if (expectedSha256 !== undefined) body.set('expected_sha256', expectedSha256)
+    return request<{ file: WorkspaceFile }>(`/ai/sessions/${seg(id)}/files`, { method: 'POST', body })
+  },
+
+  /** #2329 — deletes one file from a session's workspace. */
+  deleteAiSessionFile: (id: string, path: string) =>
+    request<void>(sessionFilePath(id, path), { method: 'DELETE' }),
 
   /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
   getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),

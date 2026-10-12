@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import queue_route, slice_routes
@@ -70,14 +71,28 @@ def test_creating_a_project_pairs_it_with_a_folder(client: TestClient, model: st
     assert json.loads(folder.calls.last.request.content)["project_id"] == 7
 
 
-def test_scadbuddy_keeps_no_model_to_project_relationship(client: TestClient) -> None:
-    """ScadBuddy renders and sends; Bambuddy owns projects. Which prints belong to a
-    project is on the project's own page, so there is no per-model route to store a
-    second answer that would go stale."""
-    configure(client)
-    assert client.put(
-        "/api/v1/print/models/anything/project", json={"project_id": 7}
-    ).status_code in (404, 405)
+def test_scadbuddy_keeps_no_project_membership(app: FastAPI) -> None:
+    """ScadBuddy renders and sends; Bambuddy owns projects. Which prints and files belong
+    to a project is on the project's own page, so no ScadBuddy route answers it from a
+    second copy that would go stale.
+
+    What ScadBuddy does keep is a *default*: the project Generate last filed a model
+    (and preset) into, so the picker opens there (#1660), forgettable in Settings like
+    ``last_project_id``. That is a preference about the next filing, not a record of
+    what the project holds. ``GET /farm/archives?project_id=`` is the one read scoped
+    to a project, and it is Bambuddy's own archive list passed through."""
+    schema = app.openapi()
+    scoped = {
+        path
+        for path, item in schema["paths"].items()
+        if "get" in item
+        and any("project" in param["name"] for param in item["get"].get("parameters", []))
+    }
+    assert scoped == {"/api/v1/farm/archives"}
+
+    # The remembered default names a project and nothing it holds.
+    remembered = schema["components"]["schemas"]["RememberedModelProject"]
+    assert set(remembered["properties"]) == {"preset_id", "preset_name", "project_id"}
 
 
 @pytest.mark.requires_postgres

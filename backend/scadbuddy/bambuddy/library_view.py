@@ -34,7 +34,13 @@ from pydantic import ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import LibraryFile
-from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, SpoolFullError, printable
+from scadbuddy.bambuddy.print_source import (
+    SLICED_TYPE,
+    LibrarySource,
+    ReadOutOfMemoryError,
+    SpoolFullError,
+    printable,
+)
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_geometry
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.objects3mf import PlateRead, UnreadableObjectsError, read_plate_parts
@@ -115,10 +121,13 @@ async def _read(
         async with spooled_3mf(client, source, cache, budget or ReadBudget()) as payload:
             if payload is None:
                 raise NotViewableError(file, "it holds no mesh ScadBuddy can read")
-            return await asyncio.to_thread(read_plate_parts, payload, plate, budget)
+            try:
+                return await asyncio.to_thread(read_plate_parts, payload, plate, budget)
+            except MemoryError:
+                raise ReadOutOfMemoryError from None
     except UnreadableObjectsError as error:
         raise NotViewableError(file, str(error)) from None
-    except SpoolFullError as error:
+    except (SpoolFullError, ReadOutOfMemoryError) as error:
         raise NotViewableError(file, str(error)) from None
 
 

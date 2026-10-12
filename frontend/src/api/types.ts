@@ -225,6 +225,8 @@ export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
 export type ProjectFile = Schemas['ProjectFile']
 export type LastProject = Schemas['LastProject']
+export type ModelProjects = Schemas['ModelProjects']
+export type ModelProjectPut = Schemas['ModelProjectPut']
 export type AttachResult = Schemas['AttachResult']
 
 /** #81 — the build volume the preview draws and checks the model against. */
@@ -352,6 +354,36 @@ export interface ImageSettings {
   long_edge: number
   min: number
   max: number
+}
+
+/**
+ * #2329 — the caps on the assistant's workspace, in bytes (agent
+ * `routes/workspaceSettings.ts`), with the bounds the form may save.
+ */
+export interface WorkspaceSettings {
+  file_max_bytes: number
+  workspace_max_bytes: number
+  min: number
+  file_max: number
+  workspace_max: number
+}
+
+/** #2329 — one file in a session's workspace (agent `routes/sessionFiles.ts`). */
+export interface WorkspaceFile {
+  path: string
+  media_type: string
+  size: number
+  sha256: string
+  /** Where it came from: an upload (`kind: 'upload'`), or the tool and its ids, or a URL. */
+  source: Record<string, string | number | boolean | null> | null
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkspaceFileList {
+  files: WorkspaceFile[]
+  usage: { files: number; bytes: number }
+  limits: { file_max_bytes: number; workspace_max_bytes: number }
 }
 
 /**

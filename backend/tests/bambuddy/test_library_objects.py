@@ -280,3 +280,42 @@ async def test_a_download_stops_before_it_fills_the_cache_volume(
     monkeypatch.undo()
     [obj] = (await read_library_objects(bambuddy, 92, blobs=blobs, cache=cache)).objects
     assert obj.library_file_id == 92 and download.call_count == 2
+
+
+@respx.mock
+async def test_running_out_of_memory_is_never_kept_as_the_files_refusal(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no triangle limit nothing refuses a huge STL before it is wrapped, so the
+    wrap can run out of memory: that is refused saying how to bound it, never kept as
+    "holds no mesh", and the next read (with memory to spare) arranges the file."""
+    buffer = io.BytesIO()
+    trimesh.creation.box(extents=(10, 10, 10)).export(buffer, file_type="stl")
+    stl = buffer.getvalue()
+    respx.get(f"{API}/library/files/93").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 93,
+                "filename": "big.stl",
+                "file_type": "stl",
+                "file_size": len(stl),
+                "file_hash": hashlib.sha256(stl).hexdigest(),
+            },
+        )
+    )
+    respx.get(f"{API}/library/files/93/download").mock(
+        return_value=httpx.Response(200, content=stl)
+    )
+
+    def out_of_memory(*_: object, **__: object) -> bytes:
+        raise MemoryError
+
+    monkeypatch.setattr(print_source, "stl_3mf", out_of_memory)
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    with pytest.raises(NotArrangeableError, match="ran out of memory") as refused:
+        await read_library_objects(bambuddy, 93, blobs=blobs, cache=cache)
+    assert "SCADBUDDY_READ_MAX_TRIANGLES" in refused.value.reason
+    monkeypatch.undo()
+    [obj] = (await read_library_objects(bambuddy, 93, blobs=blobs, cache=cache)).objects
+    assert obj.library_file_id == 93

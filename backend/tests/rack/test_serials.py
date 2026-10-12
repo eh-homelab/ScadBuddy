@@ -50,7 +50,12 @@ class Leaky:
         raise RuntimeError(leak(next(iter(serials))))
 
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int:
         raise RuntimeError(leak(picks[0].serial))
 
