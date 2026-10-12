@@ -10,10 +10,13 @@ from pydantic import ValidationError
 from scadbuddy.flows.grants import (
     MAX_EXPIRY,
     CallFacts,
+    Grant,
     GrantRule,
     GrantSpec,
+    Narrowing,
     RuleUse,
     admits,
+    choose,
     validate_spec,
 )
 
@@ -72,6 +75,9 @@ def test_a_library_file_matches_only_through_library_files() -> None:
 def test_max_prints_counts_what_was_used() -> None:
     assert admits(rule(max_prints=4), facts(prints=2), RuleUse(prints=2)) is None
     assert admits(rule(max_prints=4), facts(prints=2), RuleUse(prints=3)) is not None
+    # An all-plates print of a library file is not counted: no print bound matches it.
+    assert admits(rule(max_prints=4), facts(prints=None), RuleUse()) == "prints unknown"
+    assert admits(rule(), facts(prints=None), RuleUse()) is None
 
 
 def test_max_filament_refuses_unknown_grams() -> None:
@@ -152,3 +158,28 @@ def test_the_model_refuses_negative_maxima_and_unknown_keys() -> None:
         rule(printer=[3])
     with pytest.raises(ValidationError):
         GrantSpec.model_validate({"expires_at": NOW, "rules": [{"fn": "queue_print"}] * 33})
+
+
+def test_a_narrowing_that_widens_admits_nothing_beyond_the_grant() -> None:
+    """A script's narrowing is an intersection (spec §4.3): naming more printers, more
+    prints or another function than the run grant lets nothing more through."""
+    grant = Grant(
+        id="g1",
+        run_id="r1",
+        status="approved",
+        spec=spec({"fn": "queue_print", "printers": [3], "max_prints": 2}),
+        requested_by={"kind": "browser"},
+        expires_at=NOW + timedelta(hours=1),
+        created_at=NOW,
+    )
+    wide = Narrowing(rules=[rule(printers=[3, 4], max_prints=100), GrantRule(fn="arrange")])
+
+    def verdict(call: CallFacts, narrowing: Narrowing = wide) -> object:
+        return choose(grant, call, narrowing=narrowing, narrowed_by="c", now=NOW)
+
+    assert isinstance(verdict(facts(printer_id=4)), str)
+    assert isinstance(verdict(facts(prints=3)), str)
+    assert isinstance(verdict(CallFacts(fn="arrange", models=["coaster"])), str)
+    assert verdict(facts()) == (0, 0)
+    # A narrowing narrower than the grant refuses what it excludes.
+    assert isinstance(verdict(facts(), Narrowing(rules=[rule(printers=[5])])), str)

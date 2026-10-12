@@ -84,7 +84,15 @@ export type ApprovalBinding = { inputHash: string }
  */
 export interface ApprovalRecords {
   approved(requestId: string, call?: ApprovalBinding): Promise<boolean>
+  /**
+   * Whether the call's approval came from a run grant (responder kind `run_grant`,
+   * #2481) now revoked or expired: `approved` is false for it, refused GrantRevoked.
+   */
+  lapsed?(requestId: string, call?: ApprovalBinding): Promise<boolean>
 }
+
+/** A run grant's responder in `ai_input_responses` (#2481): `{kind: 'run_grant', id}`. */
+type Responder = { kind?: unknown; id?: unknown }
 
 export class PgApprovalRecords implements ApprovalRecords {
   readonly #sql: Sql
@@ -94,13 +102,35 @@ export class PgApprovalRecords implements ApprovalRecords {
   }
 
   async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
+    const grant = await this.#approval(requestId, call)
+    return grant !== undefined && (grant === null || (await this.#inForce(grant)))
+  }
+
+  async lapsed(requestId: string, call?: ApprovalBinding): Promise<boolean> {
+    const grant = await this.#approval(requestId, call)
+    return typeof grant === 'string' && !(await this.#inForce(grant))
+  }
+
+  /** The approval for this call: undefined for none, null for a person's, a grant id for a run grant's. */
+  async #approval(requestId: string, call?: ApprovalBinding): Promise<string | null | undefined> {
     // Without the call's hash nothing can be matched, so nothing is approved.
-    if (call === undefined) return false
-    const rows = await this.#sql`
-      SELECT 1 FROM ai_input_responses r
+    if (call === undefined) return undefined
+    const [row] = await this.#sql<{ responder: Responder }[]>`
+      SELECT r.responder FROM ai_input_responses r
       JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
       WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
-        AND a.input_hash = ${call.inputHash}`
+        AND a.input_hash = ${call.inputHash}
+      LIMIT 1`
+    if (!row) return undefined
+    if (row.responder.kind !== 'run_grant') return null
+    return typeof row.responder.id === 'string' ? row.responder.id : ''
+  }
+
+  /** Whether the run grant is in force; the backend's table, read only for a grant's approval. */
+  async #inForce(grantId: string): Promise<boolean> {
+    const rows = await this.#sql`
+      SELECT 1 FROM flow_grants
+      WHERE id = ${grantId} AND status = 'approved' AND revoked_at IS NULL AND now() < expires_at`
     return rows.length > 0
   }
 }
@@ -136,6 +166,8 @@ export const TOOL_ERROR = 'ToolError'
 export const UNKNOWN_SESSION = 'UnknownSession'
 /** The failure type of a gated call with no approval recorded for it. */
 export const NOT_APPROVED = 'NotApproved'
+/** The failure type of a call a run grant approved, revoked or expired before it ran (#2481). */
+export const GRANT_REVOKED = 'GrantRevoked'
 /** The failure type of a call from a `flow-<id>` workflow with no flow run recorded. */
 export const UNKNOWN_FLOW = 'UnknownFlow'
 /** The failure type of a tool a flow cannot use: a browser tool (no tab) or an answer tool (no session). */
@@ -299,7 +331,10 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
   const tiers = owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner)
   const flows = deps.flows
   // The caller's binding is the hash of what this call was given; none approves nothing.
-  const approvals = flows && { approved: (requestId: string, call?: ApprovalBinding) => flows.approved(requestId, call?.inputHash) }
+  const approvals = flows && {
+    approved: (requestId: string, call?: ApprovalBinding) => flows.approved(requestId, call?.inputHash),
+    lapsed: async (requestId: string, call?: ApprovalBinding) => (await flows.lapsed?.(requestId, call?.inputHash)) ?? false,
+  }
   return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals, tiers }
 }
 
@@ -381,6 +416,13 @@ async function runAsActivity(
   // describe_call gave the parked call, computed again from what this call was given.
   const binding = deps.audit ? { inputHash: deps.audit.hash(tool.name, (input ?? {}) as Record<string, unknown>) } : undefined
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
+    if (await caller.approvals?.lapsed?.(requestId, binding)) {
+      await refuse(
+        "the run's grant was revoked or expired before this call ran",
+        `${tool.name}: the run's grant was revoked or expired before this call ran`,
+        GRANT_REVOKED,
+      )
+    }
     await refuse(
       'no approval is recorded for this call',
       `${tool.name} needs an approval, and none is recorded for this call`,

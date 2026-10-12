@@ -76,4 +76,35 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     expect(await flows.approved(flowRequestId(id, 'wr1', 'c1'))).toBe(false)
     expect(await flows.approved(flowRequestId(id, 'wr1', 'c5'), 'h1')).toBe(false)
   })
+
+  // #2481 (plan 2026-10-11 Task A4): a call the run's grant approved runs only while the
+  // grant is in force; one revoked or expired since is refused GrantRevoked, not NotApproved.
+  it("approves a grant's call only while the grant is in force, and names a lapsed one", async () => {
+    const id = await run({ kind: 'browser' })
+    await t.db.sql`
+      INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by, approved_at, expires_at)
+      VALUES ('g1', ${id}, 'approved', '{}', '{"kind": "browser"}', 'browser', now(), now() + interval '1 hour')`
+    const decide = async (call: string, responder: string) =>
+      t.db.sql`
+        INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id, kind, outcome, responder, input_hash)
+        VALUES (${flowRequestId(id, 'wr1', call)}, ${id}, 'wr1', ${call}, 'approval', 'approved', ${responder}, 'h1')`
+    await decide('c1', 'grant:g1')
+    await decide('c2', 'browser')
+    const c1 = flowRequestId(id, 'wr1', 'c1')
+    const c2 = flowRequestId(id, 'wr1', 'c2')
+    expect(await flows.approved(c1, 'h1')).toBe(true)
+    expect(await flows.lapsed(c1, 'h1')).toBe(false)
+    // Changed input is #2318's refusal, whatever the grant.
+    expect(await flows.approved(c1, 'h2')).toBe(false)
+    expect(await flows.lapsed(c1, 'h2')).toBe(false)
+    await t.db.sql`UPDATE flow_grants SET revoked_at = now(), revoked_by = 'browser' WHERE id = 'g1'`
+    expect(await flows.approved(c1, 'h1')).toBe(false)
+    expect(await flows.lapsed(c1, 'h1')).toBe(true)
+    // A person's approval does not depend on the grant.
+    expect(await flows.approved(c2, 'h1')).toBe(true)
+    expect(await flows.lapsed(c2, 'h1')).toBe(false)
+    await t.db.sql`UPDATE flow_grants SET revoked_at = NULL, expires_at = now() - interval '1 second' WHERE id = 'g1'`
+    expect(await flows.approved(c1, 'h1')).toBe(false)
+    expect(await flows.lapsed(c1, 'h1')).toBe(true)
+  })
 })

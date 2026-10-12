@@ -22,13 +22,14 @@ from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
 from scadbuddy.flows.definitions import FlowDefinitions
-from scadbuddy.flows.keys import payload_keys
+from scadbuddy.flows.keys import approval_key, payload_keys
 from scadbuddy.flows.manifest import load_manifest
 from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.repo_lock import flows_coordinator
 from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.operation_activities import operation_activities
@@ -122,11 +123,18 @@ async def _run(flows: Flows) -> AsyncIterator[None]:
         return
     # Without SCADBUDDY_API_INTERNAL_URL a flow's render, print and arrange fail,
     # naming it; the rest of a flow runs.
-    routes = FlowRoutes(api_client(settings.api_internal_url))
+    api = api_client(settings.api_internal_url)
+    routes = FlowRoutes(api)
+    grants = FlowGrants(flows.store, api, approval_key(settings))
     worker = projects_worker(
         flows.client,
         flows.queue,
-        [*FlowActivities(flows.store).all(), *routes.all(), *flows.operation_activities()],
+        [
+            *FlowActivities(flows.store).all(),
+            *routes.all(),
+            *grants.all(),
+            *flows.operation_activities(),
+        ],
     )
     task = asyncio.create_task(worker.run())
     try:

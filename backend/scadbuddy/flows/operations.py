@@ -193,6 +193,9 @@ def flow_kinds(
         # Before `waiting_on`: a call whose Update landed is no longer waiting, and its
         # resend must reach Temporal's answer, not a 409 (#2247).
         existing = await store.get_decision(rid)
+        if existing is not None and existing.responder.startswith("grant:"):
+            # Let through by the run's grant (#2481): never listed, so not a person's.
+            raise _stale()
         if existing is not None:
             answer = await answer_of(request) if kind == "answer" else None
             if not _same(existing, kind, request, answer):

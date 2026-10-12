@@ -56,6 +56,7 @@ from scadbuddy.flows.grants import (
 )
 from scadbuddy.flows.history import ResetPoints, ResetPreview, outward_since, reset_points
 from scadbuddy.flows.images import BLOB_NAME, RunImage, open_image, run_images
+from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import (
     HOST_FN,
@@ -73,6 +74,8 @@ from scadbuddy.flows.store import GrantStateError
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
+from scadbuddy.workflows.flow_grants import FlowGrants
+from scadbuddy.workflows.flow_routes import api_client
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 
@@ -196,6 +199,8 @@ class GrantView(BaseModel):
     #: Approved, not revoked and not expired: calls inside it run without asking.
     in_force: bool
     uses: list[GrantUseView] = []
+    #: On approval: the parked calls it let through.
+    released: list[str] = []
 
 
 def _grant_view(grant: Grant, uses: list[GrantUse]) -> GrantView:
@@ -889,7 +894,28 @@ async def approve_flow_grant(
         approved = await flows.store.approve_grant(run_id, spec, approved_by="browser")
     except GrantStateError as err:
         raise _grant_state(err) from None
-    return await _grant_answer(flows, approved)
+    view = await _grant_answer(flows, approved)
+    view.released = await _release(flows, run_id)
+    return view
+
+
+async def _release(flows: Flows, run_id: str) -> list[str]:
+    """The run's parked calls the newly approved grant admits, let through (the user's
+    ruling: an agent-started run's outward calls wait until its grant, or each call, is
+    approved). One that cannot be let through stays for a person to decide."""
+    run = await flows.store.get_run(run_id)
+    if flows.client is None or run is None or run.status in TERMINAL:
+        return []
+    api = api_client(flows.settings.api_internal_url)
+    try:
+        grants = FlowGrants(flows.store, api, approval_key(flows.settings))
+        return await grants.release(flows.client, run)
+    except (RPCError, psycopg.Error):
+        logger.warning("could not release a run's parked calls into its grant", exc_info=True)
+        return []
+    finally:
+        if api is not None:
+            await api.aclose()
 
 
 @router.post(
