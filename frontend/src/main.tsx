@@ -12,7 +12,7 @@ async function start() {
   if (import.meta.env.VITE_MOCK_API === '1') {
     const { worker } = await import('./mocks/browser')
     await worker.start({
-      onUnhandledFrame: 'bypass',
+      onUnhandledRequest: 'bypass',
       serviceWorker: { url: `${import.meta.env.BASE_URL}mockServiceWorker.js` },
     })
   }

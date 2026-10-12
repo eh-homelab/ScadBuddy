@@ -34,7 +34,7 @@ configure({
 // longer lands inside the first findByRole's 1 s wait in each file (#1485).
 getComputedStyle(document.documentElement)
 
-beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   server.resetHandlers()
   resetMockState()
