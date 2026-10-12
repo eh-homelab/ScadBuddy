@@ -58,6 +58,8 @@ interface Props {
    * applying it again. Read on mount too, so it survives the remount a save causes.
    */
   selected?: SelectedElsewhere | null
+  /** #1660 — told the preset selected now, or null for none, whenever that changes. */
+  onSelected?: (preset: ParamPreset | null) => void
 }
 
 export interface SelectedElsewhere {
@@ -128,6 +130,7 @@ export function PresetPicker({
   pinned = false,
   resetKey,
   selected: elsewhere = null,
+  onSelected,
 }: Props) {
   const presetsState = useAsync(() => api.listPresets(slug), [slug])
   const presets = presetsState.data ?? []
@@ -249,6 +252,9 @@ export function PresetPicker({
   }, [naming])
 
   const selected = selection?.preset
+  useEffect(() => {
+    onSelected?.(selected ?? null)
+  }, [selected, onSelected])
   const modified =
     selection !== null && (!sameValues(values, selection.applied) || !sameJson(extra, selection.extra))
   const editable = selected?.origin === 'mine'

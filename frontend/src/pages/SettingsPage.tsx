@@ -1018,7 +1018,7 @@ export function SettingsPage() {
                 help={
                   projectsState.error
                     ? `Could not list the projects: ${projectsState.error instanceof ApiError ? projectsState.error.detail : 'no answer'}`
-                    : 'Where the project picker opens, and the project a send without one is filed under.'
+                    : "Where a library file's print opens its project picker, and the project a send without one is filed under. A model opens on the project it was last filed in."
                 }
               >
                 <select
