@@ -46,8 +46,8 @@ import { DURABLE_EVAL_TOOL_PREFIX as DURABLE_TOOL_PREFIX, type Outcome, type Run
 //
 // Every parked outward call is denied through the gate's `respond` Update, as the
 // browser user would deny it. The model then gets the durable engine's own rejection
-// text (DURABLE_REJECTION): unlike the classic gate, a durable denial carries no
-// message of the denier's.
+// text (DURABLE_REJECTION), followed by a classic turn's refusal wording, which the
+// segment runner adds (#2392); the outcome records the engine's text.
 //
 // The outcome is built from what the session logged (`ai_session_events`, what the
 // panel shows) and from the tool activities themselves: a durable tool.result event

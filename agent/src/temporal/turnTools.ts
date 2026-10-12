@@ -13,12 +13,14 @@ import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { type FlowRuns, flowOf } from './flowRuns.js'
+import { endClient, type KeptClient, type KeptConnection, neverSent, type SessionClients, sessionGone, transportBroken } from './sessionClients.js'
 import {
   type ApprovalRecords,
   durableSession,
   NOT_APPROVED,
   type ResultBlobs,
   resultText,
+  sessionOf,
   type SessionOwners,
   TOOL_ERROR,
   turnTiers,
@@ -52,6 +54,11 @@ import {
 
 export const TURN_TOOLS_ACTIVITY = 'turn_tools'
 export const TURN_TOOL_TIER_ACTIVITY = 'turn_tool_tier'
+/**
+ * Ends the session's kept MCP clients on this replica (#2581): DurableSession runs it on
+ * the replica its plugin calls were pinned to when the session ends.
+ */
+export const TURN_TOOLS_CLOSE_ACTIVITY = 'turn_tools_close'
 /** The activity type a turn tool's call runs as: `turn:<server>__<tool>`. */
 export const TURN_TOOL_PREFIX = 'turn:'
 const SEPARATOR = '__'
@@ -93,6 +100,16 @@ export type TurnServer = {
    * do not list the plugin again (#2497). The forwarder still refuses a disabled tool's call.
    */
   listingKey?: string
+  /**
+   * A remote plugin whose MCP session a durable session keeps from one call, and one
+   * turn, to the next (#2581, sessionClients.ts), as a classic turn's Claude Code keeps
+   * it for the turn: a stateful plugin (Playwright MCP) keeps its page. `fingerprint`
+   * says what the session depends on (URL, header, address, tool settings): a change
+   * starts a new one. `connect` opens a client that outlives the turn's servers (its own
+   * forwarder route, freed by `release` once the client is ended). With
+   * `TurnToolsDeps.clients`, its calls are pinned to the replica that holds the client.
+   */
+  keep?: { fingerprint: string; connect(): Promise<KeptConnection> }
 }
 
 export type TurnServers = {
@@ -140,6 +157,8 @@ export type TurnToolsDeps = {
   listTimeoutMs?: number | undefined
   /** Where a call's result images are kept for `view_tool_images` (toolActivities.ts `resultText`). */
   blobs?: ResultBlobs | undefined
+  /** This replica's kept MCP clients, per durable session and plugin (#2581); without it every call opens its own. */
+  clients?: SessionClients<ListedTools> | undefined
 }
 
 /** What DurableSession declares for one turn tool. */
@@ -197,12 +216,13 @@ function split(name: string): { server: string; tool: string } | undefined {
   return at > 0 ? { server: name.slice(0, at), tool: name.slice(at + SEPARATOR.length) } : undefined
 }
 
+/** A client for one use, ended after it with the session DELETE (#2581), not left on the server. */
 async function withClient<T>(server: TurnServer, use: (client: Client) => Promise<T>): Promise<T> {
   const client = await server.connect()
   try {
     return await use(client)
   } finally {
-    await client.close().catch(() => {})
+    await endClient(client)
   }
 }
 
@@ -211,26 +231,103 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
  * Tools whose harness names collide are left out, as a classic turn hides them
  * (plugins/forwarder.ts), so a name never stands for two tools.
  */
-type Listed = { tool: Awaited<ReturnType<Client['listTools']>>['tools'][number]; name: string }[]
+export type ListedTools = { tool: Awaited<ReturnType<Client['listTools']>>['tools'][number]; name: string }[]
+type Listed = ListedTools
 
 const kept = new Map<string, { at: number; tools: Listed }>()
+
+function named(tools: Awaited<ReturnType<Client['listTools']>>['tools']): Listed {
+  const all = tools.map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+  const seen = new Map<string, number>()
+  for (const { name } of all) seen.set(name, (seen.get(name) ?? 0) + 1)
+  return all.filter(({ name }) => seen.get(name) === 1)
+}
 
 async function listed(server: TurnServer, signal: AbortSignal, reuse = false): Promise<Listed> {
   const key = server.listingKey === undefined ? undefined : `${server.name}\0${server.listingKey}`
   const hit = key === undefined ? undefined : kept.get(key)
   if (reuse && hit && Date.now() - hit.at < LISTING_KEPT_MS) return hit.tools
-  const tools = await withClient(server, async (client) => {
-    const { tools } = await client.listTools(undefined, { signal })
-    const named = tools.map((tool) => ({ tool, name: harnessToolName(tool.name) }))
-    const seen = new Map<string, number>()
-    for (const { name } of named) seen.set(name, (seen.get(name) ?? 0) + 1)
-    return named.filter(({ name }) => seen.get(name) === 1)
-  })
+  const tools = await withClient(server, async (client) => named((await client.listTools(undefined, { signal })).tools))
   if (key !== undefined) {
     for (const [k, v] of kept) if (Date.now() - v.at >= LISTING_KEPT_MS) kept.delete(k)
     kept.set(key, { at: Date.now(), tools })
   }
   return tools
+}
+
+/** A durable session's kept client on a server (#2581): none for a flow run, a server that keeps none, or without `clients`. */
+type KeptTarget = {
+  clients: SessionClients<Listed>
+  session: string
+  name: string
+  keep: NonNullable<TurnServer['keep']>
+}
+
+function keptTarget(deps: TurnToolsDeps, context: Pick<TurnContext, 'session' | 'flow'>, server: TurnServer): KeptTarget | undefined {
+  if (!deps.clients || !server.keep || context.flow !== undefined) return undefined
+  return { clients: deps.clients, session: context.session, name: server.name, keep: server.keep }
+}
+
+/** Whether a server's calls run on this replica's own queue: its state lives here. */
+function pinned(deps: TurnToolsDeps, server: TurnServer): boolean {
+  return Boolean(deps.hostQueue && (server.pinned || (server.keep && deps.clients)))
+}
+
+function openKept(t: KeptTarget): Promise<KeptClient<Listed>> {
+  return t.clients.open(t.session, t.name, t.keep.fingerprint, () => t.keep.connect())
+}
+
+/** Lists the server on the session's kept client, keeping the list with it; a listing has no side effects, so a broken session is reconnected once. */
+async function listKept(t: KeptTarget, signal: AbortSignal): Promise<{ client: KeptClient<Listed>; tools: Listed }> {
+  for (let attempt = 0; ; attempt++) {
+    const client = await openKept(t)
+    try {
+      const { tools } = await t.clients.use(client, (c) => c.listTools(undefined, { signal }))
+      client.tools = named(tools)
+      return { client, tools: client.tools }
+    } catch (err) {
+      if (signal.aborted || !(transportBroken(err) || neverSent(err))) throw err
+      await t.clients.drop(client)
+      if (attempt > 0) throw err
+    }
+  }
+}
+
+/** What a call on a kept client says once its MCP session was reset. */
+const resetNote = (server: string) =>
+  `ScadBuddy: the MCP session with plugin ${server} was reset, so state from earlier calls (such as an open browser page) is gone`
+
+/**
+ * A call on the session's kept client. If the server no longer knows the session (404),
+ * or the request could not be sent at all, the call never ran: it is retried once on a
+ * new session, and `reset` says so. Any other broken transport may have run it, so it is
+ * never retried; the client is ended and the error says the session was reset.
+ */
+async function callKept(
+  t: KeptTarget,
+  first: KeptClient<Listed>,
+  call: (client: Client) => ReturnType<Client['callTool']>,
+  signal: AbortSignal,
+): Promise<{ result: Awaited<ReturnType<Client['callTool']>>; reset?: string }> {
+  try {
+    return { result: await t.clients.use(first, call) }
+  } catch (err) {
+    if (signal.aborted || !(transportBroken(err) || neverSent(err))) throw err
+    await t.clients.drop(first)
+    const reason = (err as Error).message
+    if (!sessionGone(err) && !neverSent(err)) {
+      throw new Error(`${reason}. ${resetNote(t.name)}; the call was not retried, since it may have run`, { cause: err })
+    }
+    const again = await openKept(t)
+    try {
+      return { result: await t.clients.use(again, call), reset: `${resetNote(t.name)} (${reason}); this call ran on a new one.` }
+    } catch (retried) {
+      if (!signal.aborted && transportBroken(retried)) await t.clients.drop(again)
+      throw new Error(`${(retried as Error).message}. ${resetNote(t.name)}, and the call failed again on a new one`, {
+        cause: retried,
+      })
+    }
+  }
 }
 
 /** `promise`, or the signal's reason once it aborts (a connect that stalls takes no signal). */
@@ -262,12 +359,35 @@ function serverOf(set: TurnServers, name: string) {
   return { parts, server }
 }
 
-/** The tool a turn tool's name names now, or a non-retryable refusal saying why not. */
-async function resolve(set: TurnServers, name: string, signal: AbortSignal) {
+/**
+ * The tool a turn tool's name names now, or a non-retryable refusal saying why not. A
+ * call (`use: 'call'`) on a kept server lists it on the session's kept client, which it
+ * then runs on; a tier check uses that client's list only if this replica holds one, so
+ * a replica the calls are not pinned to keeps none.
+ */
+async function resolve(
+  deps: TurnToolsDeps,
+  context: Pick<TurnContext, 'session' | 'flow'>,
+  set: TurnServers,
+  name: string,
+  signal: AbortSignal,
+  use: 'call' | 'tier',
+) {
   const { parts, server } = serverOf(set, name)
-  const found = (await listed(server, signal, true)).find((t) => t.name === parts.tool)
+  const target = keptTarget(deps, context, server)
+  let client: KeptClient<Listed> | undefined
+  let tools: Listed
+  if (target && use === 'call') {
+    client = await openKept(target)
+    if (client.tools) tools = client.tools
+    else ({ client, tools } = await listKept(target, signal))
+  } else {
+    const held = target && target.clients.peek(target.session, target.name, target.keep.fingerprint)
+    tools = held?.tools ?? (await listed(server, signal, true))
+  }
+  const found = tools.find((t) => t.name === parts.tool)
   if (!found) throw ApplicationFailure.nonRetryable(`${name} is not offered any more by ${server.name}`, TOOL_ERROR)
-  return { server, tool: found.tool, harnessName: `mcp__${server.name}__${parts.tool}` }
+  return { server, tool: found.tool, harnessName: `mcp__${server.name}__${parts.tool}`, client }
 }
 
 /** Who a call runs as, with which tiers and under which approval: a durable session's turn, or a flow run's starter. */
@@ -331,7 +451,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
           set.servers.map(async (server) => {
             try {
               const bounded = AbortSignal.any([signal, AbortSignal.timeout(deps.listTimeoutMs ?? LIST_TIMEOUT_MS)])
-              return { server, offered: await within(listed(server, bounded), bounded) }
+              const target = keptTarget(deps, { session }, server)
+              const offered = target ? listKept(target, bounded).then((k) => k.tools) : listed(server, bounded)
+              return { server, offered: await within(offered, bounded) }
             } catch (err) {
               if (signal.aborted) throw new CancelledFailure('the listing was cancelled')
               return { server, problem: `plugin ${server.name} is not available in this turn: ${(err as Error).message}` }
@@ -355,15 +477,22 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
               description: tool.description ?? '',
               input_schema: tool.inputSchema as Record<string, unknown>,
               may_park: server.mayPark?.(`mcp__${server.name}__${name}`) ?? true,
-              ...(server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}),
+              ...(pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}),
             })
           }
         }
+        // A plugin gone since, or configured differently now, takes its session with it.
+        await deps.clients?.retain(session, new Map(set.servers.flatMap((s) => (s.keep ? [[s.name, s.keep.fingerprint] as const] : []))))
         // Said once, after the listing, so a retried attempt does not say it again.
         const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : [])), ...tooLong]
         if (problems.length) await deps.report?.(session, problems.map(scrub))
         return { tools, packages: set.packages ?? [] }
       })
+    },
+    [TURN_TOOLS_CLOSE_ACTIVITY]: async (): Promise<void> => {
+      // The session's own id, from its workflow: its row may be gone (forgotten) by now.
+      const session = sessionOf(Context.current().info.workflowExecution?.workflowId)
+      if (session !== undefined) await deps.clients?.closeSession(session)
     },
     [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier; task_queue?: string }> => {
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
@@ -371,9 +500,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const caller = await turnCaller(deps, TURN_TOOL_TIER_ACTIVITY, '')
       const signal = Context.current().cancellationSignal
       return withServers(deps, { ...caller.context, signal }, async (set) => {
-        const { server, harnessName } = await resolve(set, tool, signal)
+        const { server, harnessName } = await resolve(deps, caller.context, set, tool, signal, 'tier')
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
-        const queue = server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}
+        const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
         return { tier: server.tierOf(harnessName, input), ...queue }
       })
     },
@@ -401,7 +530,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const signal = context.cancellationSignal
     return withServers(deps, { ...caller.context, signal }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
-      const { server, tool, harnessName } = await resolve(set, name, signal)
+      const { server, tool, harnessName, client: keptClient } = await resolve(deps, caller.context, set, name, signal, 'call')
       const tier = server.tierOf(harnessName, input)
       const startedAt = new Date()
       const record = (outcome: 'ok' | 'error' | 'refused', detail?: string) =>
@@ -439,8 +568,15 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       }
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>
+      let reset: string | undefined
+      const callTool = (client: Client) => client.callTool({ name: tool.name, arguments: fields }, undefined, { signal })
+      const target = keptTarget(deps, caller.context, server)
       try {
-        result = await withClient(server, (client) => client.callTool({ name: tool.name, arguments: fields }, undefined, { signal }))
+        if (target && keptClient) {
+          ;({ result, reset } = await callKept(target, keptClient, callTool, signal))
+        } else {
+          result = await withClient(server, callTool)
+        }
       } catch (err) {
         if (signal.aborted) throw new CancelledFailure('the call was cancelled')
         await record('error', (err as Error).message)
@@ -451,6 +587,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       // The images go to the session's blobs, never into the payload; their names and
       // the text go through the same scrub.
       const text = scrub(
+        (reset ? `[${reset}]\n\n` : '') +
         await resultText(
           (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
           deps.blobs && session ? { session, blobs: deps.blobs } : undefined,

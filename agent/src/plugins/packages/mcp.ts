@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { declaredConfigs } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
@@ -73,7 +73,7 @@ export async function forwardPackageServers(
   for (const pkg of loaded) {
     for (const { map } of declaredConfigs(pkg.dir).mcp) {
       for (const [server, config] of entries(map)) {
-        if (typeof config.url !== 'string' || config.command !== undefined) continue
+        if (typeof config.url !== 'string' || !noCommand(config)) continue
         const name = packageServerName(pkg.name, server)
         const what = `plugin package ${pkg.name}: MCP server "${server}"`
         if (name.includes('__')) {
@@ -128,9 +128,14 @@ export async function forwardPackageServers(
   return { plugins, problems, secrets, release: () => releases.forEach((r) => r()) }
 }
 
+/** No command: absent or null, as agent-durable's runner.py `_remote_entry` reads it (#2563). */
+function noCommand(config: Record<string, unknown>): boolean {
+  return config.command === undefined || config.command === null
+}
+
 /** Whether a server entry is reached by URL (http, sse): the forwarder's, never Claude Code's. */
 export function isRemoteEntry(config: Record<string, unknown>): boolean {
-  return config.command === undefined && (typeof config.url === 'string' || config.type === 'http' || config.type === 'sse')
+  return noCommand(config) && (typeof config.url === 'string' || config.type === 'http' || config.type === 'sse')
 }
 
 /** Whether a plugin directory declares any server reached by URL. */
@@ -168,6 +173,12 @@ function withoutRemote(map: unknown): unknown {
  * load: one already there is kept only while it hashes to the fresh copy, so it is
  * never trusted as it is. The original is never written to.
  */
+/** Marks a package copy as just used: its folder's mtime is what turnPackages.ts `sweepPackageCopies` reads. */
+export async function touch(dir: string): Promise<void> {
+  const now = new Date()
+  await utimes(dir, now, now).catch(() => {})
+}
+
 export async function withoutRemoteServers(dir: string, contentHash: string, root: string): Promise<string> {
   if (!declaresRemoteServers(dir)) return dir
   const target = path.join(root, contentHash.replace(/^sha256:/, ''))
@@ -189,6 +200,9 @@ export async function withoutRemoteServers(dir: string, contentHash: string, roo
     }
     if (declaresRemoteServers(tmp)) throw new Error(`could not strip the http MCP servers of ${dir}`)
     const want = (await hashTree(tmp)).hash
+    // Its last use, which turnPackages.ts `sweepPackageCopies` keeps it by (#2395),
+    // touched before it is checked, as sharePackage does.
+    await touch(target)
     if (await hashesTo(target, want)) return target
     await rm(target, { recursive: true, force: true })
     await rename(tmp, target).catch(async (err: NodeJS.ErrnoException) => {

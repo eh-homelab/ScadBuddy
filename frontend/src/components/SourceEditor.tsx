@@ -3,6 +3,7 @@ import type * as Monaco from 'monaco-editor/editor/editor.api'
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import type { Diagnostic } from '../api/types'
 import { connectLanguageServer } from '../lib/languageClient'
+import { LEAVE_HINT, letTabLeave } from '../lib/editorExit'
 import { definitionFile, definitionLabel, directoryOf, type DefinitionFile } from '../lib/lsp'
 import { MARKER_OWNER, toMarkers } from '../lib/markers'
 import { OPENSCAD_LANGUAGE_ID, monaco, setupMonaco } from '../lib/monaco'
@@ -25,10 +26,6 @@ export interface SourceEditHandle {
   /** The editor's own element, for the highlight. */
   element: () => HTMLElement | null
 }
-
-
-/** #997 — how to leave the editor by keyboard, since Tab indents in it. */
-const LEAVE_HINT = 'Esc, then Tab, to leave the editor'
 
 interface Props {
   value: string
@@ -264,33 +261,8 @@ export function SourceEditor({
                 element: () => instance.getDomNode(),
               }
             }
-            // #997 — Tab indents, so on its own it can never leave the editor (WCAG 2.1.2).
-            // Escape arms Monaco's tab-focus mode for the next key: Tab or Shift+Tab then
-            // moves focus on, and any other key, or leaving, puts Tab back to indenting.
-            // Only with no widget open and nothing selected: Escape still closes completion,
-            // find and the rest, collapses a selection and removes secondary cursors.
-            instance.addCommand(
-              monaco.KeyCode.Escape,
-              () => instance.updateOptions({ tabFocusMode: true }),
-              '!suggestWidgetVisible && !findWidgetVisible && !parameterHintsVisible && ' +
-                '!renameInputVisible && !referenceSearchVisible && !inSnippetMode && !editorHasMultipleSelections && ' +
-                '!editorHasSelection',
-            )
-            const passing = new Set([
-              monaco.KeyCode.Escape,
-              monaco.KeyCode.Tab,
-              monaco.KeyCode.Shift,
-              monaco.KeyCode.Ctrl,
-              monaco.KeyCode.Alt,
-              monaco.KeyCode.Meta,
-            ])
-            instance.onKeyDown((event) => {
-              if (!passing.has(event.keyCode)) instance.updateOptions({ tabFocusMode: false })
-            })
-            instance.onDidBlurEditorText(() => instance.updateOptions({ tabFocusMode: false }))
+            letTabLeave(instance, label)
             instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => latest.current.onSave?.())
-            // #1672 — the way out is part of the name, so a screen reader says it on focus.
-            instance.updateOptions({ ariaLabel: `${label}. ${LEAVE_HINT}` })
             applyMarkers()
             setTextModel(instance.getModel())
             // Only the model's own source: a definition shown read-only has no session.
