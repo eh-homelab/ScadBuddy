@@ -15,7 +15,11 @@ export interface Carry {
   ready: boolean
 }
 
-/** The dialog's one carry, held across renders; the hooks read and settle it. */
+/**
+ * The dialog's one carry, held across renders; the hooks read and settle it. It is not
+ * state: `usePrintChoices` reads it while rendering, so every `set` must come with a
+ * state change that re-renders (#2250).
+ */
 export class CarryBox {
   private value: Carry | null = null
   get(): Carry | null {
@@ -80,6 +84,11 @@ export function useFilamentPlan(
    * are that plate's own, and all plates' are their union, so those are read for it.
    */
   const filamentAttempt = useRef(0)
+  /**
+   * #2249 — bumped by Retry after a failed read. Print stays held while there is no plan
+   * for these choices (`planReady`): sending an empty one would print with no spools.
+   */
+  const [retries, setRetries] = useState(0)
   useEffect(() => {
     const token = (filamentAttempt.current += 1)
     setFilamentError(null)
@@ -142,7 +151,7 @@ export function useFilamentPlan(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
-  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan, carry])
+  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan, carry, retries])
 
   const suggested = filaments?.suggested ?? []
   const planChanged =
@@ -155,5 +164,7 @@ export function useFilamentPlan(
   /** Whether `plan` was seeded from these choices, so it may be sent with them. */
   const planReady = choices !== null && planFor === choices
 
-  return { filaments, plan, setPlan, planChanged, filamentError, planReady }
+  const retryFilaments = () => setRetries((n) => n + 1)
+
+  return { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments }
 }

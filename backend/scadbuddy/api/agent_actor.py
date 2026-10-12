@@ -31,9 +31,10 @@ lets a marked request through when, in one statement that also marks the grant u
 - the grant is for the marker's session, this method and this exact path;
 - it is unused and not expired;
 - the turn that made it is still the session's live turn (``ai_sessions.turn_id``
-  with an unexpired lease), so an interrupt, a handoff, a new turn or the turn's end
-  voids it;
-- its approval is approved, consumed and not revoked, in the same session.
+  with an unexpired lease; for a durable session, ``durable_turn_id`` while it runs,
+  #2320), so an interrupt, a handoff, a new turn or the turn's end voids it;
+- its approval is approved, consumed and not revoked, in the same session (for a
+  durable session, its call's ``ai_input_responses`` row, outcome ``approved``).
 
 A grant covers the method and path only, not the body or query string, so a route
 whose body alone decides where something goes cannot be granted at all
@@ -124,7 +125,7 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "PUT /api/v1/print/projects/last",
     "POST /api/v1/workflows",
     "POST /api/v1/workflows/{definition_id}/runs",
-    "POST /api/v1/workflows/{definition_id}/versions/{commit}/restore",
+    "POST /api/v1/workflows/names/{name}/versions/{commit}/restore",
 )
 # agent-allowed-writes:end
 
@@ -162,14 +163,22 @@ UPDATE ai_headless_grants SET used_at = now()
 WHERE id = (
   SELECT g.id FROM ai_headless_grants g
   JOIN ai_sessions s ON s.id = g.session_id
-  JOIN ai_approvals a ON a.id = g.approval_id
+  LEFT JOIN ai_approvals a ON a.id = g.approval_id
+  LEFT JOIN ai_input_responses r ON r.request_id = g.request_id
   WHERE g.session_id = %(session)s AND g.method = %(method)s
     -- The same optional trailing slash AgentActorGate.permits() allows (_compile).
     AND rtrim(g.path, '/') = rtrim(%(path)s, '/')
     AND g.used_at IS NULL AND g.expires_at > now()
-    AND s.turn_id = g.turn_id AND s.lease_until > now()
-    AND a.session_id = g.session_id AND a.decision = 'approved' AND a.consumed_at IS NOT NULL
-    AND a.revoked_at IS NULL
+    AND (
+      -- A classic turn's grant: its turn holds the claim, its approval was used.
+      (s.mode = 'classic' AND s.turn_id = g.turn_id AND s.lease_until > now()
+        AND a.session_id = g.session_id AND a.decision = 'approved'
+        AND a.consumed_at IS NOT NULL AND a.revoked_at IS NULL)
+      -- A durable turn's (#2320): its turn is the one running, its call was approved.
+      OR (s.mode = 'durable' AND s.durable_turn_id = g.turn_id
+        AND s.status IN ('running', 'waiting_approval', 'waiting_input')
+        AND r.session_id = g.session_id AND r.kind = 'approval' AND r.outcome = 'approved')
+    )
   ORDER BY g.created_at LIMIT 1
   FOR UPDATE OF g SKIP LOCKED)
   AND used_at IS NULL

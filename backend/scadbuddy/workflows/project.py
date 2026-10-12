@@ -62,9 +62,9 @@ class FlowStart(BaseModel):
     #: The agent's tools and their tiers when the run started (`flows/manifest.py`).
     tool_tiers: dict[str, str] = {}
     search_attributes: bool = False
-    #: The commit of the version it runs, in `data/flows` (#2503); None from a run
-    #: started before flows were in git.
-    commit: str | None = None
+    #: The commit of the version it runs, in `data/flows` (#2503); "" from a run started
+    #: before flows were in git, so recorded histories decode unchanged.
+    commit: str = ""
 
 
 @agent.defn(name=PROJECT_WORKFLOW)

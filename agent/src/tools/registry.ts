@@ -8,7 +8,7 @@ import { raiseTier } from '../harness/permissions.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
-import type { SessionFiles } from '../workspace/store.js'
+import { type SessionFiles, workspaceOf } from '../workspace/store.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
@@ -517,7 +517,12 @@ async function runJudgedByResult(
     if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
       const input = tool.parse(args)
-      const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })
+      const action = await ctx.pending.prepare(ctx.principal, {
+        tool: tool.name,
+        input,
+        summary: tool.summarize(args),
+        workspace: workspaceOf(ctx),
+      })
       return {
         result: json({
           status: 'pending_approval',

@@ -8,11 +8,11 @@ import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
-import { type SessionImage, imageOfBlock, SessionBlobs } from './blobs.js'
+import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import type { EventLog } from './eventLog.js'
-import { previewsOf, type UserImage } from './images.js'
+import type { UserImage } from './images.js'
 import { POOL_BUDGET, POOL_COST, SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
-import { event, type Owner, type SessionStatus } from './protocol.js'
+import { event, type Owner, type SentImage, type SessionStatus } from './protocol.js'
 
 // A durable session's turns (spec 2026-10-01 §6, plan 5c PR 3): what SessionManager
 // does instead of running the harness when a session's mode is `durable`. The turn
@@ -109,15 +109,6 @@ export type DurableTurnsDeps = {
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
-/** The images as the blobs the worker reads; one the panel's checks let through is always a blob. */
-function blobsOf(images: readonly UserImage[]): SessionImage[] {
-  return images.map((image, i) => {
-    const blob = imageOfBlock({ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } })
-    if (!blob) throw new SessionError('invalid', `images[${i}] is not an image the model can take`)
-    return blob
-  })
-}
-
 /** A protobuf Timestamp (`seconds` may be a Long) as epoch ms; 0 when absent. */
 function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
   return ts ? Number(String(ts.seconds ?? 0)) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6) : 0
@@ -187,14 +178,15 @@ export class DurableTurns {
    */
   async send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
     const id = session.id
-    const blobs = blobsOf(turn.images)
+    // The images and their previews by name (#2479): the event and the workflow's message carry only these.
+    const { blobs, sent } = sentImageBlobs(turn.images)
     // The status before the claim, which a give-back restores (a refused send keeps `failed`).
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, updated_at = now() FROM prior
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now() FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
@@ -205,6 +197,8 @@ export class DurableTurns {
         turn.author.kind,
         turn.author.id,
         turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
+        // The running turn, which a headless-browser grant dies with (#2320).
+        turn.turnId,
       ],
     )
     if (!claimed) return undefined
@@ -220,12 +214,12 @@ export class DurableTurns {
           turnId: turn.turnId,
           text: turn.prompt,
           author: turn.author,
-          ...(turn.images.length ? { images: previewsOf(turn.images) } : {}),
+          ...(sent.length ? { images: sent } : {}),
         }),
         event({ type: 'session.status', sessionId: id, status: 'running' }),
       ])
       seq = seqs.at(-1) ?? 0
-      await this.#sendMessage(session, turn, blobs, Number(claimed.durable_offset) > 0)
+      await this.#sendMessage(session, turn, sent, Number(claimed.durable_offset) > 0)
     } catch (err) {
       if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
       // The refusal is what the caller hears, whatever the give-back meets.
@@ -256,7 +250,7 @@ export class DurableTurns {
    * workflow not found was removed by retention after it ended, and starting
    * `session-<id>` again would run the session's history-holding chat empty (#2078).
    */
-  async #sendMessage(session: SessionRecord, turn: DurableTurn, blobs: readonly SessionImage[], ranTurn: boolean): Promise<void> {
+  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean): Promise<void> {
     const start: SessionStart = {
       session_id: session.id,
       creator: wire(session.creator),
@@ -268,7 +262,8 @@ export class DurableTurns {
       turn_id: turn.turnId,
       text: turn.text,
       author: wire(turn.author),
-      images: blobs.map((b) => ({ name: b.name, mediaType: b.mediaType })),
+      // The full images, which the segment runner reads by name (Ruling 5); the previews are the panel's.
+      images: sent.map((s) => ({ name: s.name!, mediaType: s.mediaType! })),
     }
     const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
@@ -311,7 +306,7 @@ export class DurableTurns {
   /** Gives back a claim whose message the workflow refused (Ruling 7), to the status it had. */
   async #giveBack(id: string, prior: SessionStatus): Promise<void> {
     const released = await this.#sql`
-      UPDATE ai_sessions SET status = ${prior}, updated_at = now() WHERE id = ${id} AND status = 'running'`
+      UPDATE ai_sessions SET status = ${prior}, durable_turn_id = NULL, updated_at = now() WHERE id = ${id} AND status = 'running'`
     if (released.count > 0) await this.#events.append(id, [event({ type: 'session.status', sessionId: id, status: prior })])
   }
 

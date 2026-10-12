@@ -36,11 +36,15 @@ from scadbuddy.api.operations import (
     still_accepting,
 )
 from scadbuddy.core.authorship import current_author
-from scadbuddy.core.gitstore import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
+from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.component import Flows, FlowsDep
-from scadbuddy.flows.definitions import FlowHistoryUnavailableError, UnknownFlowError
+from scadbuddy.flows.definitions import (
+    FlowHistoryUnavailableError,
+    ScriptMissingError,
+    UnknownFlowError,
+)
 from scadbuddy.flows.forget import forget_run
 from scadbuddy.flows.history import ResetPreview, outward_since
 from scadbuddy.flows.manifest import raise_tiers, tiers
@@ -70,6 +74,8 @@ router = APIRouter(tags=["flows"])
 FLOW_NAMESPACE = uuid.UUID("5b6f1d0e-6a8f-4f0e-9a51-0c1f1e57f10f")
 FLOWS_UNAVAILABLE = "https://scadbuddy.dev/problems/flows-unavailable"
 SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
+SCRIPT_MISSING = "https://scadbuddy.dev/problems/flow-script-missing"
+NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
 ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
 _STATUS_SECONDS = 2.0
@@ -90,7 +96,7 @@ class DefinitionCreate(BaseModel):
     """A flow version to register."""
 
     #: Lower-case letters, digits and dashes; a new version of an existing name.
-    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    name: str = Field(pattern=NAME_PATTERN)
     #: The script: Python over the host functions, checked before it is stored.
     script: str
     #: Seconds an outward call of its runs waits for a decision, or "never". Omitted,
@@ -224,77 +230,86 @@ def _versioned() -> Iterator[None]:
         yield
     except UnknownFlowError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow.") from None
-    except RevisionNotFoundError as error:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"No such version of the flow: {error}") from None
+    except RevisionNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such version of this flow.") from None
+    except ScriptMissingError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, "This version's script is missing.", type_=SCRIPT_MISSING
+        ) from None
     except FlowHistoryUnavailableError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "Flow history is unavailable: no git repository under the data directory's flows.",
+            "Flow history is unavailable: the flows directory is not a git repository.",
             type_=FLOWS_UNAVAILABLE,
         ) from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
+NamePath = Annotated[str, Path(pattern=NAME_PATTERN)]
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]
 
 
 @router.get(
-    "/workflows/{definition_id}/versions",
+    "/workflows/names/{name}/versions",
     response_model=list[FlowVersion],
     summary="A flow's history: its versions, newest first",
 )
 async def list_flow_versions(
-    definition_id: str,
+    name: NamePath,
     flows: FlowsDep,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> list[FlowVersion]:
-    """Every commit of the flow's script in `data/flows`, whichever of its versions
-    `definition_id` names. Each carries its version id, which `GET /workflows/{id}` and
-    a run's start take."""
+    """Every version of the flow, one commit each in `data/flows`, with who made it and
+    when. Each carries its version id, which `GET /workflows/{id}` and a run's start
+    take."""
     with _versioned():
-        return await flows.definitions.versions(definition_id, limit=limit)
+        return await flows.definitions.versions(name, limit=limit)
 
 
 @router.get(
-    "/workflows/{definition_id}/versions/{commit}",
-    response_model=Definition,
-    summary="A flow's script at a commit",
+    "/workflows/names/{name}/versions/{commit}/source",
+    response_class=Response,
+    responses={200: {"content": {"text/plain": {}}}},
+    summary="A flow's script at one of its versions",
 )
-async def get_flow_version(definition_id: str, commit: CommitPath, flows: FlowsDep) -> Definition:
-    """The flow's version at `commit`: the newest of its commits at or before it."""
+async def get_flow_version_source(name: NamePath, commit: CommitPath, flows: FlowsDep) -> Response:
     with _versioned():
-        return await flows.definitions.at(definition_id, commit)
+        script = await flows.definitions.source(name, commit)
+    return Response(content=script, media_type="text/plain; charset=utf-8")
 
 
 @router.get(
-    "/workflows/{definition_id}/versions/{commit}/diff",
+    "/workflows/names/{name}/versions/{commit}/diff",
     response_model=FlowDiff,
-    summary="Diff a flow's script between two commits (the version before by default)",
+    summary="Diff a flow's script between two versions (the one before by default)",
 )
-async def get_flow_diff(
-    definition_id: str,
+async def get_flow_version_diff(
+    name: NamePath,
     commit: CommitPath,
     flows: FlowsDep,
     base: Annotated[str | None, Query(pattern=COMMIT_ID_PATTERN)] = None,
 ) -> FlowDiff:
     with _versioned():
-        return await flows.definitions.diff(definition_id, commit, base)
+        return await flows.definitions.diff(name, commit, base)
 
 
 @router.post(
-    "/workflows/{definition_id}/versions/{commit}/restore",
+    "/workflows/names/{name}/versions/{commit}/restore",
+    status_code=status.HTTP_201_CREATED,
     response_model=Definition,
-    summary="Restore a flow's script at a commit, as a new version",
+    summary="Restore a flow's script at one of its versions, as a new version",
 )
-async def restore_flow_version(
-    definition_id: str, commit: CommitPath, flows: FlowsDep
-) -> Definition:
-    """One new commit with the script as it was at `commit`, authored by the caller:
-    never a rewrite. Restoring the script the flow has already makes no commit and
-    answers its current version. The approval timeout is the flow's, unchanged."""
+async def restore_flow_version(name: NamePath, commit: CommitPath, flows: FlowsDep) -> Definition:
+    """A new commit with the script as it was at `commit`, and a new version row with
+    that version's approval timeout: never a rewrite. Type-checked first, as a
+    registration is."""
     with _versioned():
-        return await flows.definitions.restore(definition_id, commit, _started_by())
+        script = await flows.definitions.source(name, commit)
+    if problems := await check_script(script):
+        raise _script_problems(problems, "That version no longer type-checks.")
+    with _versioned():
+        return await flows.definitions.restore(name, commit, _started_by())
 
 
 async def _execution(client: Client, run_id: str) -> WorkflowExecutionStatus | None:
@@ -378,7 +393,7 @@ async def start_flow_run(
                     tools_queue=flows.settings.temporal_task_queue_agent_tools,
                     tool_tiers=raise_tiers(tiers(), overrides),
                     search_attributes=flows.search_attributes,
-                    commit=definition.commit,
+                    commit=definition.commit or "",
                 ),
                 update_id=key,
             )

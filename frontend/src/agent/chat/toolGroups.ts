@@ -33,22 +33,44 @@ export function isLiveStatus(status: ToolStatus): boolean {
 }
 
 /**
- * How a call stands: its result says done or failed; else the approval or question
- * that names it says whether it waits on a human or was never run; else it runs.
+ * How a call stands. An approval that names it and was not given says it was not run,
+ * even when Claude Code went on to record an error result for it (#2149); one still
+ * pending says it waits. Else its result says done or failed, unless the turn was
+ * stopped while it ran (Claude Code then records a refusal as its result), which is
+ * stopped. Else a question that names it says it waits on the user; else it runs.
  * `settled`: the session's turn has ended, so a call with nothing to show for it stopped.
  */
 export function toolStatus(call: ToolCall, items: readonly FeedItem[], options: { settled?: boolean } = {}): ToolStatus {
-  if (call.result) return call.result.ok ? 'done' : 'failed'
   for (const item of items) {
-    if (item.kind === 'approval' && item.tool === call.id) {
-      if (item.state === 'pending' || item.state === 'sent') return 'waiting_approval'
-      if (item.state !== 'approved') return 'not_run'
-    }
+    if (item.kind !== 'approval' || item.tool !== call.id) continue
+    if (item.state === 'pending' || item.state === 'sent') {
+      if (!call.result) return 'waiting_approval'
+    } else if (item.state !== 'approved') return 'not_run'
+  }
+  if (call.result) {
+    if (call.result.ok) return 'done'
+    return stoppedDuring(call, items) ? 'stopped' : 'failed'
+  }
+  for (const item of items) {
     if (item.kind === 'question' && item.tool === call.id && (item.state === 'pending' || item.state === 'sent')) {
       return 'waiting_input'
     }
   }
   return options.settled ? 'stopped' : 'running'
+}
+
+/**
+ * Whether the turn was stopped (the agent's `interrupted` error) while `call` was still
+ * its last step: nothing the assistant or the user said comes between them.
+ */
+function stoppedDuring(call: ToolCall, items: readonly FeedItem[]): boolean {
+  const at = items.indexOf(call)
+  if (at < 0) return false
+  for (const item of items.slice(at + 1)) {
+    if (item.kind === 'error' && item.code === 'interrupted') return true
+    if (item.kind === 'assistant' || item.kind === 'user') return false
+  }
+  return false
 }
 
 /** A group's status: its first live call's; else failed, not run or stopped if any call was; else done. */

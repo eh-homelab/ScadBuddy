@@ -28,6 +28,15 @@ on:
         description: "Claude model id or alias (blank: the Agent SDK's default)"
         required: false
         type: string
+      mode:
+        description: "Session mode the scenarios run in (docs/ai/evals.md)"
+        required: false
+        type: choice
+        default: both
+        options:
+          - both
+          - classic
+          - durable
 
 permissions:
   contents: read
@@ -41,10 +50,10 @@ jobs:
     name: Live AI evals
     runs-on: ubuntu-latest
     # The scenarios run one at a time, each up to vitest's 6 minutes
-    # (vitest.evals.config.ts, live.eval.ts): 5 scenarios are 30 minutes, after
-    # checkout, install and the image build below. Keep headroom so a slow model
-    # fails a scenario, not the job.
-    timeout-minutes: 75
+    # (vitest.evals.config.ts, live.eval.ts): 5 scenarios in each of two modes are
+    # an hour, after checkout, install, the image build and the durable stack's
+    # start below. Keep headroom so a slow model fails a scenario, not the job.
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: agent
@@ -153,14 +162,42 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # `inputs.model` reaches the run as an environment variable, never
-      # interpolated into the script.
+      # The durable mode (#2320, evals/durable.ts) runs agent-durable's worker under
+      # uv and starts its own Temporal dev server from this CLI; without them it
+      # skips. The same pins as ci.yml's `agent` job; bump together.
+      - name: Set up uv
+        if: ${{ steps.key.outputs.present == 'true' && inputs.mode != 'classic' }}
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: agent-durable/uv.lock
+
+      - name: Install the Temporal CLI
+        if: ${{ steps.key.outputs.present == 'true' && inputs.mode != 'classic' }}
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
+      # `inputs.model` and `inputs.mode` reach the run as environment variables,
+      # never interpolated into the script.
       - name: Run the live evals
         env:
           SCADBUDDY_EVAL_ANTHROPIC_API_KEY: ${{ secrets.SCADBUDDY_EVAL_ANTHROPIC_API_KEY }}
           SCADBUDDY_EVAL_MODEL: ${{ inputs.model }}
           SCADBUDDY_EVAL_REPORT: ${{ runner.temp }}/eval-report.json
           SCADBUDDY_EVAL_BACKEND_URL: ${{ steps.key.outputs.present == 'true' && 'http://127.0.0.1:18080' || '' }}
+          SCADBUDDY_EVAL_MODE: ${{ inputs.mode || 'both' }}
+          # The durable stack's own throwaway database (it copies a migrated
+          # template, so it needs CREATEDB: the service's superuser has it).
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_evals
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: pnpm evals
 
       - name: Backend logs
@@ -180,11 +217,11 @@ jobs:
           {
             echo "## AI evals: $(jq -r '"\(.passed)/\(.total) passed"' "$REPORT")"
             echo
-            echo "| Scenario | Result | Model | Failed checks |"
-            echo "|---|---|---|---|"
+            echo "| Scenario | Mode | Result | Model | Failed checks |"
+            echo "|---|---|---|---|---|"
             # A literal | in a title or check name would split the table cell.
             jq -r 'def cell: tostring | gsub("\\|"; "\\|");
-              .scenarios[] | "| \(.title | cell) | \(if .pass then "pass" else "FAIL" end) | \(.model // "unknown" | cell) | \([.checks[] | select(.pass | not) | .name] | join("; ") | cell) |"' "$REPORT"
+              .scenarios[] | "| \(.title | cell) | \(.mode // "classic" | cell) | \(if .pass then "pass" else "FAIL" end) | \(.model // "unknown" | cell) | \([.checks[] | select(.pass | not) | .name] | join("; ") | cell) |"' "$REPORT"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the report

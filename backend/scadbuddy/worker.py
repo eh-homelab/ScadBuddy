@@ -28,7 +28,7 @@ from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
-from scadbuddy.bambuddy.client import DEFAULT_SLICE_TIMEOUT, client_for
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
 from scadbuddy.bambuddy.output_reader import RemoteOutputs
@@ -39,7 +39,7 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRunStore, newest_failed_from
+from scadbuddy.bambuddy.runs import PrintRunStore, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
@@ -93,7 +93,6 @@ from scadbuddy.workflows.client import (
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
-from scadbuddy.workflows.follow import FOLLOW_WORKFLOW
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
@@ -113,10 +112,13 @@ DRAIN_POLL = 5.0
 DRAIN_CURRENT_GRACE = 30.0
 #: Making the build current, retried once the worker polls: Temporal 1.28 ignores
 #: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
-#: The waits between attempts, then every `MAKE_CURRENT_EVERY`, for `_DEADLINE` seconds.
+#: The waits between attempts, then every `MAKE_CURRENT_EVERY` until it takes or the
+#: worker stops: a worker that gave up left a deployment whose current build had no
+#: poller once the old pods went, and every render hung (#2341). After
+#: `MAKE_CURRENT_ERROR_AFTER` seconds each failure logs an error instead of a warning.
 MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
 MAKE_CURRENT_EVERY = 5.0
-MAKE_CURRENT_DEADLINE = 60.0
+MAKE_CURRENT_ERROR_AFTER = 60.0
 
 
 def build_worker_deps(
@@ -279,12 +281,13 @@ async def make_current_until_polled(
     build_id: str,
     backoff: Sequence[float],
     every: float,
-    deadline: float,
-) -> bool:
-    """Make the build current, retrying an `RPCError` until ``deadline`` seconds have
-    passed; False when it never took. Any other error propagates."""
+    error_after: float,
+) -> None:
+    """Make the build current, retrying an `RPCError` until it takes; cancel it to
+    stop. Failures past ``error_after`` seconds log at error level. Any other error
+    propagates."""
     loop = asyncio.get_running_loop()
-    give_up = loop.time() + deadline
+    escalate = loop.time() + error_after
     attempt = 0
     while True:
         attempt += 1
@@ -292,20 +295,15 @@ async def make_current_until_polled(
             await set_current()
         except RPCError as error:
             delay = backoff[attempt - 1] if attempt <= len(backoff) else every
-            logger.warning(
+            logger.log(
+                logging.ERROR if loop.time() >= escalate else logging.WARNING,
                 "could not make this build current yet",
                 extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
             )
-            if loop.time() + delay > give_up:
-                logger.error(
-                    "could not make this build current; polling anyway",
-                    extra={"build_id": build_id, "attempts": attempt, "error": str(error)},
-                )
-                return False
             await asyncio.sleep(delay)
         else:
             logger.info("made this build current", extra={"build_id": build_id})
-            return True
+            return
 
 
 async def _poll(
@@ -404,7 +402,7 @@ async def _serve_versioned(
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
                 every=MAKE_CURRENT_EVERY,
-                deadline=MAKE_CURRENT_DEADLINE,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
             )
         )
         stopped = asyncio.create_task(stop.wait())
@@ -688,16 +686,6 @@ async def run_inprocess_worker(
     await _poll(settings, deps, client, stop, drain=False)
 
 
-#: The longest a print run stays open (#1060): its plates' slices, then
-#: ``REPEAT_WINDOW`` on a timer. A stopping print worker drains its pinned runs for at
-#: most this; ``FollowPrint`` is AUTO_UPGRADE and never holds it.
-PRINT_DRAIN_TIMEOUT = (
-    REPEAT_WINDOW + 2 * timedelta(seconds=DEFAULT_SLICE_TIMEOUT)
-).total_seconds() + 120
-#: The workflow types the print worker's drain does not wait for (AUTO_UPGRADE).
-PRINT_UNPINNED = (FOLLOW_WORKFLOW,)
-
-
 @dataclass
 class PrintWorkerDeps:
     """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): Postgres, the
@@ -812,7 +800,8 @@ async def run_print_worker(
     client: Client | None = None,
 ) -> None:
     """``python -m scadbuddy.worker --queue bambuddy``: the ``scadbuddy-print`` worker
-    (#1060), versioned and drained like the render worker, ``stop_now`` included."""
+    (#1060), versioned like the render worker but not drained: its workflows are
+    AUTO_UPGRADE (`print_deployment`, #2066), so the next build takes them over."""
     stop = stop or asyncio.Event()
     deps = await asyncio.to_thread(build_print_deps, settings)
     try:
@@ -838,8 +827,7 @@ async def run_print_worker(
                 stop,
                 build_id=build_id,
                 deployment_name=PRINT_DEPLOYMENT_NAME,
-                drain_timeout=PRINT_DRAIN_TIMEOUT,
-                ignore_types=PRINT_UNPINNED,
+                drain_timeout=None,
                 stop_now=stop_now,
             )
         finally:

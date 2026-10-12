@@ -15,7 +15,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.core.gitstore import git_env
+from scadbuddy.core.gitrepo import git_env
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 
@@ -161,13 +161,26 @@ def test_a_definition_no_longer_type_checking_is_refused_at_start(
     ).stdout.strip()
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute(
-            "UPDATE workflow_definition_versions SET commit_sha = %s WHERE id = %s",
-            (head, definition["id"]),
+            "UPDATE workflow_definitions SET commit = %s WHERE id = %s", (head, definition["id"])
         )
     assert start(client, definition["id"], "k").status_code == 422
 
 
-def test_a_flows_history_script_at_a_commit_diff_and_restore(client: TestClient) -> None:
+def test_a_start_whose_script_is_missing_from_git_is_409(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    definition = register(client, script("return 1"))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE workflow_definitions SET commit = %s WHERE id = %s",
+            ("f" * 40, definition["id"]),
+        )
+    response = start(client, definition["id"], "k")
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/flow-script-missing")
+
+
+def test_a_flows_history_source_diff_and_restore(client: TestClient) -> None:
     """#2503: a flow's versions are commits in `data/flows`, each authored by its
     registrar, and a run records the commit it ran."""
     one = register(client, script("return 1"))
@@ -181,19 +194,20 @@ def test_a_flows_history_script_at_a_commit_diff_and_restore(client: TestClient)
         {"kind": "agent", "principal": "token:p1", "session": "s1"},
     )
 
-    versions = client.get(f"/api/v1/workflows/{one['id']}/versions").json()
+    base = "/api/v1/workflows/names/swap/versions"
+    versions = client.get(base).json()
     assert [(v["version"], v["id"], v["commit"], v["created_by"]["kind"]) for v in versions] == [
         (2, two["id"], two["commit"], "agent"),
         (1, one["id"], one["commit"], "browser"),
     ]
-    at = client.get(f"/api/v1/workflows/{two['id']}/versions/{one['commit'][:7]}").json()
-    assert (at["id"], at["script"]) == (one["id"], script("return 1"))
-    diff = client.get(f"/api/v1/workflows/{two['id']}/versions/{two['commit']}/diff").json()
+    source = client.get(f"{base}/{one['commit'][:7]}/source")
+    assert (source.status_code, source.text) == (200, script("return 1"))
+    diff = client.get(f"{base}/{two['commit']}/diff").json()
     assert (diff["base"], diff["head"]) == (one["commit"], two["commit"])
     assert "+    return 2" in diff["patch"]
 
-    restored = client.post(f"/api/v1/workflows/{two['id']}/versions/{one['commit']}/restore")
-    assert restored.status_code == 200, restored.text
+    restored = client.post(f"{base}/{one['commit']}/restore")
+    assert restored.status_code == 201, restored.text
     assert (restored.json()["version"], restored.json()["script"]) == (3, script("return 1"))
     assert [d["version"] for d in client.get("/api/v1/workflows").json()] == [3]
 
@@ -202,9 +216,10 @@ def test_a_flows_history_script_at_a_commit_diff_and_restore(client: TestClient)
     view = until(client, run_id, lambda v: v["status"] == "succeeded")
     assert (view["run"]["commit"], view["run"]["result"]) == (one["commit"], "result: 1")
 
-    assert client.get(f"/api/v1/workflows/{uuid.uuid4()}/versions").status_code == 404
-    missing = client.get(f"/api/v1/workflows/{one['id']}/versions/{'0' * 40}")
-    assert missing.status_code == 404
+    register(client, script("return 3"), name="other")
+    other = client.get("/api/v1/workflows/names/other/versions").json()[0]["commit"]
+    assert client.get("/api/v1/workflows/names/nothing/versions").status_code == 404
+    assert client.get(f"{base}/{other}/source").status_code == 404
 
 
 def test_the_approval_timeout_resolves_run_then_flow_then_setting(client: TestClient) -> None:

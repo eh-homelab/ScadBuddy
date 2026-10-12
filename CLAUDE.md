@@ -128,6 +128,10 @@ runs live only against a real backend (`SCADBUDDY_EVAL_BACKEND_URL`, the image; 
 skips without one), and its render is checked `verify.sh`-style on the saved output's
 3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
 #1924).
+Every scenario runs in both session modes (#2320): `test/evals.durable.e2e.test.ts` replays
+them through a real durable session (`evals/durable.ts`: the Python worker, Temporal, the
+agent-tools worker; skips without uv, Temporal or Postgres), and `pnpm evals` takes
+`SCADBUDDY_EVAL_MODE=classic|durable|both` (default both).
 
 Durable sessions (`agent-durable/`, Python 3.12, uv; the `agent-durable` CI job, #1056):
 
@@ -168,7 +172,9 @@ Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
 kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
-repo-server runs that version), and the `.github/scripts/*.test.sh` suites. Every
+repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as
+base64 in JSON or text outside its allowlisted Messages API boundaries; images move as
+blobs and `{name, mediaType}` pointers), and the `.github/scripts/*.test.sh` suites. Every
 `docker run` in a `verify.sh` must carry
 `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
 `"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
@@ -241,7 +247,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   a callback answered `timed out`, an approval denied at the run's approval timeout),
   `flow_routes.py` (`render`, `save_output`, `queue_print` and `arrange` call the API's
   own routes at `SCADBUDDY_API_INTERNAL_URL` with a key per call; not `print`, which
-  Monty's builtin shadows), `flow_activities.py`, `flow_models.py`,
+  Monty's builtin shadows); `tool(name, args)` takes a manifest tool, or a
+  `<server>__<tool>` turn tool (a remote plugin's, `scadbuddy_http__http_request`;
+  #2320, behind `patched("flow-turn-tools-2320")`) that the agent's `turn_tool_tier`
+  tiers and names the queue of, as the run's starter, never the headless browser;
+  `flow_activities.py`, `flow_models.py`,
   `projects_worker.py`, on the `projects` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), unversioned: a change must replay
   `tests/fixtures/project_workflow_histories/`. A flow's payloads are sealed per run
@@ -334,6 +344,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
   `prelude`, another kind run first on its own queue: `output_delete` (library) names
   `output_inbox_delete` (bambuddy).
+- `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
+  model history (`library/history.py` `ModelHistory`) and flow scripts
+  (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per
+  version; `flows/backfill.py` is the start-time backfill and reconciler;
+  `flows/history.py` is the Reset preview, not git).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
@@ -462,10 +477,18 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
     approval; no browser or answer tools)), a durable turn's other tools (#2320,
     `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins
-    through the forwarder, `http_request`): `turn_tools` lists them per turn as
+    through the forwarder, `http_request`, and `turnBrowser.ts`'s headless browser and
+    its grant tool): `turn_tools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
     and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
-    the servers again and checks tier, principal and approval as it runs; and `AgentOperation` (`workflows.ts`, bundled by
+    the servers again and checks tier, principal and approval as it runs (a `flow-<id>`
+    workflow's call too: as the run's starter, approved only by `workflow_run_decisions`,
+    with no browser servers; a server whose
+    state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
+    `agent-tools.<hostname>`, which each agent also polls), a durable turn's automatic
+    Hindsight memory (`memoryActivities.ts`, `memory_recall` before the prompt and
+    `memory_retain` before `finish_turn`: the classic hooks of `memory/hindsight.ts`,
+    the transcript rebuilt from the event log; never failing the turn); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
     the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
@@ -507,6 +530,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8); the headless
     browser's downloads are drained into `downloads/` after each browser call by a
     `PostToolUse` hook (`src/harness/browserDownloads.ts`).
+    The panel's Files (part 3) are `routes/sessionFiles.ts`
+    (list, download as an attachment, multipart upload, delete; the session routes'
+    guards, writes owner-only, each write a `workspace.file` event) and the caps' route
+    `routes/workspaceSettings.ts`; the frontend is `components/assistant/SessionFiles.tsx`
+    with msw `src/mocks/features/sessionFiles.ts` (component tests stub the upload:
+    jsdom's `File` cannot pass undici's multipart parser).
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
@@ -534,7 +563,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
     re-fetched from the pin. Install stores the pin unapproved; approving needs the
     exact commit and hash. `vet.ts` adds rules on top of `harness/plugins.ts`. Tests
-    use local git repos (`test/support/gitRepo.ts`).
+    use local git repos (`test/support/gitRepo.ts`). A durable turn (#2320) gets them
+    from `<payload dir>/plugins/<content hash>/` (`temporal/turnPackages.ts`), which the
+    segment runner re-hashes (`agent-durable/.../session/package_hash.py`, the same hash
+    as `hash.ts`); their MCP servers are turn tools (http ones, in both modes, through the
+    forwarder: `plugins/packages/mcp.ts`), and only `Bash`/`PowerShell` of an
+    allowed package's built-ins are offered there (each parked for approval).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
@@ -561,6 +595,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `activities.py` (`gate_settings`, `finish_turn`). Its tests start a dev server from
   `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` and skip without one; `tests/fake_anthropic.py`
   is the Python fake endpoint the bundled Claude Code is pointed at.
+  A segment's subagents (#2320) get ScadBuddy's tools from the agent's loopback
+  `routes/subagentMcp.ts` as `mcp__scadbuddy__*` (`session/subagents.py` mints the
+  per-turn token from the KEK, `temporal/subagentToken.ts` the same format); every call
+  is resolved from the session as it is then, and an outward one is refused to the main agent.
   `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
   validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
   activities that write `ai_pending_input`, `ai_input_responses`, the session's events

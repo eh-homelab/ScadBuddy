@@ -6,10 +6,11 @@ revisions: ``git log``, ``git show`` and ``git diff`` are the read side, so an
 operator with a shell on the volume sees precisely what the API serves.
 
 How ScadBuddy talks to git -- why it shells out to ``git`` rather than dulwich or
-pygit2, and how every call is kept hermetic -- is ``core/gitstore.py``, which the
-flow scripts' repository (#2503) shares. What is here is the model-specific part: the
-layout (a template per directory, built-ins under ``_builtin/``), the ``.gitignore``
-of render byproducts, the commit listener, and the catalogue's own reads.
+pygit2, how every call is kept hermetic, the write lock across replicas -- is
+``core/gitrepo.py``, which the flow scripts' repository (#2503) shares. What is here is
+the model-specific part: the layout (a template per directory, built-ins under
+``_builtin/``), the ``.gitignore`` of render byproducts, the commit listener, seeding,
+the symlink-safe tree reads, export and merge.
 """
 
 from __future__ import annotations
@@ -21,32 +22,39 @@ import re
 import tarfile
 import tempfile
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from pathlib import Path
 
-from scadbuddy.core.gitstore import _FIELD, _RECORD, AUTHOR_EMAIL, AUTHOR_NAME, GitRepository
-from scadbuddy.core.gitstore import COMMIT_ID_PATTERN as COMMIT_ID_PATTERN
-from scadbuddy.core.gitstore import DEFAULT_BRANCH as DEFAULT_BRANCH
-from scadbuddy.core.gitstore import DEFAULT_LOG_LIMIT as DEFAULT_LOG_LIMIT
-from scadbuddy.core.gitstore import DEFAULT_TIMEOUT as DEFAULT_TIMEOUT
-from scadbuddy.core.gitstore import EMPTY_TREE as EMPTY_TREE
-from scadbuddy.core.gitstore import GIT as GIT
-from scadbuddy.core.gitstore import GITIGNORE_NAME as GITIGNORE_NAME
-from scadbuddy.core.gitstore import LOCK_NAME as LOCK_NAME
-from scadbuddy.core.gitstore import MAINTAIN_LOOSE_OBJECTS as MAINTAIN_LOOSE_OBJECTS
-from scadbuddy.core.gitstore import MAINTAIN_PACKS as MAINTAIN_PACKS
-from scadbuddy.core.gitstore import MAINTAIN_TIMEOUT as MAINTAIN_TIMEOUT
-from scadbuddy.core.gitstore import MAX_SUBJECT as MAX_SUBJECT
-from scadbuddy.core.gitstore import RECOVERED_MESSAGE as RECOVERED_MESSAGE
-from scadbuddy.core.gitstore import FileChange as FileChange
-from scadbuddy.core.gitstore import GitError as GitError
-from scadbuddy.core.gitstore import GitTimeoutError as GitTimeoutError
-from scadbuddy.core.gitstore import GitUnavailableError as GitUnavailableError
-from scadbuddy.core.gitstore import Revision as Revision
-from scadbuddy.core.gitstore import RevisionNotFoundError as RevisionNotFoundError
-from scadbuddy.core.gitstore import RevisionRange as RevisionRange
-from scadbuddy.core.gitstore import git_env as git_env
-from scadbuddy.core.gitstore import subject_line as subject_line
+from scadbuddy.core.gitrepo import _FIELD, _RECORD, AUTHOR_EMAIL, AUTHOR_NAME, GitRepo
+from scadbuddy.core.gitrepo import COMMIT_ATTEMPTS as COMMIT_ATTEMPTS
+from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN as COMMIT_ID_PATTERN
+from scadbuddy.core.gitrepo import COMMIT_RETRY_SECONDS as COMMIT_RETRY_SECONDS
+from scadbuddy.core.gitrepo import DEFAULT_BRANCH as DEFAULT_BRANCH
+from scadbuddy.core.gitrepo import DEFAULT_LOG_LIMIT as DEFAULT_LOG_LIMIT
+from scadbuddy.core.gitrepo import DEFAULT_TIMEOUT as DEFAULT_TIMEOUT
+from scadbuddy.core.gitrepo import EMPTY_TREE as EMPTY_TREE
+from scadbuddy.core.gitrepo import FRESH_POLL_MAX_SECONDS as FRESH_POLL_MAX_SECONDS
+from scadbuddy.core.gitrepo import GIT as GIT
+from scadbuddy.core.gitrepo import GITIGNORE_NAME as GITIGNORE_NAME
+from scadbuddy.core.gitrepo import LOCK_NAME as LOCK_NAME
+from scadbuddy.core.gitrepo import LOCK_POLL_SECONDS as LOCK_POLL_SECONDS
+from scadbuddy.core.gitrepo import MAINTAIN_LOOSE_OBJECTS as MAINTAIN_LOOSE_OBJECTS
+from scadbuddy.core.gitrepo import MAINTAIN_PACKS as MAINTAIN_PACKS
+from scadbuddy.core.gitrepo import MAINTAIN_TIMEOUT as MAINTAIN_TIMEOUT
+from scadbuddy.core.gitrepo import MAX_SUBJECT as MAX_SUBJECT
+from scadbuddy.core.gitrepo import RECOVERED_MESSAGE as RECOVERED_MESSAGE
+from scadbuddy.core.gitrepo import REF_LOCK_ERROR as REF_LOCK_ERROR
+from scadbuddy.core.gitrepo import FileChange as FileChange
+from scadbuddy.core.gitrepo import GitError as GitError
+from scadbuddy.core.gitrepo import GitTimeoutError as GitTimeoutError
+from scadbuddy.core.gitrepo import GitUnavailableError as GitUnavailableError
+from scadbuddy.core.gitrepo import HeadMovedError as HeadMovedError
+from scadbuddy.core.gitrepo import RepoCoordinator as RepoCoordinator
+from scadbuddy.core.gitrepo import RepoHold as RepoHold
+from scadbuddy.core.gitrepo import Revision as Revision
+from scadbuddy.core.gitrepo import RevisionNotFoundError as RevisionNotFoundError
+from scadbuddy.core.gitrepo import RevisionRange as RevisionRange
+from scadbuddy.core.gitrepo import git_env as git_env
+from scadbuddy.core.gitrepo import subject_line as subject_line
 from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
 
 logger = logging.getLogger(__name__)
@@ -91,12 +99,14 @@ def _gitignore_body(wrapper_prefix: str) -> str:
     )
 
 
-class ModelHistory(GitRepository):
+class ModelHistory(GitRepo):
     """The git repository under ``data/models``.
 
     Sync on purpose: the methods shell out, so an ``async`` caller hands them to
     :func:`asyncio.to_thread` rather than this class pretending to be awaitable.
     """
+
+    label = "model history"
 
     def __init__(
         self,
@@ -105,40 +115,36 @@ class ModelHistory(GitRepository):
         git: str = GIT,
         wrapper_prefix: str = "",
         timeout: float = DEFAULT_TIMEOUT,
+        coordinator: RepoCoordinator | None = None,
     ) -> None:
-        super().__init__(root, git=git, timeout=timeout)
+        super().__init__(root, git=git, timeout=timeout, coordinator=coordinator)
         self.wrapper_prefix = wrapper_prefix
         #: Called with each new commit and the templates it touched, after the write
         #: lock is released -- how the app publishes ``version.committed``. It must
         #: not raise; a failure is logged, never reported as a failed commit.
         self.on_commit: Callable[[str, list[str]], None] | None = None
 
-    def write_lock(self) -> AbstractContextManager[None]:
-        """The write lock every commit takes, held for a change that commits nothing:
-        a built-in's added media (#722) is outside the repository, but its
-        read-modify-write must not interleave with another replica's."""
-        return self._exclusive()
+    def _gitignore_body(self) -> str:
+        return _gitignore_body(self.wrapper_prefix)
+
+    def _commit_retry_seconds(self) -> float:
+        return COMMIT_RETRY_SECONDS
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def ensure_repo(self) -> str | None:
         """Initialise the repository if it is not one yet, and commit what is there.
 
-        Returns the commit id when this call created one, and ``None`` when there
-        was nothing to commit OR when the repository could not be initialised at
-        all -- the app has to boot either way. A models directory that already
-        holds files becomes revision 1 rather than being left untracked, which is
-        what makes the first built-in sync land on top of revision 1 on a fresh volume.
-
-        On a repository that already has history, anything left to commit is a
-        catalogue action whose own commit failed, and it is committed as
-        ``RECOVERED_MESSAGE`` rather than being called the initial revision (#134).
+        A models directory that already holds files becomes revision 1 rather than
+        being left untracked, which is what makes the first built-in sync land on top
+        of revision 1 on a fresh volume. See :meth:`GitRepo.ensure_repo`.
         """
-        return self._ensure(_gitignore_body(self.wrapper_prefix), "model history")
+        return super().ensure_repo()
 
     def maintain(self, *, loose_objects: int | None = None, packs: int | None = None) -> bool:
         """Pack the repository when it has piled up loose objects or packs (#2289):
-        :meth:`GitRepository.maintain` at this module's thresholds."""
+        :meth:`GitRepo.maintain` at this module's thresholds. Every listing walks the
+        whole history (`last_commits`)."""
         return super().maintain(
             loose_objects=MAINTAIN_LOOSE_OBJECTS if loose_objects is None else loose_objects,
             packs=MAINTAIN_PACKS if packs is None else packs,
@@ -146,29 +152,17 @@ class ModelHistory(GitRepository):
 
     # ── writing ───────────────────────────────────────────────────────────────
 
-    def commit(
+    def commit(  # type: ignore[override]
         self,
         message: str,
         *paths: str,
         prepare: Callable[[], None] | None = None,
         rollback: Callable[[], None] | None = None,
     ) -> str | None:
-        """Stage ``paths`` and commit them. ``None`` when nothing actually changed.
-
-        ``prepare`` runs under the write lock first, which makes a read-modify-write
-        -- of a ``model.json``, say -- atomic with its commit. ``rollback`` runs under
-        the same lock if the commit then fails, before the error is raised, so what
-        ``prepare`` wrote can be undone before another write sees it.
-        """
+        """:meth:`GitRepo.commit`, then the commit listener with the templates it
+        touched."""
         with self._exclusive():
-            if prepare is not None:
-                prepare()
-            try:
-                created = self._commit_locked(message, *paths)
-            except (GitError, OSError):
-                if rollback is not None:
-                    rollback()
-                raise
+            created = self._commit_action(message, paths, prepare=prepare, rollback=rollback)
             touched = self._touched_by(created)
         self._announce(created, touched)
         return created
@@ -199,10 +193,12 @@ class ModelHistory(GitRepository):
         except Exception:
             logger.exception("a commit listener failed", extra={"commit": commit})
 
-    def restore(self, slug: str, commit: str) -> str:
+    def restore(self, slug: str, commit: str) -> str:  # type: ignore[override]
         """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite."""
-        resolved = self.resolve(commit)
         with self._exclusive():
+            # Under the lock, once settled: a revision another replica just made is
+            # not yet visible before (#2385).
+            resolved = self.resolve(commit)
             created = self._restore_locked(slug, resolved, f"Restore {slug} to {resolved[:7]}")
             touched = self._touched_by(created)
         self._announce(created, touched)
@@ -237,15 +233,20 @@ class ModelHistory(GitRepository):
         assert isinstance(completed.stdout, str)
         return completed.returncode == 0 and not completed.stdout.strip()
 
-    def previous_commit(self, slug: str) -> str | None:
-        """The commit before :meth:`last_commit` in the model's own history (#1071):
-        what its current revision was made from. None for its first commit."""
+    def last_two_commits(self, slug: str) -> tuple[str | None, str | None]:
+        """:meth:`last_commit` and the commit before it in the model's own history
+        (#1071: what its current revision was made from; None for its first commit),
+        from ONE ``git log`` (#2158): two runs could straddle a commit to the model, and
+        then name a "previous" that is not the current revision's parent."""
         completed = self._run("log", "-2", "--format=%H", "--", slug, check=False)
         assert isinstance(completed.stdout, str)
         if completed.returncode != 0:
-            return None
+            return None, None
         commits = completed.stdout.split()
-        return commits[1] if len(commits) > 1 else None
+        return (
+            commits[0] if commits else None,
+            commits[1] if len(commits) > 1 else None,
+        )
 
     def seed_commit(self, slug: str) -> str | None:
         """The ``Seed … from the image`` commit ``slug`` as it stands was copied in by.

@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import itertools
 import uuid
 from typing import Any
 
@@ -9,8 +10,8 @@ from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.client import Client, WorkflowExecutionStatus
 
-from scadbuddy.flows.models import TERMINAL, Run
-from scadbuddy.flows.store import FlowStore, VersionRow
+from scadbuddy.flows.models import TERMINAL, Run, StoredDefinition
+from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 
 #: The key a flow approval's input hash is made with in these tests (#2318).
@@ -25,12 +26,21 @@ class Keys:
         return hashlib.sha256(subject.encode()).digest()
 
 
-async def define(store: FlowStore, name: str) -> VersionRow:
-    """A version row for a run to name: its commit is made up, since a run's tests never
-    read the script from git (`flows/definitions.py` does, `test_flow_definitions.py`)."""
-    commit = uuid.uuid4().hex + "0" * 8
+_VERSIONS = itertools.count(1)
+
+
+async def define(store: FlowStore, name: str) -> StoredDefinition:
+    """A version row for a run to name: its commit is made up, since a run's tests send
+    the script as the run's input and never read it from git (`test_flow_repository.py`
+    and `tests/api/test_flows.py` do)."""
     return await asyncio.to_thread(
-        store.record_version, name, commit, 1, {"kind": "browser"}, head=True
+        store.insert_version,
+        str(uuid.uuid4()),
+        name,
+        next(_VERSIONS),
+        uuid.uuid4().hex + "0" * 8,
+        {"kind": "browser"},
+        approval_timeout_s=None,
     )
 
 

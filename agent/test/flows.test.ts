@@ -69,12 +69,14 @@ describe('flow tools (#1057)', () => {
 
   it("reads a flow's history and restores a commit as a write (#2503)", async () => {
     expect(
-      ['list_flow_versions', 'get_flow_version', 'diff_flow_version', 'restore_flow_version'].map((n) => tool(n).risk),
+      ['list_flow_versions', 'get_flow_version_source', 'diff_flow_version', 'restore_flow_version'].map(
+        (n) => tool(n).risk,
+      ),
     ).toEqual(['read', 'read', 'read', 'write'])
     const COMMIT = 'a'.repeat(40)
     const restored: string[] = []
     server.use(
-      http.get(`${BACKEND}/api/v1/workflows/${DEFINITION}/versions`, ({ request }) =>
+      http.get(`${BACKEND}/api/v1/workflows/names/swap/versions`, ({ request }) =>
         HttpResponse.json(
           [2, 1].map((version) => ({
             id: DEFINITION,
@@ -88,15 +90,15 @@ describe('flow tools (#1057)', () => {
           })),
         ),
       ),
-      http.get(`${BACKEND}/api/v1/workflows/${DEFINITION}/versions/${COMMIT}/diff`, ({ request }) =>
+      http.get(`${BACKEND}/api/v1/workflows/names/swap/versions/${COMMIT}/diff`, ({ request }) =>
         HttpResponse.json({ name: 'swap', base: new URL(request.url).searchParams.get('base'), head: COMMIT, patch: '' }),
       ),
-      http.post(`${BACKEND}/api/v1/workflows/${DEFINITION}/versions/${COMMIT}/restore`, ({ request }) => {
+      http.post(`${BACKEND}/api/v1/workflows/names/swap/versions/${COMMIT}/restore`, ({ request }) => {
         restored.push(request.url)
         return HttpResponse.json({ id: DEFINITION, name: 'swap', version: 3, commit: 'c'.repeat(40), script: 'x' })
       }),
     )
-    const listed = firstText(await runTool(tool('list_flow_versions'), { definition_id: DEFINITION }, ctx())) as {
+    const listed = firstText(await runTool(tool('list_flow_versions'), { name: 'swap' }, ctx())) as {
       items: { version: number; current: boolean }[]
     }
     expect(listed.items.map((v) => [v.version, v.current])).toEqual([
@@ -104,9 +106,9 @@ describe('flow tools (#1057)', () => {
       [1, false],
     ])
     const base = 'b'.repeat(40)
-    const diff = await runTool(tool('diff_flow_version'), { definition_id: DEFINITION, commit: COMMIT, base }, ctx())
+    const diff = await runTool(tool('diff_flow_version'), { name: 'swap', commit: COMMIT, base }, ctx())
     expect((firstText(diff) as { base: string }).base).toBe(base)
-    const done = await runTool(tool('restore_flow_version'), { definition_id: DEFINITION, commit: COMMIT }, ctx())
+    const done = await runTool(tool('restore_flow_version'), { name: 'swap', commit: COMMIT }, ctx())
     expect((firstText(done) as { version: number }).version).toBe(3)
     expect(restored).toHaveLength(1)
   })

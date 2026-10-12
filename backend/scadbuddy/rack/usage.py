@@ -120,7 +120,12 @@ class RackUsage(Protocol):
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]: ...
 
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int: ...
 
     async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]: ...
@@ -228,7 +233,8 @@ class RackUsageStore:
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
         """One :class:`Usage` per non-empty serial; zeros for one with no rows (spec §4).
-        ``pending`` counts its open picks younger than ``PENDING_PICK_MAX_AGE`` (#1079)."""
+        ``pending`` counts its open picks younger than ``PENDING_PICK_MAX_AGE`` (#1079),
+        one per copy of the pick's queue item not yet settled (#2134)."""
         unique = sorted({serial for serial in serials if serial})
         if not unique:
             return {}
@@ -241,12 +247,14 @@ class RackUsageStore:
                 " coalesce(sum(p.print_seconds), 0) AS print_seconds,"
                 " coalesce(sum(p.grams), 0) AS grams,"
                 " max(p.settled_at) AS last_used_at,"
-                # Open picks (#1079): no print row for the pick's item and group yet.
-                " (SELECT count(*) FROM rack_nozzle_picks AS k"
-                "  WHERE k.serial = s.serial AND k.picked_at > now() - %s"
-                "  AND NOT EXISTS (SELECT 1 FROM rack_nozzle_prints AS done"
+                # Open picks (#1079): each of a pick's copies with no print row for its
+                # item and group yet, as every copy settles its own (#2134).
+                " (SELECT coalesce(sum(greatest(k.copies - (SELECT count(*)"
+                "   FROM rack_nozzle_prints AS done"
                 "   WHERE done.queue_item_id = k.queue_item_id"
-                "   AND done.group_id = k.group_id)) AS pending"
+                "   AND done.group_id = k.group_id), 0)), 0)"
+                "  FROM rack_nozzle_picks AS k"
+                "  WHERE k.serial = s.serial AND k.picked_at > now() - %s) AS pending"
                 " FROM unnest(%s::text[]) AS s(serial)"
                 " LEFT JOIN rack_nozzle_seen AS seen ON seen.serial = s.serial"
                 " LEFT JOIN rack_nozzle_prints AS p ON p.serial = s.serial"
@@ -310,23 +318,33 @@ class RackUsageStore:
         return history
 
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int:
-        """The picks for one queue item, with their spools; the pick rows actually
-        written (#1015)."""
+        """The picks for one queue item of ``copies`` copies, with their spools; the
+        pick rows actually written (#1015)."""
         if not picks:
             return 0
-        return await asyncio.to_thread(self._record_picks, queue_item_id, printer_id, list(picks))
+        return await asyncio.to_thread(
+            self._record_picks, queue_item_id, printer_id, list(picks), copies
+        )
 
-    def _record_picks(self, queue_item_id: int, printer_id: int, picks: list[PickedHotend]) -> int:
+    def _record_picks(
+        self, queue_item_id: int, printer_id: int, picks: list[PickedHotend], copies: int
+    ) -> int:
         written = 0
         with self._ready().connection() as conn, conn.transaction():
             for pick in picks:
                 cursor = conn.execute(
-                    "INSERT INTO rack_nozzle_picks (queue_item_id, group_id, printer_id, serial)"
-                    " VALUES (%s, %s, %s, %s)"
+                    "INSERT INTO rack_nozzle_picks"
+                    " (queue_item_id, group_id, printer_id, serial, copies)"
+                    " VALUES (%s, %s, %s, %s, %s)"
                     " ON CONFLICT (queue_item_id, group_id) DO NOTHING",
-                    (queue_item_id, pick.group_id, printer_id, pick.serial),
+                    (queue_item_id, pick.group_id, printer_id, pick.serial, copies),
                 )
                 written += cursor.rowcount
                 for spool in pick.spools:
@@ -461,17 +479,21 @@ async def save_picks(
     printer_id: int,
     queue_item_ids: Sequence[int],
     picks: Sequence[PickedHotend],
+    *,
+    copies: int = 1,
 ) -> None:
-    """Write the sent picks against each queue item, right after ``POST /queue/`` (spec
-    §5). Advisory: the item is queued, so a failure is logged by type and dropped, and
-    that print's use goes uncounted. A pick of a hotend with no serial is skipped: it was
-    sent, but nothing can be attributed to it."""
+    """Write the sent picks against each queue item of ``copies`` copies, right after
+    ``POST /queue/`` (spec §5). Advisory: the item is queued, so a failure is logged by
+    type and dropped, and that print's use goes uncounted. A pick of a hotend with no
+    serial is skipped: it was sent, but nothing can be attributed to it."""
     attributable = [pick for pick in picks if pick.serial]
     if store is None or not attributable:
         return
     try:
         for queue_item_id in queue_item_ids:
-            written = await store.record_picks(queue_item_id, printer_id, attributable)
+            written = await store.record_picks(
+                queue_item_id, printer_id, attributable, copies=copies
+            )
             if written != len(attributable):
                 logger.warning(
                     "a rack pick was already recorded for this queue item",

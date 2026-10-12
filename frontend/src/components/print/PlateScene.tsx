@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -29,14 +29,7 @@ export function PlateScene({ url, colors, cutAt, onHeight, background }: Props) 
     <ErrorBoundary
       resetKey={url}
       onError={() => useLoader.clear(GLTFLoader, url)}
-      fallback={(_, retry) => (
-        <div role="alert" className="flex items-center gap-3 p-4 text-[13px] text-warn">
-          The plate's preview could not be loaded.
-          <Button size="sm" onClick={retry}>
-            Try again
-          </Button>
-        </div>
-      )}
+      fallback={(error, retry) => <PreviewFailure url={url} error={error} retry={retry} />}
     >
       <Canvas
         data-testid="plate-scene"
@@ -54,6 +47,55 @@ export function PlateScene({ url, colors, cutAt, onHeight, background }: Props) 
         <OrbitControls makeDefault enablePan minDistance={20} maxDistance={1200} />
       </Canvas>
     </ErrorBoundary>
+  )
+}
+
+/**
+ * The status a failed load answered with, from three's loader error ("fetch for … responded
+ * with 422: …", wrapped by `useLoader`), or null when it never got an answer.
+ */
+function failedStatus(error: Error): number | null {
+  const match = /responded with (\d{3})\b/.exec(error.message)
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * #2111 — why the preview failed. A 4xx is the backend refusing this file for good (sliced,
+ * damaged, past a read budget): its problem detail says why, and Try again could never
+ * succeed, so none is offered. Anything else (a network error, a 5xx) may pass, so it is.
+ * The loader keeps no body, so the refusal's detail is read once more here.
+ */
+export function PreviewFailure({ url, error, retry }: { url: string; error: Error; retry: () => void }) {
+  const status = failedStatus(error)
+  const refused = status !== null && status >= 400 && status < 500
+  const [detail, setDetail] = useState<{ url: string; text: string } | null>(null)
+  useEffect(() => {
+    if (!refused) return
+    let live = true
+    fetch(url, { headers: { Accept: 'application/problem+json, application/json' } })
+      .then((response) => response.json() as Promise<{ detail?: unknown }>)
+      .then(
+        (problem) => live && typeof problem.detail === 'string' && setDetail({ url, text: problem.detail }),
+        () => undefined,
+      )
+    return () => {
+      live = false
+    }
+  }, [refused, url])
+  const reason = detail?.url === url ? detail.text : null
+  return (
+    <div role="alert" className="flex items-center gap-3 p-4 text-[13px] text-warn">
+      {refused
+        ? reason
+          ? `The plate's preview cannot be shown: ${reason}`
+          : "The plate's preview cannot be shown for this file."
+        : "The plate's preview could not be loaded."}
+      {!refused && (
+        <Button size="sm" onClick={retry}>
+          Try again
+        </Button>
+      )}
+    </div>
   )
 }
 

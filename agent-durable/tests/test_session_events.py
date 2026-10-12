@@ -81,10 +81,17 @@ async def test_an_offset_is_written_once(agent_db: Conn) -> None:
 @pytest.mark.requires_postgres
 async def test_finish_turn_writes_once(agent_db: Conn, connect: object) -> None:
     sid = await insert_session(agent_db, budget=2.0)
-    await agent_db.execute("UPDATE ai_sessions SET cost_usd = 0.5, turns = 3 WHERE id = %s", (sid,))
+    await agent_db.execute(
+        "UPDATE ai_sessions SET cost_usd = 0.5, turns = 3, durable_turn_id = gen_random_uuid()"
+        " WHERE id = %s",
+        (sid,),
+    )
     acts = SessionActivities(connect)  # type: ignore[arg-type]
     args = FinishTurn(session_id=sid, turn_id="t", outcome="failed", message="it broke")
     assert await acts.finish_turn(args)
+    # The turn is over: a headless-browser grant made in it dies with it (#2320).
+    cur = await agent_db.execute("SELECT durable_turn_id FROM ai_sessions WHERE id = %s", (sid,))
+    assert await cur.fetchone() == (None,)
     assert not await acts.finish_turn(args)  # a retry writes nothing twice
     log = await events(agent_db, sid)
     assert [e["type"] for e in log] == ["session.result", "error", "session.status"]
@@ -221,6 +228,38 @@ async def test_a_turn_ends_on_its_own_end_not_the_last_turns(
     result = await env.run(
         acts.follow_session,
         FollowArgs(session_id=sid, workflow_id=f"session-{sid}", prompted=True),
+    )
+    assert result.ended == "done"
+    assert [e["type"] for e in await events(agent_db, sid)] == [
+        "assistant.text.delta",
+        "assistant.text.done",
+    ]
+
+
+@pytest.mark.requires_postgres
+async def test_a_carried_over_turn_ends_on_its_own_end_not_an_earlier_turns(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2123: a turn handed over by continue-as-new has no prompt in this run, so an
+    earlier turn's unread end is told apart by its time."""
+    sid = await insert_session(agent_db)
+    since = "2026-10-11T12:00:00+00:00"
+    stream = [
+        {"type": "cancelled", "at": "2026-10-11T11:59:58+00:00", "offset": 0},
+        {"type": "text", "text": "hello", "at": "2026-10-11T12:00:03+00:00", "offset": 1},
+        {"type": "done", "result": "hello", "at": "2026-10-11T12:00:04+00:00", "offset": 2},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    result = await env.run(
+        acts.follow_session,
+        FollowArgs(session_id=sid, workflow_id=f"session-{sid}", since=since),
     )
     assert result.ended == "done"
     assert [e["type"] for e in await events(agent_db, sid)] == [

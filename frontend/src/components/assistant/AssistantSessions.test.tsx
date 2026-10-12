@@ -1,8 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, mockAgentSessions, type MockAgentOptions, type MockAgentTransport } from '../../mocks/agent'
 import { sessionWrites } from '../../mocks/features/assistantSessions'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
 
@@ -98,6 +100,39 @@ describe('Fork (#794)', () => {
     expect(sessionWrites().at(-1)).toEqual({ ...fromReply })
     await waitFor(() => expect(conversation().queryByText('make it blue')).not.toBeInTheDocument())
     expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveValue('make it blue')
+  })
+
+  // #2161: a failed fork's alert is the session's it failed on, not the panel's.
+  it('says a fork failed on that chat only, not on the next one opened', async () => {
+    server.use(
+      http.post('/api/v1/ai/sessions/:id/fork', () => HttpResponse.json({ detail: 'the agent is busy' }, { status: 503 })),
+    )
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The chat was not forked: the agent is busy')
+
+    await user.click(screen.getByRole('button', { name: 'New chat' }))
+    await user.type(screen.getByRole('textbox', { name: 'Message the assistant' }), 'hello{Enter}')
+    await screen.findByText(/hello/, { selector: '[data-feed-item] *' })
+    expect(screen.queryByText(/The chat was not forked/)).not.toBeInTheDocument()
+  })
+
+  // #2161: "Fork from here" on a user message never throws away what the user is writing.
+  it('keeps a draft the user is writing when forking from a user message', async () => {
+    const { user } = renderShell()
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await user.type(box, 'Make the name bigger and send it{Enter}')
+    await user.click(await screen.findByRole('button', { name: 'Approve' }))
+    await screen.findByText('Sent. Two copies are in the queue.')
+    await user.type(box, 'make it blue{Enter}')
+    await screen.findByText('Noted: "make it blue". Anything else on this model?')
+
+    await user.type(box, 'half-written thought')
+    await user.click(within(feedItem('make it blue')).getByRole('button', { name: 'Fork from here' }))
+    const conversation = () => within(screen.getByRole('log', { name: 'Conversation' }))
+    await waitFor(() => expect(conversation().queryByText('make it blue')).not.toBeInTheDocument())
+    expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveValue('half-written thought')
   })
 
   it('offers Fork only once the chat has a reply, saying why it cannot yet', async () => {

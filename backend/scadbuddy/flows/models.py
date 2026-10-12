@@ -19,18 +19,18 @@ HOST_FN = {
     "approved_print": "queue_print",
     "approved_arrange": "arrange",
     "approved_tool": "tool",
+    "approved_turn_tool": "tool",
 }
 
 
 class DefinitionSummary(BaseModel):
-    """A flow version, without its script. Its id is the version's: a flow's versions
-    are commits in `data/flows` (#2503), and `version` is the commit's place in the
-    flow's commit order."""
+    """A flow version, without its script. Each version is one commit in `data/flows`
+    (#2503), and `version` is that commit's position in the flow's history."""
 
     id: str
     name: str
     version: int
-    #: The version's commit in `data/flows`; None for one not yet imported there.
+    #: The version's commit in `data/flows`; None for one not yet backfilled there.
     commit: str | None = None
     #: Seconds an outward call of its runs waits for a decision: None takes the global
     #: setting, 0 is never. A run may override it.
@@ -45,10 +45,17 @@ class Definition(DefinitionSummary):
     script: str
 
 
+class StoredDefinition(DefinitionSummary):
+    """A version's row: ``script`` only on a row written before flows were in git."""
+
+    script: str | None = None
+
+
 class FlowVersion(BaseModel):
     """One commit of a flow's history (#2503)."""
 
-    #: The version's id: what `GET /workflows/{id}` and a run's start take.
+    #: The version's id (its `ScadBuddy-Flow-Version` trailer): what `GET /workflows/{id}`
+    #: and a run's start take.
     id: str
     commit: str
     short: str
@@ -71,8 +78,8 @@ class FlowDiff(BaseModel):
     patch: str
 
 
-class LegacyVersion(BaseModel):
-    """A version registered before flows were in git, still to be imported (#2503)."""
+class BackfillRow(BaseModel):
+    """A version written before flows were in git, still to be committed (#2503)."""
 
     id: str
     name: str

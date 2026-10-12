@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
@@ -298,8 +298,9 @@ MAX_ARRANGE_COPIES = 2000
 
 
 #: Arrange's 422 for a library file whose objects cannot be read from its 3MF (#1863): a
-#: sliced file, one past the download cap, one painted in PrusaSlicer or cut by a negative
-#: part. A part painted in Bambu Studio is arranged with its painting (#1965).
+#: sliced file, one past the download cap, one painted in PrusaSlicer or coloured by a
+#: texture (#2147), or one cut by a negative part. A part painted in Bambu Studio is
+#: arranged with its painting (#1965).
 LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
 
 
@@ -361,24 +362,40 @@ def _check_copies(total: int) -> None:
         raise ValueError(f"{total} copies is more than one arrange places ({MAX_ARRANGE_COPIES})")
 
 
+async def live_outputs_for_files(
+    uploads: BambuddyUploadStore, outputs: OutputStore, library_file_ids: Iterable[int]
+) -> dict[int, str]:
+    """The output each of ``library_file_ids`` ScadBuddy uploaded is a copy of (#1864),
+    while that output still exists: the upload row outlives a deleted output, and a file
+    whose output is gone is any other library file (#2138). The library listing and
+    Arrange both ask this, so they cannot disagree about a file."""
+    made = await uploads.outputs_for_files(library_file_ids)
+    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
+
+
+def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
+    """Those of ``output_ids`` the output store still has."""
+    found: set[str] = set()
+    for output_id in output_ids:
+        try:
+            outputs.directory(output_id)
+        except OutputNotFoundError:
+            continue
+        found.add(output_id)
+    return found
+
+
 async def resolve_library_files(
     uploads: BambuddyUploadStore, outputs: OutputStore, body: ArrangeRequest
 ) -> tuple[ArrangeRequest, list[int]]:
     """``body`` with each library file ScadBuddy uploaded named by the output it is a
     copy of (#1864), and the plain files left, which are read from their 3MF (#1863). A
-    file whose output has since been deleted is a 404 naming the file."""
+    file whose output has since been deleted is a plain file (#2138)."""
     wanted = list(dict.fromkeys(o.library_file_id for o in body.objects if o.library_file_id))
     if not wanted:
         return body, []
-    found = await uploads.outputs_for_files(wanted)
-    for file_id, output_id in found.items():
-        try:
-            await asyncio.to_thread(outputs.directory, output_id)
-        except OutputNotFoundError:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND,
-                f"library file {file_id} is a copy of output {output_id}, which has been deleted",
-            ) from None
+    found = await live_outputs_for_files(uploads, outputs, wanted)
     objects = [
         o
         if o.library_file_id not in found

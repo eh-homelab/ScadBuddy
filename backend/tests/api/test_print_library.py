@@ -33,7 +33,7 @@ from tests.api.test_print_progress import watched as watched  # the fixture, sha
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
-from tests.api.test_send import BASE, _uploaded_3mf, configure
+from tests.api.test_send import BASE, _uploaded_3mf, configure, make_output
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
@@ -151,8 +151,29 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
 
 
 @respx.mock
-def test_a_file_scadbuddy_uploaded_names_its_output(client: TestClient, app: FastAPI) -> None:
+def test_a_file_scadbuddy_uploaded_names_its_output(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
     """#1864: what Arrange reads a generated library file's objects through."""
+    configure(client)
+    output_id = make_output(client, model)
+    listing_routes(recording("library-files-root.json"))
+    first = client.get("/api/v1/print/library").json()["files"][0]["id"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(
+        state.uploads.record(output_id, LibraryCopy(id=first, folder_id=None, target_key="k"))
+    )
+
+    files = client.get("/api/v1/print/library").json()["files"]
+
+    assert {row["id"]: row["output_id"] for row in files if row["output_id"]} == {first: output_id}
+    assert len(files) > 1
+
+
+@respx.mock
+def test_a_file_whose_output_was_deleted_names_no_output(client: TestClient, app: FastAPI) -> None:
+    """#2138: the upload row outlives its output. Named, the file would be read as an
+    output's copy, and Arrange would 404 it rather than read it as a plain file."""
     configure(client)
     listing_routes(recording("library-files-root.json"))
     first = client.get("/api/v1/print/library").json()["files"][0]["id"]
@@ -163,8 +184,7 @@ def test_a_file_scadbuddy_uploaded_names_its_output(client: TestClient, app: Fas
 
     files = client.get("/api/v1/print/library").json()["files"]
 
-    assert {row["id"]: row["output_id"] for row in files if row["output_id"]} == {first: "a" * 32}
-    assert len(files) > 1
+    assert [row["output_id"] for row in files if row["id"] == first] == [None]
 
 
 @respx.mock

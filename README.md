@@ -543,14 +543,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   URL and key as the API has them (they only seed a database never saved). Its build id
   is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
-  render worker's is. `PrintRun` and `Operation` are pinned to the build that started
-  them; `FollowPrint` is AUTO_UPGRADE, since it lasts as long as the print, and moves to
-  the new build. Changes to any of them are still made with `workflow.patched`.
-- **Shutdown:** SIGTERM drains the build's pinned runs, as the render worker does, for at
-  most 1920 s (`REPEAT_WINDOW` 600 s, two slice timeouts of 600 s, and 120 s): a print run
-  stays open for `REPEAT_WINDOW` after it ends, so repeats of the same press find it. Set
-  `terminationGracePeriodSeconds` to **2000** and roll with `RollingUpdate`,
-  `maxSurge >= 1`.
+  render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
+  AUTO_UPGRADE: a run moves to each new build (#2066). They were pinned, and the
+  Deployment rolls with `Recreate`, so the old build was still current when its pod
+  stopped, it stopped without draining, and every run pinned to it waited forever.
+  So every change to them goes behind `workflow.patched`, and `tests/test_print_replay.py`
+  replays committed `PrintRun` histories to hold that.
+- **Shutdown:** SIGTERM does not drain: the next build takes the runs over. Activities
+  still in flight get the worker's graceful shutdown timeout.
 - **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
   (dev, tests) or `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS` (a deployment without the
   `scadbuddy-print` Deployment yet), unversioned, on its own volume. Either way the API
@@ -603,13 +603,13 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   `render`, `save_output`, `queue_print` and `arrange` call the API's own routes there
   (`workflows/flow_routes.py`). No data volume
   and no Bambuddy key: nothing outward runs in it. Health and metrics on 9090.
-- **Scripts are git** (#2503): each flow's versions are commits in `/data/flows`
+- **Scripts are git** (#2503): each flow version is one commit in `/data/flows`
   (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
-  volume, on the same git code (`core/gitstore.py`). Only the API reads it: a run's
-  script goes to the worker as the run's input. Postgres keeps which commit each version
-  id names, each flow's head and the commit each run ran. The first start after the
-  upgrade imports the versions Postgres held, one commit each, oldest first, with their
-  authors and dates; it is idempotent, and the log says how many it moved.
+  volume, on the same git code (`core/gitrepo.py`). Only the API reads it: a run's
+  script goes to the worker as the run's input. `workflow_definitions` keeps a row per
+  version naming its commit, and `workflow_runs` the commit each run ran. The first
+  start after the upgrade backfills the versions Postgres held (`flows/backfill.py`),
+  one commit each with its author and date; it is idempotent, and the log says how many.
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
 - **Memory:** `pydantic-monty` keeps a process-wide pool, so the worker's memory does
@@ -635,6 +635,9 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Inbox folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  Any file in a ScadBuddy `Work/` folder that ScadBuddy did not upload, such as one
+  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`: keep
+  your own files elsewhere.
   The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
   ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
   instance's folder ids (#683). Respelling the same URL (host case, a default port, a

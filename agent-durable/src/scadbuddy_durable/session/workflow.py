@@ -32,7 +32,7 @@ from typing import Any, Literal
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError, FailureError
+from temporalio.exceptions import ActivityError, ApplicationError, FailureError
 
 with workflow.unsafe.imports_passed_through():
     from temporalio.claude_agent_sdk import AgentState, DurableClaudeAgent
@@ -75,11 +75,14 @@ with workflow.unsafe.imports_passed_through():
         FinishTurn,
         FollowArgs,
         GateSettings,
+        MemoryRecalled,
+        MemoryTurn,
         Message,
         SegmentContext,
         SendAnswer,
         SessionStart,
         TurnOutcome,
+        TurnPackage,
         TurnStart,
         TurnTools,
     )
@@ -89,7 +92,19 @@ DESCRIBE_CALL = "gate.describe_call"
 TURN_TOOLS = "turn_tools"
 TURN_TOOL_TIER = "turn_tool_tier"
 TURN_TOOLS_PATCH = "turn-tools-2320"
+# The built-ins a package may name that run as their own activities, so a call can park.
+ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
+# agent/src/temporal/memoryActivities.ts (#2320, superseding #825): automatic Hindsight
+# memory around a turn, as a classic turn's hooks do it.
+MEMORY_RECALL = "memory_recall"
+MEMORY_RETAIN = "memory_retain"
+MEMORY_PATCH = "memory-2320"
+# Past the hooks' own limits (3 s recall, 15 s retain) and the plugin lookup.
+MEMORY_RECALL_TIMEOUT = timedelta(seconds=30)
+MEMORY_RETAIN_TIMEOUT = timedelta(minutes=1)
+# Never retried, never failing the turn: the agent records a failure in the session.
+MEMORY_ONCE = RetryPolicy(maximum_attempts=1)
 FOLLOW_TIMEOUT = timedelta(days=30)
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_DRAIN = timedelta(seconds=30)
@@ -101,6 +116,11 @@ IMAGES_NOTE = (
 TURN_ENDED = "the turn ended"
 INTERRUPTED = "the turn was interrupted"
 NOBODY_ANSWERED = "nobody answered in time"
+# workflow.patched ids (#2123): each changes the commands of a path an older history
+# may have taken, so that history replays the old way.
+STOPPED_BEFORE_RUN = "stop-before-run-skips-the-turn"
+SETTLE_PARKED = "turn-end-settles-resolving-entries"
+STOP_FIRST = "stop-cancels-the-run-first"
 
 
 def prompt_of(message: Message) -> str:
@@ -159,6 +179,8 @@ class DurableSession:
         # This turn's other tools (plugins, http_request, the headless browser; #2320):
         # offered from what turn_tools listed, replaced every turn.
         self._turn_tools: set[str] = set()
+        # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
+        self._packages: list[TurnPackage] = []
         self._turn: TurnStart | None = start.turn
         self._message: Message | None = None
         self._parked: dict[str, Parked] = {}
@@ -175,7 +197,8 @@ class DurableSession:
         self._agent = DurableClaudeAgent(
             tools=list(self._tools.values()),
             max_turns=start.max_turns,
-            builtin_tools=["Skill"],
+            # The own plugin's skills and subagents (#2320: subagents in durable too).
+            builtin_tools=["Skill", "Agent"],
             tool_activities=(),
             max_segments=MAX_SEGMENTS,
             state=start.agent,
@@ -206,7 +229,12 @@ class DurableSession:
                     return
                 message, self._message = self._message, None
                 assert message is not None
-                self._turn = TurnStart(message.turn_id, message.author, list(message.images))
+                self._turn = TurnStart(
+                    message.turn_id,
+                    message.author,
+                    list(message.images),
+                    started_at=workflow.now().isoformat(),
+                )
                 await self._run_turn(prompt_of(message))
             self._turn = None
             self._in_turn = False
@@ -252,12 +280,34 @@ class DurableSession:
             self._turn_tools = manifest.offer_turn_tools(
                 self._agent._tools, self._tools, self._turn_tools, offered.tools
             )
+            self._packages = list(offered.packages)
+            # The built-ins the allowed packages name, as a classic turn offers them; each
+            # call is outward there, so here it runs as its own activity after a human
+            # approved it (the agent offers only Bash and PowerShell, which can).
+            named = sorted(
+                {t for p in offered.packages for t in p.builtin_tools} - {"Skill", "Agent"}
+            )
+            parked = [t for t in named if t in ENGINE_PARKED]
+            # Only those: one the agent should have left out never runs unasked here.
+            self._agent._builtin_tools = ["Skill", "Agent", *parked]
+            self._agent._tool_activities = parked
+            self._agent._tool_approvals = parked
+        if prompt is not None and workflow.patched(MEMORY_PATCH):
+            prompt += await self._recall(turn_id)
+        if self._interrupted is not None and workflow.patched(STOPPED_BEFORE_RUN):
+            # Stopped before its run began (#2123): a run cancelled before its first
+            # step publishes nothing, not even its prompt, so a subscriber would wait
+            # the whole FOLLOW_DRAIN for an end that never comes. Nothing ran, so
+            # there is nothing to follow, park or cancel.
+            await self._finish(sid, turn_id, "interrupted", None)
+            return
         follow = workflow.start_activity(
             "follow_session",
             FollowArgs(
                 session_id=sid,
                 workflow_id=workflow.info().workflow_id,
                 prompted=prompt is not None,
+                since=self._turn.started_at if self._turn else None,
             ),
             start_to_close_timeout=FOLLOW_TIMEOUT,
             heartbeat_timeout=FOLLOW_HEARTBEAT,
@@ -288,6 +338,8 @@ class DurableSession:
         watcher.cancel()
         reason = self._interrupted or TURN_ENDED
         await self._cancel_parked(reason)
+        if workflow.patched(SETTLE_PARKED):
+            await self._settle_parked(reason)
         for park in self._parks:
             park.cancel()
         self._parks = []
@@ -297,11 +349,45 @@ class DurableSession:
             await workflow.wait_condition(follow.done, timeout=FOLLOW_DRAIN)
         except TimeoutError:
             follow.cancel()
+        if workflow.patched(MEMORY_PATCH):
+            await self._retain(turn_id)
+        await self._finish(sid, turn_id, outcome, message)
+
+    async def _finish(
+        self, sid: str, turn_id: str, outcome: TurnOutcome, message: str | None
+    ) -> None:
         await workflow.execute_activity(
             "finish_turn",
             FinishTurn(session_id=sid, turn_id=turn_id, outcome=outcome, message=message),
             start_to_close_timeout=SHORT,
         )
+
+    async def _recall(self, turn_id: str) -> str:
+        """The memories a classic turn's recall hook would add, to follow the prompt;
+        nothing when memory is off, nothing matched, or the recall failed."""
+        try:
+            recalled = await workflow.execute_activity(
+                MEMORY_RECALL,
+                MemoryTurn(turn_id),
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=MEMORY_RECALL_TIMEOUT,
+                retry_policy=MEMORY_ONCE,
+                result_type=MemoryRecalled,
+            )
+        except ActivityError:
+            return ""
+        return f"\n\n{recalled.context}" if recalled.context else ""
+
+    async def _retain(self, turn_id: str) -> None:
+        """The session's transcript retained, as a classic turn's Stop hook does."""
+        with contextlib.suppress(ActivityError):
+            await workflow.execute_activity(
+                MEMORY_RETAIN,
+                MemoryTurn(turn_id),
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=MEMORY_RETAIN_TIMEOUT,
+                retry_policy=MEMORY_ONCE,
+            )
 
     # ---- the gate ----
     async def _watch_gate(self) -> None:
@@ -489,6 +575,17 @@ class DurableSession:
             await self._resolve(parked, "cancelled", SYSTEM, None, reason, timer=not bounded)
         return bool(pending)
 
+    async def _settle_parked(self, reason: str) -> None:
+        """Lets every resolve_input in flight finish before the parks are cancelled (#2123):
+        one whose timer fired is in a park task, and cancelling it there would leave its
+        row pending. One that fails (a respond's bounded attempt) is cancelled after."""
+        while True:
+            await workflow.wait_condition(
+                lambda: all(p.entry.state != "resolving" for p in self._parked.values())
+            )
+            if not await self._cancel_parked(reason):
+                return
+
     # ---- handlers ----
     @workflow.update(name=SEND_MESSAGE_UPDATE)
     async def send_message(self, message: Message) -> SendAnswer:
@@ -569,6 +666,11 @@ class DurableSession:
         if self._task.done():
             return
         self._interrupted = INTERRUPTED
+        if workflow.patched(STOP_FIRST):
+            # The run stops now, even with Postgres down (#2123); the turn's end then
+            # cancels the parked entries with this reason, retrying until it can.
+            self._task.cancel()
+            return
         await self._cancel_parked(INTERRUPTED)
         if self._task is not None:
             self._task.cancel()
@@ -609,6 +711,7 @@ class DurableSession:
             images=list(self._turn.images) if self._turn else [],
             system_append=self._start.system_append,
             disabled_tools=list(self._settings.disabled_tools),
+            packages=list(self._packages),
         )
 
     @workflow.query(name=TURN_QUERY)

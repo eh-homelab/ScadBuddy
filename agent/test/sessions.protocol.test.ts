@@ -259,6 +259,9 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'session.status', sessionId: S, status: 'waiting_approval' }),
     event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3, budgetUsd: 1 }),
     event({ type: 'session.budget', sessionId: S, costUsd: 1.02, budgetUsd: 2 }),
+    // #2329: a file uploaded into, or deleted from, the session's workspace.
+    event({ type: 'workspace.file', sessionId: S, path: 'uploads/part.stl', change: 'uploaded', by: { kind: 'browser', id: 'browser', label: 'You' }, size: 12, mediaType: 'model/stl', sha256: 'a'.repeat(64) }),
+    event({ type: 'workspace.file', sessionId: S, path: 'uploads/part.stl', change: 'deleted', by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
     event({ type: 'error', sessionId: S, code: 'conflict', message: 'no longer waiting', questionId: 'q1' }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),

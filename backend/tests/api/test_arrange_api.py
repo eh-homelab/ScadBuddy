@@ -340,16 +340,6 @@ def test_two_templates_and_a_library_file_arrange_together(
     assert [i.count for i in inputs.items] == [1, 2, 2]
 
 
-def test_a_library_file_whose_output_was_deleted_is_a_404_naming_the_file(
-    client: TestClient, app: FastAPI
-) -> None:
-    state: AppState = getattr(app.state, STATE_ATTR)
-    asyncio.run(state.uploads.record(UNKNOWN, LibraryCopy(id=78, folder_id=None, target_key="k")))
-    response = client.post("/api/v1/outputs/arrange", json={"objects": [{"library_file_id": 78}]})
-    assert response.status_code == 404, response.text
-    assert "library file 78" in response.json()["detail"]
-
-
 def two_colour_3mf(tmp_path: Path) -> bytes:
     """A two-colour project, as Bambuddy's library holds one ScadBuddy did not make."""
     red = trimesh.creation.box(extents=(10, 10, 4))
@@ -397,6 +387,31 @@ def test_a_plain_library_file_arranges_beside_an_output(
     assert inputs.sources == [meta.id]
     state: AppState = getattr(app.state, STATE_ATTR)
     assert (state.store.blobs.dir_for(key) / LAYOUT_NAME).is_file()
+
+
+@respx.mock
+def test_a_library_file_whose_output_was_deleted_arranges_as_a_plain_file(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#2138: the upload row outlives a deleted output, so the file is read from its 3MF
+    like any other library file, as the listing already shows it."""
+    configure(client)
+    asyncio.run(saved_output(tmp_path))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(state.uploads.record(UNKNOWN, LibraryCopy(id=88, folder_id=None, target_key="k")))
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"library_file_id": 88}], "slug": "demo"},
+    )
+    assert response.status_code == 202, response.text
+    [inputs] = arranger.inputs
+    [item] = inputs.items
+    assert item.part.piece_key.startswith("lib3-")
+    assert inputs.provenance[item.part.piece_key].library_file_id == 88
+    assert inputs.sources == []
 
 
 @respx.mock

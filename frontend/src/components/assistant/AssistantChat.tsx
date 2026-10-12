@@ -14,15 +14,15 @@ import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import {
   IMAGE_ACCEPT,
-  IMAGES_DATA_TOTAL_MAX,
+  IMAGES_BYTES_TOTAL_MAX,
   IMAGES_MAX,
   composerImages,
-  dataUrl,
   prepareImage,
+  type PreparedImage,
 } from '../../agent/chat/images'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
-import { isDone, type SessionMode, type UserImage } from '../../agent/chat/protocol'
+import { isDone, type SessionMode } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
 import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
@@ -40,6 +40,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
+import { SessionFiles } from './SessionFiles'
 import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -99,8 +100,22 @@ export interface OpenRequest {
 interface Attached {
   key: number
   name: string
-  image: UserImage
+  image: PreparedImage
   id: string
+}
+
+/**
+ * #2479 — an attached image's thumbnail, drawn from its preview blob by a blob URL (the
+ * page's CSP allows `blob:` images, inside Bambuddy's frame too), revoked when it goes.
+ */
+function AttachedThumb({ blob, alt }: { blob: Blob; alt: string }) {
+  const [url, setUrl] = useState<string>()
+  useEffect(() => {
+    const made = URL.createObjectURL(blob)
+    setUrl(made)
+    return () => URL.revokeObjectURL(made)
+  }, [blob])
+  return url ? <img src={url} alt={alt} className="h-14 w-14 rounded-[4px] border border-line object-cover" /> : null
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -181,6 +196,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [toolResults])
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
+  // #2329 — the active session's Files (its workspace).
+  const [filesOpen, setFilesOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
   function toggleAdvanced() {
     setAdvanced((was) => {
@@ -210,6 +227,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
   const touchedId = useId()
+  const filesId = useId()
   const voiceNoteId = useId()
   const archivedNoteId = useId()
   /** #1885 — a refused Unarchive, shown for that chat only. */
@@ -268,21 +286,21 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     preparingNow.current += taken.length
     setPreparing(preparingNow.current)
     const results = await Promise.allSettled(taken.map((file) => prepareImage(file, undefined, imageEdge)))
-    const ready: { name: string; image: UserImage }[] = []
-    let total = attachedNow.current.reduce((sum, a) => sum + a.image.data.length, uploadingBytes.current)
+    const ready: { name: string; image: PreparedImage }[] = []
+    let total = attachedNow.current.reduce((sum, a) => sum + a.image.blob.size, uploadingBytes.current)
     results.forEach((result, index) => {
       const name = taken[index]?.name ?? 'image'
       if (result.status === 'rejected') {
         errors.push(result.reason instanceof Error ? result.reason.message : `${name} could not be added.`)
-      } else if (total + result.value.data.length > IMAGES_DATA_TOTAL_MAX) {
+      } else if (total + result.value.blob.size > IMAGES_BYTES_TOTAL_MAX) {
         errors.push(`${name} was not added: this message's images would be too large together.`)
       } else {
-        total += result.value.data.length
+        total += result.value.blob.size
         ready.push({ name, image: result.value })
       }
     })
     // #2119 — held until the uploads settle, so an attach started meanwhile counts them.
-    const reserved = ready.reduce((sum, { image }) => sum + image.data.length, 0)
+    const reserved = ready.reduce((sum, { image }) => sum + image.blob.size, 0)
     uploadingBytes.current += reserved
     // #1941 — each image goes to the agent now, and the message sends its id.
     const uploads = await Promise.allSettled(ready.map(({ image }) => api.uploadAttachment(image)))
@@ -440,7 +458,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     const { session } = await api.forkAiSession(id, options.upTo === undefined ? {} : { upTo: options.upTo })
     chat.patch(patchOf(session))
     chat.select(session.id)
-    if (options.draft !== undefined) writeDraft(options.draft)
+    // #2161: the message comes back to edit only into an empty composer; a draft the
+    // user is writing is theirs, and the fork must not throw it away.
+    if (options.draft !== undefined && draftNow.current.trim() === '') writeDraft(options.draft)
     setPickerOpen(false)
     focusSession()
   }
@@ -451,10 +471,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       throw reason(caught)
     }
   }
-  const [forkError, setForkError] = useState<string | null>(null)
+  // #2161: kept with the session that failed to fork, so it is not shown on another.
+  const [forkError, setForkError] = useState<{ session: string; message: string } | null>(null)
   const fork = (id: string, options: { upTo?: string; draft?: string } = {}) => {
     setForkError(null)
-    openFork(id, options).catch((caught: unknown) => setForkError(reason(caught).message))
+    openFork(id, options).catch((caught: unknown) => setForkError({ session: id, message: reason(caught).message }))
   }
   // #795 — rename and done answer with the session, shown at once; a refusal is the row's to show.
   const updateSession = async (id: string, edit: AiSessionEdit) => {
@@ -677,6 +698,16 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           >
             Touched
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={filesOpen}
+            aria-controls={filesOpen ? filesId : undefined}
+            title="The files in this session's workspace: download them, or upload one for the assistant"
+            onClick={() => setFilesOpen((o) => !o)}
+          >
+            Files
+          </Button>
           <BudgetMeter session={active} />
           {active.parentId && (
             <div className="flex w-full items-center gap-1 text-[11.5px] text-muted">
@@ -692,9 +723,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               </button>
             </div>
           )}
-          {forkError && (
+          {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">
-              The chat was not forked: {forkError}
+              The chat was not forked: {forkError.message}
             </p>
           )}
           {active.modeFallback && (
@@ -734,6 +765,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             key={active.id}
             sessionId={active.id}
             refreshKey={`${active.status}:${finishedTools}`}
+          />
+        </section>
+      )}
+
+      {active && filesOpen && (
+        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-line bg-surface-2">
+          {/* Read again when a tool call finishes or a file is uploaded or deleted. */}
+          <SessionFiles
+            key={active.id}
+            sessionId={active.id}
+            refreshKey={`${active.status}:${finishedTools}:${active.workspaceChanges ?? 0}`}
+            canWrite={canSend}
+            onInsert={(text) => {
+              const now = draftNow.current
+              writeDraft(now && !/\s$/.test(now) ? `${now} ${text}` : `${now}${text}`)
+            }}
           />
         </section>
       )}
@@ -847,11 +894,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <ul aria-label="Images to send" className="mb-1.5 flex flex-wrap gap-1.5">
             {attached.map((a) => (
               <li key={a.key} className="relative">
-                <img
-                  src={dataUrl(a.image.preview)}
-                  alt={a.name}
-                  className="h-14 w-14 rounded-[4px] border border-line object-cover"
-                />
+                <AttachedThumb blob={a.image.preview.blob} alt={a.name} />
                 <button
                   type="button"
                   aria-label={`Remove ${a.name}`}

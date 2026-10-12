@@ -273,3 +273,19 @@ export async function rememberApprovedOrigin(
     RETURNING origin`
   if (rows.length !== 1) throw new Error(`approval ${approvalId} is not an approved, used approval in session ${sessionId}`)
 }
+
+
+/**
+ * `rememberApprovedOrigin` for a durable session (#2320): the approval is the
+ * navigation call's own approved `ai_input_responses` row.
+ */
+export async function rememberDurableOrigin(sql: Sql, sessionId: string, origin: string, requestId: string): Promise<void> {
+  const rows = await sql`
+    INSERT INTO ai_browser_origins (session_id, origin, request_id)
+    SELECT r.session_id, ${origin}, r.request_id FROM ai_input_responses r
+    WHERE r.request_id = ${requestId} AND r.session_id = ${sessionId}
+      AND r.kind = 'approval' AND r.outcome = 'approved'
+    ON CONFLICT (session_id, origin) DO UPDATE SET session_id = EXCLUDED.session_id
+    RETURNING origin`
+  if (rows.length !== 1) throw new Error(`call ${requestId} is not an approved call in session ${sessionId}`)
+}

@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { answered, command } from './command.js'
 import { page, PAGED, pageInput } from './pagination.js'
-import { defineTool, json, type Tool } from './registry.js'
+import { defineTool, json, text, type Tool } from './registry.js'
 
 // Flows (#1057, spec 2026-10-01 §7): a Python script over ScadBuddy's host functions,
 // registered by name and run durably as a ProjectWorkflow. Routes:
@@ -13,10 +13,11 @@ const definitionId = z
   .string()
   .uuid()
   .describe('A flow version id, as register_flow, list_flows or list_flow_versions returns it')
+const flowName = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).describe("A flow's name")
 const flowCommit = z
   .string()
   .regex(/^[0-9a-f]{7,40}$/)
-  .describe("A commit of the flow's script, as list_flow_versions returns it")
+  .describe("One of the flow's versions' commits, as list_flow_versions returns it")
 const runId = z.string().uuid().describe('A flow run id, as start_flow_run returns it')
 const approvalTimeout = z
   .union([z.number().int().min(10).max(2_592_000), z.literal('never')])
@@ -36,13 +37,15 @@ export const flowTools: Tool[] = [
       '`agent(prompt, skills, result_schema)` starts a durable agent session as the run\'s starter and returns ' +
       'its answer (skills a list, maybe empty; with a JSON Schema the JSON value it answered, else its text), and ' +
       '`ask_session(session_id, message)` sends to a durable session the starter owns and returns its answer; ' +
-      "a session's own outward calls wait for approval in its chat. Results are " +
+      "a session's own outward calls wait for approval in its chat. `tool(name, args)` calls a tool as the " +
+      "run's starter and returns its text: one of ScadBuddy's, or an enabled plugin's or http_request named " +
+      '`<server>__<tool>` (e.g. `scadbuddy_http__http_request`); an outward one waits for approval. Results are ' +
       'dicts; a refusal is an exception in ScadBuddy\'s words, and a denial a ToolApprovalDenied. The script ' +
       'is `import asyncio`, an `async def main()` that awaits host functions, and `asyncio.run(main())`; it may ' +
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
-      'Registering an existing `name` adds its next version, one commit in its history (list_flow_versions); ' +
-      'a version never changes, and an unchanged script adds none. `approval_timeout` sets how long its runs ' +
-      'wait for approvals (omit for the global setting).',
+      'Registering an existing `name` adds its next version, one commit in its history (list_flow_versions), ' +
+      'an unchanged script too; a version never changes. `approval_timeout` sets how long its runs wait for ' +
+      'approvals (omit for the global setting).',
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),
@@ -84,37 +87,38 @@ export const flowTools: Tool[] = [
   defineTool({
     name: 'list_flow_versions',
     description:
-      "A flow's history, newest first: each version's id, commit, version number, message and who made it " +
-      '(a person, or an agent with its principal and session). `definition_id` may be any of its versions. ' +
-      'Pass a version id to get_flow or start_flow_run.' +
+      "A flow's history, newest first, from git: each version's id, commit, version number, message and who " +
+      'made it (a person, or an agent with its principal and session). Pass a version id to get_flow or ' +
+      'start_flow_run.' +
       PAGED,
-    input: z.object({ definition_id: definitionId, ...pageInput }),
+    input: z.object({ name: flowName, ...pageInput }),
     risk: 'read',
-    routes: ['GET /api/v1/workflows/{definition_id}/versions'],
-    handler: async ({ definition_id, ...args }, { backend }) => {
+    routes: ['GET /api/v1/workflows/names/{name}/versions'],
+    handler: async ({ name, ...args }, { backend }) => {
       const items = await ok(
-        backend.GET('/api/v1/workflows/{definition_id}/versions', {
-          params: { path: { definition_id }, query: { limit: 500 } },
+        backend.GET('/api/v1/workflows/names/{name}/versions', {
+          params: { path: { name }, query: { limit: 500 } },
         }),
-        `list versions of flow ${definition_id}`,
+        `list versions of flow ${name}`,
       )
-      return json(page(items, { definition_id, ...args }, (item) => item.commit, 'list_flow_versions'))
+      return json(page(items, { name, ...args }, (item) => item.commit, 'list_flow_versions'))
     },
   }),
 
   defineTool({
-    name: 'get_flow_version',
-    description: "A flow's version at a commit of its history, with its script.",
-    input: z.object({ definition_id: definitionId, commit: flowCommit }),
+    name: 'get_flow_version_source',
+    description: "A flow's script at one of its versions, by commit.",
+    input: z.object({ name: flowName, commit: flowCommit }),
     risk: 'read',
-    routes: ['GET /api/v1/workflows/{definition_id}/versions/{commit}'],
-    handler: async ({ definition_id, commit }, { backend }) =>
-      json(
+    routes: ['GET /api/v1/workflows/names/{name}/versions/{commit}/source'],
+    handler: async ({ name, commit }, { backend }) =>
+      text(
         await ok(
-          backend.GET('/api/v1/workflows/{definition_id}/versions/{commit}', {
-            params: { path: { definition_id, commit } },
+          backend.GET('/api/v1/workflows/names/{name}/versions/{commit}/source', {
+            params: { path: { name, commit } },
+            parseAs: 'text',
           }),
-          `get flow ${definition_id}@${commit}`,
+          `get flow ${name}@${commit}`,
         ),
       ),
   }),
@@ -122,17 +126,18 @@ export const flowTools: Tool[] = [
   defineTool({
     name: 'diff_flow_version',
     description:
-      "The unified diff of a flow's script at a commit against its version before, or against `base` when given.",
-    input: z.object({ definition_id: definitionId, commit: flowCommit, base: flowCommit.optional() }),
+      "The unified diff of a flow's script at a version against the version before it, or against `base` " +
+      '(another of its versions) when given.',
+    input: z.object({ name: flowName, commit: flowCommit, base: flowCommit.optional() }),
     risk: 'read',
-    routes: ['GET /api/v1/workflows/{definition_id}/versions/{commit}/diff'],
-    handler: async ({ definition_id, commit, base }, { backend }) =>
+    routes: ['GET /api/v1/workflows/names/{name}/versions/{commit}/diff'],
+    handler: async ({ name, commit, base }, { backend }) =>
       json(
         await ok(
-          backend.GET('/api/v1/workflows/{definition_id}/versions/{commit}/diff', {
-            params: { path: { definition_id, commit }, query: { base } },
+          backend.GET('/api/v1/workflows/names/{name}/versions/{commit}/diff', {
+            params: { path: { name, commit }, query: { base } },
           }),
-          `diff flow ${definition_id}@${commit}`,
+          `diff flow ${name}@${commit}`,
         ),
       ),
   }),
@@ -140,18 +145,19 @@ export const flowTools: Tool[] = [
   defineTool({
     name: 'restore_flow_version',
     description:
-      "Restore a flow's script at an earlier commit as its newest version: a new commit on top of its history " +
-      '(nothing is lost). Runs already started keep the version they ran.',
-    input: z.object({ definition_id: definitionId, commit: flowCommit }),
+      "Restore a flow's script at one of its versions as its newest version: a new commit and version, " +
+      'type-checked first, with that version\'s approval timeout (nothing is lost). Runs already started keep ' +
+      'the version they ran.',
+    input: z.object({ name: flowName, commit: flowCommit }),
     risk: 'write',
-    routes: ['POST /api/v1/workflows/{definition_id}/versions/{commit}/restore'],
-    handler: async ({ definition_id, commit }, { backend }) =>
+    routes: ['POST /api/v1/workflows/names/{name}/versions/{commit}/restore'],
+    handler: async ({ name, commit }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/workflows/{definition_id}/versions/{commit}/restore', {
-            params: { path: { definition_id, commit } },
+          backend.POST('/api/v1/workflows/names/{name}/versions/{commit}/restore', {
+            params: { path: { name, commit } },
           }),
-          `restore flow ${definition_id}@${commit}`,
+          `restore flow ${name}@${commit}`,
         ),
       ),
   }),

@@ -108,7 +108,7 @@ export class DurableRunningSweep {
       ]
       const done = await sql.begin(async (tx) => {
         const [claimed] = await tx`
-          UPDATE ai_sessions SET status = 'idle', updated_at = now()
+          UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
           WHERE id = ${row.id} AND mode = 'durable' AND status = 'running' AND event_seq = ${row.event_seq}
           RETURNING id`
         return claimed ? await events.append(row.id, tail, tx) : undefined

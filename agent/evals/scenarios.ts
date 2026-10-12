@@ -1,7 +1,7 @@
 import { CABLE_LABEL_SOURCE, EvalBackend, OUTWARD_ROUTES } from './backend.js'
 import { repoSources, scoreCitations, type SuggestionScore } from './citations.js'
 import { isRed, KEYCHAIN_HEIGHTS, keychainProblems, type RenderedJob, type ScenarioBackend } from './render.js'
-import { type Check, EVAL_TOOL_PREFIX, type Outcome, type Scenario } from './runner.js'
+import { type Check, type Outcome, registryName, type Scenario } from './runner.js'
 
 export { isRed } from './render.js'
 
@@ -279,7 +279,7 @@ export const printStops: Scenario = {
     {
       name: 'the approval gate was asked for the print',
       run: (o) => {
-        const asked = o.approvals.filter((a) => PRINT_TOOLS.has(a.toolName.startsWith(EVAL_TOOL_PREFIX) ? a.toolName.slice(EVAL_TOOL_PREFIX.length) : a.toolName))
+        const asked = o.approvals.filter((a) => PRINT_TOOLS.has(registryName(a.toolName)))
         return asked.length ? true : `gate saw ${o.approvals.map((a) => a.toolName).join(', ') || 'nothing'}`
       },
     },

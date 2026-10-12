@@ -40,7 +40,7 @@ from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
 from scadbuddy_durable.payload_store import external_storage
 from scadbuddy_durable.secrets import Kek, load_kek
-from scadbuddy_durable.session import tools
+from scadbuddy_durable.session import subagents, tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.events import SessionEvents
 from scadbuddy_durable.session.models import TASK_QUEUE
@@ -63,6 +63,8 @@ class Config:
     previous_kek_file: str | None
     scripted: bool = False
     payload_dir: str | None = None
+    # The agent's loopback MCP server for subagents (session/subagents.py); "off" disables it.
+    subagent_url: str | None = None
 
     def __repr__(self) -> str:  # the database URL can carry a password
         return f"Config(temporal={self.temporal_address}, namespace={self.namespace})"
@@ -93,7 +95,14 @@ def config_from_env(env: dict[str, str] | None = None) -> Config:
         previous_kek_file=e.get("SCADBUDDY_SECRET_KEY_PREVIOUS_FILE") or None,
         scripted=e.get("SCADBUDDY_DURABLE_SCRIPTED") == "1",
         payload_dir=e.get("SCADBUDDY_PAYLOAD_DIR") or None,
+        subagent_url=_subagent_url(e.get("SCADBUDDY_DURABLE_SUBAGENT_MCP_URL")),
     )
+
+
+def _subagent_url(raw: str | None) -> str | None:
+    if raw == "off":
+        return None
+    return raw or subagents.DEFAULT_URL
 
 
 def connector(url: str, search_path: str | None = None) -> Connect:
@@ -148,7 +157,15 @@ def segment_runner(cfg: Config, connect: Connect, kek: Kek) -> SegmentRunner:
     """The model's runner: Claude through ScadBuddyRunner, or the tests' scripted one."""
     if cfg.scripted:
         return scripted_runner()
-    return ScadBuddyRunner(connect, kek, cwd=cfg.cwd, plugin_dir=cfg.skills_dir)
+    return ScadBuddyRunner(
+        connect,
+        kek,
+        cwd=cfg.cwd,
+        plugin_dir=cfg.skills_dir,
+        # agent/src/temporal/turnPackages.ts SHARED_PACKAGES, on the shared payload volume.
+        package_root=os.path.join(cfg.payload_dir, "plugins") if cfg.payload_dir else None,
+        subagent_url=cfg.subagent_url,
+    )
 
 
 async def connect_client(cfg: Config, connect: Connect, kek: Kek, previous: Kek | None) -> Client:

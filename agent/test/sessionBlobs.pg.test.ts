@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
@@ -204,10 +204,10 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
 
   describe('the images a user sends with a turn', () => {
     // A JPEG's signature is enough for images.ts; the preview is the panel's own drawing.
-    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]).toString('base64')
-    const SENT = `${createHash('sha256').update(Buffer.from(JPEG, 'base64')).digest('hex')}.jpg`
-    const preview = { mediaType: 'image/png' as const, data: PNG }
-    const image = { mediaType: 'image/jpeg' as const, data: JPEG, preview }
+    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46])
+    const SENT = `${createHash('sha256').update(JPEG).digest('hex')}.jpg`
+    const preview = { mediaType: 'image/png' as const, bytes: Buffer.from(PNG, 'base64') }
+    const image = { mediaType: 'image/jpeg' as const, bytes: JPEG, preview }
 
     /** A browser session whose first turn carried the image; its turn returns none. */
     async function withSent(): Promise<string> {
@@ -217,13 +217,19 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
       return session.id
     }
 
-    it('stores each before the user.turn that names it beside its preview, and serves it', async () => {
+    it('stores each and its preview before the user.turn that names them, and serves both (#2479)', async () => {
       const id = await withSent()
       const events = await logged(id)
-      expect(events.find((e) => e.type === 'user.turn')).toMatchObject({ images: [{ ...preview, name: SENT }] })
-      // The log names the image; only the preview is in it.
-      expect(JSON.stringify(events)).not.toContain(JPEG)
+      expect(events.find((e) => e.type === 'user.turn')).toMatchObject({
+        images: [{ name: SENT, mediaType: 'image/jpeg', preview: { name: NAME, mediaType: 'image/png' } }],
+      })
+      // The log names the image and its preview; neither's bytes are in it.
+      expect(JSON.stringify(events)).not.toContain(JPEG.toString('base64'))
+      expect(JSON.stringify(events)).not.toContain(PNG.slice(0, 40))
       await expectPanelAccepts(events)
+      const small = await get(`/api/v1/ai/sessions/${id}/blobs/${NAME}`)
+      expect(small.status).toBe(200)
+      expect(small.headers.get('content-type')).toBe('image/png')
 
       const res = await get(`/api/v1/ai/sessions/${id}/blobs/${SENT}`)
       expect(res.status).toBe(200)
@@ -231,7 +237,7 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
       expect(res.headers.get('x-content-type-options')).toBe('nosniff')
       expect(res.headers.get('content-disposition')).toBe('inline')
       expect(res.headers.get('cache-control')).toMatch(/^private, .*immutable/)
-      expect(Buffer.from(await res.arrayBuffer()).equals(Buffer.from(JPEG, 'base64'))).toBe(true)
+      expect(Buffer.from(await res.arrayBuffer()).equals(JPEG)).toBe(true)
     })
 
     it('serves it to the UI only, under its own session, and not to another principal', async () => {
@@ -249,12 +255,36 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
       await expect(m.blob(id, SENT, agentA)).rejects.toMatchObject({ code: 'not_found' })
     })
 
-    it('logs the previews without names when the images cannot be stored', async () => {
+    const blobsOf = async (id: string) => db.sql`SELECT name FROM ai_session_blobs WHERE session_id = ${id}`
+
+    it('stores nothing for a principal who may not send to the session (#2479)', async () => {
+      next = { reply: 'nothing to see' }
+      // The browser user sees every session, but only an owner may send.
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      await expect(m.send(session.id, browser, 'look', { images: [image] })).rejects.toMatchObject({ code: 'forbidden' })
+      expect(await blobsOf(session.id)).toHaveLength(0)
+    })
+
+    it('stores nothing when the claim is refused: a busy session (#2479)', async () => {
+      next = { reply: 'nothing to see' }
+      const { session } = await m.start(browser, { origin: 'chat' })
+      await db.sql`
+        UPDATE ai_sessions SET status = 'running', turn_id = ${randomUUID()}, lease_until = now() + interval '1 hour'
+        WHERE id = ${session.id}`
+      await expect(m.send(session.id, browser, 'look', { images: [image] })).rejects.toMatchObject({ code: 'busy' })
+      expect(await blobsOf(session.id)).toHaveLength(0)
+    })
+
+    it('refuses the message, starting nothing, when the images cannot be stored (#2479)', async () => {
+      next = { reply: 'nothing to see' }
+      const { session } = await m.start(browser, { origin: 'chat' })
       await db.sql`ALTER TABLE ai_session_blobs ADD CONSTRAINT no_more CHECK (false) NOT VALID`
-      const id = await withSent()
-      const turn = (await logged(id)).find((e) => e.type === 'user.turn')
-      expect(turn).toMatchObject({ images: [preview] })
-      expect(turn?.type === 'user.turn' && turn.images?.[0] && 'name' in turn.images[0]).toBe(false)
+      await expect(m.send(session.id, browser, 'look', { images: [image] })).rejects.toMatchObject({
+        name: 'SessionError',
+        code: 'unavailable',
+      })
+      expect((await logged(session.id)).find((e) => e.type === 'user.turn')).toBeUndefined()
+      expect((await m.get(session.id, browser)).status).toBe('idle')
     })
   })
 
