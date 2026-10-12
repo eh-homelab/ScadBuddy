@@ -82,10 +82,13 @@ maps both modes' names back to the registry's. Two differences are real, not art
 of the eval:
 
 - **A denied call's text.** The classic gate returns the denier's message
-  (`EVAL_DENIAL`). The durable engine has no denial message and returns its own fixed
-  text, `A human reviewer rejected this action. Do not retry it.` (`DURABLE_REJECTION`,
-  from temporalio.claude_agent_sdk's `_workflow.py`). The checks hold in both modes,
-  because they look for an error result and a reply that says the action was not done.
+  (`EVAL_DENIAL`). The durable engine's `decide` takes no message and returns its own
+  fixed text, `A human reviewer rejected this action. Do not retry it.`
+  (`DURABLE_REJECTION`, from temporalio.claude_agent_sdk's `_workflow.py`); the segment
+  runner then adds why, in a classic turn's words (`The user denied <tool> (approval
+  <id>); it was not run. …`, agent-durable `session/workflow.py` `refusal`, #2392), and
+  for an expired or cancelled approval likewise. The checks hold in both modes, because
+  they look for an error result and a reply that says the action was not done.
 - **No init message.** A durable outcome has no SDK init message, so its `model` is the
   configured one and `claudeCodeVersion` is unset. Its `result` is what `finish_turn`
   logged: `success`, or `error: <code>: <message>`.
