@@ -164,8 +164,13 @@ grants: the TypeScript agent only reads whether a recorded match is still in for
    then `UPDATE flow_grants SET used = …` guarded by `used + n <= max`. A request id
    already recorded returns its first answer, so a retried activity consumes once.
    Counters are never given back: a call that later fails still spent its share.
-6. Returns `{verdict: "inside", grant_id, rule, input_hash}` or `{verdict: "outside",
-   reason}`. `input_hash` is `approval_hash.input_hash` of the call as the agent
+6. Returns `{verdict: "inside", grant_id, rule, input_hash, args}` or `{verdict:
+   "outside", reason}`. **`args` are the call's arguments with every default the bounds
+   resolved pinned in**: for `queue_print`, `request.printer_id` and `request.copies` as
+   checked. The call runs with these `args`, and `input_hash` covers them, so a change
+   of the configured printer or the remembered quantity between the check and the send
+   cannot change what runs. Agent tools' `args` bounds read only what the call sent
+   (a missing path does not match), so nothing is resolved for them. `input_hash` is `approval_hash.input_hash` of the call as the agent
    will run it (`{"tool", "input"}` for a `tool(...)` or child call; for `queue_print`
    and `arrange`, the host function's name and its arguments).
 
@@ -276,6 +281,15 @@ two roles (`agent/src/gate/role.ts`, `gate/validate.ts`, and their Python port
 - `parent` is decided by the route from the escalation's record (§4.6): the caller's
   `ctx.session` is the run's starter session and the entry is at hop `parent`. The
   same principal in any other session is `owner`, as before.
+- **The author header is not authentication.** On the backend, the starter session and
+  the starter (for `parent` actions on a flow-own entry, and for revoke) are read from
+  `X-ScadBuddy-Agent-Author` / `-Session`, which `core/authorship.py` documents as a
+  label, not a credential. Only the browser and the agent sidecar reach the backend,
+  and the browser is already the person. So a forged header can at most deny a call,
+  narrow it into the grant, pass it up, or revoke the grant: each only removes
+  authority. No header ever approves, creates or widens anything; those need the absence
+  of the header (`_browser_only`). `core/authorship.py`'s docstring gains this use and
+  this bound (plan B3).
 - `run_grant` is never a route's caller. It is the responder `DurableSession` passes
   to `resolve_input` itself when `flow_grant_check` answered inside; no Update carries
   it, and `respond`'s validator refuses it.
@@ -359,6 +373,17 @@ it off when approving the grant), an outside call goes there first.
 - **Cost.** Each delivery is a turn of the starter session, paid from its budget
   (`budget_root_id`, #823). A session out of budget, archived, deleted, or whose owner
   changed by handoff is skipped: its entries go to the person at once.
+- **A child that is the starter session.** A script may `ask_session` the very session
+  that started the run. Its outside calls would escalate to itself in the middle of its
+  own turn, and it receives escalations only when idle, so they would wait out the whole
+  parent hop. So the parent hop is skipped when the child is the starter session: its
+  outside calls go straight to the person.
+- **The escalation turn's text is untrusted.** The summary, the proposal, the outside
+  reason and above all the child's reasoning are model or tool output. The turn wraps
+  them in the untrusted-data envelope every tool result uses
+  (`agent/src/safety/untrusted.ts`), with the instruction that they are information
+  about a call to judge, never instructions, as §4.5 shows them to the person. The
+  starter session's own tiers still bound whatever it does next.
 - **One hop only.** The chain does not climb past the starter session to whatever
   started *it*. A run started by a child session of another run has that child as its
   starter session, and the other run is not consulted.
@@ -506,20 +531,29 @@ its child sessions' parked calls from flow turns, and a requested grant.
   two trailers, `ScadBuddy-Flow: <name>` and `ScadBuddy-Flow-Version: <definition id>`;
   the definition id is chosen before the commit.
 - The **version number** shown to people is the commit's position among the commits
-  with that name's `ScadBuddy-Flow` trailer, oldest first. Because every version is a
-  commit, that is the row's version, which the registration stores as today
-  (`UNIQUE (name, version)` holds). For migrated rows it equals the existing numbering,
-  identical consecutive scripts included (§6.4).
+  with that name's `ScadBuddy-Flow` trailer, oldest first. **The row's version is always
+  that position, never `MAX(version) + 1`**: `FlowHistory` computes it, and nothing else
+  numbers a version. So the history routes, the index and the reconciler can never give
+  one commit two numbers. For migrated rows it equals the existing numbering, identical
+  consecutive scripts included (§6.4).
 - `workflow_runs` gains `commit`, the commit its script was read from, set from
   `FlowStart.commit` by the run's first activity. Reset replays the run's own history,
   which carries the script itself, so a Reset always reruns that commit's script; the
   column is what the run page links to and what the queue shows (§4.5).
-- **Registering** (`register_flow` or the editor's Save, #2487) type-checks, then commits
-  `<name>/flow.py` (subject `Register <name> v<N>`; its author recorded as `ModelHistory`
-  records one), then inserts the index row with that commit. If the insert fails after
-  the commit, the commit stays (git is the source), and a reconciler at start indexes
-  any commit whose `ScadBuddy-Flow-Version` trailer no row names, oldest first, with
-  that id. It matches on the trailer, never on the script's content.
+- **Registering** (`register_flow` or the editor's Save, #2487) type-checks, then, **under
+  the flows repository's write lock held across both steps**, commits `<name>/flow.py`
+  (subject `Register <name> v<N>`; its author recorded as `ModelHistory` records one) and
+  inserts the index row with that commit and its position as the version. The lock is
+  the thread lock plus `flock` (`GitRepo.write_lock`), so two registrations of one name,
+  in one process or two, cannot interleave their commits and inserts. Restore and the
+  reconciler take the same lock.
+- **A failed insert.** If the insert fails after the commit, the commit stays (git is the
+  source) and the request fails. The commit still holds its position: the next
+  registration commits at the position after it and inserts that number, so no later
+  row takes the orphan's number. The reconciler (at start, and before each registration
+  under the same lock) indexes any commit whose `ScadBuddy-Flow-Version` trailer no row
+  names, with that id and its own position, so it never collides on
+  `UNIQUE (name, version)`. It matches on the trailer, never on the script's content.
 - **Starting a run** reads the script from git at the version's commit, not from the row.
   A missing commit (a damaged volume) is 409 "this version's script is missing".
 
@@ -619,8 +653,10 @@ sees or what is safe, and are listed in the PR for the user.
     can turn the parent hop off when approving the grant.
 14. **Counters are never given back** (§3.3), and a Reset's replayed calls consume again
     (§7).
-15. **Every version is its own commit, and one row per version stays** in `workflow_definitions` (§6.2), rather than one row
-    per name, so existing ids and runs keep working.
+15. **Every version is its own commit, its number is its git position (never
+    `MAX + 1`), the commit and the index insert share one lock, and one row per version
+    stays** in `workflow_definitions` (§6.2), rather than one row per name, so existing
+    ids and runs keep working.
 16. **No metadata file in `data/flows`** (§6.1).
 17. **`FlowHistory` lives in `flows/repository.py`**, since `flows/history.py` is the Reset
     preview.
@@ -652,7 +688,8 @@ The plan's tasks carry the tests; these are what the spec requires to be shown:
   parked.
 - Git: registering commits once with the author trailers; history, diff, source and
   restore; re-registering an unchanged script is a new commit (`--allow-empty`) and a
-  new version; the backfill reproduces consecutive identical versions; the backfill reproduces every existing version in order with its dates and
+  new version; the backfill reproduces every existing version, consecutive identical ones
+  included, in order with its dates and
   maps every run; `ModelHistory`'s test suite passes unchanged on the shared core.
 
 ## 10. Out of scope

@@ -195,6 +195,10 @@ async def flow_grant_approve(req: GrantApprove) -> bool
 output's plate filament options when known, and `copies` defaulted as
 `print_run.py` resolves it. A failing lookup returns facts that admit nothing.
 
+**Pinned args:** an inside verdict's `args` replace the call's (amendment §3.3 step 6):
+`queue_print` runs `approved_print` with `request.printer_id` and `request.copies` set to
+what was checked; the decision's `input_hash` is over those args.
+
 **`_gated` change**, behind `workflow.patched("flow-grant-check")`: before
 `run_gated`, run `flow_grant_check` (start-to-close 10 s, retries 5). Inside: the step
 is opened with no `waiting` (so no `waiting_on` entry is projected and nobody is
@@ -207,7 +211,9 @@ hops).
 - [ ] Test (time-skipping env, fake API as `test_outward_host_functions.py` does): a
   `queue_print` inside the grant runs with no `waiting_on` entry and its decision row has
   `responder = grant:<id>` and the hash; outside, it parks as before; `max_calls: 1` →
-  the second call parks. See them fail.
+  the second call parks; a `queue_print` with no `printer_id` matched against the
+  configured printer is sent with that printer pinned even after the setting changes.
+  See them fail.
 - [ ] Test: an outward `tool(...)` inside the grant reaches the agent activity with an
   approved decision whose hash matches (fake agent-tools worker, as
   `test_tool_host_function.py`).
@@ -363,6 +369,9 @@ verdict for a child whose step's policy is `on_outside: "deny"` is refused witho
 parking (`agent.decide(…, False, "flow")`, recorded `denied` by `flow`); a flow-own call
 has no flow hop.
 
+- [ ] Add to `core/authorship.py`'s docstring: the header now also names the starter
+  session for `parent` actions and the starter for revoke, and a forged one can only
+  deny, narrow into the grant, pass up or revoke (amendment §4.2).
 - [ ] Tests: each action at hop `parent`; refused at hop `person` (409 "with the person
   now"); refused from another session of the same owner (403); `approve` is not an
   action (422); a narrow inside the grant runs, outside reaches the person with the
@@ -393,7 +402,10 @@ started, or out of budget; wait when in a turn; else send one turn authored
 proposal, outside reason, the child's reasoning) and how to answer with
 `escalation_respond`; mark delivered (`hops` gains `{action: "delivered"}`).
 
-- [ ] Tests: idle classic and durable sessions get one batched turn; a busy session gets
+- [ ] Tests: the turn wraps summary, proposal, reason and reasoning in the untrusted-data
+  envelope (`safety/untrusted.ts`); a run that `ask_session`s its own starter session
+  opens that child's outside calls at hop `person`, never `parent`; idle classic and
+  durable sessions get one batched turn; a busy session gets
   it after its turn ends; an archived one sends the entries to the person; a run started
   by a token with no session never delivers. See them fail. Implement.
 
@@ -464,6 +476,10 @@ class FlowHistory(GitRepo):
     def write(self, name: str, script: str, version_id: str) -> str
         # always one commit ("Register <name> v<N>", --allow-empty when unchanged),
         # trailers ScadBuddy-Flow: <name>, ScadBuddy-Flow-Version: <version_id>
+    def register(self, name: str, script: str, version_id: str,
+                 index: Callable[[str, int], None]) -> tuple[str, int]
+        # under write_lock(): reconcile pending orphans, write(), then
+        # index(commit, position); the lock is held across all three
     def script_at(self, name: str, commit: str) -> str
     def versions(self, name: str) -> list[Revision]          # commits with the name's trailer, newest first
     def version_of(self, name: str, commit: str) -> int      # 1-based position among them, oldest first
@@ -492,9 +508,19 @@ ALTER TABLE workflow_runs ADD COLUMN commit text;
 
 `FlowStart.commit` defaults to `""` so recorded histories decode and replay unchanged.
 
+**Registration under one lock:** `register_flow` and `restore` run
+`FlowHistory.register(name, script, version_id, index)` where `index(commit, version)`
+inserts the row; `register` holds `write_lock()` across the reconcile-pending check, the
+commit and `index`, and computes `version` as the commit's position. `store.py`'s
+`MAX(version) + 1` is no longer used for flows.
+
 - [ ] Tests: register writes a commit and a row with it; re-registering an unchanged
   script (only `approval_timeout` changed) is a new commit and version, never a
-  `UNIQUE (name, version)` failure; version equals the commit's position; start reads git (a script edited in the row but not in git is ignored); a
+  `UNIQUE (name, version)` failure; version equals the commit's position; an insert
+  that fails after its commit, then another registration, then the reconciler: the
+  orphan is indexed at its own position, the later row keeps its own, no collision;
+  two registrations of one name from two threads (and two processes, `flock`) each get
+  the version of their commit's position; start reads git (a script edited in the row but not in git is ignored); a
   missing commit → 409; the run row's `commit` is set. Replay green. See them fail.
   Implement.
 
@@ -525,7 +551,8 @@ content. Idempotent.
 
 - [ ] Tests: three versions of one name (two of them identical and consecutive) and one
   of another backfill in order with their dates and authors and keep their version
-  numbers; a second run changes nothing; a crash after commit before update
+  numbers; the reconciler indexes an orphan commit at its position after later rows
+  exist, without a `UNIQUE (name, version)` failure; a second run changes nothing; a crash after commit before update
   is repaired; runs map to their version's commit. See them fail. Implement.
 
 ### Task C6: Deployment and docs
