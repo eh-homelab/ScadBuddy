@@ -184,6 +184,10 @@ handing Claude Code the servers; durable gets the entries:
 - `memory_recall` (TS activity, turn start) returns the `<hindsight_memories>` block the
   classic `UserPromptSubmit` hook adds; appended to the prompt. `memory_retain` (turn end,
   before `finish_turn`) retains the turn's transcript. Supersedes #825.
+- As built: `agent/src/temporal/memoryActivities.ts` runs the classic hooks themselves
+  (the Stop hook reads a transcript rebuilt from `ai_session_events`); the workflow calls
+  both under the patch `memory-2320`, once each, and neither fails the turn
+  (`docs/ai/operating.md` §11).
 
 ## Phase 7 — tool images in durable (PR 7)
 
@@ -194,6 +198,11 @@ handing Claude Code the servers; durable gets the entries:
 
 - `tool(name, …)` accepts plugin and `http_request` entries through `turn_tools`/`extra_tool`
   with the run's starter principal; disabled tools refused before the call is made.
+- As built: a `<server>__<tool>` name not in the run's manifest asks the agent's
+  `turn_tool_tier` (which now takes a `flow-<id>` workflow and returns the pinned
+  queue), then runs `turn:<name>` on that queue under `tool-<call id>`; an outward one
+  parks as `approved_turn_tool` and the agent checks `workflow_run_decisions`. Behind
+  `patched("flow-turn-tools-2320")`. The headless browser stays out of flows.
 
 ## Phase 9 — evals, docs, UI (PR 9)
 

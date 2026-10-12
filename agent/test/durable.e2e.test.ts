@@ -15,6 +15,11 @@ import { DurableTurns } from '../src/sessions/durable.js'
 import { SETTING_SESSION_MODE } from '../src/sessions/manager.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
 import { writeManifest } from '../src/tools/manifest.js'
+import { PgSessionOwners } from '../src/temporal/toolActivities.js'
+import { turnServers } from '../src/temporal/turnServers.js'
+import { turnToolActivities, turnToolActivity } from '../src/temporal/turnTools.js'
+import { AgentWorker } from '../src/temporal/worker.js'
+import { createServer as createHttpServer, type Server } from 'node:http'
 import { expectPanelAccepts, frontendClientMessages } from './support/frontendProtocol.js'
 import { type LiveAgent, openPanelSocket, type PanelSocket, startLiveAgent } from './support/liveAgent.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -26,7 +31,10 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 // real DurableSession workflow on a Temporal dev server, run by the real Python worker
 // (`python -m scadbuddy_durable`) with its scripted model in place of Claude
 // (SCADBUDDY_DURABLE_SCRIPTED=1, session/scripted.py: it answers "you said: <message>").
-// The workflow's events reach ai_session_events, and the panel, through the log.
+// The workflow's events reach ai_session_events, and the panel, through the log. A
+// turn's other tools (#2320) are served by the agent's own agent-tools worker
+// (temporal/turnTools.ts): the scripted model's `fetch <url>` calls http_request through
+// it, as a durable tool, against a local web server.
 // Payloads are sealed by the subject codec on both sides. Skips without uv, Temporal
 // or Postgres.
 
@@ -73,6 +81,9 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
   let agent: LiveAgent | undefined
   let panel: PanelSocket | undefined
   let client: Client
+  let tools: AgentWorker | undefined
+  let web: Server | undefined
+  let webUrl = ''
   const sessionIds: string[] = []
 
   beforeAll(async () => {
@@ -130,11 +141,31 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     sessions.durableTurns = new DurableTurns({ client, sql: db.sql, events: sessions.events, sendTimeoutMs: 60_000 })
     agent = await startLiveAgent(sessions)
     panel = await openPanelSocket(agent)
+
+    web = createHttpServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('hello from the web')
+    })
+    await new Promise<void>((resolve) => web!.listen(0, '127.0.0.1', resolve))
+    webUrl = `http://127.0.0.1:${(web.address() as { port: number }).port}/page`
+    const turnDeps = {
+      sessions: new PgSessionOwners(db.sql),
+      servers: turnServers({ httpRequest: { saveRoot: dir } }),
+    }
+    tools = AgentWorker.start({
+      address: env.address,
+      namespace: 'default',
+      activities: { ...turnToolActivities(turnDeps), default: turnToolActivity(turnDeps) },
+      dataConverter: { payloadCodecs: [new SubjectPayloadCodec(new PgPayloadKeys(db.sql, kek))] },
+    })
+    await tools.running(60_000)
   }, 300_000)
 
   afterAll(async () => {
     panel?.close()
     await agent?.close()
+    await tools?.stop()
+    web?.close()
     for (const id of sessionIds) {
       await client
         ?.workflow.getHandle(sessionWorkflowId(id))
@@ -195,5 +226,22 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     })
     const raw = Buffer.from(JSON.stringify(history)).toString()
     expect(raw).not.toContain(Buffer.from('hello durable').toString('base64').slice(0, 12))
+  }, 300_000)
+
+  it("calls a turn's http_request as a durable tool served by the agent, and answers with what it read (#2320)", async () => {
+    const { clientMessage } = await frontendClientMessages()
+    const p = panel!
+    const from = p.frames.length
+    p.send(clientMessage({ type: 'user.message', text: `fetch ${webUrl}`, context: { route: '/' } }))
+    const frames = await p.until(
+      (f) => f.type === 'error' || (f.type === 'assistant.text.done' && p.frames.some((g) => g.type === 'tool.result')),
+      { from, timeoutMs: 120_000 },
+    )
+    expect(frames.filter((f) => f.type === 'error')).toEqual([])
+    const sessionId = frames.find((f) => f.type === 'session.started')!.sessionId as string
+    sessionIds.push(sessionId)
+    const reply = frames.filter((f) => f.type === 'assistant.text.delta').map((f) => f.delta).join('')
+    expect(reply).toMatch(/^fetched \(ok\): /)
+    expect(reply).toContain('hello from the web')
   }, 300_000)
 })

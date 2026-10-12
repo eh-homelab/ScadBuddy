@@ -24,7 +24,7 @@ from the next turn on, every session turn gets the browser (`main.ts` gives the
 | The official plugin's manifest, vendored byte for byte from [`anthropics/claude-plugins-official` at `fa59bc9`](https://github.com/anthropics/claude-plugins-official/tree/fa59bc9037741ecfa131aa27938272605710d7b2/external_plugins/playwright) (Apache-2.0, the repository's root `LICENSE`) | [`agent/plugins/playwright/`](../../agent/plugins/playwright/README.md) |
 | Per-session plugin copy, server config, tier map, disallowed tools, input guard, request guard | [`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts) |
 | Where it may go: ScadBuddy's own origins, and origins a human approved per session | [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts), table `ai_browser_origins` ([migration](../../agent/src/db/migrations/20260930T0342Z_browser_origins.sql)), `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` in [`agent/src/config.ts`](../../agent/src/config.ts) |
-| Its downloads, into the session's workspace (#2329) | [`agent/src/harness/browserDownloads.ts`](../../agent/src/harness/browserDownloads.ts) (`drainDownloads`, `downloadsHook`) |
+| Its downloads, into the session's workspace (#2329) | [`agent/src/harness/browserDownloads.ts`](../../agent/src/harness/browserDownloads.ts) (`drainDownloads`, `downloadsHook`, `turnEndDownloadsHook`) |
 | Loading it into a query | `buildHarness()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts) (`HarnessRun.headlessBrowser`) |
 | Turning it on per turn | `runTurn()` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts): `deps.headlessBrowser` **and** the `ai_settings` key `headless_browser_enabled` = `true` |
 | Its directory | `sessionBrowserDir()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts): `<state dir>/browser/<session id>` |
@@ -74,6 +74,28 @@ holds the Claude credential (`run.ts` `credentialEnv`). That is why
 plugins. This one is built by the harness, not read from a plugin, and `env -i` means
 the server and Chromium start with `HOME`, `TMPDIR` and `PLAYWRIGHT_BROWSERS_PATH` only
 (measured: `/proc/<pid>/environ` in the tests and in the image).
+
+### In a durable session
+
+A durable session (spec 2026-10-01 §6) has the same browser (#2320; this supersedes plan
+5c Ruling 15, which left it out). Its tools run as Temporal activities on the TS agent,
+not in a Claude Code process, so the agent starts the same server itself
+([`turnBrowser.ts`](../../agent/src/temporal/turnBrowser.ts) `BrowserHost`):
+`materializeHeadlessBrowser()` and `assertHeadlessPlugin()` as above, then the written
+`.mcp.json`'s command over stdio. The server lives for the session on the replica that
+started it and is closed after ten idle minutes (`BROWSER_IDLE_MS`). Its tools are turn
+tools named `plugin_playwright_playwright__browser_*`, so their harness names, tiers and
+Settings → Plugins overrides are the classic ones. Every call is pinned to that replica:
+each agent also polls `agent-tools.<hostname>`, and the listing names that queue for
+each browser tool.
+
+Each call gets the same checks as a classic turn's seam. The deny list and any disabled
+tools are not offered, and are refused if named anyway. `browserInputGuard` refuses a
+bad filename or a refused origin before the call parks. An origin a human may allow
+makes the call outward. Once that call is approved, the origin is remembered under the
+call's own approved `ai_input_responses` row (`rememberDurableOrigin`). The grant tool
+is `scadbuddy_browser__authorize_request` there too (see "Approving one outward
+request").
 
 ## Tools and tiers
 
@@ -139,8 +161,15 @@ In order, from the model outwards:
    (answered `413`, [Downloads](#downloads)), and any other page or subresource to
    `PAGE_MAX_BYTES`, 50 MiB (answered `502`, a navigation with a page that says the
    response is larger than the most the headless browser reads, which the model sees in
-   its snapshot). So an endless or enormous response costs the agent pod at most about
-   that much memory, never all of it. A 3xx to a place the session may not go is refused, an allowed
+   its snapshot). Past 1 MiB (`SPOOL_OVER_BYTES`, #2401) a body is no longer held in
+   memory while it is read: what came so far and the rest go to a fresh file in the
+   browser directory's `spool/`, which the guard reads back only to hand the body to
+   Chromium and then deletes. The handoff itself still takes the body whole: Playwright's
+   `route.fulfill` reads even its `path` option into one buffer (playwright-core 1.64
+   `Route._innerFulfill`) and CDP's `Fetch.fulfillRequest` takes the body as one base64
+   string. So a slow response holds at most 1 MiB while it trickles in, and an endless or
+   enormous one costs the agent pod at most about its limit, for the moment of the
+   handoff, never all of it. A 3xx to a place the session may not go is refused, an allowed
    3xx on a GET navigation becomes a new navigation (which the guard sees again), and
    any other 3xx is refused. So neither a ScadBuddy page redirecting off-origin nor an
    approved origin redirecting to an unapproved one gets through, whatever sits in
@@ -210,8 +239,16 @@ to 10 s for a download the call started:
   `additionalContext`, never the URL; `workspace_list` shows the source.
 
 A download still running after the wait is drained by the next browser call. One that
-finishes after the turn's last browser call is not drained: it goes with the browser
-directory when the turn ends.
+finishes after the turn's last browser call (#2397) is drained when the turn ends: a
+`Stop` hook (`turnEndDownloadsHook`, added in `run.ts`) waits up to the same 10 s for
+any still running, while the query and Chromium still live, and drains the directory
+under the same caps; then the session manager drains it once more, without waiting,
+just before it removes the browser directory, for a turn that ended without its `Stop`
+hook (stopped, failed, out of turns or budget). Neither tells the model; `workspace_list`
+shows the files. A download still running when that wait runs out, or one the guard is
+still reading at the route (before the browser starts it, so there is nothing on the disk
+to wait for), goes with the browser directory. The durable session's `BrowserHost`
+(`turnBrowser.ts`) does not drain at the turn's end yet.
 
 ### Limits, while a download runs
 
@@ -371,6 +408,14 @@ built:
 
 So an interrupt, a handoff, a new turn or the end of the turn voids an unused grant.
 
+In a durable session (#2320) the approval is the call's own approved
+`ai_input_responses` row, which the workflow's gate wrote and the activity checked
+against this exact input. The turn is `ai_sessions.durable_turn_id`, set when the turn
+is claimed and cleared by `finish_turn`, the release of a refused start, and the durable
+sweep. `recordDurableGrant()` writes the grant with `request_id` instead of
+`approval_id`. `GRANT_SQL`'s durable branch lets it through only while the session is
+durable, is running or parked, and its `durable_turn_id` is the grant's turn.
+
 **A grant binds the method and path, not the body or query string** (review of #518).
 The approver sees only those two, so for print and send the printer, plate and options
 the page sends are not shown or checked. Routes where the body alone decides where
@@ -472,8 +517,13 @@ became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only 
   available when connecting remotely"), since the server's connection counts as remote,
   so the guard waits on `download.failure()`; and deleting the artifact while the server
   copies it fails the tool call, so a kept download's artifact is left to Playwright. The
-  hooks themselves are unit-tested (`agent/test/workspace.test.ts`), not yet through
-  Claude Code.
+  hooks are unit-tested (`agent/test/workspace.test.ts`) and run through a live classic
+  session (`agent/test/headlessBrowser.session.e2e.test.ts`, #2398): a click on the
+  download link lands `downloads/part.stl` in `ai_session_files` with the model told
+  after the click, and a download the page starts 3 s after the turn's last browser
+  call lands at the turn's end, with the model never told. Measured with the Claude Code
+  `@anthropic-ai/claude-agent-sdk` 0.3.289 bundles, @playwright/mcp 0.0.83 and
+  chromium-headless-shell 1247 on 2026-10-11.
 - **Bounded reads**: an endless attachment (a 64 KiB chunk at a time, never ending) is
   answered 413 at a 1000-byte cap and an endless `text/html` page 502 at
   `PAGE_MAX_BYTES`, each in under 3 s; the test server counts what it got out before the
@@ -485,6 +535,14 @@ became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only 
   (`headlessBrowser.test.ts`, `workspace.test.ts`). Measured on 0.0.83 with
   chromium-headless-shell 1246 on 2026-10-11 (server tests "stops reading an endless …",
   "keeps a site's cookies …").
+- **Spooled bodies** (#2401): a body past `SPOOL_OVER_BYTES` is on the disk, not in
+  memory, by the time the stream has given out twice the threshold; an endless download
+  spooled past the threshold is still cut off one chunk past its cap, its spool file
+  removed; a spool file is removed after the handoff, and when the handoff fails; and a
+  spool name that is a link or leaves the directory is neither read nor followed
+  (`headlessBrowser.test.ts` "reading a body (#2401)"). A 3 MiB page reaches Chromium
+  whole and leaves `spool/` empty, measured on 0.0.83 with chromium-headless-shell 1247
+  on 2026-10-11 (server test "hands on a page past the spool threshold …").
 - **`TMPDIR` must be short.** Chromium's profile goes under it and its `SingletonSocket`
   is a Unix socket (path limit about 107 bytes); under the session directory the launch
   fails with "Target page, context or browser has been closed". It is a folder per

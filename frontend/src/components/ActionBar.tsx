@@ -2,6 +2,7 @@ import {
   useEffect,
   useId,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -34,10 +35,13 @@ import { ColorStrip } from './ColorStrip'
 import { ColoursDialog } from './ColoursDialog'
 import { ImageDialog } from './ImageDialog'
 import { PrintPicker } from './PrintPicker'
-import { useProjectList } from '../lib/projects'
+import { breadcrumbs, useProjectList } from '../lib/projects'
+import { useSubscription } from '../lib/realtime'
+import { useAsync } from '../lib/useAsync'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
+import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 
@@ -73,6 +77,11 @@ interface Props {
   cameraView?: () => CameraView | null
   /** The template, so the rendered image can be added to its media. */
   model?: ModelSummary
+  /**
+   * #1660 — the preset in use, or none. The project Generate files into is remembered
+   * per model and preset, and the picker moves to it when either changes.
+   */
+  preset?: { id: string; name: string } | null
   onModelChanged?: (model: ModelSummary) => void
   /** The UI state recorded with the output (spec 2026-09-27 §4.3). */
   extra: InputsExtra
@@ -104,6 +113,7 @@ export function ActionBar({
   viewSize,
   cameraView,
   model,
+  preset = null,
   onModelChanged,
   extra,
   fit,
@@ -135,13 +145,57 @@ export function ActionBar({
   const [announcement, setAnnouncement] = useState('')
   /**
    * #317 — the project Generate files the editable 3MF into, shared with the print
-   * dialog's picker so both show one choice. Seeded from `last_project_id`; a change on
-   * either picker becomes the new `last_project_id`.
+   * dialog's picker so both show one choice. It opens on the project remembered for this
+   * model (#1660), never on another model's: a change on either picker still becomes the
+   * new `last_project_id`, which a print without a project of its own falls back to.
    */
   const [projectId, setProjectId] = useState<number | null>(null)
   const [project, setProject] = useState<ProjectView | null>(null)
   /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
-  const projects = useProjectList(setProjectId)
+  const projects = useProjectList()
+  const listed = projects.choices?.projects
+  const paths = useMemo(() => breadcrumbs(listed ?? []), [listed])
+  const projectPath = (id: number) => paths.get(id) ?? `project ${id}`
+  const projectName = (id: number) => listed?.find((entry) => entry.id === id)?.name ?? `project ${id}`
+  /** One no longer in Bambuddy's list is nothing remembered. */
+  const stillListed = (id: number | null) =>
+    id !== null && (!listed || listed.some((entry) => entry.id === id)) ? id : null
+  const modelProjects = useAsync(() => api.getModelProjects(slug), [slug])
+  // Another tab (or the agent) filing this model, or a Forget in Settings, changes what
+  // is remembered: read it again, or this tab confirms against a stale project.
+  useSubscription('settings', (signal) => {
+    const section = signal === 'resync' ? null : signal.data.section
+    if (signal === 'resync' || section === 'model_project' || section === 'remembered') modelProjects.refresh()
+  })
+  const rememberedFor = (presetId: string | null) =>
+    stillListed(
+      modelProjects.data?.projects?.find((entry) => (entry.preset_id ?? null) === presetId)?.project_id ?? null,
+    )
+  /**
+   * #1660 — the project this model was last filed into with the preset in use, which
+   * Generate asks before filing elsewhere. Only that pair's: a preset never filed yet was
+   * not "last filed" anywhere.
+   */
+  const remembered = rememberedFor(preset?.id ?? null)
+  /** Where the picker opens: the pair's project, else the model's own with no preset. */
+  const opensOn = remembered ?? (preset ? rememberedFor(null) : null)
+  /** What the model is called in the confirmation: the preset in use, else the model. */
+  const subject = preset?.name ?? model?.name ?? slug
+  // #1660 — opening a model or loading a preset moves the picker to its project, or with
+  // none remembered to no project: `last_project_id` is another model's (the 2026-10-11
+  // QA report filed an apple into a keychain project). Once per change, so a pick made
+  // since stays.
+  const preselectKeyFor = (presetId: string | null, target: number | null) =>
+    `${slug}\n${presetId ?? ''}\n${target ?? ''}`
+  const preselectKey = modelProjects.data ? preselectKeyFor(preset?.id ?? null, opensOn) : null
+  const [preselected, setPreselected] = useState<string | null>(null)
+  if (preselectKey !== null && preselectKey !== preselected) {
+    setPreselected(preselectKey)
+    setProjectId(opensOn)
+  }
+  const latestPresetId = useLatest(preset?.id ?? null)
+  /** #1660 — Generate about to file somewhere other than the remembered project, asking. */
+  const [confirming, setConfirming] = useState<{ remembered: number; chosen: number } | null>(null)
   const [filed, setFiled] = useState<{ outputId: string; name: string; file: ProjectFile } | null>(
     null,
   )
@@ -160,14 +214,32 @@ export function ActionBar({
     void api.rememberProject(next).catch(() => undefined)
   }
 
-  /** Best effort: the output is saved whether or not Bambuddy takes the file. */
-  /** Files a new output in the remembered project; the file, or null when none was filed. */
-  async function fileIntoProject(created: Output): Promise<ProjectFile | null> {
-    if (projectId === null) return null
-    const name = project?.name ?? `project ${projectId}`
+  /** #1660 — the remembered project, when Generate into `target` would file elsewhere. */
+  function conflict(target: number | null): { remembered: number; chosen: number } | null {
+    return remembered !== null && target !== null && target !== remembered ? { remembered, chosen: target } : null
+  }
+
+  /**
+   * Files a new output in `target`; the file, or null when none was filed. Best effort:
+   * the output is saved whether or not Bambuddy takes the file. A filed output's project
+   * becomes the one remembered for this model and preset (#1660).
+   */
+  async function fileIntoProject(created: Output, target: number | null): Promise<ProjectFile | null> {
+    if (target === null) return null
+    const name = target === projectId && project ? project.name : projectName(target)
     try {
-      const file = await api.fileIntoProject(created.id, projectId)
+      const file = await api.fileIntoProject(created.id, target)
       setFiled({ outputId: created.id, name, file })
+      const presetId = preset?.id ?? null
+      void api
+        .putModelProject(slug, { preset_id: presetId, preset_name: preset?.name ?? null, project_id: target })
+        .then((next) => {
+          // What this page just filed is not a fresh preselect: a pick made on the
+          // unlocked picker since Generate ended stays where it was put.
+          if (latestPresetId.current === presetId) setPreselected(preselectKeyFor(presetId, target))
+          modelProjects.setData(next, { supersede: true })
+        })
+        .catch(() => undefined)
       return file
     } catch (cause) {
       setFileError(
@@ -194,8 +266,14 @@ export function ActionBar({
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
 
-  /** The saved output, and the project file Generate filed it as (#931: the agent records both). */
-  async function generate(): Promise<{ output: Output; filed: ProjectFile | null; extra: InputsExtra } | null> {
+  /**
+   * The saved output, and the project file Generate filed it as (#931: the agent records
+   * both). `target` is the project it files into: the picker's, unless a confirmation
+   * (#1660) chose another.
+   */
+  async function generate(
+    target: number | null = projectId,
+  ): Promise<{ output: Output; filed: ProjectFile | null; extra: InputsExtra } | null> {
     if (!job) return null
     const controller = new AbortController()
     generation.current?.abort()
@@ -231,7 +309,7 @@ export function ActionBar({
           }
           span.setAttribute('scadbuddy.output_id', created.id)
           // After the thumbnail, so the file Bambuddy lists carries the plate image.
-          const filed = await within(() => fileIntoProject(created))
+          const filed = await within(() => fileIntoProject(created, target))
           setAnnouncement(
             `Generated ${created.name ?? created.id.slice(0, 8)}. Download 3MF, Send to Bambuddy or Print it.`,
           )
@@ -263,11 +341,16 @@ export function ActionBar({
     extra,
     sendOpen,
     printOpen,
+    projectId,
+    conflict,
+    subject,
+    projectPath,
+    listed,
   })
 
   // #254 — Generate, and opening (never confirming) the print and send dialogs.
   useAgentHandlers('actions', {
-    generate: async ({ timeout_ms }) => {
+    generate: async ({ timeout_ms, project_id }) => {
       await waitFor(() => (live.current.ready ? true : undefined), {
         timeout: timeout_ms,
         what: 'the preview render to finish',
@@ -276,8 +359,33 @@ export function ActionBar({
       if (live.current.creatingProject) {
         throw new AgentToolError('invalid_args', 'A project is still being created; wait for it first.')
       }
+      // #1660 — the same check the button asks: filing somewhere other than the project
+      // this model and preset were last filed in needs the project named.
+      const target = project_id === undefined ? live.current.projectId : project_id
+      const clash = project_id === undefined ? live.current.conflict(target) : null
+      if (clash) {
+        const { subject: named, projectPath: path } = live.current
+        throw new AgentToolError(
+          'invalid_args',
+          `${named} was last filed in project ${clash.remembered} (${path(clash.remembered)}), but the Project ` +
+            `picker has project ${clash.chosen} (${path(clash.chosen)}). Nothing was saved. Call generate again ` +
+            `with project_id ${clash.chosen} to file it in ${path(clash.chosen)}, or ${clash.remembered} to file ` +
+            `it in ${path(clash.remembered)}.`,
+        )
+      }
+      // An id Bambuddy does not list would be saved and then fail to file: refuse it first.
+      if (project_id !== undefined && project_id !== null && !live.current.listed?.some((p) => p.id === project_id)) {
+        throw new AgentToolError(
+          'invalid_args',
+          live.current.listed
+            ? `Bambuddy has no project ${project_id}. Nothing was saved. Call generate with a project_id from ` +
+                'list_print_projects, or null for no project.'
+            : `The project list has not been read, so project ${project_id} cannot be checked. Nothing was saved.`,
+        )
+      }
+      if (project_id !== undefined) chooseProject(project_id)
       touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
-      const generated = await generate()
+      const generated = await generate(target)
       if (!generated) return null
       const { output: created, filed, extra: savedExtra } = generated
       // Shown, or already left behind by a UI-state change made while it saved (#848).
@@ -377,7 +485,8 @@ export function ActionBar({
       onChange={chooseProject}
       list={projects}
       onProject={setProject}
-      disabled={generating}
+      // #666 — locked while Generate files, so the project on screen is where it went.
+      disabled={generating || confirming !== null}
       onCreating={setPageCreating}
     />
   )
@@ -386,7 +495,11 @@ export function ActionBar({
       <Button
         variant="primary"
         onClick={() => {
-          if (!generating) void generate().catch(() => undefined)
+          if (generating) return
+          // #1660 — filing somewhere other than the remembered project asks first.
+          const clash = conflict(projectId)
+          if (clash) setConfirming(clash)
+          else void generate().catch(() => undefined)
         }}
         // #967 — busy is aria-disabled, not disabled: a disabled button drops the
         // keyboard focus it was pressed with to <body>.
@@ -546,6 +659,48 @@ export function ActionBar({
           </div>
         )}
       </footer>
+
+      <Dialog
+        open={confirming !== null}
+        title="File in another project?"
+        onClose={() => setConfirming(null)}
+        footer={
+          confirming && (
+            <>
+              <Button variant="ghost" onClick={() => setConfirming(null)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => {
+                  setConfirming(null)
+                  chooseProject(confirming.remembered)
+                  void generate(confirming.remembered).catch(() => undefined)
+                }}
+                data-testid="generate-use-remembered"
+              >
+                Use {projectName(confirming.remembered)}
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setConfirming(null)
+                  void generate(confirming.chosen).catch(() => undefined)
+                }}
+                data-testid="generate-file-chosen"
+              >
+                File in {projectName(confirming.chosen)}
+              </Button>
+            </>
+          )
+        }
+      >
+        {confirming && (
+          <p className="text-[13px]" data-testid="generate-project-confirm">
+            {subject} was last filed in <strong>{projectPath(confirming.remembered)}</strong>. File this in{' '}
+            <strong>{projectPath(confirming.chosen)}</strong>?
+          </p>
+        )}
+      </Dialog>
 
       <ImageDialog
         open={imageOpen}

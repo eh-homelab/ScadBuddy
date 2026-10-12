@@ -14,6 +14,7 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     EventsDep,
     PresetsDep,
+    SettingsStoreDep,
     SlugPath,
 )
 from scadbuddy.api.models import require_model_exists
@@ -341,6 +342,7 @@ def delete_preset(
     catalogue: CatalogueDep,
     presets: PresetsDep,
     events: EventsDep,
+    store: SettingsStoreDep,
 ) -> Response:
     require_model_exists(catalogue, slug)
     require_saved(presets, slug, preset_id)
@@ -348,5 +350,7 @@ def delete_preset(
         presets.delete(slug, preset_id)
     except PresetNotFoundError:
         raise _missing(preset_id) from None
+    # What it was filed into goes with it (#1660), or Settings keeps listing its id.
+    store.forget_model_projects(slug, preset_id)
     _changed(events, slug)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

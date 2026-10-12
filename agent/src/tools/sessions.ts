@@ -587,6 +587,9 @@ export const sessionTools: Tool[] = [
         manager(ctx).fork(session_id, ownerOf(ctx.principal), {
           ...(title === undefined ? {} : { title }),
           ...(up_to === undefined ? {} : { upTo: up_to }),
+          // Recorded like the HTTP route's fork (#2159): a harness call (in-process or a
+          // durable activity) as `harness`, anything else as `mcp`.
+          audit: { surface: ctx.gate === undefined ? 'mcp' : 'harness', clientIp: ctx.principal.clientIp },
         }),
       )
       return json(sessionView(child, viewerOf(ctx)))

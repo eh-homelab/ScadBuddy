@@ -189,6 +189,19 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })
 
+  it('copies into a fork only the images its copied events name (#2150)', async () => {
+    const id = await withImage()
+    await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    // An image the parent holds that no event the fork copies names.
+    const stray = `${'a'.repeat(64)}.png`
+    await db.sql`
+      INSERT INTO ai_session_blobs (session_id, name, media_type, data)
+      VALUES (${id}, ${stray}, 'image/png', ${Buffer.from(PNG, 'base64')})`
+    const child = await m.fork(id, browser)
+    const rows = await db.sql`SELECT name FROM ai_session_blobs WHERE session_id = ${child.id}`
+    expect(rows.map((r) => r.name as string)).toEqual([NAME])
+  })
+
   describe('the images a user sends with a turn', () => {
     // A JPEG's signature is enough for images.ts; the preview is the panel's own drawing.
     const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]).toString('base64')

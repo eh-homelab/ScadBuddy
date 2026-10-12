@@ -19,6 +19,11 @@ import type { ImageRef } from './protocol.js'
 // from a request. The name is the bytes' sha256 and the type's extension, so
 // one image twice in a session is one row, and a name that is not that shape
 // is refused before the database is asked.
+//
+// Rows go with their session (ON DELETE CASCADE) and are not pruned before that:
+// a session keeps every image its transcript names, so the panel can show any of
+// them. A fork copies only the ones the events it copies name (#2150), so a fork
+// chain does not multiply the images its ancestors held past the fork point.
 
 /** The most images one tool result keeps; any past it stay `[image]` in the summary. */
 export const RESULT_IMAGES_MAX = 8
@@ -89,11 +94,16 @@ export class SessionBlobs {
     return row ? { mediaType: row.media_type, bytes: row.data } : undefined
   }
 
-  /** A fork's copy of its parent's images, which the events it copies name. */
-  async copy(from: string, to: string): Promise<void> {
+  /**
+   * A fork's copy of the parent's images `names` lists: those the events it copies name
+   * (forkPoint.ts `blobNames`, #2150), never every image the parent holds.
+   */
+  async copy(from: string, to: string, names: readonly string[]): Promise<void> {
+    if (names.length === 0) return
     await this.sql`
       INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)
-      SELECT ${to}, name, media_type, data, created_at FROM ai_session_blobs WHERE session_id = ${from}
+      SELECT ${to}, name, media_type, data, created_at FROM ai_session_blobs
+       WHERE session_id = ${from} AND name = ANY(${names as string[]})
       ON CONFLICT (session_id, name) DO NOTHING`
   }
 }

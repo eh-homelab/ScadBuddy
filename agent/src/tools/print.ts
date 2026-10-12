@@ -500,8 +500,10 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'remember_last_project',
     description:
-      'Choose the Bambuddy project the Customize page and the print dialog open on (null for "No project"). ' +
-      'Generate files its 3MF there; list_print_projects shows the current `last_project_id`.',
+      'Choose `last_project_id` (null for "No project"): the project a print dialog with no project of its own ' +
+      '(a library file) opens on, and a run that names none is filed under. The Customize page opens on the ' +
+      "project remembered for the model and preset instead (get_remembered_choices' `model_projects`), or on no " +
+      'project. list_print_projects shows the current `last_project_id`.',
     input: z.object({ project_id: z.number().int().nullable() }),
     risk: 'write',
     routes: ['PUT /api/v1/print/projects/last'],

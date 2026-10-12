@@ -122,7 +122,7 @@ function budgetVerb(method: string, path: string): string | undefined {
   return method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/budget$/.test(path) ? 'session_budget_usd' : undefined
 }
 
-/** A fork of a session, or a rename or done (#792); successful forks are recorded by the manager (sessions/manager.ts fork). */
+/** A fork of a session, or a rename or done (#792); successful ones are recorded by the manager (sessions/manager.ts fork, sessions/edits.ts). */
 function sessionWriteVerb(method: string, path: string): string | undefined {
   if (method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/fork$/.test(path)) return 'session_fork'
   if (method === 'PATCH' && /^\/api\/v1\/ai\/sessions\/[^/]+$/.test(path)) return 'session_update'

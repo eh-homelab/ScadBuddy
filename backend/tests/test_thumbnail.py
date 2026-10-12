@@ -331,6 +331,55 @@ def test_one_angle_overrides_the_named_view() -> None:
     assert render_view(_long_in_x(), "front", 128, camera) == render_view(_long_in_x(), "top", 128)
 
 
+def _pink_end_in_y() -> list[ColourPart]:
+    """A bar along Y, blue, with a pink block on its +Y end: which way up a view
+    straight down or up the bar's side draws it shows."""
+    return [
+        ColourPart(1, "Color 1", BLUE, trimesh.creation.box(extents=(10, 40, 10))),
+        ColourPart(
+            2,
+            "Color 2",
+            PINK,
+            trimesh.creation.box(extents=(12, 8, 12), transform=_translate(0, 22, 0)),
+        ),
+    ]
+
+
+def _pink_row(image: np.ndarray) -> float:
+    """The mean row of the pink pixels, from the top."""
+    solid = image[..., 3] == 255
+    pink = solid & (image[..., 0].astype(int) > image[..., 2].astype(int) + 40)
+    rows, _ = np.nonzero(pink)
+    assert len(rows) > 0
+    return float(rows.mean())
+
+
+@pytest.mark.parametrize("azimuth", [0, 30, 150, -160])
+@pytest.mark.parametrize(("inside", "past"), [(87, 88), (-87, -88)])
+def test_a_view_frames_alike_either_side_of_straight_down_or_up(
+    azimuth: float, inside: float, past: float
+) -> None:
+    """#2153: past about 87.4 degrees the framing switches from Z-up to the straight
+    down/up rule. Two nearly identical cameras either side of that must draw the model
+    the same way up; from below it used to turn 180 degrees."""
+    size = 128
+    near = read_png(render_view(_pink_end_in_y(), "front", size, Camera(azimuth, inside)))
+    far = read_png(render_view(_pink_end_in_y(), "front", size, Camera(azimuth, past)))
+
+    assert (_pink_row(near) < size / 2) == (_pink_row(far) < size / 2)
+    assert abs(_pink_row(near) - _pink_row(far)) < size / 8
+
+
+def test_a_named_bottom_view_has_the_front_at_the_top() -> None:
+    """#2153: the limit of a front view tilted under the model, so the named bottom
+    view and a camera just short of it agree; top keeps the back at the top."""
+    bottom = read_png(render_view(_pink_end_in_y(), "bottom", 128))
+    top = read_png(render_view(_pink_end_in_y(), "top", 128))
+
+    assert _pink_row(bottom) > 64
+    assert _pink_row(top) < 64
+
+
 def test_a_camera_between_the_axes_sees_two_faces() -> None:
     """At azimuth 45 the bar is neither its full length nor end-on."""
     front = _opaque_extent(read_png(render_view(_long_in_x(), "front", 256)))

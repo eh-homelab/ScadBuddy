@@ -1364,6 +1364,11 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
                     "could not release a deleted model's output Parts",
                     extra={"slug": slug, "id": output_id},
                 )
+    # And the projects it was filed into (#1660), or Settings keeps listing its id.
+    try:
+        await asyncio.to_thread(state.settings_store.forget_model_projects, slug)
+    except psycopg.Error:
+        logger.exception("could not forget a deleted model's projects", extra={"slug": slug})
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 

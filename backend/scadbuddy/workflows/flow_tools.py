@@ -18,6 +18,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     import jsonschema
+    import referencing.exceptions
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
@@ -128,6 +129,13 @@ _RUN_SETTLED = ["succeeded", "failed"]
 OUTWARD_PREFIX = "outward-"
 #: An agent tool's activity id prefix, which the agent strips to find the call id.
 TOOL_PREFIX = "tool-"
+#: A turn tool (agent/src/temporal/turnTools.ts): its tier activity, its call's activity
+#: type prefix, and the separator in its `<server>__<tool>` name.
+TURN_TOOL_TIER = "turn_tool_tier"
+TURN_TOOL_PREFIX = "turn:"
+TURN_TOOL_SEPARATOR = "__"
+#: tool(...) reaches the turn tools (#2320); runs recorded before refuse such a name.
+FLOW_TURN_TOOLS_PATCH = "flow-turn-tools-2320"
 
 
 def _refusal(err: ActivityError) -> BaseException:
@@ -348,16 +356,25 @@ async def arrange(
     return result
 
 
-async def _call_tool(call_id: str, name: str, args: dict[str, Any], *, attempts: int) -> str:
+async def _call_tool(
+    call_id: str,
+    name: str,
+    args: dict[str, Any],
+    *,
+    attempts: int,
+    activity: str | None = None,
+    queue: str | None = None,
+) -> str:
     """The agent tool `name` as an activity on the agent's `agent-tools` queue, under the
-    activity id `tool-<call id>` the agent reads the call (and its approval) from."""
+    activity id `tool-<call id>` the agent reads the call (and its approval) from. A turn
+    tool's call is the activity `turn:<name>`, on the queue `turn_tool_tier` named."""
     owner: StepOwner = workflow.instance()
     try:
         text: str = await workflow.execute_activity(
-            name,
+            activity or name,
             args,
             activity_id=f"{TOOL_PREFIX}{call_id}",
-            task_queue=owner.tools_queue,
+            task_queue=queue or owner.tools_queue,
             result_type=str,
             start_to_close_timeout=_TOOL_TIMEOUT,
             retry_policy=RetryPolicy(
@@ -378,14 +395,77 @@ async def approved_tool(call: str, name: str, args: dict[str, Any]) -> str:
     return await _call_tool(call, name, args, attempts=1)
 
 
+@agent.tool_defn()
+async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: str) -> str:
+    """An outward plugin or http_request call, run once a person approved it, at most once."""
+    await _approved(call)
+    return await _call_tool(
+        call, name, args, attempts=1, activity=f"{TURN_TOOL_PREFIX}{name}", queue=queue
+    )
+
+
+async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> str:
+    """A tool a durable turn has beside ScadBuddy's own (a remote plugin's,
+    `scadbuddy_http__http_request`), named `<server>__<tool>` (agent/src/temporal/turnTools.ts).
+    The agent tiers it from its input as the run's starter, and refuses one no enabled
+    plugin or setting offers before anything is called."""
+    owner: StepOwner = workflow.instance()
+    try:
+        tiered: dict[str, Any] = await workflow.execute_activity(
+            TURN_TOOL_TIER,
+            {"tool": name, "input": args},
+            task_queue=owner.tools_queue,
+            result_type=dict,
+            start_to_close_timeout=_TOOL_TIMEOUT,
+            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
+        )
+    except ActivityError as err:
+        if isinstance(err.cause, ApplicationError) and err.cause.type == "ToolError":
+            raise ValueError(f"there is no tool {name!r}: {err.cause.message}") from None
+        if isinstance(err.cause, ApplicationError):
+            raise ToolFailedError(err.cause.message) from None
+        raise
+    tier = str(tiered.get("tier"))
+    # A server whose state lives on one agent replica (http_request's saved bodies) names it.
+    queue = str(tiered.get("task_queue") or owner.tools_queue)
+    call_id = str(workflow.uuid4())
+    if tier == "outward":
+        text: str = await _gated(
+            f"tool:{name}",
+            runner,
+            approved_turn_tool,
+            call_id,
+            call=call_id,
+            name=name,
+            args=args,
+            queue=queue,
+        )
+        return text
+    async with step(f"tool:{name}", call_id, outward=False):
+        return await _call_tool(
+            call_id,
+            name,
+            args,
+            attempts=3 if tier == "read" else 1,
+            activity=f"{TURN_TOOL_PREFIX}{name}",
+            queue=queue,
+        )
+
+
 @agent.tool_defn(inherently_safe=True)
 async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]) -> str:
     """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
-    started this run; returns its text. An outward tool (one that changes something
-    outside ScadBuddy) waits for a person to approve it first."""
+    started this run; returns its text. `name` may also be a plugin's tool or
+    `scadbuddy_http__http_request`, named `<server>__<tool>` as the assistant sees them.
+    An outward tool (one that changes something outside ScadBuddy) waits for a person
+    to approve it first."""
     owner: StepOwner = workflow.instance()
     tier = owner.tool_tier(name)
     if tier is None:
+        # Before #2320 an unknown name was refused here with no command: a run recorded
+        # then replays without the patch marker and is refused again.
+        if TURN_TOOL_SEPARATOR in name and workflow.patched(FLOW_TURN_TOOLS_PATCH):
+            return await _turn_tool(name, args, runner)
         raise ValueError(f"there is no tool {name!r}")
     call_id = str(workflow.uuid4())
     if tier == "outward":
@@ -490,6 +570,10 @@ def _answer(text: str, schema: dict[str, Any] | None) -> Any:
         raise ValueError(
             f"the session's answer does not match result_schema: {err.message}"
         ) from None
+    except referencing.exceptions.Unresolvable as err:
+        # A `$ref` it cannot resolve (remote refs are never fetched): `check_schema`
+        # passes it, and only validating reaches the ref (#2278).
+        raise ValueError(f"result_schema has a $ref that cannot be resolved: {err}") from None
     return value
 
 
@@ -573,10 +657,11 @@ FLOW_TOOLS: list[Any] = [
     approved_arrange,
     tool,
     approved_tool,
+    approved_turn_tool,
     agent_session,
     ask_session,
 ]
-_INNER = (human_answer, approved_print, approved_arrange, approved_tool)
+_INNER = (human_answer, approved_print, approved_arrange, approved_tool, approved_turn_tool)
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]
 
 

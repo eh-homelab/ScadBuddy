@@ -72,6 +72,8 @@ export type OutwardGate = (headers: IncomingHttpHeaders) => Promise<number>
 
 /** What the stand-in UI's "Download part" link downloads (`/files/part.stl?token=abc`). */
 export const DOWNLOAD_BODY = 'solid part\nendsolid part\n'
+/** How long "Download later" waits before it clicks "Download part": past the click's own call (#2397). */
+export const LATER_MS = 3000
 /** The size of the downloads the tests hold over the cap (`/files/stream.bin`, `/files/lying.bin`, "Blob big"). */
 export const BIG_DOWNLOAD = 5000
 
@@ -83,6 +85,9 @@ export const BIG_DOWNLOAD = 5000
  */
 export const endlessSent = new Map<string, number>()
 export const ENDLESS_CEILING = 512 * 1024 * 1024
+
+/** The size of `/big.html`, a page past the request guard's spool threshold (headlessBrowser.ts SPOOL_OVER_BYTES). */
+export const BIG_PAGE = 3 * 1024 * 1024
 
 async function sendEndless(url: string, res: ServerResponse, headers: Record<string, string>): Promise<void> {
   res.writeHead(200, headers)
@@ -122,6 +127,7 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <button id="agent-socket" onclick="const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/v1/ai/chat'); ws.onopen = () => document.getElementById('agent-socket-result').textContent = 'agent socket open'; ws.onerror = ws.onclose = () => document.getElementById('agent-socket-result').textContent = 'agent socket closed'">Agent socket</button>
   <p id="agent-socket-result">agent socket not run</p>
   <a id="download" href="/files/part.stl?token=abc">Download part</a>
+  <button id="download-later" onclick="setTimeout(() => document.getElementById('download').click(), ${LATER_MS})">Download later</button>
   <a id="download-stream" href="/files/stream.bin">Download stream</a>
   <a id="download-lying" href="/files/lying.bin">Download lying</a>
   <a id="download-endless" href="/files/endless.bin">Download endless</a>
@@ -167,6 +173,13 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
     }
     if (url === '/files/endless.bin') {
       await sendEndless(url, res, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="endless.bin"' })
+      return
+    }
+    if (url === '/big.html') {
+      const head = '<!doctype html><title>Big page</title><h1>big page reached</h1><!--'
+      const tail = '-->'
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end(head + 'a'.repeat(BIG_PAGE - head.length - tail.length) + tail)
       return
     }
     if (url === '/endless.html') {

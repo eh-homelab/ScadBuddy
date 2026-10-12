@@ -77,6 +77,11 @@ from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart, Paint, normalise
 PIECE_MESH_NAME = "object.3mf"
 
 _CORE = f"{{{CORE_NS}}}"
+#: The 3MF Materials and Properties extension: per-triangle colours by ``colorgroup``,
+#: and the property groups (textures, mixes) Arrange cannot turn into a colour (#2147).
+MATERIAL_NS = "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
+_MATERIAL = f"{{{MATERIAL_NS}}}"
+_UNREAD_GROUPS = ("texture2dgroup", "compositematerials", "multiproperties")
 _PATH = f"{{{PRODUCTION_NS}}}path"
 _RELS = "_rels/.rels"
 _UNITS = {
@@ -358,12 +363,32 @@ def _root_model_name(archive: _Archive) -> str:
 
 
 def _materials(root: ET.Element) -> dict[tuple[str, int], str]:
+    """Each (group id, index)'s colour: a ``basematerials`` base's, or a ``colorgroup``
+    colour's (#2147), which some tools colour triangles by instead."""
     resources = root.find(f"{_CORE}resources")
     found: dict[tuple[str, int], str] = {}
-    for group in resources.iter(f"{_CORE}basematerials") if resources is not None else []:
+    if resources is None:
+        return found
+    for group in resources.iter(f"{_CORE}basematerials"):
         for index, base in enumerate(group.findall(f"{_CORE}base")):
             found[(group.get("id", ""), index)] = normalise_colour(base.get("displaycolor"))
+    for group in resources.iter(f"{_MATERIAL}colorgroup"):
+        for index, colour in enumerate(group.findall(f"{_MATERIAL}color")):
+            found[(group.get("id", ""), index)] = normalise_colour(colour.get("color"))
     return found
+
+
+def _unread_groups(root: ET.Element) -> set[str]:
+    """The ids of the property groups whose colours Arrange cannot read: a texture, a
+    composite or a multi-property mix (#2147)."""
+    resources = root.find(f"{_CORE}resources")
+    if resources is None:
+        return set()
+    return {
+        group.get("id", "")
+        for kind in _UNREAD_GROUPS
+        for group in resources.iter(f"{_MATERIAL}{kind}")
+    }
 
 
 @dataclass
@@ -488,6 +513,14 @@ class _Reader:
                 axis=1,
             )
             unique, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+            # Grey with no word would arrange the file as one colour and print it with the
+            # wrong filaments (#2147).
+            unread = _unread_groups(root)
+            if unread and any(pids[pid] in unread for pid, _ in unique):
+                raise UnreadableObjectsError(
+                    f"object {name} is coloured by a texture or a material mix, which Arrange"
+                    " cannot read; colour it with materials or a part per colour"
+                )
             by_key = [materials.get((pids[pid], int(p1)), STL_COLOUR) for pid, p1 in unique]
             # A dict, not list.index: a hostile file controls both counts.
             colours = {

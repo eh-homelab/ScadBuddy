@@ -229,6 +229,13 @@ export type DownloadBudget = {
  */
 export const PAGE_MAX_BYTES = 50 * 1024 * 1024
 
+/**
+ * How much of a body the request guard holds in memory while it reads it (#2401):
+ * past this, the body so far and the rest go to a file in its spool directory,
+ * read back only to hand it to Chromium, then deleted.
+ */
+export const SPOOL_OVER_BYTES = 1024 * 1024
+
 /** One request's deadline in the request guard, its body included: route.fetch's own default, 30 s. */
 export const FETCH_TIMEOUT_MS = 30_000
 
@@ -237,6 +244,14 @@ export const NO_DOWNLOADS: DownloadBudget = { call: null, fileMaxBytes: 0, callM
 
 /** Only `name.ext`-like names: no directory part, no leading dot (and `..` is refused besides). Downloads are named by it too (browserDownloads.ts). */
 export const PLAIN_FILE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/
+
+/** The tools whose `url` the guard classifies: their tier depends on the origin it opens. */
+const ORIGIN_TOOLS: ReadonlySet<string> = new Set(['browser_navigate', 'browser_tabs'])
+
+/** Whether `browserInputGuard` can make a call of this tool outward, by its input. */
+export function browserTierDependsOnInput(toolName: string): boolean {
+  return toolName.startsWith(TOOL_PREFIX) && ORIGIN_TOOLS.has(toolName.slice(TOOL_PREFIX.length))
+}
 
 /**
  * What the permission seam should do with a headless-browser tool call, or
@@ -258,7 +273,7 @@ export function browserInputGuard(
   if (filename !== undefined && (typeof filename !== 'string' || !PLAIN_FILE_NAME.test(filename) || filename.includes('..'))) {
     return { deny: `${bare}: filename must be a plain file name such as "preview.png", with no directory part.` }
   }
-  const url = bare === 'browser_navigate' || bare === 'browser_tabs' ? args.url : undefined
+  const url = ORIGIN_TOOLS.has(bare) ? args.url : undefined
   if (url === undefined) return undefined
   const target = classifyNavigation(url, origins, approved)
   switch (target.kind) {
@@ -366,6 +381,8 @@ export type HeadlessBrowserPlugin = {
   outputDir: string
   /** Where the request guard saves downloads until the harness drains them into the workspace (browserDownloads.ts). */
   downloadsDir: string
+  /** Where the request guard spools a body past SPOOL_OVER_BYTES while it reads it. */
+  spoolDir: string
   /** The download budget the request guard reads (browserDownloads.ts `writeDownloadBudget`); none allowed until written. */
   budgetFile: string
   origins: BrowserOrigins
@@ -454,10 +471,13 @@ export function redirectGuardSource(options: {
   budgetFile?: string
   /** The server's output directory, where it keeps a copy of each download; a refused one's is removed. */
   outputDir?: string
+  /** Where a body past SPOOL_OVER_BYTES is spooled while it is read; held in memory whole when unset. */
+  spoolDir?: string
 }): string {
   return `'use strict'
 // Written by agent/src/harness/headlessBrowser.ts (redirectGuardSource); do not edit.
-const { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } = require('node:fs')
+const { constants, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } = require('node:fs')
+const { open } = require('node:fs/promises')
 const { randomUUID } = require('node:crypto')
 const { dirname, join } = require('node:path')
 const UI = ${JSON.stringify(options.ui)}
@@ -467,6 +487,7 @@ const APPROVED_FILE = ${JSON.stringify(options.approvedFile)}
 const DOWNLOADS = ${JSON.stringify(options.downloadsDir ?? null)}
 const BUDGET_FILE = ${JSON.stringify(options.budgetFile ?? null)}
 const OUTPUT_DIR = ${JSON.stringify(options.outputDir ?? null)}
+const SPOOL = ${JSON.stringify(options.spoolDir ?? null)}
 const INSTALLED = Symbol.for('scadbuddy.requestGuard')
 const WATCHED = Symbol.for('scadbuddy.downloads')
 const originOf = (url) => {
@@ -537,6 +558,7 @@ const moveTo = (route, href) =>
 // One deadline for the answer and its body (FETCH_TIMEOUT_MS, route.fetch's 30 s).
 const FETCH_TIMEOUT_MS = ${FETCH_TIMEOUT_MS}
 const PAGE_MAX_BYTES = ${PAGE_MAX_BYTES}
+const SPOOL_OVER_BYTES = ${SPOOL_OVER_BYTES}
 const HOP_BY_HOP = new Set(['host', 'connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te', 'trailer', 'content-length', 'expect'])
 // Not handed on: the body is fulfilled decoded, and its length is Playwright's to set.
 const DROPPED = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive'])
@@ -568,7 +590,8 @@ async function boundedFetch(request, url, headers) {
 }
 // The body, read a chunk at a time and given up on (the connection closed) the
 // moment it passes its limit: a download's is the budget's per-file cap, any
-// other response's PAGE_MAX_BYTES.
+// other response's PAGE_MAX_BYTES. Past SPOOL_OVER_BYTES it goes on in a fresh
+// file in SPOOL ('wx': never through something already there), not in memory.
 async function readBounded(request, fetched) {
   const download = request.isNavigationRequest() && downloadLike(fetched.headers)
   const limit = download ? budget().fileMaxBytes : PAGE_MAX_BYTES
@@ -580,6 +603,12 @@ async function readBounded(request, fetched) {
   }
   const chunks = []
   let size = 0
+  let spool = null
+  const drop = async () => {
+    if (spool === null) return
+    await spool.handle.close().catch(() => {})
+    removeOwn(SPOOL, spool.name)
+  }
   const reader = fetched.response.body ? fetched.response.body.getReader() : null
   try {
     while (reader) {
@@ -590,16 +619,53 @@ async function readBounded(request, fetched) {
         // Stop reading and close the connection: nothing past the limit is held.
         fetched.abort()
         reader.cancel().catch(() => {})
+        await drop()
         return over
       }
+      if (spool !== null) {
+        await spool.handle.appendFile(value)
+        continue
+      }
       chunks.push(value)
+      if (size > SPOOL_OVER_BYTES && SPOOL !== null) {
+        mkdirSync(SPOOL, { recursive: true })
+        const name = randomUUID() + '.body'
+        const file = ownPath(SPOOL, name)
+        if (file === null) throw new Error('no spool directory')
+        spool = { name, handle: await open(file, 'wx', 0o600) }
+        for (const chunk of chunks.splice(0)) await spool.handle.appendFile(chunk)
+      }
     }
+    if (spool !== null) await spool.handle.close()
   } catch {
     fetched.abort()
+    await drop()
     return { over: 'failed', limit }
   }
   clearTimeout(fetched.timer)
-  return { over: null, limit, body: Buffer.concat(chunks) }
+  return spool === null ? { over: null, limit, body: Buffer.concat(chunks) } : { over: null, limit, spooled: spool.name }
+}
+// Hands a body read by readBounded to Chromium. Playwright's fulfill takes a body
+// whole (its \`path\` option reads the file whole too) and CDP's
+// Fetch.fulfillRequest has no stream, so a spooled body is in memory only for
+// the handoff. The spool file is removed either way; it is read without
+// following a link.
+async function fulfillRead(route, status, headers, reply) {
+  if (reply.spooled === undefined) return route.fulfill({ status, headers, body: reply.body })
+  try {
+    const file = ownPath(SPOOL, reply.spooled)
+    if (file === null) throw new Error('not a spool file')
+    const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
+    let body
+    try {
+      body = await handle.readFile()
+    } finally {
+      await handle.close()
+    }
+    return await route.fulfill({ status, headers, body })
+  } finally {
+    removeOwn(SPOOL, reply.spooled)
+  }
 }
 async function guard(route, context) {
   const request = route.request()
@@ -646,7 +712,7 @@ async function guard(route, context) {
       return refuse(route, 502, 'Blocked: the response from ' + originOf(to.url) + ' is larger than ' + reply.limit + ' bytes, the most the headless browser reads.')
     }
     if (reply.over === 'failed') return refuse(route, 502, 'The request to ' + originOf(to.url) + ' failed.')
-    return route.fulfill({ status, headers: answered, body: reply.body })
+    return fulfillRead(route, status, answered, reply)
   }
   fetched.abort()
   const location = answered['location']
@@ -704,7 +770,7 @@ const refusedDownload = (url, name, refused) => {
   } catch {}
 }
 // Every file this guard writes, measures or deletes is a path it built: one of
-// its own directories (DOWNLOADS, OUTPUT_DIR) resolved with realpath, joined with
+// its own directories (DOWNLOADS, OUTPUT_DIR, SPOOL) resolved with realpath, joined with
 // one plain name, never a path the page or the server reported. A name with a
 // separator, '..' or a leading dot is refused; a symlink is never followed (lstat;
 // removing one unlinks the link, never its target); anything that is not a plain
@@ -760,6 +826,7 @@ const finishOwn = (id, meta) => {
   renameSync(tmp, done)
 }
 module.exports.ownFiles = { ownPath, removeOwn, plainSize, dropServerCopy: (s) => dropServerCopy(s), serverName: (s) => serverName(s) }
+module.exports.bodies = { readBounded, fulfillRead }
 // The server saves every download in its output directory too, under its
 // suggested name made safe (@playwright/mcp 0.0.83 Tab._downloadStarted,
 // sanitizeForFilePath). A refused one's copy is removed, now and once more
@@ -984,6 +1051,11 @@ export function serverCommand(options: {
   }
 }
 
+/** Where the request guard saves downloads, under a browser directory (`HeadlessBrowserOptions.dir`). */
+export function browserDownloadsDir(dir: string): string {
+  return path.join(path.resolve(dir), 'downloads')
+}
+
 /**
  * Writes the session's copy of the plugin: the vendored manifest, a `.mcp.json`
  * that starts the pinned server with the session's config, and that config.
@@ -1009,9 +1081,10 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   const configFile = path.join(dir, 'playwright-mcp.json')
   const guardFile = path.join(dir, 'redirect-guard.cjs')
   const approvedFile = path.join(dir, 'approved-origins.json')
-  const downloadsDir = path.join(dir, 'downloads')
+  const downloadsDir = browserDownloadsDir(dir)
   const budgetFile = path.join(dir, 'download-budget.json')
-  for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home, downloadsDir]) {
+  const spoolDir = path.join(dir, 'spool')
+  for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home, downloadsDir, spoolDir]) {
     mkdirSync(d, { recursive: true })
   }
   if (options.tmpDir) mkdirSync(options.tmpDir, { recursive: true, mode: 0o700 })
@@ -1026,7 +1099,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   writeFileSync(budgetFile, JSON.stringify(NO_DOWNLOADS))
   writeFileSync(
     guardFile,
-    redirectGuardSource({ ui: origins.ui, sessionId: options.sessionId, approvedFile, downloadsDir, budgetFile, outputDir }),
+    redirectGuardSource({ ui: origins.ui, sessionId: options.sessionId, approvedFile, downloadsDir, budgetFile, outputDir, spoolDir }),
   )
   writeFileSync(
     configFile,
@@ -1058,6 +1131,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
     configFile,
     outputDir,
     downloadsDir,
+    spoolDir,
     budgetFile,
     origins,
     approved,

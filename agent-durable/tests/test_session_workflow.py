@@ -97,6 +97,9 @@ def policy(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
         ("ask badly", ("ask_user", {"questions": "red?"})),
         ("wait for me", ("wait_for_user", WAIT)),
         ("render it", ("render_preview", {"model": "m"})),
+        ("get it", ("notes__post", {"method": "GET", "body": "y"})),
+        ("post it", ("notes__post", {"method": "POST", "body": "x"})),
+        ("run it", ("Bash", {"command": "make notes"})),
     ):
         if prompt.startswith(name):
             return ToolCall(*args)
@@ -822,4 +825,146 @@ async def test_a_turn_an_older_worker_started_parks_by_the_manifest_and_replays(
     assert "approval.required" not in _types(log)
     texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
     assert texts and texts[0].startswith("render_preview: error")
+    await _replays(harness, handle)
+
+
+NOTES_POST = {
+    "name": "notes__post",
+    "description": "posts a note",
+    "input_schema": {
+        "type": "object",
+        "properties": {"method": {"type": "string"}, "body": {"type": "string"}},
+    },
+    "may_park": True,
+}
+
+
+async def test_a_turn_tool_whose_call_is_read_runs_without_parking(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: a plugin's or http_request's tool is offered as a durable tool, and a call
+    the agent tiers read (an http GET) goes straight through, as in a classic turn."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts == ["notes__post: ok: turn:notes__post did GET"]
+    await _replays(harness, handle)
+
+
+async def test_an_outward_turn_tool_call_parks_and_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    harness.stand_in.turn_offered = [NOTES_POST]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "post it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "POST", "body": "x"})]
+    await _replays(harness, handle)
+
+
+NOTES_PACKAGE = {
+    "name": "notes",
+    "dir": "a" * 64,
+    "content_hash": "sha256:" + "a" * 64,
+    "allowed": True,
+    "builtin_tools": ["Bash"],
+}
+
+
+async def test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: an allowed package's Bash, outward in a classic turn, runs here as its own
+    activity once a human approved the call; the segment runner is told the package."""
+    harness.stand_in.turn_packages = [NOTES_PACKAGE]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "run it")
+    [entry] = await _parked(handle)
+    assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert [(p.name, p.dir, p.allowed) for p in context.packages] == [("notes", "a" * 64, True)]
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert len(texts) == 1 and texts[0].startswith("Bash: ok"), texts
+    await _replays(harness, handle)
+
+
+async def test_a_turn_recalls_memories_into_its_prompt_and_retains_before_it_ends(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: Hindsight's block follows the prompt as a classic turn's recall hook adds
+    it, and the transcript is retained before the turn is written."""
+    harness.stand_in.memory_context = "<hindsight_memories>1. red</hindsight_memories>"
+    sid, handle = await harness.session(agent_db)
+    answer = await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["you said: hello there\n\n<hindsight_memories>1. red</hindsight_memories>"]
+    assert harness.stand_in.memory == [
+        ("memory_recall", answer.turn_id),
+        ("memory_retain", answer.turn_id),
+    ]
+    await _replays(harness, handle)
+
+
+async def test_a_failed_recall_or_retain_never_fails_the_turn(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    harness.stand_in.memory_fails = True
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["you said: hello there"]
+    assert [name for name, _ in harness.stand_in.memory] == ["memory_recall", "memory_retain"]
+    await _replays(harness, handle)
+
+
+async def test_a_turn_tool_call_the_agent_cannot_tier_parks(
+    harness: Harness, agent_db: Conn
+) -> None:
+    """Fail toward asking: a may_park tool whose turn_tool_tier fails is asked about, never
+    let through to be refused as unapproved without the user seeing it."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.tier_refuses = True
+    _, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+    await _replays(harness, handle)
+
+
+async def test_a_turn_whose_other_tools_cannot_be_listed_goes_on_with_its_own(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A failed turn_tools never fails the session: the turn runs with the manifest's tools
+    and offers none of last turn's others, as a classic turn reports the plugin and goes on."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    assert await settled(connect, sid) == "idle"
+    harness.stand_in.turn_tools_fails = True
+    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+    await send_next(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    # The second turn ran to its result, offered no turn tool, and called none.
+    types = _types(await events(agent_db, sid))
+    assert types.count("session.result") == 2
+    assert types.count("tool.call") == 1
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
     await _replays(harness, handle)

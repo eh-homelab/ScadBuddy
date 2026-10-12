@@ -32,7 +32,7 @@ from typing import Any, Literal
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError, FailureError
+from temporalio.exceptions import ActivityError, ApplicationError, FailureError
 
 with workflow.unsafe.imports_passed_through():
     from temporalio.claude_agent_sdk import AgentState, DurableClaudeAgent
@@ -75,15 +75,36 @@ with workflow.unsafe.imports_passed_through():
         FinishTurn,
         FollowArgs,
         GateSettings,
+        MemoryRecalled,
+        MemoryTurn,
         Message,
         SegmentContext,
         SendAnswer,
         SessionStart,
         TurnOutcome,
+        TurnPackage,
         TurnStart,
+        TurnTools,
     )
 
 DESCRIBE_CALL = "gate.describe_call"
+# agent/src/temporal/turnTools.ts (#2320).
+TURN_TOOLS = "turn_tools"
+TURN_TOOL_TIER = "turn_tool_tier"
+TURN_TOOLS_PATCH = "turn-tools-2320"
+# The built-ins a package may name that run as their own activities, so a call can park.
+ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
+TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
+# agent/src/temporal/memoryActivities.ts (#2320, superseding #825): automatic Hindsight
+# memory around a turn, as a classic turn's hooks do it.
+MEMORY_RECALL = "memory_recall"
+MEMORY_RETAIN = "memory_retain"
+MEMORY_PATCH = "memory-2320"
+# Past the hooks' own limits (3 s recall, 15 s retain) and the plugin lookup.
+MEMORY_RECALL_TIMEOUT = timedelta(seconds=30)
+MEMORY_RETAIN_TIMEOUT = timedelta(minutes=1)
+# Never retried, never failing the turn: the agent records a failure in the session.
+MEMORY_ONCE = RetryPolicy(maximum_attempts=1)
 FOLLOW_TIMEOUT = timedelta(days=30)
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_DRAIN = timedelta(seconds=30)
@@ -150,6 +171,11 @@ class DurableSession:
         # The plugin keeps these objects and reads needs_approval as each call comes:
         # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
         self._tools = {t.name: t for t in manifest.durable_tools(entries)}
+        # This turn's other tools (plugins, http_request, the headless browser; #2320):
+        # offered from what turn_tools listed, replaced every turn.
+        self._turn_tools: set[str] = set()
+        # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
+        self._packages: list[TurnPackage] = []
         self._turn: TurnStart | None = start.turn
         self._message: Message | None = None
         self._parked: dict[str, Parked] = {}
@@ -222,6 +248,39 @@ class DurableSession:
             self._settings.tool_tiers,
             set(self._settings.disabled_tools),
         )
+        if workflow.patched(TURN_TOOLS_PATCH):
+            # What a classic turn would hand Claude Code beside ScadBuddy's own tools,
+            # listed by the agent as it is now; from the result, so a replay offers the same.
+            try:
+                offered = await workflow.execute_activity(
+                    TURN_TOOLS,
+                    task_queue=TOOLS_QUEUE,
+                    start_to_close_timeout=TURN_TOOLS_TIMEOUT,
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3, non_retryable_error_types=["UnknownSession"]
+                    ),
+                    result_type=TurnTools,
+                )
+            except FailureError:
+                # As a classic turn whose plugins cannot be reached: it goes on with
+                # ScadBuddy's own tools, and offers none of last turn's others.
+                offered = TurnTools()
+            # The plugin's own table, which each segment declares its tools from.
+            self._turn_tools = manifest.offer_turn_tools(
+                self._agent._tools, self._tools, self._turn_tools, offered.tools
+            )
+            self._packages = list(offered.packages)
+            # The built-ins the allowed packages name, as a classic turn offers them; each
+            # call is outward there, so here it runs as its own activity after a human
+            # approved it (the agent offers only Bash and PowerShell, which can).
+            named = sorted({t for p in offered.packages for t in p.builtin_tools} - {"Skill"})
+            parked = [t for t in named if t in ENGINE_PARKED]
+            # Only those: one the agent should have left out never runs unasked here.
+            self._agent._builtin_tools = ["Skill", *parked]
+            self._agent._tool_activities = parked
+            self._agent._tool_approvals = parked
+        if prompt is not None and workflow.patched(MEMORY_PATCH):
+            prompt += await self._recall(turn_id)
         follow = workflow.start_activity(
             "follow_session",
             FollowArgs(
@@ -267,11 +326,40 @@ class DurableSession:
             await workflow.wait_condition(follow.done, timeout=FOLLOW_DRAIN)
         except TimeoutError:
             follow.cancel()
+        if workflow.patched(MEMORY_PATCH):
+            await self._retain(turn_id)
         await workflow.execute_activity(
             "finish_turn",
             FinishTurn(session_id=sid, turn_id=turn_id, outcome=outcome, message=message),
             start_to_close_timeout=SHORT,
         )
+
+    async def _recall(self, turn_id: str) -> str:
+        """The memories a classic turn's recall hook would add, to follow the prompt;
+        nothing when memory is off, nothing matched, or the recall failed."""
+        try:
+            recalled = await workflow.execute_activity(
+                MEMORY_RECALL,
+                MemoryTurn(turn_id),
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=MEMORY_RECALL_TIMEOUT,
+                retry_policy=MEMORY_ONCE,
+                result_type=MemoryRecalled,
+            )
+        except ActivityError:
+            return ""
+        return f"\n\n{recalled.context}" if recalled.context else ""
+
+    async def _retain(self, turn_id: str) -> None:
+        """The session's transcript retained, as a classic turn's Stop hook does."""
+        with contextlib.suppress(ActivityError):
+            await workflow.execute_activity(
+                MEMORY_RETAIN,
+                MemoryTurn(turn_id),
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=MEMORY_RETAIN_TIMEOUT,
+                retry_policy=MEMORY_ONCE,
+            )
 
     # ---- the gate ----
     async def _watch_gate(self) -> None:
@@ -305,6 +393,11 @@ class DurableSession:
             "answer" if self._kinds.get(name) == "answer" else "approval"
         )
         author = self._turn.author if self._turn else self._start.owner
+        if name in self._turn_tools and not await self._outward(name, call):
+            # A read or write call (an http GET, a plugin tool tiered read) goes straight
+            # through, as the permission seam lets it; its activity checks the tier again.
+            self._agent.decide(str(call["id"]), True, approver="scadbuddy")
+            return
         summary, input_hash = "", None
         if kind == "approval":
             described = await workflow.execute_activity(
@@ -387,6 +480,26 @@ class DurableSession:
                 await self._resolve(parked, "cancelled", SYSTEM, None, NOBODY_ANSWERED, timer=True)
             else:
                 await self._resolve(parked, "timed_out", SYSTEM, None, None, timer=True)
+
+    async def _outward(self, name: str, call: dict[str, Any]) -> bool:
+        """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a
+        tool listed as may_park is asked about, so one the agent cannot tier (its plugin
+        did not answer, or is gone) parks: fail toward asking. Its activity still refuses
+        a call whose tool is gone, saying why."""
+        try:
+            tiered = await workflow.execute_activity(
+                TURN_TOOL_TIER,
+                {"tool": name, "input": call["input"]},
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=["UnknownSession", "ToolError"]
+                ),
+                result_type=dict,
+            )
+        except FailureError:
+            return True
+        return bool(tiered.get("tier") == "outward")
 
     async def _resolve(
         self,
@@ -554,6 +667,7 @@ class DurableSession:
             images=list(self._turn.images) if self._turn else [],
             system_append=self._start.system_append,
             disabled_tools=list(self._settings.disabled_tools),
+            packages=list(self._packages),
         )
 
     @workflow.query(name=TURN_QUERY)

@@ -14,10 +14,11 @@ import {
   materializeHeadlessBrowser,
   PAGE_MAX_BYTES,
   SERVER_NAME,
+  SPOOL_OVER_BYTES,
 } from '../src/harness/headlessBrowser.js'
 import { type DownloadTarget, drainDownloads, writeDownloadBudget } from '../src/harness/browserDownloads.js'
 import type { DownloadBudget } from '../src/harness/headlessBrowser.js'
-import { DOWNLOAD_BODY, endlessSent, type Hit, type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
+import { BIG_PAGE, DOWNLOAD_BODY, endlessSent, type Hit, type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
 
 // The pinned @playwright/mcp server itself, started exactly as the per-session
 // plugin's `.mcp.json` starts it, driven over stdio by an MCP client. No model
@@ -405,6 +406,18 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
       expect(sent).toBeGreaterThan(PAGE_MAX_BYTES)
       expect(sent).toBeLessThan(PAGE_MAX_BYTES + 16 * 1024 * 1024)
       expect(performance.now() - started).toBeLessThan(30_000)
+    }, 60_000)
+
+    it('hands on a page past the spool threshold whole, and leaves no spool file', async () => {
+      expect(BIG_PAGE).toBeGreaterThan(SPOOL_OVER_BYTES)
+      const { call, plugin } = await connect(ui.origin)
+      const opened = await call('browser_navigate', { url: `${ui.origin}/big.html` })
+      expect(opened.isError).toBe(false)
+      expect(opened.text).toContain('Big page')
+      // The comment that pads it ends the page: all of it reached Chromium.
+      const whole = await call('browser_evaluate', { function: `() => document.documentElement.outerHTML.length > ${BIG_PAGE - 1024}` })
+      expect(whole.text).toMatch(/\btrue\b/)
+      expect(await readdir(plugin.spoolDir)).toEqual([])
     }, 60_000)
 
     it('cancels and deletes one made by page script that passes the cap on the disk', async () => {

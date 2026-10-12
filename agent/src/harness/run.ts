@@ -13,7 +13,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
-import { downloadBudgetHook, downloadsHook } from './browserDownloads.js'
+import { downloadBudgetHook, downloadsHook, turnEndDownloadsHook } from './browserDownloads.js'
 import {
   assertHeadlessPlugin,
   browserInputGuard,
@@ -36,7 +36,8 @@ import {
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
-import { assertPluginAllowed } from './plugins.js'
+import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
+import { declaresRemoteServers } from '../plugins/packages/mcp.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
@@ -97,7 +98,8 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     enabled: a per-session copy of the vendored `playwright` plugin, its
 //     tier map, its disallowed tools and its origin/file-name guard, and a
 //     `PostToolUse` hook that moves its downloads into the session's
-//     workspace after each browser call (browserDownloads.ts, #2329);
+//     workspace after each browser call (browserDownloads.ts, #2329), and a
+//     `Stop` hook that moves those that ended after the last one (#2397);
 //   - in-process memory hooks (memory/hindsight.ts): `UserPromptSubmit`,
 //     `Stop` and optionally `PostToolUse` callbacks that recall from and
 //     retain to the enabled `hindsight` plugin's bank. SDK callbacks, run in
@@ -421,6 +423,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       downloadHooks = {
         PreToolUse: [downloadBudgetHook(browser.budgetFile, downloads)],
         PostToolUse: [downloadsHook(browser.downloadsDir, downloads)],
+        // And once more as the turn ends, for one that finished after the last call (#2397).
+        Stop: [turnEndDownloadsHook(browser.downloadsDir, downloads)],
       }
     }
     tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
@@ -574,6 +578,18 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   if (run.allowedPluginPaths?.length) {
     options.strictMcpConfig = false
     options.settings = { ...(typeof options.settings === 'object' ? options.settings : {}), disableSkillShellExecution: false }
+  }
+  // With `strictMcpConfig` off, Claude Code starts the MCP servers a plugin declares
+  // and connects to an http one itself: around the forwarder (redirects, OAuth discovery,
+  // the name resolved again; plugins/forwarder.ts "WHY"). So no plugin loaded then may
+  // declare one: a package's are stripped from the copy it loads and forwarded instead
+  // (plugins/packages/mcp.ts `withoutRemoteServers`, #2320).
+  if (options.strictMcpConfig === false) {
+    for (const p of [...(run.ownPlugin !== undefined ? [run.ownPlugin] : []), ...(run.pluginPaths ?? []), ...(run.allowedPluginPaths ?? [])]) {
+      if (declaresRemoteServers(p)) {
+        throw new PluginRefusedError(p, ['declares an http MCP server, which Claude Code would reach without the forwarder'])
+      }
+    }
   }
   if (run.systemPromptAppend !== undefined) {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }

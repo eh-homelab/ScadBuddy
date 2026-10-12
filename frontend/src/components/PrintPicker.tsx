@@ -67,7 +67,7 @@ import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
-import { type ProjectList, useProjectList } from '../lib/projects'
+import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -95,7 +95,8 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  *   Checks. The nozzles, quality, plate type, print options, project and copies are
  *   Advanced steps, and Simple sends what they open on: the size and tier this model
  *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
- *   remembered copies and the page's project, else the last one printed to. Advanced also adds the full process list,
+ *   remembered copies and the page's project, else the last one printed to; that project is
+ *   named in a "Filed under" line (#1660). Advanced also adds the full process list,
  *   per-side flow and a per-slot filament preset override.
  *
  * Around that it keeps what the send bar's print already had: the options disclosure
@@ -216,7 +217,7 @@ export function PrintPicker({
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
-  const { filaments, plan, setPlan, planChanged, filamentError, planReady } = useFilamentPlan(
+  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
     source,
     choices,
     plate,
@@ -351,6 +352,25 @@ export function PrintPicker({
   // A page project without a shared list is read by its own picker, out of sight here.
   const projectKnown = project ? project.list?.choices !== null : ownProjects.choices !== null
   const projectId = pickedProject === null && !projectKnown ? undefined : pickedProject
+
+  /**
+   * #1660 — the project the print is filed under, named, for Simple mode: its picker is an
+   * Advanced step, so a project carried over from earlier would otherwise go unseen. None
+   * while the list is unread, when the server chooses (`projectId` undefined).
+   */
+  const shownProjects = (project ? project.list : ownProjects)?.choices?.projects
+  const projectPaths = useMemo(() => breadcrumbs(shownProjects ?? []), [shownProjects])
+  const filedUnderLabel =
+    projectId === undefined ? null : projectId === null ? 'No project' : (projectPaths.get(projectId) ?? `project ${projectId}`)
+  /** "(change)" opens Advanced, then puts the focus on the project step it shows. */
+  const focusProject = useRef(false)
+  useEffect(() => {
+    if (!picker.advanced || !focusProject.current) return
+    focusProject.current = false
+    const select = document.getElementById('print-project')
+    select?.scrollIntoView?.({ block: 'nearest' })
+    select?.focus()
+  }, [picker.advanced])
 
   /**
    * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
@@ -766,9 +786,15 @@ export function PrintPicker({
               )}
 
               {filamentError && (
-                <p className="text-[12px] text-warn" data-testid="filaments-unavailable">
-                  ScadBuddy could not read the filament inventory: {filamentError}
-                </p>
+                <div className="flex items-center gap-3" data-testid="filaments-unavailable">
+                  <p className="text-[12px] text-warn">
+                    ScadBuddy could not read the filament inventory: {filamentError} Print is unavailable
+                    until it loads.
+                  </p>
+                  <Button size="sm" onClick={retryFilaments}>
+                    Retry
+                  </Button>
+                </div>
               )}
               {!picker.advanced && (
                 <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
@@ -910,6 +936,25 @@ export function PrintPicker({
                 </div>
               )}
 
+              {/* #1660 — Simple hides the project step, but not where the print is filed. */}
+              {!picker.advanced && filedUnderLabel !== null && (
+                <p className="text-[13px] text-muted" data-testid="print-filed-under">
+                  Filed under: <span className="text-ink">{filedUnderLabel}</span>{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      focusProject.current = true
+                      picker.toggleAdvanced()
+                    }}
+                    disabled={projectCreating}
+                    className="underline decoration-dotted underline-offset-2 hover:text-ink"
+                    data-testid="print-filed-under-change"
+                  >
+                    (change)
+                  </button>
+                </p>
+              )}
+
               {/* #768 — Simple mode sends these steps' defaults without showing them. */}
               {picker.advanced && (
                 <>
@@ -954,7 +999,12 @@ export function PrintPicker({
 
                   <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
 
-                  {given?.kind === 'output' && <SlicerDefaults settings={printSettings} />}
+                  {given?.kind === 'output' && (
+                    <SlicerDefaults
+                      settings={printSettings}
+                      overridden={printSequence !== null ? ['print_sequence'] : []}
+                    />
+                  )}
 
                   <PrintOptionsDisclosure
                     subject={subject}

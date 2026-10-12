@@ -15,8 +15,9 @@ sed -i "s/$sha/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef/g" "$work/pyproject.toml
 if out="$("$here/agent-durable-pin.sh" "$work" 2>&1)"; then
   echo "FAIL: a vanished pin passed the check"; exit 1
 fi
-# The failure must be the missing commit, not (say) no network.
-if ! grep -q "failed to fetch commit \`deadbeef" <<<"$out"; then
+# The failure must be the missing commit, not (say) no network. Matched loosely, so a
+# uv release that rewords, recases or requotes its message does not red every PR (#2135).
+if ! grep -qiE 'commit.{0,3}deadbeef' <<<"$out"; then
   echo "FAIL: the check failed, but not on the vanished commit:"; echo "$out"; exit 1
 fi
 "$here/agent-durable-pin.sh" "$root/agent-durable" >/dev/null

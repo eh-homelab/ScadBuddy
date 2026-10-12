@@ -7,7 +7,7 @@ service sends the same shapes as JSON (agent/src/sessions/durable.ts).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from temporalio.claude_agent_sdk import AgentState
 
@@ -85,17 +85,70 @@ class Message:
 
 
 @dataclass
+class TurnPackage:
+    """A plugin package a durable turn's Claude Code loads (agent/src/temporal/turnTools.ts
+    ``TurnPackage``, #2320): copied by the agent to ``<payload dir>/plugins/<dir>``."""
+
+    name: str
+    dir: str
+    content_hash: str
+    # Approved with allow_refused: loaded as it is, with the built-ins it names.
+    allowed: bool = False
+    builtin_tools: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SegmentContext:
     images: list[ImageRef] = field(default_factory=list)
     system_append: str | None = None
     # The tools Settings → Plugins disabled: the segment runner leaves them undeclared.
     disabled_tools: list[str] = field(default_factory=list)
+    # The turn's plugin packages (#2320), which the segment runner loads once each hashes
+    # to its pin.
+    packages: list[TurnPackage] = field(default_factory=list)
 
 
 @dataclass
 class SendAnswer:
     accepted: bool
     turn_id: str
+
+
+@dataclass
+class TurnTool:
+    """One of a turn's other tools (agent/src/temporal/turnTools.ts ``TurnToolEntry``):
+    a remote plugin's, ``http_request``, the headless browser's (#2320). Its calls run
+    as the activity ``turn:<name>`` on agent-tools."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    # Whether a call may be outward: it then asks turn_tool_tier before it parks.
+    may_park: bool
+    # The replica's own queue when its server's state lives there (http_request's saved
+    # bodies, the headless browser); None: agent-tools.
+    task_queue: str | None = None
+
+
+@dataclass
+class TurnTools:
+    tools: list[TurnTool] = field(default_factory=list)
+    # Defaulted: a listing an older agent made named no packages.
+    packages: list[TurnPackage] = field(default_factory=list)
+
+
+@dataclass
+class MemoryTurn:
+    """memory_recall's and memory_retain's argument (agent temporal/memoryActivities.ts)."""
+
+    turn_id: str
+
+
+@dataclass
+class MemoryRecalled:
+    """The ``<hindsight_memories>`` block a classic turn's recall hook adds; None: none."""
+
+    context: str | None = None
 
 
 @dataclass
