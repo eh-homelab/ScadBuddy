@@ -98,6 +98,19 @@ describe.skipIf(!TEST_DATABASE_URL)(`headless-browser grants${TEST_DATABASE_URL 
     expect(await recordDurableGrant(context, INPUT)).toMatchObject({ ok: false })
   })
 
+  it('answers a retried attempt with the grant its first attempt recorded, not "Not granted" (#2524)', async () => {
+    const { session, context } = await durableInTurn()
+    const first = await recordDurableGrant(context, INPUT)
+    expect(first.ok).toBe(true)
+    // The activity's result was lost, and Temporal retries it: the same grant, still one.
+    expect(await recordDurableGrant(context, INPUT)).toEqual(first)
+    expect(await db.sql`SELECT 1 FROM ai_headless_grants WHERE session_id = ${session.id}`).toHaveLength(1)
+    // Another request under the same approval is not that grant.
+    expect(await recordDurableGrant(context, { method: 'DELETE', path: RUN })).toMatchObject({ ok: false })
+    expect(await backendUses(session.id, 'POST', RUN)).toBe(true)
+    expect(await recordDurableGrant(context, INPUT)).toMatchObject({ ok: false })
+  })
+
   it('refuses a durable grant without an approved call, outside a running turn, or once the turn ended', async () => {
     const denied = await durableInTurn('denied')
     expect(await recordDurableGrant(denied.context, INPUT)).toMatchObject({ ok: false })

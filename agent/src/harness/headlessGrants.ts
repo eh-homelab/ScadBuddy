@@ -160,8 +160,16 @@ export async function recordDurableGrant(
       AND r.request_id = ${context.requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
     ON CONFLICT (request_id) DO NOTHING
     RETURNING expires_at`
-  if (!row) return { ok: false, reason: 'no approved call of this exact request was found in the running turn, or it was already used' }
-  return { ok: true, id, expiresAt: row.expires_at.toISOString() }
+  if (row) return { ok: true, id, expiresAt: row.expires_at.toISOString() }
+  // A retried attempt whose first insert committed (its result was lost) is answered with
+  // that grant, while it is unused, for this same request and turn (#2524).
+  const [kept] = await context.sql<{ id: string; expires_at: Date }[]>`
+    SELECT g.id, g.expires_at FROM ai_headless_grants g JOIN ai_sessions s ON s.id = g.session_id
+    WHERE g.request_id = ${context.requestId} AND g.session_id = ${context.sessionId}
+      AND g.method = ${input.method} AND g.path = ${input.path}
+      AND g.used_at IS NULL AND g.expires_at > now() AND s.durable_turn_id = g.turn_id`
+  if (kept) return { ok: true, id: kept.id, expiresAt: kept.expires_at.toISOString() }
+  return { ok: false, reason: 'no approved call of this exact request was found in the running turn, or it was already used' }
 }
 
 /** The grant tool for one durable call (`recordDurableGrant`): built for the call it answers. */
