@@ -12,12 +12,14 @@ import respx
 import trimesh
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy import print_source
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.presets import ParamPresetCreate
 from scadbuddy.meshmodel import ingest
 from scadbuddy.meshmodel import operations as mesh_operations
 from scadbuddy.meshmodel.scene import load_scene, text_sha256
 from scadbuddy.render.bambu3mf import stl_3mf
+from scadbuddy.render.read_budget import ReadBudget
 from tests.api.test_print_library import library_file
 from tests.api.test_send import configure
 from tests.support.operations import press
@@ -42,6 +44,7 @@ def upload(
     name: str = "Carrot",
     data: bytes | None = None,
     filename: str = "carrot.stl",
+    key: dict[str, str] | None = None,
 ) -> httpx.Response:
     response: httpx.Response = client.post(
         "/api/v1/models/from-mesh/upload",
@@ -53,7 +56,7 @@ def upload(
             )
         },
         data={"name": name},
-        headers=press(),
+        headers=key or press(),
     )
     return response
 
@@ -190,14 +193,73 @@ def test_split_with_a_joint_is_one_revision(client: TestClient, paths: DataPaths
     assert scene.generated_sha256 == text_sha256((paths.model_dir(slug) / "model.scad").read_text())
 
 
-def test_a_repeated_edit_is_one_revision(client: TestClient) -> None:
+def test_a_repeated_edit_is_one_revision(client: TestClient, paths: DataPaths) -> None:
+    """A split run twice would split o2 off again; the replay answers the first run."""
     slug = upload(client).json()["slug"]
+    before = len(client.get(f"/api/v1/models/{slug}/versions").json())
     key = press()
-    body = {"edit": "rename", "object": "o1", "name": "Body"}
-    first = edit(client, slug, body, key=key)
-    again = edit(client, slug, body, key=key)
-    assert first.status_code == again.status_code == 200
-    assert first.json()["version"] == again.json()["version"]
+    split = {
+        "edit": "split_at_plane",
+        "object": "o1",
+        "point": [0, 0, 32],
+        "normal": [0, 0, 1],
+        "joint": {"depth": 5},
+    }
+    first = edit(client, slug, split, key=key)
+    again = edit(client, slug, split, key=key)
+    assert first.status_code == again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert len(client.get(f"/api/v1/models/{slug}/versions").json()) == before + 1
+    scene = load_scene((paths.model_dir(slug) / "scene.json").read_text())
+    assert [o.id for o in scene.objects] == ["o1", "o2"]
+
+
+def test_a_repeated_upload_is_one_model(client: TestClient, paths: DataPaths) -> None:
+    key = press()
+    first = upload(client, key=key)
+    again = upload(client, key=key)
+    assert first.status_code == again.status_code == 201, again.text
+    assert again.json()["slug"] == first.json()["slug"] == "carrot"
+    assert [m["slug"] for m in client.get("/api/v1/models").json() if m["origin"] == "mine"] == [
+        "carrot"
+    ]
+    assert not (paths.model_dir("carrot-2")).exists()
+
+
+def tight_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A triangle budget the carrot's STL is past."""
+    monkeypatch.setattr(mesh_operations, "ReadBudget", lambda: ReadBudget(max_triangles=10))
+
+
+def test_an_stl_upload_past_the_triangle_budget_is_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tight_budget(monkeypatch)
+    refused = upload(client)
+    assert refused.status_code == 422, refused.text
+    assert "triangles" in refused.json()["detail"]
+
+
+def test_a_library_stl_past_the_triangle_budget_is_refused_before_it_loads(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(client)
+    tight_budget(monkeypatch)
+
+    def never(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError("an STL past the budget is never loaded")
+
+    monkeypatch.setattr(mesh_operations, "stl_3mf", never)
+    monkeypatch.setattr(print_source, "stl_3mf", never)
+    with respx.mock:
+        library_file(689, content=stl(carrot()), file_type="stl")
+        refused = client.post(
+            "/api/v1/models/from-mesh",
+            json={"name": "Big Carrot", "library_file_id": 689},
+            headers=press(),
+        )
+    assert refused.status_code == 422, refused.text
+    assert "triangles" in refused.json()["detail"]
 
 
 def test_a_refused_edit_is_a_422_naming_why(client: TestClient) -> None:

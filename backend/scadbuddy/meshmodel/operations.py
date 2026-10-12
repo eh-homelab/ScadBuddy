@@ -105,6 +105,16 @@ def mesh_loader(directory: Path) -> MeshOf:
     return mesh_of
 
 
+def stl_as_3mf(data: bytes, name: str) -> bytes:
+    """An untrusted STL as a 3MF: refused past the triangle budget before trimesh loads
+    it whole (`check_stl`), and as unreadable when it holds no mesh."""
+    check_stl(io.BytesIO(data), ReadBudget())
+    try:
+        return stl_3mf(data, model_name=Path(name).stem or "model")
+    except ValueError:
+        raise UnreadableObjectsError(f"{name} holds no mesh") from None
+
+
 #: A kind's check or run.
 Step = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
 
@@ -145,23 +155,12 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
                 # Not "send it again": a re-send with the same key replays this answer.
                 "this request's upload is no longer held; upload the file again",
             ) from None
-        name: str = source["name"]
-        if not name.lower().endswith(".stl"):
-            return data
-
-        def wrapped() -> bytes:
-            # Refused past the triangle budget before trimesh loads it whole.
-            check_stl(io.BytesIO(data), ReadBudget())
-            try:
-                return stl_3mf(data, model_name=Path(name).stem or "model")
-            except ValueError:
-                raise UnreadableObjectsError(f"{name} holds no mesh") from None
-
-        return await asyncio.to_thread(wrapped)
+        return data
 
     async def source_bytes(
         request: dict[str, Any], checked: dict[str, Any]
     ) -> tuple[bytes, SceneSource]:
+        """The file as a 3MF, and where it came from (its own bytes' digest)."""
         source = request["source"]
         if source["kind"] == "upload":
             data, name = await _uploaded(source), source["name"]
@@ -173,27 +172,30 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
                 )
             data, name = found, f"{source['output_id']}.3mf"
         else:
-            # The check read the file's record; only its bytes are fetched here.
+            # The check read the file's record; only its bytes are fetched here, as they
+            # are, so an STL is budgeted below before anything loads it.
             filename, kind = checked["filename"], checked["file_type"]
             library = LibrarySource(
                 file_id=source["file_id"], colours=[], plates=[], filename=filename, file_type=kind
             )
             settings = await asyncio.to_thread(state.settings_store.load)
             async with client_for(settings) as client:
-                payload = await library.fetch_3mf(client)
+                payload = await library.download(client)
             if payload is None:
                 raise ApiError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    f"{filename} is too large to read, or holds no mesh",
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, f"{filename} is too large to read"
                 )
             data, name = payload, filename
-        return data, SceneSource(
+        found_at = SceneSource(
             kind=source["kind"],
             name=name,
             sha256=hashlib.sha256(data).hexdigest(),
             file_id=source.get("file_id"),
             output_id=source.get("output_id"),
         )
+        if name.lower().endswith(".stl") or checked.get("file_type") == "stl":
+            data = await asyncio.to_thread(stl_as_3mf, data, name)
+        return data, found_at
 
     async def create_check(request: dict[str, Any]) -> dict[str, Any]:
         models_api._require_new(state.catalogue, request["slug"])
