@@ -651,12 +651,21 @@ do not retry the same edit):
 - A jointed split on a scaled object: the clearance would scale with it. Set the scale to 1
   first (`transform`), or split without a joint. A parameter or later `transform` may not
   rescale a jointed half either.
+- A jointed split where the section's centre lies outside the section (a ring): cut
+  elsewhere.
 - More than 16 cuts on one object.
 - A peg that does not fit the section: it needs `room >= diameter / 2 + clearance + 0.8`
-  mm, where `room` is the distance from the section's centre to its nearest edge, 0.8 mm is
-  two 0.4 mm walls, and a hex key is measured to its corners. The default diameter is
-  `1.2 * room`. Cut where the neck is thicker, or give a smaller `diameter` or `clearance`.
-- Removing a parameter that a saved preset sets, unless `drop_from_presets` is true.
+  mm, where `room` is the distance from the section's centre to its nearest edge and 0.8 mm
+  is two 0.4 mm walls. For `key: "hex"` the corners stand out past the flats, so it needs
+  `room >= (diameter / 2 + clearance) / cos(30 degrees) + 0.8` mm. The default key is `flat`
+  and the default diameter is `1.2 * room`. Cut where the neck is thicker, or give a smaller
+  `diameter` or `clearance`.
+
+An edit that would remove an exposed parameter (`unexpose`, or deleting its op or object) is
+refused with a 409 while a preset sets it. The model's own read-only presets (in
+`model.json`) cannot be overridden: the message reads "the model's own presets ... set ...;
+edit them first", so change those presets first. Saved presets can be: resend the edit with
+`drop_from_presets: true`, which removes the key from them in the same revision.
 
 `get_scene` reports `hand_edited`. When it is true, `model.scad` was changed directly (its
 sha256 no longer equals `scene.json`'s `generated_sha256`) and `edit_scene` answers 409.
