@@ -199,12 +199,17 @@ async def test_the_backfill_commits_each_row_in_order_with_its_author_and_date(
 
     await definitions.start()
 
-    log = git(root, "log", "--reverse", "--format=%an|%aI|%s").splitlines()[1:]
+    # Seconds, not `%aI`, whose UTC spelling differs between git versions.
+    log = git(root, "log", "--reverse", "--format=%an|%at|%s").splitlines()[1:]
+
+    def at(hour: int) -> int:
+        return int(datetime(2026, 10, 10, hour, tzinfo=UTC).timestamp())
+
     assert log == [
-        f"{AGENT_AUTHOR_NAME}|2026-10-10T01:00:00+00:00|Register other v1",
-        f"{AUTHOR_NAME}|2026-10-10T03:00:00+00:00|Register swap v1",
-        f"{AUTHOR_NAME}|2026-10-10T02:00:00+00:00|Register swap v2",
-        f"{AGENT_AUTHOR_NAME}|2026-10-10T04:00:00+00:00|Register swap v3",
+        f"{AGENT_AUTHOR_NAME}|{at(1)}|Register other v1",
+        f"{AUTHOR_NAME}|{at(3)}|Register swap v1",
+        f"{AUTHOR_NAME}|{at(2)}|Register swap v2",
+        f"{AGENT_AUTHOR_NAME}|{at(4)}|Register swap v3",
     ]
     history = definitions.history
     for version_id, version in ((s1, 1), (s2, 2), (s3, 3)):

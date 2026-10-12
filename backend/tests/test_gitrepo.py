@@ -63,7 +63,8 @@ def test_a_date_is_the_author_and_committer_date(repo: GitRepo) -> None:
     repo.commit("Add a", "a", date=when)
     [revision] = repo.log("a")
     assert revision.date == when
-    assert repo._out("log", "-1", "--format=%cI").strip() == "2026-10-10T01:02:03+00:00"
+    # Seconds, not `%cI`, whose UTC spelling (`Z` or `+00:00`) differs between git versions.
+    assert repo._out("log", "-1", "--format=%ct").strip() == str(int(when.timestamp()))
     assert revision.author == AUTHOR_NAME
 
 
