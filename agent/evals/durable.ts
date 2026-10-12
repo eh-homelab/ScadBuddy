@@ -356,6 +356,9 @@ async function startDurableWorker(o: { url: string; address: string; dir: string
       // ScadBuddy's own plugin, as runScenario gives the classic harness (`ownPlugin`).
       SCADBUDDY_DURABLE_SKILLS_DIR: OWN_PLUGIN_DIR,
       SCADBUDDY_DURABLE_HEALTH_PORT: String(port),
+      // No agent serves the subagents' loopback MCP server here: without "off" every
+      // segment's Claude Code waits about 30 s on a server it cannot reach.
+      SCADBUDDY_DURABLE_SUBAGENT_MCP_URL: 'off',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
