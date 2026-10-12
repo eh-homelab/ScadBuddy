@@ -8,6 +8,7 @@ the only piece of ``print_run.py`` the resolver needs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.filaments import settled
 from scadbuddy.bambuddy.models import LocalPreset, Preset, PresetRef
 
 logger = logging.getLogger(__name__)
@@ -91,8 +93,10 @@ class _Catalogue:
 
 
 async def _catalogue(client: BambuddyClient) -> _Catalogue:
-    catalogue = await client.presets()
-    local = await client.local_presets()
+    presets, local_presets = await asyncio.gather(
+        client.presets(), client.local_presets(), return_exceptions=True
+    )
+    catalogue, local = settled(presets), settled(local_presets)
     printers: list[PresetChoice] = []
     processes: list[PresetChoice] = []
     filaments: list[PresetChoice] = []

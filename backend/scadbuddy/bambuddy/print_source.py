@@ -28,7 +28,7 @@ from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
-from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
+from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour, settled
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope
@@ -561,17 +561,19 @@ class LibrarySource(PrintPipeline):
         sends: PrintLinkStore | None = None,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
-        its 404; one the dialog cannot print is a 422 before anything else is read."""
+        its 404; one the dialog cannot print is a 422 before anything else is read. The
+        plates and filaments are read together (#2504)."""
         file = await client.library_file(file_id)
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
-        plates = sorted(plate.index for plate in (await client.library_plates(file_id)).plates)
+        layout, requirements = await asyncio.gather(
+            client.library_plates(file_id),
+            client.filament_requirements(file_id),
+            return_exceptions=True,
+        )
+        plates = sorted(plate.index for plate in settled(layout).plates)
         # Slots are 1-based; a slot Bambuddy numbers below 1 is not one the dialog can fill.
-        needs = [
-            need
-            for need in (await client.filament_requirements(file_id)).filaments
-            if need.slot_id >= 1
-        ]
+        needs = [need for need in settled(requirements).filaments if need.slot_id >= 1]
         colours = [UNKNOWN_COLOUR] * max((need.slot_id for need in needs), default=0)
         for need in needs:
             colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR

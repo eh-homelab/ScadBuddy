@@ -8,6 +8,7 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ from scadbuddy.bambuddy.filaments import (
     gather_plate_options,
     queue_filaments,
     read_inventory,
+    settled,
 )
 from scadbuddy.bambuddy.hardware import (
     installed_nozzles,
@@ -256,6 +258,7 @@ async def filament_options(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    status: Awaitable[PrinterStatus | None] | None = None,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
 
@@ -270,25 +273,40 @@ async def filament_options(
     With a printer it also carries that printer's mounted nozzles (#78). Without one
     there are no nozzles to read. An offline printer's status is unreadable the same way (spec §3):
     the step still opens, with no mounted nozzles to compare against.
+
+    The file, the spools and the printer's status are read concurrently (#2504);
+    ``status`` is that read when the caller has started it already.
     """
-    read_file = await source.file_to_read(client)
-    library_file_id = read_file.id
-    plate_ids = ((await source.plate_ids(client)) or [1]) if all_plates else [plate_id]
-    read = await gather_plate_options(
-        client,
-        library_file_id=library_file_id,
-        printer_id=printer_id,
-        plate_ids=plate_ids,
-        fallback_colours=list(source.colours),
-        own_colours=read_file.own_colours,
+    reading = (
+        asyncio.ensure_future(status if status is not None else read_status(client, printer_id))
+        if printer_id is not None
+        else None
     )
+    try:
+        read_file, inventory = await asyncio.gather(
+            source.file_to_read(client), read_inventory(client), return_exceptions=True
+        )
+        file = settled(read_file)
+        plate_ids = ((await source.plate_ids(client)) or [1]) if all_plates else [plate_id]
+        read = await gather_plate_options(
+            client,
+            library_file_id=file.id,
+            printer_id=printer_id,
+            plate_ids=plate_ids,
+            fallback_colours=list(source.colours),
+            own_colours=file.own_colours,
+            inventory=settled(inventory),
+        )
+    finally:
+        # Awaited even when a read failed, so the status read never outlives the call.
+        printer_status = (
+            (await asyncio.gather(reading, return_exceptions=True))[0] if reading else None
+        )
     options = read[0] if len(read) == 1 else every_plate(read)
     if printer_id is None:
         return options
-    try:
-        printer_status = await client.printer_status(printer_id)
-    except (ApiError, ValueError):
-        logger.info("printer status unreadable; the filament step opens with no nozzles known")
+    printer_status = settled(printer_status)
+    if printer_status is None:
         options.nozzles = []
         return options
     options.nozzles = printer_status.nozzles
@@ -337,7 +355,7 @@ def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | N
     return settings.last_project_id
 
 
-async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
+async def read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
     """The printer's live status, read once per run; unreadable is ``None``."""
     try:
         return await client.printer_status(printer_id)
@@ -881,7 +899,7 @@ async def prepare_run(
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
-    printer_status = await _read_status(client, printer_id)
+    printer_status = await read_status(client, printer_id)
     await record_seen(rack, printer_id, printer_status)
     if refuse_manual_pick and request.rack_position is not None:
         # Only a manual pick needs the file judged, which reads its 3MF (#1752).
