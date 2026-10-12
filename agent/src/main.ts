@@ -56,6 +56,8 @@ import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } fr
 import { TASK_QUEUE } from './temporal/names.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
 import { BrowserHost, type HeadlessBrowserDeps, turnBrowserServers } from './temporal/turnBrowser.js'
+import { SHARED_PACKAGES } from './temporal/turnPackages.js'
+import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { turnServers } from './temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
@@ -348,6 +350,7 @@ const sessions =
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder),
         // The headless browser (#349): on for a turn only when the
         // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
         // It opens ScadBuddy's own origins as they are (#983): the public URL
@@ -460,6 +463,17 @@ const turnToolDeps = temporal
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, 'durable-turns'), audit },
+        // Shared with agent-durable on the payload volume, which its runner loads them from.
+        ...(pluginPackages
+          ? {
+              packages: {
+                load: () => loadPackagesForRun(pluginPackages, packageInstaller),
+                root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
+                localRoot: path.join(paths.stateDir, 'plugins-local'),
+                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+              },
+            }
+          : {}),
         ...(database
           ? {
               extra: turnBrowserServers({

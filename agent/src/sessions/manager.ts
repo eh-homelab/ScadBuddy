@@ -49,7 +49,8 @@ import {
   type MemoryHooksOptions,
   hindsightTarget,
 } from '../memory/hindsight.js'
-import type { PackagesForRun } from '../plugins/packages/install.js'
+import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
+import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import {
   ensureSessionDir,
   isUuid,
@@ -657,6 +658,11 @@ export type SessionManagerDeps = {
    * package that cannot be loaded is reported in the session and left out.
    */
   packagePlugins?: () => Promise<PackagesForRun>
+  /**
+   * A turn's vetted packages' http MCP servers, registered with the loopback forwarder
+   * as remote plugins are (plugins/packages/mcp.ts `forwardPackageServers`, #2320).
+   */
+  packageServers?: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
   /**
    * Automatic memory (memory/hindsight.ts): when a turn's remote plugins
    * include an enabled `hindsight` plugin, its prompt is recalled against and
@@ -1576,6 +1582,7 @@ export class SessionManager {
       }
       let forwarded: PluginsForRun | undefined
       let packages: PackagesForRun | undefined
+      let packageServers: PackageServers | undefined
       let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
       /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
       let inProcessServers: string[] = []
@@ -1589,7 +1596,7 @@ export class SessionManager {
         secrets = candidates.map((c) => c.credential.secret)
         builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
         forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
-        const remotePlugins = forwarded?.plugins ?? []
+        const remotePlugins = [...(forwarded?.plugins ?? [])]
         // Plugin header values (and their bare tokens) are redacted from the
         // event log like the credential. Claude Code never holds them (the
         // forwarder adds them), but a plugin could echo one in a tool result.
@@ -1601,6 +1608,37 @@ export class SessionManager {
             ? this.deps.ownPlugin
             : undefined
         packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
+        const packageNames = new Map<string, string>()
+        if (packages) {
+          // Loaded without their own http MCP servers, which come through the forwarder
+          // below: a query with strictMcpConfig off would start them itself (run.ts).
+          const loaded = packages
+          const problems = [...loaded.problems]
+          // A package that cannot be stripped is left out and said, as one that cannot be loaded.
+          const stripped = async (dir: string): Promise<string | undefined> => {
+            const pkg = loaded.loaded.find((p) => p.dir === dir)
+            if (!pkg) return dir
+            try {
+              const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
+              packageNames.set(loadedDir, pkg.name)
+              return loadedDir
+            } catch (err) {
+              problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
+              return undefined
+            }
+          }
+          const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(stripped))).filter((d): d is string => d !== undefined)
+          packages = { ...loaded, paths: await kept(loaded.paths), allowedPaths: await kept(loaded.allowedPaths), problems }
+        }
+        // Every package's http MCP servers, through the forwarder like a remote
+        // plugin's (#2320); Claude Code loads the packages without them (above).
+        packageServers =
+          packages && this.deps.packageServers
+            ? await this.deps.packageServers(packages.loaded)
+            : undefined
+        remotePlugins.push(...(packageServers?.plugins ?? []))
+        secrets.push(...(packageServers?.secrets ?? []))
         const pluginTiers = harnessTierOf({
           remotePlugins,
           tierOf,
@@ -1618,7 +1656,7 @@ export class SessionManager {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
-        for (const problem of packages?.problems ?? []) {
+        for (const problem of [...(packages?.problems ?? []), ...(packageServers?.problems ?? [])]) {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
@@ -1635,7 +1673,7 @@ export class SessionManager {
           }
           for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
             if (!loaded.has(path.resolve(dir))) {
-              await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+              await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
             }
           }
           // #1255: Claude Code drops an in-process server it cannot connect, and every
@@ -1854,6 +1892,7 @@ export class SessionManager {
         }
       } finally {
         forwarded?.release()
+        packageServers?.release()
         packages?.release()
         local.settling = true
         clearInterval(renew)

@@ -35,7 +35,8 @@ import {
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
-import { assertPluginAllowed } from './plugins.js'
+import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
+import { declaresRemoteServers } from '../plugins/packages/mcp.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
@@ -558,6 +559,18 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   if (run.allowedPluginPaths?.length) {
     options.strictMcpConfig = false
     options.settings = { ...(typeof options.settings === 'object' ? options.settings : {}), disableSkillShellExecution: false }
+  }
+  // With `strictMcpConfig` off, Claude Code starts the MCP servers a plugin declares
+  // and connects to an http one itself: around the forwarder (redirects, OAuth discovery,
+  // the name resolved again; plugins/forwarder.ts "WHY"). So no plugin loaded then may
+  // declare one: a package's are stripped from the copy it loads and forwarded instead
+  // (plugins/packages/mcp.ts `withoutRemoteServers`, #2320).
+  if (options.strictMcpConfig === false) {
+    for (const p of [...(run.ownPlugin !== undefined ? [run.ownPlugin] : []), ...(run.pluginPaths ?? []), ...(run.allowedPluginPaths ?? [])]) {
+      if (declaresRemoteServers(p)) {
+        throw new PluginRefusedError(p, ['declares an http MCP server, which Claude Code would reach without the forwarder'])
+      }
+    }
   }
   if (run.systemPromptAppend !== undefined) {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }
