@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pytest
 import trimesh
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import (
@@ -103,15 +103,16 @@ def test_split_maps_the_world_plane_through_the_transform() -> None:
 
 
 def test_a_joint_puts_a_peg_on_the_top_and_a_socket_in_the_bottom() -> None:
-    result = apply_edits(garden(1), edits(split(depth=5, clearance=0.2, key="hex")), mesh_of)
+    result = apply_edits(
+        garden(1), edits(split(diameter=3, depth=5, clearance=0.2, key="hex")), mesh_of
+    )
     lower, upper = result.objects
     socket, peg = lower.ops[-1], upper.ops[-1]
     assert isinstance(socket, Joint) and socket.role == "socket"
     assert isinstance(peg, Joint) and peg.role == "peg"
     assert socket.axis == peg.axis == (0.0, 0.0, -1.0)
     assert np.allclose(peg.at, (0, 0, 32), atol=1e-6)
-    room = 3 * math.cos(math.pi / 64)
-    assert value(peg.diameter) == pytest.approx(round(1.2 * room, 2))
+    assert value(peg.diameter) == 3
     assert (value(peg.depth), value(peg.clearance), peg.key) == (5, 0.2, "hex")
 
 
@@ -398,3 +399,78 @@ def test_a_transform_cannot_set_a_zero_scale() -> None:
         apply_edits(
             garden(1), edits({"edit": "transform", "object": "o1", "scale": [1, 0, 1]}), mesh_of
         )
+
+
+def column() -> trimesh.Trimesh:
+    cylinder = trimesh.creation.cylinder(radius=10, height=40, sections=64)
+    cylinder.apply_translation((0, 0, 20))
+    raised: trimesh.Trimesh = cylinder
+    return raised
+
+
+def test_a_joint_after_an_earlier_cut_stays_off_the_earlier_cut_face() -> None:
+    result = apply_edits(
+        garden(1),
+        edits(
+            {"edit": "split_at_plane", "object": "o1", "point": [30, 0, 0], "normal": [1, 0, 0]},
+            split(z=20.0, depth=4),
+        ),
+        lambda _: column(),
+    )
+    # o1 keeps x < 0; the half disc's centroid is 4r / 3pi in from the first cut face.
+    peg = result.objects[1].ops[-1]
+    assert isinstance(peg, Joint) and peg.role == "peg"
+    assert peg.at[0] == pytest.approx(-4 * 10 / (3 * math.pi), abs=0.05)
+    room = 4 * 10 / (3 * math.pi)
+    assert value(peg.diameter) == pytest.approx(round(1.2 * room, 2), abs=0.02)
+    assert value(peg.diameter) / 2 + value(peg.clearance) + 0.8 <= room
+
+
+def test_a_split_that_misses_what_the_earlier_cuts_keep_is_refused() -> None:
+    with pytest.raises(SceneEditError, match="does not cut o2"):
+        apply_edits(garden(1), edits(split(z=30.0), split("o2", z=10.0)), lambda _: column())
+
+
+def test_lay_flat_refuses_an_object_with_nothing_left() -> None:
+    gone = (
+        garden(1)
+        .objects[0]
+        .model_copy(
+            update={
+                "ops": [
+                    Cut(point=(0, 0, 10), normal=(0, 0, 1), keep="below"),
+                    Cut(point=(0, 0, 30), normal=(0, 0, 1), keep="above"),
+                ]
+            }
+        )
+    )
+    scene = garden(1).model_copy(update={"objects": [gone]})
+    with pytest.raises(SceneEditError, match="nothing of o1 is left"):
+        apply_edits(
+            scene, edits({"edit": "lay_flat", "object": "o1", "normal": [1, 0, 0]}), mesh_of
+        )
+
+
+def test_an_expose_name_that_is_not_an_identifier_fails_validation() -> None:
+    for bad in ("1 bad", "o1_x", "if", "x" * 65):
+        with pytest.raises(ValidationError):
+            edits({"edit": "expose", "object": "o1", "op": None, "field": "scale.2", "name": bad})
+
+
+def test_a_hex_key_is_checked_by_its_corners() -> None:
+    fits_as_a_circle: dict[str, Any] = {"diameter": 3.6, "clearance": 0.2}
+    apply_edits(garden(1), edits(split(key="flat", **fits_as_a_circle)), mesh_of)
+    with pytest.raises(SceneEditError, match=r"needs 3\.11 mm"):
+        apply_edits(garden(1), edits(split(key="hex", **fits_as_a_circle)), mesh_of)
+
+
+def test_a_joint_is_refused_on_a_scaled_object() -> None:
+    scaled = (
+        garden(1)
+        .objects[0]
+        .model_copy(update={"transform": Transform(translate=(30, 0, 0), scale=(2, 2, 2))})
+    )
+    scene = garden(1).model_copy(update={"objects": [scaled]})
+    with pytest.raises(SceneEditError, match="o1 is scaled"):
+        apply_edits(scene, edits(split(z=64.0, depth=5)), mesh_of)
+    apply_edits(scene, edits(split(z=64.0)), mesh_of)  # no joint: fine

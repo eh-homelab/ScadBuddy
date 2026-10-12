@@ -25,6 +25,7 @@ from scadbuddy.meshmodel.frames import (
     unit,
 )
 from scadbuddy.meshmodel.scene import (
+    IDENT,
     Add,
     Custom,
     Cut,
@@ -136,12 +137,14 @@ class RemoveOpEdit(_Edit):
 
 
 class ExposeEdit(_Edit):
+    # python-re: `IDENT`'s lookaheads, which the default Rust engine does not support.
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, regex_engine="python-re")
     edit: Literal["expose"] = "expose"
     #: The op's index, or None for the object's transform.
     op: int | None = Field(ge=0)
     #: A field of it, a tuple's element by ``.index``: ``point.2``, ``diameter``.
     field: str = Field(pattern=r"^[a-z_]+(\.[0-2])?$")
-    name: str
+    name: str = Field(pattern=IDENT, max_length=64)
 
 
 class UnexposeEdit(_Edit):
@@ -221,14 +224,12 @@ def _holes(obj: SceneObject, mesh_of: MeshOf) -> list[trimesh.Trimesh]:
 def _section_area(
     obj: SceneObject, mesh: trimesh.Trimesh, point: np.ndarray, normal: np.ndarray
 ) -> float:
-    """A part's section at the plane, counted only where the object's earlier cuts keep
-    it: a part cut away above the plane is no part a peg can stand on. Measured without
-    the object's negative parts: a hole shifts every part's area alike, so it cannot
-    change which part is widest; only the joint's own fit check must see it."""
-    found = measure(mesh, point.tolist(), normal.tolist())
-    if found is None or not len(kept(found.centroid[None, :], _cuts(obj))):
-        return 0.0
-    return found.area
+    """A part's section at the plane, where the object's earlier cuts keep it: a part cut
+    away above the plane is no part a peg can stand on. Measured without the object's
+    negative parts: a hole shifts every part's area alike, so it cannot change which
+    part is widest; only the joint's own fit check must see it."""
+    found = measure(mesh, point.tolist(), normal.tolist(), cuts=_cuts(obj))
+    return 0.0 if found is None else found.area
 
 
 def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
@@ -243,7 +244,7 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
     except ValueError as error:
         raise SceneEditError(str(error)) from None
     holes = _holes(obj, mesh_of)
-    section = measure(object_mesh(obj, mesh_of), point.tolist(), normal.tolist(), holes)
+    section = measure(object_mesh(obj, mesh_of), point.tolist(), normal.tolist(), holes, _cuts(obj))
     if section is None:
         raise SceneEditError(f"the plane does not cut {obj.id}")
     p = (float(point[0]), float(point[1]), float(point[2]))
@@ -268,13 +269,20 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
             raise SceneEditError(
                 f"{obj.id}'s scale is a parameter; unexpose the scale before splitting with a joint"
             )
+        if _floats(t.scale) != [1.0, 1.0, 1.0]:
+            raise SceneEditError(
+                f"{obj.id} is scaled, so a joint's clearance would scale with it: set its scale "
+                "to 1 first, or split it without a joint"
+            )
         if not section.inside:
             raise SceneEditError(
                 f"the section of {obj.id} at that plane has its centre outside it (a ring); "
                 "cut elsewhere"
             )
         diameter = spec.diameter if spec.diameter is not None else round(1.2 * section.room, 2)
-        need = diameter / 2 + spec.clearance + WALL
+        reach = diameter / 2 + spec.clearance
+        # A hex key's corners stand out past its flats by 1 / cos 30 degrees.
+        need = (reach / math.cos(math.pi / 6) if spec.key == "hex" else reach) + WALL
         if section.room < need:
             raise SceneEditError(
                 f"a {diameter:g} mm peg with {spec.clearance:g} mm clearance needs "
@@ -328,10 +336,10 @@ def _largest_flat(obj: SceneObject, mesh_of: MeshOf) -> np.ndarray:
     for faces, area, normal in zip(mesh.facets, mesh.facets_area, mesh.facets_normal, strict=True):
         if area > best_area and len(kept(centres[faces], cuts)) == len(faces):
             best_area, best = float(area), np.asarray(normal)
-    for point, normal, keep in cuts:
+    for index, (point, normal, keep) in enumerate(cuts):
         if _has_peg_on(obj, point, normal):
             continue
-        section = measure(mesh, point, normal)
+        section = measure(mesh, point, normal, cuts=[*cuts[:index], *cuts[index + 1 :]])
         if section is not None and section.area > best_area:
             best_area, best = section.area, unit(normal) * (1 if keep == "below" else -1)
     if best is None:
@@ -384,9 +392,10 @@ def _lay_flat(scene: Scene, edit: LayFlatEdit, mesh_of: MeshOf) -> Scene:
         except ValueError:
             raise SceneEditError("lay_flat's normal is zero") from None
     new_rotate = euler(turn_to_down(direction) @ rotation(rotate))
-    points = np.concatenate(
-        [cut_points(object_mesh(obj, mesh_of), _cuts(obj)), *_added_points(obj)]
-    )
+    kept_points = cut_points(object_mesh(obj, mesh_of), _cuts(obj))
+    if len(kept_points) == 0:
+        raise SceneEditError(f"nothing of {obj.id} is left after its cuts, so it cannot lie flat")
+    points = np.concatenate([kept_points, *_added_points(obj)])
     world = (linear(new_rotate, scale) @ points.T).T
     translate = _floats(t.translate)
     transform = Transform(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Literal
 
 import numpy as np
@@ -58,11 +59,55 @@ def _encloses(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
     return bool(np.count_nonzero(straddles & (x > c[0])) % 2)
 
 
+def _clip(
+    a: np.ndarray,
+    b: np.ndarray,
+    origin: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    cut: CutSpec,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The 2D boundary ``a``->``b`` (interior on the left) cut to ``cut``'s kept side:
+    segments outside are dropped, crossing ones trimmed at the cut line, and the line
+    closed between each exit and the next entry along it, so the boundary still
+    encloses the kept region."""
+    cut_point, cut_normal, keep = cut
+    n = unit(cut_normal)
+    sign = 1.0 if keep == "above" else -1.0
+    gu, gv = sign * float(u @ n), sign * float(v @ n)
+    base = sign * float((origin - np.asarray(cut_point, dtype=float)) @ n)
+    if np.hypot(gu, gv) < 1e-9:  # the cut plane is parallel to the section's
+        return (a, b) if base >= -1e-9 else (a[:0], b[:0])
+    fa, fb = base + a @ (gu, gv), base + b @ (gu, gv)
+    in_a, in_b = fa >= -1e-9, fb >= -1e-9
+    start, end = [a[in_a & in_b]], [b[in_a & in_b]]
+    along = np.array([gv, -gu]) / np.hypot(gu, gv)
+    events: list[tuple[float, int, np.ndarray]] = []  # (position, 0 exit / 1 enter, point)
+    for i in np.flatnonzero(in_a != in_b):
+        t = fa[i] / (fa[i] - fb[i])
+        at = a[i] + t * (b[i] - a[i])
+        if in_a[i]:
+            start.append(a[i : i + 1])
+            end.append(at[None, :])
+            events.append((float(at @ along), 0, at))
+        else:
+            start.append(at[None, :])
+            end.append(b[i : i + 1])
+            events.append((float(at @ along), 1, at))
+    events.sort(key=lambda e: (e[0], e[1]))
+    for first, second in pairwise(events):
+        if first[1] == 0 and second[1] == 1:
+            start.append(first[2][None, :])
+            end.append(second[2][None, :])
+    return np.concatenate(start), np.concatenate(end)
+
+
 def measure(
     mesh: trimesh.Trimesh,
     point: Sequence[float],
     normal: Sequence[float],
     holes: Sequence[trimesh.Trimesh] = (),
+    cuts: Sequence[CutSpec] = (),
 ) -> Section | None:
     """``mesh``'s section at the plane, less each of ``holes`` (an object's negative
     parts). A hole's boundary goes in reversed, so its area and moments subtract, its
@@ -71,7 +116,11 @@ def measure(
     subtracts that part too, which only makes the section smaller: a stricter fit. A
     stretch of a hole lying outside the mesh's own section still counts toward
     ``inside`` parity (it crosses one boundary), which only matters if a negative part
-    pokes past the surface along the plane."""
+    pokes past the surface along the plane.
+
+    ``cuts`` (an object's earlier cuts, in the mesh's frame) clip the section to what
+    they keep: the cut line becomes a wall, and a section they remove entirely is
+    ``None``."""
     n = unit(normal)
     origin = np.asarray(point, dtype=float)
     found = _segments(mesh, origin, n)
@@ -85,6 +134,10 @@ def measure(
     u, v = _basis(n)
     a = np.stack([(start - origin) @ u, (start - origin) @ v], axis=1)
     b = np.stack([(end - origin) @ u, (end - origin) @ v], axis=1)
+    for limit in cuts:
+        a, b = _clip(a, b, origin, u, v, limit)
+    if len(a) == 0:
+        return None
     cross = a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1]
     area = float(cross.sum() / 2)
     if area <= 1e-9:
