@@ -10,6 +10,7 @@ responder `grant:<id>`, with the call's input hash), then lets the parked call t
 with the harness's public `tool_approval` Update, as `flow_entry_timeout` denies one.
 """
 
+import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -29,12 +30,15 @@ from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_models import (
     FLOW_GRANT_APPROVE,
     FLOW_GRANT_CHECK,
+    FLOW_GRANT_WITHDRAW,
     GRANT_REFUSED,
     GrantApproval,
     GrantApprove,
     GrantCheck,
     GrantVerdict,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _segment(value: Any) -> str:
@@ -258,7 +262,7 @@ class FlowGrants:
             await client.approve_tool(req.call_id, approved=True, update_id=f"grant-{req.call_id}")
         except ToolApprovalError as err:
             # Decided otherwise: no row says the grant approved a call it did not.
-            await self._store.delete_decision(request_id)
+            await self._store.withdraw_grant_decision(request_id)
             if err.error_type == "ToolApprovalAlreadyResolved":
                 return "resolved"
             raise ApplicationError(
@@ -266,7 +270,26 @@ class FlowGrants:
                 type=GRANT_REFUSED,
                 non_retryable=True,
             ) from None
+        except BaseException:
+            # The Update may not have arrived: a retry records the row again, and once
+            # the retries are spent the call is listed for a person, who must be able to
+            # decide it (flow_decide answers stale to a `grant:` row). Had it arrived,
+            # the agent finds no approval and refuses the call: closed, not open.
+            await self._store.withdraw_grant_decision(request_id)
+            raise
         return "approved"
+
+    @activity.defn(name=FLOW_GRANT_WITHDRAW)
+    async def withdraw(self, req: GrantApprove) -> None:
+        """Before the workflow lists a call whose grant approval never completed (the
+        retries ran out, or a worker died with the row written): remove the grant's own
+        decision for it, never a person's, so a person can decide it. The request id is
+        the calling workflow's own, as in `approve`."""
+        own = _flow_request_prefix()
+        if own is None:
+            return
+        _, prefix = own
+        await self._store.withdraw_grant_decision(f"{prefix}{req.call_id}")
 
     async def release(self, client: Client, run: Run) -> list[str]:
         """After a requested grant is approved: let through the run's parked flow-own
@@ -324,13 +347,19 @@ class FlowGrants:
                 )
             except ToolApprovalError:
                 # Decided meanwhile (a person, its timer): not the grant's.
-                await self._store.delete_decision(request_id)
+                await self._store.withdraw_grant_decision(request_id)
+                continue
+            except Exception:
+                # The Update may not have arrived; the call stays listed for a person,
+                # who must be able to decide it (see `approve`).
+                logger.warning("could not release a parked call into its grant", exc_info=True)
+                await self._store.withdraw_grant_decision(request_id)
                 continue
             released.append(parked.tool_id)
         return released
 
     def all(self) -> list[Callable[..., Any]]:
-        return [self.check, self.approve]
+        return [self.check, self.approve, self.withdraw]
 
 
 _PRINT_PATH = re.compile(r"^/api/v1/print/(outputs|library)/([^/]+)/run$")

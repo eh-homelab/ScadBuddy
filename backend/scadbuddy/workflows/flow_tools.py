@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.flow_models import (
         FLOW_GRANT_APPROVE,
         FLOW_GRANT_CHECK,
+        FLOW_GRANT_WITHDRAW,
         GRANT_REFUSED,
         GrantApproval,
         GrantApprove,
@@ -412,6 +413,13 @@ async def _gated(
                     retry_policy=_GRANT_APPROVE_RETRY,
                 )
             except ActivityError:
+                # The approval may have left its row behind (retries spent, a worker
+                # lost): removed, so the person it is listed for can decide it.
+                await workflow.execute_activity(
+                    FLOW_GRANT_WITHDRAW,
+                    GrantApprove(call_id=call_id),
+                    start_to_close_timeout=_GRANT_CHECK,
+                )
                 answer = "ask"
             if answer == "approved":
                 return await call
