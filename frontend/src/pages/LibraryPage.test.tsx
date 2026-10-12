@@ -51,10 +51,7 @@ describe('LibraryPage', () => {
     // #2287 — it is not sent anywhere yet; Print opens the print dialog with the result.
     const next = screen.getByRole('group', { name: 'Next step' })
     expect(next).toHaveTextContent('Not sent to Bambuddy yet')
-    expect(within(next).getByRole('link', { name: 'Download' })).toHaveAttribute(
-      'href',
-      expect.stringMatching(/\/outputs\/[0-9a-f]+\/model\.3mf$/),
-    )
+    expect(within(next).getByRole('button', { name: 'Download' })).toBeInTheDocument()
     await user.click(within(next).getByRole('button', { name: 'Print' }))
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })

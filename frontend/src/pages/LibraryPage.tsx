@@ -151,6 +151,8 @@ export function LibraryPage() {
 
   /** Opens or closes a file's print dialog, as a URL Back returns from. */
   function openPrint(file: LibraryEntry | null) {
+    // The arranged result's print is not the one opening or closing here.
+    setPrintArranged(false)
     const next = new URLSearchParams(search)
     if (file) {
       next.set('print', String(file.id))

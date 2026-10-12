@@ -5,6 +5,7 @@ import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, LibraryCopy, ModelLibrary, Output } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
+import { BlobDownload } from '../components/BlobDownload'
 import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
 import { PrintPicker } from '../components/PrintPicker'
@@ -21,7 +22,6 @@ import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
-import { isEmbedded } from '../lib/embed'
 
 /** Output ids are 32 hex characters; only the head of one is worth showing. */
 function shortId(id: string): string {
@@ -113,7 +113,8 @@ export function HistoryPage() {
 
         {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
           <>
-            {arrangedOutput && (
+            {/* Gone from the list (deleted): nothing to offer a next step for. */}
+            {arrangedOutput && outputsState.data.some((o) => o.id === arrangedOutput.id) && (
               <div className="mb-2">
                 <ArrangedNext
                   output={arrangedOutput}
@@ -522,17 +523,10 @@ function OutputRow({
         <ul className="mt-2 flex flex-wrap gap-3 text-[12px]">
           {(output.files ?? []).map((name) => (
             <li key={name}>
-              {/* Bambuddy's iframe sandbox has no allow-downloads: there the file opens in
-                  a tab that escapes it (allow-popups-to-escape-sandbox), as lib/embed.ts does. */}
-              <a
-                className="text-accent underline"
-                href={api.outputFileUrl(output.id, name)}
-                download
-                rel="noopener"
-                target={isEmbedded() ? '_blank' : undefined}
-              >
+              {/* #2287 — through downloadBlob: a plain link is dropped in Bambuddy's frame (#612). */}
+              <BlobDownload url={api.outputFileUrl(output.id, name)} filename={name}>
                 {name}
-              </a>
+              </BlobDownload>
             </li>
           ))}
         </ul>

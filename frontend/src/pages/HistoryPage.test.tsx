@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
@@ -55,13 +55,12 @@ describe('HistoryPage', () => {
     const item = await row('Reagan')
     const table = within(item).getByRole('table')
     expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Wall81, 2')
-    const link = within(item).getByRole('link', { name: 'guide.svg' })
-    expect(link).toHaveAttribute('href', `/api/v1/outputs/${first.id}/files/guide.svg`)
-    expect(link).toHaveAttribute('download')
-    expect(link).not.toHaveAttribute('target')
+    // #2287 — a button through downloadBlob, not a plain link the frame would drop.
+    expect(within(item).getByRole('button', { name: 'guide.svg' })).toBeInTheDocument()
+    expect(within(item).queryByRole('link', { name: 'guide.svg' })).not.toBeInTheDocument()
   })
 
-  it('opens a pipeline output\'s file in a new tab when embedded, out of the sandbox', async () => {
+  it('downloads a pipeline output\'s file through the escape popup when embedded (#612, #2287)', async () => {
     const first = outputs[0]!
     server.use(
       http.get('/api/v1/models/name-keychain/outputs', () =>
@@ -71,12 +70,15 @@ describe('HistoryPage', () => {
     const top = window.top
     // Inside Bambuddy's iframe: its sandbox has no allow-downloads (CLAUDE.md).
     Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    // A blocked popup: downloadBlob refuses rather than start a download the frame drops.
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
     try {
-      render()
-      const link = within(await row('Reagan')).getByRole('link', { name: 'guide.svg' })
-      expect(link).toHaveAttribute('target', '_blank')
-      expect(link).toHaveAttribute('rel', 'noopener')
+      const { user } = render()
+      await user.click(within(await row('Reagan')).getByRole('button', { name: 'guide.svg' }))
+      expect(open).toHaveBeenCalledWith('', '_blank')
+      expect(await screen.findByRole('alert')).toHaveTextContent('Allow pop-ups')
     } finally {
+      open.mockRestore()
       Object.defineProperty(window, 'top', { value: top, configurable: true })
     }
   })
@@ -334,10 +336,7 @@ describe('HistoryPage', () => {
     // #2287 — the next step, right there: it has not been sent, and Print is the way on.
     const next = screen.getByRole('group', { name: 'Next step' })
     expect(next).toHaveTextContent('Not sent to Bambuddy yet')
-    expect(within(next).getByRole('link', { name: 'Download' })).toHaveAttribute(
-      'href',
-      expect.stringMatching(/\/outputs\/[0-9a-f]+\/model\.3mf$/),
-    )
+    expect(within(next).getByRole('button', { name: 'Download' })).toBeInTheDocument()
     await user.click(within(next).getByRole('button', { name: 'Print' }))
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
@@ -392,6 +391,11 @@ describe('HistoryPage', () => {
             name: 'Batch',
             params: {},
             arranged_from: ['a'.repeat(32), 'c'.repeat(32)],
+            // #2287 — an arrange's result, never sent anywhere.
+            library_files: [],
+            queue_item_id: null,
+            plates: [],
+            print_route: null,
           },
         ]),
       ),
@@ -401,6 +405,7 @@ describe('HistoryPage', () => {
     expect(within(batch).queryByRole('button', { name: 'Edit Batch' })).not.toBeInTheDocument()
     expect(within(batch).getByText('Arranged from 2 outputs')).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Print Batch' })).toBeInTheDocument()
+    expect(within(batch).getByRole('button', { name: 'Send Batch' })).toBeInTheDocument()
   })
 })
 

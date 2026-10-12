@@ -1,6 +1,6 @@
 import { api } from '../api/client'
 import type { Output } from '../api/types'
-import { isEmbedded } from '../lib/embed'
+import { BlobDownload } from './BlobDownload'
 import { Button } from './ui/Button'
 
 /**
@@ -14,17 +14,13 @@ export function ArrangedNext({ output, sent, onPrint }: { output: Output; sent: 
       <Button size="sm" variant="primary" onClick={onPrint}>
         Print
       </Button>
-      {/* Bambuddy's iframe sandbox has no allow-downloads: there the file opens in a tab
-          that escapes it, as History's file links do (lib/embed.ts). */}
-      <a
+      <BlobDownload
+        url={api.downloadUrl(output.id)}
+        filename={`${output.slug}-${output.id}.3mf`}
         className="text-[13px] text-accent underline"
-        href={api.downloadUrl(output.id)}
-        download
-        rel="noopener"
-        target={isEmbedded() ? '_blank' : undefined}
       >
         Download
-      </a>
+      </BlobDownload>
     </div>
   )
 }
