@@ -30,6 +30,7 @@ from scadbuddy.workflows.flow_models import (
     FLOW_GRANT_APPROVE,
     FLOW_GRANT_CHECK,
     GRANT_REFUSED,
+    GrantApproval,
     GrantApprove,
     GrantCheck,
     GrantVerdict,
@@ -147,6 +148,11 @@ class FlowGrants:
     async def check(self, req: GrantCheck) -> GrantVerdict:
         if self._hash_key is None:
             return GrantVerdict(verdict="outside", reason="no approval key")
+        # The run and the request id are the calling workflow's own, never the payload's
+        # word for them: a flow run's checks are its calls (`flow:<run>:<workflow run>:`).
+        own = _flow_request_prefix()
+        if own is None or req.run_id != own[0] or not req.request_id.startswith(own[1]):
+            return GrantVerdict(verdict="outside", reason="not this run's call")
         verdict = await match_grant(
             self._store,
             self.facts_of,
@@ -177,42 +183,60 @@ class FlowGrants:
         )
 
     @activity.defn(name=FLOW_GRANT_APPROVE)
-    async def approve(self, req: GrantApprove) -> bool:
-        """Record the grant's approval, then send it. False when something else decided
-        the call first (a person can't: it is never listed; a Reset can)."""
-        request_id = f"flow:{req.run_id}:{req.workflow_run_id}:{req.call_id}"
-        recorded = await self._store.record_decision(
+    async def approve(self, req: GrantApprove) -> GrantApproval:
+        """Let the calling run's parked call through on its grant's say. Nothing of the
+        verdict is taken from the payload, which names only the call: the call's tool and
+        input are read from the harness as it is parked, hashed here, and approved only
+        when the grant's recorded use of this request id is for that very hash and the
+        grant is in force, in one statement (`record_grant_decision`). "ask" when it is
+        not, and the workflow lists the call for a person; "resolved" when something else
+        decided it first."""
+        own = _flow_request_prefix()
+        if own is None or self._hash_key is None:
+            return "ask"
+        run_id, prefix = own
+        info = activity.info()
+        request_id = f"{prefix}{req.call_id}"
+        client = AgentClient(activity.client(), info.workflow_id)
+        parked = next(
+            (c for c in await client.get_pending_approvals() if c.tool_id == req.call_id), None
+        )
+        if parked is None:
+            # Not parked yet (the workflow starts the call as it schedules this), or
+            # decided already: retried, and the workflow asks once the retries are spent.
+            raise ApplicationError("the call is not parked")
+        call = _parked_call(parked.tool_name, parked.tool_input)
+        use = await self._store.grant_use(request_id)
+        if call is None or use is None or (call[0], call[1]) != (use.fn, use.tool):
+            return "ask"
+        hashed = self._hash(self._hash_key)(*call)
+        recorded = await self._store.record_grant_decision(
             Decision(
                 request_id=request_id,
-                run_id=req.run_id,
-                workflow_run_id=req.workflow_run_id,
+                run_id=run_id,
+                workflow_run_id=info.workflow_run_id or "",
                 call_id=req.call_id,
                 kind="approval",
                 outcome="approved",
-                responder=f"grant:{req.grant_id}",
-                input_hash=req.input_hash,
+                responder=f"grant:{use.grant_id}",
+                input_hash=hashed,
             )
         )
         if not recorded:
-            return False
-        client = AgentClient(activity.client(), req.workflow_id)
+            return "ask"
         try:
             await client.approve_tool(req.call_id, approved=True, update_id=f"grant-{req.call_id}")
         except ToolApprovalError as err:
-            if err.error_type == "UnknownToolApproval":
-                # Not parked yet: the workflow sends this as it starts the call, and the
-                # call parks in the same task. Retried.
-                raise ApplicationError("the call is not parked yet") from None
+            # Decided otherwise: no row says the grant approved a call it did not.
+            await self._store.delete_decision(request_id)
             if err.error_type == "ToolApprovalAlreadyResolved":
-                # Decided otherwise: no row says the grant approved a call it did not.
-                await self._store.delete_decision(request_id)
-                return False
+                return "resolved"
             raise ApplicationError(
                 f"the harness refused the grant's approval ({err.error_type})",
                 type=GRANT_REFUSED,
                 non_retryable=True,
             ) from None
-        return True
+        return "approved"
 
     async def release(self, client: Client, run: Run) -> list[str]:
         """After a requested grant is approved: let through the run's parked flow-own
@@ -251,7 +275,7 @@ class FlowGrants:
             )
             if not isinstance(verdict, Inside):
                 continue
-            if not await self._store.record_decision(
+            if not await self._store.record_grant_decision(
                 Decision(
                     request_id=request_id,
                     run_id=run.id,
@@ -280,6 +304,18 @@ class FlowGrants:
 
 
 _PRINT_PATH = re.compile(r"^/api/v1/print/(outputs|library)/([^/]+)/run$")
+_FLOW_WORKFLOW = re.compile(r"^flow-([0-9a-f-]{36})$")
+
+
+def _flow_request_prefix() -> tuple[str, str] | None:
+    """The calling flow run's id and its calls' request id prefix, from the activity's
+    own workflow; None when the caller is no flow run."""
+    info = activity.info()
+    found = _FLOW_WORKFLOW.match(info.workflow_id or "")
+    if found is None:
+        return None
+    run_id = found.group(1)
+    return run_id, f"flow:{run_id}:{info.workflow_run_id}:"
 
 
 def _parked_call(

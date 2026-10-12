@@ -286,6 +286,14 @@ class FlowStore:
     async def get_decision(self, request_id: str) -> Decision | None:
         return await asyncio.to_thread(self._get_decision, request_id)
 
+    async def record_grant_decision(self, decision: Decision) -> bool:
+        """Record a run grant's approval of a call (#2481), only if the grant is in force
+        now and its recorded use of this request id is for this very input: one statement
+        under the grant row's lock, so a revocation lands wholly before or after it (and
+        the agent checks the grant again as the call runs). True when recorded, or when it
+        is there already; False otherwise."""
+        return await asyncio.to_thread(self._record_grant_decision, decision)
+
     async def delete_decision(self, request_id: str) -> None:
         """Undo a decision the harness refused: no `approved` row for a call it never ran."""
         await asyncio.to_thread(self._delete_decision, request_id)
@@ -565,6 +573,43 @@ class FlowStore:
                 (request_id,),
             ).fetchone()
         return Decision.model_validate(row) if row else None
+
+    def _record_grant_decision(self, decision: Decision) -> bool:
+        grant_id = decision.responder.removeprefix("grant:")
+        with self._pool.connection() as conn, conn.transaction():
+            held = conn.execute(
+                "SELECT 1 FROM flow_grants g JOIN flow_grant_uses u ON u.grant_id = g.id"
+                " WHERE g.id = %s AND g.run_id = %s AND u.request_id = %s"
+                " AND u.input_hash = %s AND g.status = 'approved' AND g.revoked_at IS NULL"
+                " AND now() < g.expires_at FOR SHARE OF g",
+                (grant_id, decision.run_id, decision.request_id, decision.input_hash),
+            ).fetchone()
+            if held is None:
+                return False
+            row = conn.execute(
+                "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
+                " call_id, kind, outcome, response, responder, input_hash)"
+                " VALUES (%s, %s, %s, %s, 'approval', 'approved', '{}'::jsonb, %s, %s)"
+                " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
+                (
+                    decision.request_id,
+                    decision.run_id,
+                    decision.workflow_run_id,
+                    decision.call_id,
+                    decision.responder,
+                    decision.input_hash,
+                ),
+            ).fetchone()
+            if row is not None:
+                return True
+            existing = conn.execute(
+                "SELECT responder, input_hash FROM workflow_run_decisions WHERE request_id = %s",
+                (decision.request_id,),
+            ).fetchone()
+        return existing is not None and (existing["responder"], existing["input_hash"]) == (
+            decision.responder,
+            decision.input_hash,
+        )
 
     def _delete_decision(self, request_id: str) -> None:
         with self._pool.connection() as conn:

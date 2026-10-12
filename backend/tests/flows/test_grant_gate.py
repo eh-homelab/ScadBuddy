@@ -3,13 +3,15 @@ Task A3): a call inside it runs with no entry for anyone to decide, approved by 
 grant with the hash of the call as it runs; a call outside it parks as before."""
 
 import asyncio
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio import activity
 from temporalio.testing import ActivityEnvironment
@@ -21,6 +23,7 @@ from scadbuddy.flows.grants import GrantSpec
 from scadbuddy.flows.manifest import use_manifest
 from scadbuddy.flows.operations import FLOW_DECIDE, STALE_ENTRY, flow_kinds, request_id
 from scadbuddy.workflows.flow_grants import FlowGrants
+from scadbuddy.workflows.flow_models import GrantApprove, GrantCheck, GrantVerdict
 from tests.flows.fake_api import PLAN, FakeApi, Outward
 from tests.flows.flows_support import HASH_KEY, Keys, script
 
@@ -120,6 +123,29 @@ async def test_a_person_cannot_decide_a_call_the_grant_approved(
     assert err.value.type == STALE_ENTRY
 
 
+async def test_a_call_whose_grant_lapses_before_its_approval_is_listed_for_a_person(
+    outward: Outward, api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check matched, then the grant was revoked before the approval: the approval
+    refuses (record_grant_decision), and the call waits for a person instead."""
+
+    async def lapsed(decision: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(outward.store, "record_grant_decision", lapsed)
+    run_id = await outward.run(
+        script("a = await arrange({'objects': [{'output_id': 'o1'}]})", "return a['status']"),
+        grant=grant({"fn": "arrange"}),
+    )
+    run = await outward.row(run_id, lambda r: [w.fn for w in r.waiting_on] == ["arrange"])
+    assert run.steps[0].grant_id is None
+    assert api.to("/api/v1/outputs/arrange") == []
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'done'"
+    assert run.waiting_on == [] and run.steps[0].grant_id is None
+
+
 async def test_a_lookup_that_fails_asks(outward: Outward, api: FakeApi) -> None:
     api.outputs_fail = True
     run_id = await outward.run(script(PRINT, "return 1"), grant=grant({"fn": "queue_print"}))
@@ -195,6 +221,158 @@ async def test_an_outward_tool_inside_the_grant_is_approved_for_its_hash(
     assert status.pending_approvals == []
 
 
+class Parked(NamedTuple):
+    run_id: str
+    call_id: str
+    request_id: str
+    env: ActivityEnvironment
+    grants: FlowGrants
+
+
+SEND = {"output_id": "o1"}
+
+
+async def parked_send(
+    outward: Outward, api: FakeApi, queue: str, *rules: dict[str, Any], calls: int = 1
+) -> list[Parked]:
+    """`calls` sends parked in a run whose grant was requested (so they asked), then the
+    grant approved: activities run as the run's own workflow would run them."""
+    spec = grant(*rules) if rules else grant({"fn": "tool", "tool": "send_to_bambuddy"})
+
+    async def insert(run_id: str) -> None:
+        await outward.store.insert_grant(
+            run_id, spec, status="requested", requested_by={"kind": "agent"}
+        )
+
+    sends = ", ".join(f"tool('send_to_bambuddy', {SEND!r})" for _ in range(calls))
+    run_id = await outward.run(
+        script(f"return await asyncio.gather({sends})"), tools_queue=queue, before=insert
+    )
+    run = await outward.row(run_id, lambda r: len(r.waiting_on) == calls)
+    client = AgentClient(outward.client, run.workflow_id)
+    for _ in range(100):
+        if len(await client.get_pending_approvals()) == calls:
+            break
+        await asyncio.sleep(0.1)
+    await outward.store.approve_grant(run_id, None, approved_by="browser")
+    env = ActivityEnvironment(client=outward.client)
+    env.info = dataclasses.replace(
+        env.info, workflow_id=run.workflow_id, workflow_run_id=run.workflow_run_id
+    )
+    grants = FlowGrants(outward.store, api_client_of(api), HASH_KEY)
+    return [
+        Parked(run_id, w.call_id, request_id(run, w.call_id), env, grants) for w in run.waiting_on
+    ]
+
+
+async def check(p: Parked, args: dict[str, Any] = SEND, rid: str | None = None) -> GrantVerdict:
+    return await p.env.run(
+        p.grants.check,
+        GrantCheck(
+            run_id=p.run_id,
+            request_id=rid or p.request_id,
+            fn="tool",
+            tool="send_to_bambuddy",
+            args=args,
+        ),
+    )
+
+
+async def approve(p: Parked) -> str:
+    return await p.env.run(p.grants.approve, GrantApprove(call_id=p.call_id))
+
+
+async def test_approve_lets_through_only_what_the_check_matched(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str]
+) -> None:
+    served, queue = tools
+    [p] = await parked_send(outward, api, queue)
+    assert (await check(p)).verdict == "inside"
+    assert await approve(p) == "approved"
+    decision = await outward.store.get_decision(p.request_id)
+    assert decision is not None and decision.responder.startswith("grant:")
+    # The hash of the call as it is parked, which the agent checks again (#2318).
+    assert decision.input_hash == input_hash(HASH_KEY, "send_to_bambuddy", SEND)
+    await outward.row(p.run_id, lambda r: r.status == "succeeded")
+    assert served.calls == [SEND]
+
+
+async def test_a_grant_revoked_between_check_and_approve_lets_nothing_through(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str]
+) -> None:
+    served, queue = tools
+    [p] = await parked_send(outward, api, queue)
+    assert (await check(p)).verdict == "inside"
+    await outward.store.revoke_grant(p.run_id, revoked_by="browser")
+    assert await approve(p) == "ask"
+    assert await outward.store.get_decision(p.request_id) is None
+    pending = await AgentClient(outward.client, f"flow-{p.run_id}").get_pending_approvals()
+    assert [c.tool_id for c in pending] == [p.call_id]
+    assert served.calls == []
+
+
+async def test_a_grant_expired_between_check_and_approve_lets_nothing_through(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str]
+) -> None:
+    _, queue = tools
+    [p] = await parked_send(outward, api, queue)
+    assert (await check(p)).verdict == "inside"
+    with outward.store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE flow_grants SET expires_at = now() - interval '1 second' WHERE run_id = %s",
+            (p.run_id,),
+        )
+    assert await approve(p) == "ask"
+    assert await outward.store.get_decision(p.request_id) is None
+
+
+async def test_approve_trusts_no_verdict_it_did_not_record(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str]
+) -> None:
+    """Approve names only the call: nothing checked for it (or checked for other input)
+    approves it, whatever the payload says."""
+    served, queue = tools
+    [p, q] = await parked_send(outward, api, queue, calls=2)
+    # Never checked.
+    assert await approve(p) == "ask"
+    # Checked for other input than it is parked with: the hash does not match.
+    assert (await check(q, {"output_id": "o2"})).verdict == "inside"
+    assert await approve(q) == "ask"
+    for parked in (p, q):
+        assert await outward.store.get_decision(parked.request_id) is None
+    # A payload carrying a grant id or a hash is refused outright.
+    with pytest.raises(ValidationError):
+        GrantApprove.model_validate({"call_id": p.call_id, "grant_id": "g", "input_hash": "h"})
+    assert served.calls == []
+
+
+async def test_a_check_for_another_runs_call_is_outside(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str]
+) -> None:
+    _, queue = tools
+    [p] = await parked_send(outward, api, queue)
+    other = f"flow:{uuid.uuid4()}:wr:{p.call_id}"
+    assert (await check(p, rid=other)).verdict == "outside"
+    assert (await check(p, rid=p.request_id.replace(p.call_id, "x"))).verdict == "inside"
+    wrong_run = await p.env.run(
+        p.grants.check,
+        GrantCheck(run_id=str(uuid.uuid4()), request_id=p.request_id, fn="tool", tool="x"),
+    )
+    assert wrong_run.verdict == "outside"
+
+
+async def test_two_checks_racing_for_the_last_call_let_one_through(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str]
+) -> None:
+    _, queue = tools
+    [p, q] = await parked_send(
+        outward, api, queue, {"fn": "tool", "tool": "send_to_bambuddy", "max_calls": 1}, calls=2
+    )
+    verdicts = await asyncio.gather(check(p), check(q))
+    assert sorted(v.verdict for v in verdicts) == ["inside", "outside"]
+    assert len(await outward.store.grant_uses(p.run_id)) == 1
+
+
 def api_client_of(api: FakeApi) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url="http://api")
 
@@ -237,7 +415,9 @@ async def test_approving_a_requested_grant_releases_the_calls_waiting_inside_it(
     [tool_call] = [w.call_id for w in parked.waiting_on if w.fn == "tool:send_to_bambuddy"]
     assert released == [tool_call]
     run = await outward.row(run_id, lambda r: [w.fn for w in r.waiting_on] == ["queue_print"])
-    await outward.row(run_id, lambda r: r.steps[0].status == "succeeded")
+    await outward.row(
+        run_id, lambda r: any(s.call_id == tool_call and s.status == "succeeded" for s in r.steps)
+    )
     assert served.calls == [{"output_id": "o1"}]
     decision = await outward.store.get_decision(request_id(run, released[0]))
     assert decision is not None and decision.responder.startswith("grant:")

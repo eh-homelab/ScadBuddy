@@ -6,7 +6,6 @@ scripts and to coerce their arguments.
 """
 
 import asyncio
-import contextlib
 import json
 import re
 from collections.abc import Callable
@@ -25,11 +24,12 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
-    from scadbuddy.workflows.flow_entries import run_callback, run_gated
+    from scadbuddy.workflows.flow_entries import await_gated, run_callback, run_gated
     from scadbuddy.workflows.flow_models import (
         FLOW_GRANT_APPROVE,
         FLOW_GRANT_CHECK,
         GRANT_REFUSED,
+        GrantApproval,
         GrantApprove,
         GrantCheck,
         GrantVerdict,
@@ -341,8 +341,8 @@ async def approved_arrange(call: str, request: dict[str, Any]) -> ArrangeResult:
 FLOW_GRANT_PATCH = "flow-grant-check"
 _GRANT_CHECK = timedelta(seconds=10)
 _GRANT_CHECK_RETRY = RetryPolicy(maximum_attempts=5)
-#: Retried until the parked call takes it; only a definite refusal is final.
-_GRANT_APPROVE_RETRY = RetryPolicy(non_retryable_error_types=[GRANT_REFUSED])
+#: Retried while the call is not parked yet; past that, or on a refusal, a person is asked.
+_GRANT_APPROVE_RETRY = RetryPolicy(maximum_attempts=10, non_retryable_error_types=[GRANT_REFUSED])
 
 
 class GrantCall(NamedTuple):
@@ -393,34 +393,37 @@ async def _gated(
     if grant is not None and workflow.patched(FLOW_GRANT_PATCH):
         verdict = await _grant_verdict(call_id, grant)
     if grant is not None and verdict is not None and verdict.verdict == "inside":
-        assert verdict.grant_id is not None
         pinned = grant.pinned(verdict.args or {})
         # Inside the grant (spec 2026-10-11 §3.3): nothing is listed and nobody asked.
         # The call parks in the harness as any gated call does, and the grant's approval
-        # lets it through, bound to the call as it runs, with its defaults pinned.
-        async with step(fn, call_id, outward=True, grant_id=verdict.grant_id):
+        # lets it through, bound to the call as it is parked, with its defaults pinned.
+        # The approval re-derives the verdict from the store and the parked call; when it
+        # will not let it through (the grant lapsed meanwhile), a person is asked.
+        async with step(fn, call_id, outward=True, grant_id=verdict.grant_id) as handle:
             call = asyncio.ensure_future(runner.run_tool(call_id, tool, **{**kwargs, **pinned}))
+            answer: GrantApproval
             try:
-                await workflow.execute_activity(
+                answer = await workflow.execute_activity(  # a GrantApproval
                     FLOW_GRANT_APPROVE,
-                    GrantApprove(
-                        run_id=owner.run_id,
-                        workflow_id=workflow.info().workflow_id,
-                        workflow_run_id=workflow.info().run_id,
-                        call_id=call_id,
-                        grant_id=verdict.grant_id,
-                        input_hash=verdict.input_hash or "",
-                    ),
-                    result_type=bool,
+                    GrantApprove(call_id=call_id),
+                    result_type=str,
                     start_to_close_timeout=_GRANT_CHECK,
                     retry_policy=_GRANT_APPROVE_RETRY,
                 )
             except ActivityError:
-                call.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await call
-                raise
-            return await call
+                answer = "ask"
+            if answer == "approved":
+                return await call
+            if answer == "resolved":
+                handle.step = handle.step.model_copy(update={"grant_id": None})
+                return await call
+            await handle.ask("approval")
+            return await await_gated(
+                call,
+                owner.approval_timeout_s,
+                lambda: owner.started(call_id),
+                call_id=call_id,
+            )
     async with step(fn, call_id, outward=True, waiting="approval"):
         return await run_gated(
             runner.run_tool,

@@ -7,7 +7,7 @@ shows. No ``from __future__ import annotations``: the harness reads these types.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from scadbuddy.flows.grants import Narrowing
 
@@ -123,11 +123,15 @@ class GrantVerdict(BaseModel):
 
 
 class GrantApprove(BaseModel):
-    """Let one parked flow-own call through on the grant's say."""
+    """Let one parked flow-own call through on its grant's say. Only the call is named:
+    the run is the calling workflow's, and the verdict is derived again from the store
+    and the call as it is parked, never taken from here."""
 
-    run_id: str
-    workflow_id: str
-    workflow_run_id: str
+    model_config = ConfigDict(extra="forbid")
+
     call_id: str
-    grant_id: str
-    input_hash: str
+
+
+#: `flow_grant_approve`'s answer: let through; decided first by something else; or not
+#: (the grant lapsed, or its use is not for this call as parked), so a person is asked.
+GrantApproval = Literal["approved", "resolved", "ask"]

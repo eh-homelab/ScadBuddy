@@ -55,8 +55,31 @@ async def project(write: ProjectionWrite) -> None:
 class StepHandle:
     """The step a call is in, for a body that learns something the page shows."""
 
-    def __init__(self, started: FlowStep) -> None:
+    def __init__(self, started: FlowStep, parked: FlowWaiting | None = None) -> None:
         self.step = started
+        self.parked = parked
+
+    async def ask(self, kind: Literal["approval", "answer"]) -> None:
+        """The call needs a person after all (#2481: the grant that would have let it
+        through lapsed before it was approved): list it as waiting, and no longer as the
+        grant's."""
+        owner: StepOwner = workflow.instance()
+        self.step = self.step.model_copy(update={"grant_id": None})
+        self.parked = FlowWaiting(
+            call_id=self.step.call_id,
+            kind=kind,
+            fn=self.step.fn,
+            since=workflow.now(),
+            history_length=workflow.info().get_current_history_length(),
+        )
+        await project(
+            ProjectionWrite(
+                run_id=owner.run_id,
+                workflow_run_id=workflow.info().run_id,
+                step=self.step,
+                waiting_add=self.parked,
+            )
+        )
 
     async def note_session(self, session_id: str) -> None:
         """Record the session the call talks to, while it runs."""
@@ -114,7 +137,7 @@ async def step(
     )
     error: str | None = None
     closing = False
-    handle = StepHandle(started)
+    handle = StepHandle(started, parked)
     try:
         yield handle
     except GeneratorExit:
@@ -141,6 +164,6 @@ async def step(
                             "error": error,
                         }
                     ),
-                    waiting_remove=call_id if parked is not None else None,
+                    waiting_remove=call_id if handle.parked is not None else None,
                 )
             )
