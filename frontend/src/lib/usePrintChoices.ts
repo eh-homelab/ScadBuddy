@@ -55,6 +55,11 @@ export function usePrintChoices(
    * another file opened later would otherwise show the last one's slots, and be
    * printable on them, until its own read lands. A re-arrange keeps the old output's
    * on screen while the new one's is read.
+   *
+   * `carry` is a mutable box read here while rendering, which React does not track:
+   * every `carry.set` must come with a state change that re-renders (as each one in
+   * PrintPicker and useFilamentPlan does), or this keeps showing the old output's
+   * choices after the carry is cleared (#2250).
    */
   const choices = read && (read.key === key || carry?.get()) ? read.view : null
   /** The printer asked for; `null` lets the server open on the remembered one. */

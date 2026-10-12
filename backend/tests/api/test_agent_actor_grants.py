@@ -112,12 +112,16 @@ def test_allowed_and_unmarked_requests_never_consult_the_grant_store() -> None:
 
 # The agent's schema, cut down to the columns GRANT_SQL reads.
 MINI_SCHEMA = """
-CREATE TABLE ai_sessions (id uuid PRIMARY KEY, turn_id uuid, lease_until timestamptz);
+CREATE TABLE ai_sessions (id uuid PRIMARY KEY, turn_id uuid, lease_until timestamptz,
+                          mode text NOT NULL DEFAULT 'classic', durable_turn_id uuid,
+                          status text NOT NULL DEFAULT 'running');
 CREATE TABLE ai_approvals (id uuid PRIMARY KEY, session_id uuid, decision text,
                            consumed_at timestamptz, revoked_at timestamptz);
+CREATE TABLE ai_input_responses (request_id text PRIMARY KEY, session_id uuid, kind text,
+                                 outcome text);
 CREATE TABLE ai_headless_grants (
   id uuid PRIMARY KEY, session_id uuid NOT NULL, turn_id uuid NOT NULL,
-  approval_id uuid NOT NULL, method text NOT NULL, path text NOT NULL,
+  approval_id uuid, request_id text, method text NOT NULL, path text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL,
   used_at timestamptz);
 """
@@ -198,6 +202,69 @@ async def test_a_postgres_grant_whose_approval_was_revoked_is_refused(pg_conninf
     _seed(pg_conninfo)
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute("UPDATE ai_approvals SET revoked_at = now()")
+    assert not await _check(pg_conninfo)
+
+
+def _seed_durable(
+    conninfo: str, *, status: str = "running", outcome: str = "approved", live: bool = True
+) -> str:
+    """A durable session's grant (#2320): its turn is durable_turn_id while it runs, and
+    its approval is the call's ai_input_responses row."""
+    turn = str(uuid.uuid4())
+    request = f"durable:{SESSION}:run-1:toolu_1"
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute(MINI_SCHEMA.encode())
+        conn.execute(
+            "INSERT INTO ai_sessions (id, mode, durable_turn_id, status)"
+            " VALUES (%s, 'durable', %s, %s)",
+            (SESSION, turn if live else str(uuid.uuid4()), status),
+        )
+        conn.execute(
+            "INSERT INTO ai_input_responses VALUES (%s, %s, 'approval', %s)",
+            (request, SESSION, outcome),
+        )
+        conn.execute(
+            "INSERT INTO ai_headless_grants (id, session_id, turn_id, request_id, method, path,"
+            " expires_at) VALUES (%s, %s, %s, %s, 'POST', %s, now() + interval '1 minute')",
+            (str(uuid.uuid4()), SESSION, turn, request, RUN),
+        )
+    return turn
+
+
+@pytest.mark.requires_postgres
+async def test_a_durable_grant_is_used_once_while_its_turn_runs(pg_conninfo: str) -> None:
+    _seed_durable(pg_conninfo)
+    grants = PostgresGrants(pg_conninfo)
+    try:
+        assert await grants(SESSION, "POST", RUN)
+        assert not await grants(SESSION, "POST", RUN), "a grant is used at most once"
+    finally:
+        await grants.aclose()
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    ("status", "outcome", "live"),
+    [
+        ("idle", "approved", True),  # the turn ended
+        ("running", "approved", False),  # another turn runs now
+        ("running", "denied", True),
+        ("running", "expired", True),
+    ],
+)
+async def test_a_durable_grant_needs_its_running_turn_and_an_approved_call(
+    pg_conninfo: str, status: str, outcome: str, live: bool
+) -> None:
+    _seed_durable(pg_conninfo, status=status, outcome=outcome, live=live)
+    assert not await _check(pg_conninfo)
+
+
+@pytest.mark.requires_postgres
+async def test_a_classic_grant_never_passes_as_a_durable_one(pg_conninfo: str) -> None:
+    """A classic grant on a durable session (or the other way round) is refused."""
+    _seed(pg_conninfo)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("UPDATE ai_sessions SET mode = 'durable', durable_turn_id = turn_id")
     assert not await _check(pg_conninfo)
 
 

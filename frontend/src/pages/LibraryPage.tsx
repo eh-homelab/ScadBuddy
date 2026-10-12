@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { LibraryDeleteResult, LibraryEntry, LibraryFolderView, LibraryListing } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
+import { ArrangedNext } from '../components/ArrangedNext'
 import { DeleteLibraryFilesDialog } from '../components/library/DeleteLibraryFilesDialog'
 import { LibraryTree } from '../components/library/LibraryTree'
 import { PrintPicker } from '../components/PrintPicker'
@@ -76,6 +77,9 @@ export function LibraryPage() {
   const [picked, setPicked] = useState<LibraryEntry[]>([])
   const [arranging, setArranging] = useState(false)
   const [arranged, setArranged] = useState<Arranged | null>(null)
+  /** #2287 — the arranged result in the print dialog, and whether a print of it ran. */
+  const [printArranged, setPrintArranged] = useState(false)
+  const [arrangedSent, setArrangedSent] = useState(false)
   const [confirming, setConfirming] = useState<LibraryEntry[]>([])
   const [deleted, setDeleted] = useState<Deleted | null>(null)
   const isPicked = (file: LibraryEntry) => picked.some((p) => p.id === file.id)
@@ -147,6 +151,8 @@ export function LibraryPage() {
 
   /** Opens or closes a file's print dialog, as a URL Back returns from. */
   function openPrint(file: LibraryEntry | null) {
+    // The arranged result's print is not the one opening or closing here.
+    setPrintArranged(false)
     const next = new URLSearchParams(search)
     if (file) {
       next.set('print', String(file.id))
@@ -299,6 +305,9 @@ export function LibraryPage() {
               </Link>
             </p>
           )}
+          {arranged && (
+            <ArrangedNext output={arranged.output} sent={arrangedSent} onPrint={() => setPrintArranged(true)} />
+          )}
           {!listing && !error && !missing && (
             <p className="flex items-center gap-2 text-[13px] text-muted">
               <Spinner /> Reading the Bambuddy library
@@ -394,10 +403,16 @@ export function LibraryPage() {
         </section>
 
         <PrintPicker
-          open={printing !== null}
-          source={printing ? { kind: 'library', file: printing } : undefined}
-          onClose={() => openPrint(null)}
-          onRan={() => undefined}
+          open={printing !== null || (printArranged && arranged !== null)}
+          source={
+            printing
+              ? { kind: 'library', file: printing }
+              : printArranged && arranged
+                ? { kind: 'output', output: arranged.output }
+                : undefined
+          }
+          onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
+          onRan={() => (printing ? undefined : setArrangedSent(true))}
         />
         <ArrangeDialog
           open={arranging}
@@ -407,6 +422,7 @@ export function LibraryPage() {
             setArranging(false)
             setPicked([])
             setArranged(done)
+            setArrangedSent(false)
           }}
         />
         <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />

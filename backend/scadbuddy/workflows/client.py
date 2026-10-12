@@ -128,10 +128,11 @@ def bambuddy_worker(
 ) -> Worker:
     """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun``,
     ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves).
-    With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned like
-    the render worker: ``PrintRun`` and ``Operation`` are pinned to the build that started
-    them, and ``FollowPrint`` is AUTO_UPGRADE (`VersionedFollowPrint`), since it lasts as long
-    as the print.
+    With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned, and
+    every workflow on it is AUTO_UPGRADE (`print_deployment`): each run moves to the
+    current build. Pinned runs were stranded by every deploy (#2066): the Deployment
+    rolls with ``Recreate``, so the old build is still current when its pod stops, it
+    stops without draining, and nothing serves the runs pinned to it.
     Without (in the API, dev and tests) it is unversioned. Either way a change that
     alters a workflow's commands is made with ``workflow.patched``, so a run started on
     the old code finishes on the new.
@@ -187,13 +188,14 @@ def follow_worker(
 
 
 def print_deployment(build_id: str | None) -> WorkerDeploymentConfig | None:
-    """``scadbuddy-print`` at ``build_id``, workflows pinned by default; None unversioned."""
+    """``scadbuddy-print`` at ``build_id``, workflows AUTO_UPGRADE by default (#2066);
+    None unversioned."""
     if build_id is None:
         return None
     return WorkerDeploymentConfig(
         version=WorkerDeploymentVersion(deployment_name=PRINT_DEPLOYMENT_NAME, build_id=build_id),
         use_worker_versioning=True,
-        default_versioning_behavior=VersioningBehavior.PINNED,
+        default_versioning_behavior=VersioningBehavior.AUTO_UPGRADE,
     )
 
 
