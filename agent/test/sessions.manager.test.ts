@@ -762,6 +762,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         backendUrl,
         dir: sessionBrowserDir(paths, session.id),
         tmpDir: sessionBrowserTmpDir(session.id),
+        // Its downloads go into the session's workspace (#2329).
+        downloads: { files: expect.anything(), ref: { kind: 'session', sessionId: session.id } },
       })
       // Its directory is not the session's cwd, where named output files land.
       expect(runs[1]!.headlessBrowser!.dir).not.toBe(runs[1]!.cwd)

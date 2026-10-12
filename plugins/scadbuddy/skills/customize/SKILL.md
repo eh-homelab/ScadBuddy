@@ -93,6 +93,15 @@ parameter type means (main spec §5.1 and §5.2):
 - **Files.** `POST /api/v1/models/{slug}/assets` (multipart `file`, SVG or PNG,
   at most 8 MiB) stores a picture and returns its `id`. Pass that id as the
   value, never a path. A sample's value is its bare name (main spec §5.5).
+- **A file from elsewhere goes through your workspace** (#2329;
+  `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`). Save it
+  there first: `http_request` with `save_to_workspace`, a headless-browser download
+  (it lands in `downloads/`), or `workspace_save` for a ScadBuddy file. Look at it
+  with `workspace_read` (an image comes back as an image), change a text file with
+  `workspace_edit`, then upload it with `upload_asset` giving `workspace_path` and
+  the `workspace_sha256` that `workspace_list` or `workspace_read` showed, instead
+  of `content_base64`. The bytes never pass through the conversation, and the upload
+  is refused if the file changed since you read it.
 - **Colours.** Two colour parameters with the same value share one extruder
   (main spec §7). Say so if the user sets two parts to the same colour and
   expects two filaments.

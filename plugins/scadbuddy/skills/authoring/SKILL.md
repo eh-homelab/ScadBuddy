@@ -202,6 +202,16 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
   `response: "full"` only when the next edit needs the exact text. `glob` lists a
   model's files and `grep` searches one model or all of them
   (`agent/src/tools/files.ts`, issue #813).
+- A source, README or picture you got from elsewhere goes through your workspace
+  (#2329; `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`), not
+  through the conversation. Save it there (`http_request` with `save_to_workspace`, a
+  headless-browser download into `downloads/`, or `workspace_save` for a ScadBuddy
+  file), view it with `workspace_read` or fix it with `workspace_edit`, then send it
+  with `workspace_path` and the `workspace_sha256` you read it at, in place of the
+  inline content: `create_model` or `import_model` (a `.scad`), `write_file` or
+  `write_source_file`, `set_readme`, `set_model_thumbnail`, `add_model_media` (an image
+  or video for the gallery) or `set_output_thumbnail`. Text must be UTF-8. A file that
+  changed since you read it is refused; read it again and resend.
 - If `apply_patch` answers `conflict`, someone saved since you read it. Read the
   source again and rebuild the patch against `current`; don't force your old text
   over theirs (`docs/ai/authoring.md` section 2).

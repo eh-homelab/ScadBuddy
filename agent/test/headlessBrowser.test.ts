@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -15,6 +16,7 @@ import {
   DISALLOWED_BROWSER_TOOLS,
   disallowedBrowserTools,
   materializeHeadlessBrowser,
+  NO_DOWNLOADS,
   originToApprove,
   PLAYWRIGHT_MCP_VERSION,
   playwrightMcpCli,
@@ -353,10 +355,12 @@ describe('the per-session plugin', () => {
         isolated: boolean
         userDataDir?: string
         launchOptions: { headless: boolean }
-        contextOptions: { extraHTTPHeaders?: Record<string, string> }
+        contextOptions: { extraHTTPHeaders?: Record<string, string>; acceptDownloads: boolean }
       }
     }
     const config = JSON.parse(readFileSync(configFile, 'utf8')) as Config
+    // #2329: downloads are accepted, and drained into the session's workspace.
+    expect(config.browser.contextOptions.acceptDownloads).toBe(true)
     expect(config.network).toEqual({ allowedOrigins: [ORIGIN] })
     expect(config.browser.isolated).toBe(true)
     expect(config.browser.userDataDir).toBeUndefined()
@@ -392,10 +396,64 @@ describe('the per-session plugin', () => {
     const guard = readFileSync(config.browser.initPage![0]!, 'utf8')
     expect(guard).toContain(`const UI = ${JSON.stringify([ORIGIN])}`)
     expect(guard).toContain(`const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}`)
-    expect(guard).toContain('maxRedirects: 0')
+    expect(guard).toContain("redirect: 'manual'")
     const approvedFile = path.join(dir, 'approved-origins.json')
-    expect(guard).toBe(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile }))
+    expect(guard).toBe(
+      redirectGuardSource({
+        ui: [ORIGIN],
+        sessionId,
+        approvedFile,
+        downloadsDir: path.join(dir, 'downloads'),
+        budgetFile: path.join(dir, 'download-budget.json'),
+        outputDir: path.join(dir, 'output'),
+      }),
+    )
+    // No download may run until the harness writes a budget before a browser call.
+    expect(JSON.parse(readFileSync(path.join(dir, 'download-budget.json'), 'utf8'))).toEqual(NO_DOWNLOADS)
+    // #2329: it saves each page's downloads where the harness drains them.
+    expect(guard).toContain(`const DOWNLOADS = ${JSON.stringify(path.join(dir, 'downloads'))}`)
+    expect(redirectGuardSource({ ui: [ORIGIN], sessionId, approvedFile })).toContain('const DOWNLOADS = null')
     expect(JSON.parse(readFileSync(approvedFile, 'utf8'))).toEqual([])
+  })
+
+  it('deletes and writes only paths it built inside its own directories (traversal, absolute names, symlinks)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-own-'))
+    const outputDir = path.join(dir, 'output')
+    const downloadsDir = path.join(dir, 'downloads')
+    mkdirSync(outputDir)
+    mkdirSync(downloadsDir)
+    const outside = path.join(dir, 'outside.txt')
+    writeFileSync(outside, 'keep me')
+    const guardFile = path.join(dir, 'guard.cjs')
+    writeFileSync(guardFile, redirectGuardSource({ ui: [ORIGIN], sessionId: 's', approvedFile: path.join(dir, 'a.json'), downloadsDir, budgetFile: path.join(dir, 'b.json'), outputDir }))
+    type Own = {
+      ownPath: (dir: string, name: string) => string | null
+      removeOwn: (dir: string, name: string) => boolean
+      plainSize: (file: string) => number
+      dropServerCopy: (suggested: string) => void
+      serverName: (suggested: string) => string
+    }
+    const own = (createRequire(import.meta.url)(guardFile) as { ownFiles: Own }).ownFiles
+    for (const name of ['../outside.txt', '..', '.', '', outside, 'a/../../outside.txt', '..\\outside.txt']) {
+      expect(own.ownPath(outputDir, name)).toBeNull()
+      expect(own.removeOwn(outputDir, name)).toBe(false)
+    }
+    // A suggested name from the page goes through the server's sanitiser: no separator survives it.
+    for (const suggested of ['../outside.txt', '../../outside.txt', outside, '/etc/passwd', '..']) {
+      expect(own.serverName(suggested)).not.toMatch(/[/\\]/)
+      own.dropServerCopy(suggested)
+    }
+    // A symlink planted under the very name the server would use is unlinked, never followed.
+    const planted = path.join(outputDir, own.serverName('part.stl'))
+    symlinkSync(outside, planted)
+    expect(own.plainSize(planted)).toBe(0)
+    own.dropServerCopy('part.stl')
+    expect(existsSync(planted) || isLink(planted)).toBe(false)
+    // A link to a directory outside, under a download's own name, too.
+    symlinkSync(dir, path.join(downloadsDir, 'x.bin'))
+    expect(own.removeOwn(downloadsDir, 'x.bin')).toBe(true)
+    expect(readFileSync(outside, 'utf8')).toBe('keep me')
+    expect(existsSync(guardFile)).toBe(true)
   })
 
   it('sets the server allow-list to the UI origins and the listed origins, and drops it under `*`', async () => {
@@ -731,3 +789,11 @@ describe('browserToolsGuide', () => {
     expect(browserToolsGuide(false)).not.toContain(TOOL_PREFIX)
   })
 })
+
+function isLink(file: string): boolean {
+  try {
+    return lstatSync(file).isSymbolicLink()
+  } catch {
+    return false
+  }
+}

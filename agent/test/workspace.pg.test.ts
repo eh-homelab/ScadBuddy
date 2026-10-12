@@ -1,10 +1,14 @@
+import { randomUUID } from 'node:crypto'
+import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import path from 'node:path'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
+import { drainDownloads } from '../src/harness/browserDownloads.js'
 import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
@@ -217,6 +221,216 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       } finally {
         await client.close()
       }
+    })
+  })
+
+  describe('uploads from the workspace (#2329 part 2)', () => {
+    type Seen = { method: string; path: string; type: string | null; form?: FormData; json?: unknown }
+    function upload(answer: (seen: Seen) => Response = () => Response.json({ ok: true }), secrets: string[] = []) {
+      const seen: Seen[] = []
+      const c: ToolContext = {
+        ...services({
+          workspace: files,
+          secrets: async () => secrets,
+          backend: createBackendClient(BACKEND, async (r) => {
+            const req = r as Request
+            const type = req.headers.get('content-type')
+            const s: Seen = { method: req.method, path: decodeURIComponent(new URL(req.url).pathname), type }
+            if (type?.startsWith('multipart/form-data')) s.form = await req.formData()
+            else if (type?.startsWith('application/json')) s.json = await req.json()
+            seen.push(s)
+            return answer(s)
+          }),
+        }),
+        principal: { id: 'browser', kind: 'browser', tiers: tiersUpTo('outward') },
+        session: sessionId,
+        progress: async () => {},
+        signal: new AbortController().signal,
+      }
+      return { c, seen }
+    }
+
+    it('streams a stored file a slice at a time, and stops at a change', async () => {
+      const bytes = Buffer.from('0123456789abcdef!')
+      const info = await files.write(ws, 'big.bin', bytes)
+      const parts: Buffer[] = []
+      for await (const part of files.chunks(ws, 'big.bin', info.sha256, 5)) parts.push(part)
+      expect(parts.map((p) => p.length)).toEqual([5, 5, 5, 2])
+      expect(Buffer.concat(parts).equals(bytes)).toBe(true)
+      const stale = files.chunks(ws, 'big.bin', 'f'.repeat(64))
+      await expect(stale.next()).rejects.toMatchObject({ code: 'conflict' })
+      const changing = files.chunks(ws, 'big.bin', info.sha256, 5)
+      await changing.next()
+      await files.write(ws, 'big.bin', Buffer.from('other'))
+      await expect(changing.next()).rejects.toMatchObject({ code: 'conflict' })
+      await expect(files.chunks(ws, 'gone.bin', info.sha256).next()).rejects.toMatchObject({ code: 'not_found' })
+    })
+
+    it('upload_asset sends a workspace file as the multipart file, and names it in the result', async () => {
+      const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>')
+      const info = await files.write(ws, 'downloads/logo.svg', svg)
+      const { c, seen } = upload(() => Response.json({ id: 'a'.repeat(64), name: 'logo.svg' }, { status: 201 }))
+      const result = firstText(
+        await runTool(tool('upload_asset'), { slug: 'box', workspace_path: 'downloads/logo.svg', workspace_sha256: info.sha256 }, c),
+      ) as Record<string, unknown>
+      expect(seen).toHaveLength(1)
+      expect(seen[0]).toMatchObject({ method: 'POST', path: '/api/v1/models/box/assets' })
+      expect(seen[0]!.type).toMatch(/^multipart\/form-data; boundary=/)
+      const file = seen[0]!.form!.get('file') as File
+      expect(file.name).toBe('logo.svg')
+      expect(file.type).toBe('image/svg+xml')
+      expect(Buffer.from(await file.arrayBuffer()).equals(svg)).toBe(true)
+      expect(result).toMatchObject({ id: 'a'.repeat(64), workspace_file: { path: 'downloads/logo.svg', size_bytes: svg.length, sha256: info.sha256 } })
+    })
+
+    it('refuses a changed file, a path without its sha256, and both or neither of the two', async () => {
+      const info = await files.write(ws, 'p.png', PNG)
+      const { c, seen } = upload()
+      const changed = await runTool(tool('set_model_thumbnail'), { slug: 'box', workspace_path: 'p.png', workspace_sha256: 'f'.repeat(64) }, c)
+      expect(String(firstText(changed))).toMatch(/changed since it was read.*nothing was sent/)
+      const noSha = await runTool(tool('set_model_thumbnail'), { slug: 'box', workspace_path: 'p.png' }, c)
+      expect(String(firstText(noSha))).toMatch(/needs `workspace_sha256`/)
+      const both = await runTool(
+        tool('set_model_thumbnail'),
+        { slug: 'box', png_base64: PNG.toString('base64'), workspace_path: 'p.png', workspace_sha256: info.sha256 },
+        c,
+      )
+      expect(String(firstText(both))).toMatch(/exactly one of the two/)
+      const neither = await runTool(tool('set_model_thumbnail'), { slug: 'box' }, c)
+      expect(String(firstText(neither))).toMatch(/exactly one of the two/)
+      const missing = await runTool(tool('set_model_thumbnail'), { slug: 'box', workspace_path: 'nope.png', workspace_sha256: info.sha256 }, c)
+      expect(String(firstText(missing))).toMatch(/no file nope.png/)
+      expect(seen).toEqual([])
+    })
+
+    it('sets model and output thumbnails and adds model media from the workspace', async () => {
+      const info = await files.write(ws, 'shots/p.png', PNG)
+      const { c, seen } = upload((s) => (s.path.startsWith('/api/v1/outputs/') ? new Response(null, { status: 204 }) : Response.json({ slug: 'box', version: 'v2' })))
+      const ref = { workspace_path: 'shots/p.png', workspace_sha256: info.sha256 }
+      expect((await runTool(tool('set_model_thumbnail'), { slug: 'box', ...ref }, c)).isError).toBeFalsy()
+      const out = firstText(await runTool(tool('set_output_thumbnail'), { output_id: OUTPUT, ...ref }, c)) as Record<string, unknown>
+      expect(out).toMatchObject({ status: 'set', output_id: OUTPUT, workspace_file: { path: 'shots/p.png', sha256: info.sha256 } })
+      expect((await runTool(tool('add_model_media'), { slug: 'box', caption: 'Front', ...ref }, c)).isError).toBeFalsy()
+      expect(seen.map((s) => `${s.method} ${s.path}`)).toEqual([
+        'PUT /api/v1/models/box/thumbnail',
+        `PUT /api/v1/outputs/${OUTPUT}/thumbnail`,
+        'POST /api/v1/models/box/media',
+      ])
+      for (const s of seen) {
+        const file = s.form!.get('file') as File
+        expect(Buffer.from(await file.arrayBuffer()).equals(PNG)).toBe(true)
+      }
+      expect((seen[2]!.form!.get('file') as File).name).toBe('p.png')
+      expect(seen[2]!.form!.get('caption')).toBe('Front')
+    })
+
+    it('sends a text file as the text routes take it, and refuses one that is not UTF-8 text', async () => {
+      const scad = Buffer.from('module part() cube(2);\n')
+      const scadInfo = await files.write(ws, 'parts.scad', scad)
+      const md = await files.write(ws, 'README.md', Buffer.from('# Box\n'))
+      const bin = await files.write(ws, 'blob.scad', Buffer.from([0xff, 0xfe, 0x00]))
+      const { c, seen } = upload((s) => Response.json({ slug: s.path.split('/')[4] ?? 'box', version: 'v2' }, { status: s.path === '/api/v1/models' ? 201 : 200 }))
+      await runTool(tool('write_source_file'), { slug: 'box', name: 'parts.scad', workspace_path: 'parts.scad', workspace_sha256: scadInfo.sha256 }, c)
+      await runTool(tool('set_readme'), { slug: 'box', workspace_path: 'README.md', workspace_sha256: md.sha256 }, c)
+      await runTool(tool('create_model'), { name: 'Parts', workspace_path: 'parts.scad', workspace_sha256: scadInfo.sha256 }, c)
+      await runTool(tool('import_model'), { workspace_path: 'parts.scad', workspace_sha256: scadInfo.sha256 }, { ...c, gate: 'harness' })
+      expect(seen.map((s) => [`${s.method} ${s.path}`, s.json])).toEqual([
+        ['PUT /api/v1/models/box/files/parts.scad', { content: scad.toString(), message: null }],
+        ['PUT /api/v1/models/box/readme', { content: '# Box\n' }],
+        ['POST /api/v1/models', { name: 'Parts', source: scad.toString(), description: '', tags: [], force: false }],
+        ['POST /api/v1/models', { name: 'parts', source: scad.toString(), description: '', tags: [], force: false }],
+      ])
+      const refused = await runTool(tool('write_source_file'), { slug: 'box', name: 'b.scad', workspace_path: 'blob.scad', workspace_sha256: bin.sha256 }, c)
+      expect(String(firstText(refused))).toMatch(/not UTF-8 text/)
+      expect(seen).toHaveLength(4)
+    })
+
+    it('refuses every upload that carries a credential, from the workspace or inline, and never says which', async () => {
+      const SECRET = 'sk-ant-planted-0123456789'
+      const { c, seen } = upload(() => Response.json({ ok: true }), ['xy', SECRET])
+      // Text, and binary with the secret across the 1 MiB slice boundary the search reads in.
+      const text = await files.write(ws, 'leak.scad', Buffer.from(`// key ${SECRET}\ncube(1);\n`))
+      const binary = Buffer.concat([PNG, Buffer.alloc(16, 0), Buffer.from(SECRET), Buffer.alloc(4, 0)])
+      const big = new SessionFiles(db.sql, { limits: { fileMaxBytes: 3_000_000, workspaceMaxBytes: 10_000_000 } })
+      const across = Buffer.concat([Buffer.alloc(1024 * 1024 - 5, 1), Buffer.from(SECRET), Buffer.alloc(10, 1)])
+      const png = await files.write(ws, 'leak.png', binary)
+      const spanning = await big.write(ws, 'across.bin', across)
+      const fromText = { workspace_path: 'leak.scad', workspace_sha256: text.sha256 }
+      const fromPng = { workspace_path: 'leak.png', workspace_sha256: png.sha256 }
+      const calls: [string, Record<string, unknown>][] = [
+        ['upload_asset', { slug: 'box', ...fromPng }],
+        ['upload_asset', { slug: 'box', workspace_path: 'across.bin', workspace_sha256: spanning.sha256, filename: 'x.png' }],
+        ['upload_asset', { slug: 'box', filename: 'x.png', content_base64: binary.toString('base64') }],
+        ['set_model_thumbnail', { slug: 'box', ...fromPng }],
+        ['set_model_thumbnail', { slug: 'box', png_base64: binary.toString('base64') }],
+        ['set_output_thumbnail', { output_id: OUTPUT, ...fromPng }],
+        ['set_output_thumbnail', { output_id: OUTPUT, png_base64: binary.toString('base64') }],
+        ['add_model_media', { slug: 'box', ...fromPng }],
+        ['add_model_media', { slug: 'box', filename: 'p.png', content_base64: binary.toString('base64') }],
+        ['create_model', { name: 'Leak', ...fromText }],
+        ['create_model', { name: 'Leak', source: `// ${SECRET}` }],
+        ['import_model', fromText],
+        ['write_source_file', { slug: 'box', name: 'leak.scad', ...fromText }],
+        ['write_source_file', { slug: 'box', name: 'leak.scad', content: SECRET }],
+        ['write_file', { slug: 'box', file_path: 'parts.scad', ...fromText }],
+        ['write_file', { slug: 'box', file_path: 'parts.scad', content: `x ${SECRET} y` }],
+        ['set_readme', { slug: 'box', ...fromText }],
+        ['set_readme', { slug: 'box', content: SECRET }],
+      ]
+      for (const [name, args] of calls) {
+        const result = await runTool(tool(name), args, { ...c, gate: 'harness' })
+        const message = String(firstText(result))
+        expect(result.isError, `${name} ${JSON.stringify(Object.keys(args))}`).toBe(true)
+        expect(message).toMatch(new RegExp(`^${name}: refused, .* contains one of the agent's credentials`))
+        expect(message).not.toContain(SECRET)
+      }
+      expect(seen).toEqual([])
+      // Without the secret, the same file goes.
+      await runTool(tool('set_readme'), { slug: 'box', content: 'fine' }, c)
+      expect(seen).toHaveLength(1)
+    })
+
+    it('shows the path and sha256 on an approval card, never the bytes', () => {
+      const sha = 'a'.repeat(64)
+      const summary = tool('import_model').summarize({ workspace_path: 'downloads/box.scad', workspace_sha256: sha })
+      expect(summary).toBe(`Import a model from the workspace file downloads/box.scad (sha256 ${sha})`)
+      expect(tool('upload_asset').summarize({ slug: 'box', workspace_path: 'logo.svg', workspace_sha256: sha })).toContain(sha)
+    })
+
+    it('redacts the credentials from a text read', async () => {
+      await files.write(ws, 'page.html', Buffer.from('<p>key sk-ant-secret-1234</p>\n'))
+      const c: ToolContext = {
+        ...services({ workspace: files, secrets: async () => ['sk-ant-secret-1234'] }),
+        principal: { id: 'browser', kind: 'browser', tiers: tiersUpTo('read') },
+        session: sessionId,
+        progress: async () => {},
+        signal: new AbortController().signal,
+      }
+      const page = String(firstText(await runTool(tool('workspace_read'), { path: 'page.html' }, c)))
+      expect(page).toContain('<p>key [redacted]</p>')
+      expect(page).not.toContain('sk-ant-secret-1234')
+    })
+  })
+
+  describe('headless-browser downloads', () => {
+    it('land under downloads/ with a plain name, never replacing a file, and leave the disk', async () => {
+      const dir = path.join((await tempPaths()).stateDir, 'downloads')
+      await mkdir(dir, { recursive: true })
+      const put = async (name: string, url: string, bytes: Buffer) => {
+        const id = randomUUID()
+        await writeFile(path.join(dir, `${id}.bin`), bytes)
+        await writeFile(path.join(dir, `${id}.json`), JSON.stringify({ url, name, error: null }))
+      }
+      await put('part.stl', 'https://files.example/dl/part.stl?token=abc#x', Buffer.from('solid a'))
+      await put('part.stl', 'https://files.example/dl/part.stl', Buffer.from('solid b'))
+      await put('../../etc/passwd', 'https://files.example/p', Buffer.from('x'))
+      await put('huge.bin', 'https://files.example/huge', Buffer.alloc(1500))
+      const drained = await drainDownloads(dir, { files, ref: ws })
+      expect(drained.saved.map((f) => f.path).sort()).toEqual(['downloads/part-1.stl', 'downloads/part.stl', 'downloads/passwd'])
+      expect(drained.refused).toEqual([{ name: 'huge.bin', reason: '1500 bytes, over the 1000-byte workspace file limit' }])
+      const stored = await files.list(ws, 'downloads')
+      expect(stored.map((f) => f.source)).toContainEqual({ tool: 'browser', url: 'https://files.example/dl/part.stl' })
+      expect(await readdir(dir)).toEqual([])
     })
   })
 

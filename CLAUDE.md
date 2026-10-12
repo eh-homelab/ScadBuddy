@@ -489,7 +489,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
     with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
-    Never a file on the pod. The panel's Files (part 3) are `routes/sessionFiles.ts`
+    Never a file on the pod. Uploads take `workspace_path` + `workspace_sha256` instead of
+    inline content (`src/tools/workspaceUploads.ts`: binary streamed by
+    `SessionFiles.chunks` into the multipart route, text decoded as UTF-8); the headless
+    browser's downloads are drained into `downloads/` after each browser call by a
+    `PostToolUse` hook (`src/harness/browserDownloads.ts`).
+    The panel's Files (part 3) are `routes/sessionFiles.ts`
     (list, download as an attachment, multipart upload, delete; the session routes'
     guards, writes owner-only, each write a `workspace.file` event) and the caps' route
     `routes/workspaceSettings.ts`; the frontend is `components/assistant/SessionFiles.tsx`

@@ -102,6 +102,8 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "DELETE /api/v1/models/{slug}/readme",
     "PUT /api/v1/models/{slug}/thumbnail",
     "DELETE /api/v1/models/{slug}/thumbnail",
+    "POST /api/v1/models/{slug}/media",
+    "PUT /api/v1/outputs/{output_id}/thumbnail",
     "POST /api/v1/models/{slug}/render",
     "POST /api/v1/models/{slug}/presets",
     "PATCH /api/v1/models/{slug}/presets/{preset_id}",

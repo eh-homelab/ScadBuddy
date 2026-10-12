@@ -1,5 +1,6 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
+import { redact } from '../secrets.js'
 import { IMAGE_DATA_MAX } from '../sessions/images.js'
 import {
   decodeText,
@@ -33,8 +34,9 @@ import { defineTool, json, text, ToolError, type Tool, type ToolContext } from '
 // workspace_write and workspace_delete are made against it, so a change made in
 // between is a conflict, never a silent overwrite. Text reads page as read_file
 // does; an image comes back as an image block; any other binary file as its
-// metadata. A text read is a tool result like any other, so the session's event
-// log is redacted of the turn's secrets (sessions/sdkEvents.ts `scrubForLog`).
+// metadata. A text read is redacted of the credentials (ToolServices.secrets)
+// before the model sees it, and as a tool result its event-log copy is redacted
+// of the turn's secrets too (sessions/sdkEvents.ts `scrubForLog`).
 
 const SOURCE = "the assistant's workspace: files it downloaded, saved or wrote, and files the user uploaded"
 const DEFAULT_LIMIT = 2000
@@ -302,7 +304,9 @@ export const workspaceTools: Tool[] = [
           return json({ ...described(file), content: 'omitted: the image is larger than an image the model can view (5 MB)' })
         }
         const content = decodeText(file.bytes, file.mediaType)
-        if (content !== undefined) return textPage(file, content, offset ?? 1, limit ?? DEFAULT_LIMIT)
+        // The credentials are redacted before the model sees the text: a saved
+        // page or response may quote one back (http_request refuses to send them).
+        if (content !== undefined) return textPage(file, redact(content, (await ctx.secrets?.()) ?? []), offset ?? 1, limit ?? DEFAULT_LIMIT)
         return json({ ...described(file), content: 'omitted: a binary file, which is returned as metadata only' })
       }),
   }),
