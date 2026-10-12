@@ -2,7 +2,7 @@
 ``data/flows`` (#2503; spec 2026-10-11-flow-grants-and-git-design.md §6.2).
 
 A version's script is read from git at the commit its row names, never from the row. A
-registration or restore holds the flows repository's write lock across the reconcile,
+registration or restore holds the flows repository's write lock across the backfill and reconcile,
 the commit and the row's insert (``FlowHistory.register``). If the insert fails, the
 commit stays and the request fails; the next registration, or the next start, indexes
 it at its own position (``flows/backfill.py``).
@@ -16,7 +16,7 @@ import uuid
 from typing import Any
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
-from scadbuddy.flows.backfill import backfill, created_by, reconcile_locked
+from scadbuddy.flows.backfill import backfill, backfill_locked, created_by
 from scadbuddy.flows.models import Definition, DefinitionSummary, FlowDiff, FlowVersion
 from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.store import FlowStore
@@ -56,7 +56,7 @@ class FlowDefinitions:
             done = backfill(self.history, self.store)
         except (GitError, OSError):
             # The app boots either way: the rows keep their scripts until a later
-            # start backfills them, and registering waits for the repository.
+            # start or the next registration (which backfills first) commits them.
             logger.exception("could not backfill flow versions into git")
             return
         if done:
@@ -111,7 +111,7 @@ class FlowDefinitions:
             index,
             script=script,
             restore=restore,
-            reconcile=lambda: reconcile_locked(self.history, self.store),
+            reconcile=lambda: backfill_locked(self.history, self.store),
         )
         return Definition.model_validate(
             {**rows[0].model_dump(), "script": self.history.script_at(name, commit)}

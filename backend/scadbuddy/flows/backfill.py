@@ -45,24 +45,31 @@ def backfill(history: FlowHistory, store: FlowStore) -> int:
     """Commit every row written before flows were in git, then reconcile. The number of
     rows backfilled."""
     with history.write_lock():
-        rows = store.unbackfilled()
-        if rows:
-            made = {c.version_id: c.commit for c in history.commits()}
-            for row in rows:
-                commit = made.get(row.id)
-                if commit is None:
+        return backfill_locked(history, store)
 
-                    def index(commit: str, version: int, row_id: str = row.id) -> None:
-                        store.set_commit(row_id, commit)
 
-                    with authored_as(author_of(row.created_by)):
-                        history.register_locked(
-                            row.name, row.id, index, script=row.script, date=row.created_at
-                        )
-                else:
-                    # Committed before a crash, its row never updated.
-                    store.set_commit(row.id, commit)
-        reconcile_locked(history, store)
+def backfill_locked(history: FlowHistory, store: FlowStore) -> int:
+    """:func:`backfill` under the write lock the caller holds. Every registration runs
+    it first, so one never takes a number a legacy row still holds after a backfill
+    that failed at start."""
+    rows = store.unbackfilled()
+    if rows:
+        made = {c.version_id: c.commit for c in history.commits()}
+        for row in rows:
+            commit = made.get(row.id)
+            if commit is None:
+
+                def index(commit: str, version: int, row_id: str = row.id) -> None:
+                    store.set_commit(row_id, commit)
+
+                with authored_as(author_of(row.created_by)):
+                    history.register_locked(
+                        row.name, row.id, index, script=row.script, date=row.created_at
+                    )
+            else:
+                # Committed before a crash, its row never updated.
+                store.set_commit(row.id, commit)
+    reconcile_locked(history, store)
     return len(rows)
 
 

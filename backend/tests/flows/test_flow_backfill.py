@@ -251,3 +251,38 @@ async def test_a_crash_between_a_backfill_commit_and_its_update_is_repaired(
         got = await definitions.get(version_id)
         assert got is not None and got.version == version
         assert got.commit == definitions.history.commit_for(version_id)
+
+
+async def test_a_registration_after_a_partly_failed_backfill_finishes_it_first(
+    definitions: FlowDefinitions, store: FlowStore, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backfill that failed at start (a git timeout on the third row) is finished by
+    the next registration, under its lock, before it takes a number: never a number a
+    legacy row still holds."""
+    legacy(store, "swap", 1, ONE, BROWSER, 1)
+    legacy(store, "swap", 2, TWO, BROWSER, 2)
+    s3 = legacy(store, "swap", 3, ONE, AGENT, 3)
+    history = definitions.history
+    register_locked = history.register_locked
+    failed: list[str] = []
+
+    def flaky(name: str, version_id: str, *args: Any, **kwargs: Any) -> Any:
+        if version_id == s3 and not failed:
+            failed.append(version_id)
+            raise GitError("timed out")
+        return register_locked(name, version_id, *args, **kwargs)
+
+    monkeypatch.setattr(history, "register_locked", flaky)
+    await definitions.start()
+    assert [c for _, _, c in rows(store)][2] is None
+
+    four = await definitions.register("swap", TWO, BROWSER, approval_timeout_s=None)
+    assert four.version == 4
+    found = rows(store)
+    assert [v for _, v, _ in found] == [1, 2, 3, 4]
+    for _, version, commit in found:
+        assert commit is not None and history.version_of("swap", commit) == version
+
+    # And the next start has nothing to repair.
+    await definitions.start()
+    assert len(git(root, "log", "--format=%H").splitlines()) == 5
