@@ -256,6 +256,15 @@ class PrintRunResult(BaseModel):
     rack_picks: list[RackSentPick] = Field(default_factory=list)
 
 
+def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
+    """A library file's slots as read from the file itself, for every plate (#2550):
+    every copy of it has the same slots, so they answer for whichever copy is read.
+    ``None`` when they came from Bambuddy, which is then asked per plate."""
+    if isinstance(source, LibrarySource) and source.local is not None:
+        return source.local.for_plate
+    return None
+
+
 async def filament_options(
     client: BambuddyClient,
     source: PrintSource,
@@ -301,13 +310,7 @@ async def filament_options(
             fallback_colours=list(source.colours),
             own_colours=file.own_colours,
             inventory=settled(inventory),
-            # A library file's slots read from the file itself (#2550): every copy has
-            # the same slots, so they answer for the copy read here too.
-            known=(
-                source.local.for_plate
-                if isinstance(source, LibrarySource) and source.local is not None
-                else None
-            ),
+            known=known_slots(source),
         )
     finally:
         # Awaited even when a read failed, so the status read never outlives the call.
@@ -578,6 +581,7 @@ async def _slot_errors(
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
+        known=known_slots(source),
     )
     per_plate = [
         with_trays(options, prepared.printer_status, prepared.printer_id) for options in per_plate
@@ -833,11 +837,15 @@ async def check_for_library(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
+    filaments: FilamentReader | None = None,
 ) -> PrintCheck:
-    """:func:`check_print` for a file already in Bambuddy's library."""
+    """:func:`check_print` for a file already in Bambuddy's library; with ``filaments``,
+    its slots read from the file itself (#2550)."""
     return await check_print(
         client,
-        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
+        await LibrarySource.load(
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+        ),
         settings,
         request,
         rack=rack,
@@ -1128,6 +1136,7 @@ async def plan_run(
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
         inventory=inventory,
+        known=known_slots(source),
     )
     per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
     every, errors = await resolve_plates(

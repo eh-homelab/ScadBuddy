@@ -1310,3 +1310,42 @@ def test_a_file_scadbuddy_cannot_read_its_slots_from_asks_bambuddy(client: TestC
         "/api/v1/library/files/89/filament-requirements",
         "/api/v1/library/files/46/filament-requirements",
     }
+
+
+@respx.mock
+def test_a_library_print_runs_when_bambuddy_cannot_read_its_filaments(
+    client: TestClient,
+) -> None:
+    """#2550: a print of library file 1922 got past the dialog and still had to read its
+    slots, from the file and from the copy it uploads, through Bambuddy's
+    filament-requirements, which a large 3MF outlasts. The run reads them from the
+    download it uploads, so it slices and queues with Bambuddy never asked."""
+    configure(client)
+    # Not run_routes' own pattern, which would replace this route rather than follow it.
+    unreadable = respx.get(path__regex=r"/library/files/\d+/filament-requirements$").mock(
+        side_effect=httpx.ReadTimeout("Bambuddy is slicing a preview")
+    )
+    flow_copy_routes()
+    library_file(67, plates="library-plates-multi.json")
+    run_routes()
+    sliced = slice_routes()
+    queued = queue_route()
+
+    response = run_library(
+        client,
+        67,
+        json={
+            **body(),
+            "plate_id": 2,
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 2
+    assert queued.called
+    asked = {call.request.url.path for call in unreadable.calls}
+    assert not asked & {
+        "/api/v1/library/files/67/filament-requirements",
+        "/api/v1/library/files/141/filament-requirements",
+    }, asked

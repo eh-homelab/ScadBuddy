@@ -538,8 +538,19 @@ async def post_library_check(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     rack: RackUsageDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
 ) -> PrintCheck:
-    """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760)."""
+    """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
+    its slots read from the file itself, as ``/choices`` reads them (#2550)."""
     settings = store.load()
     async with client_for(settings) as client:
-        return await check_for_library(client, uploads, settings, file_id, body, rack=rack)
+        return await check_for_library(
+            client,
+            uploads,
+            settings,
+            file_id,
+            body,
+            rack=rack,
+            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+        )

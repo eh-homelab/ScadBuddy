@@ -21,6 +21,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from functools import partial
 from typing import BinaryIO, Protocol
 
 import psycopg
@@ -29,7 +30,11 @@ from fastapi import status
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour, settled
-from scadbuddy.bambuddy.filaments3mf import LocalFilaments
+from scadbuddy.bambuddy.filaments3mf import (
+    LocalFilaments,
+    UnreadableFilamentsError,
+    read_filaments,
+)
 from scadbuddy.bambuddy.models import FilamentRequirements, LibraryFile
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope
@@ -583,15 +588,31 @@ class LibrarySource(PrintPipeline):
         settings: StoredSettings | None = None,
         sends: PrintLinkStore | None = None,
         filaments: FilamentReader | None = None,
+        read_own: bool = False,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
         its 404; one the dialog cannot print is a 422 before anything else is read. The
         plates and filaments are read together (#2504). With ``filaments``, the slots
         are read from the file itself, and Bambuddy is asked only for one it cannot
-        read (#2550)."""
+        read (#2550). ``read_own`` reads them from the source's own download instead,
+        the one its print uploads (:meth:`fetch_3mf`): where there is no cache to read,
+        as in the print worker, which mounts no volume."""
         file = await client.library_file(file_id)
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
+        source = cls(
+            file_id=file_id,
+            colours=[],
+            plates=[],
+            filename=file.filename,
+            file_type=(file.file_type or "").lower(),
+            uploads=uploads,
+            settings=settings,
+            sends=sends,
+            stem=_file_stem(file.filename),
+        )
+        if filaments is None and read_own:
+            filaments = partial(source._own_filaments, client)
         layout, read = await asyncio.gather(
             client.library_plates(file_id),
             _requirements(client, file, filaments),
@@ -606,18 +627,30 @@ class LibrarySource(PrintPipeline):
             colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR
         # No plate metadata is one plate, and no filaments is one of unknown color: a
         # file laid out that way still has something on the bed to print.
-        return cls(
-            file_id=file_id,
-            colours=colours or [UNKNOWN_COLOUR],
-            plates=plates or [1],
-            filename=file.filename,
-            file_type=(file.file_type or "").lower(),
-            local=local,
-            uploads=uploads,
-            settings=settings,
-            sends=sends,
-            stem=_file_stem(file.filename),
-        )
+        source.colours = colours or [UNKNOWN_COLOUR]
+        source.plates = plates or [1]
+        source.local = local
+        return source
+
+    async def _own_filaments(
+        self, client: BambuddyClient, file: LibraryFile
+    ) -> LocalFilaments | None:
+        """The slots read from the bytes this source prints, downloaded once and kept for
+        the print (:meth:`PrintPipeline._fetch`); ``None`` for a file they cannot be read
+        from (an STL, one past :data:`MAX_DOWNLOAD_BYTES`, an unreadable 3MF)."""
+        if self.file_type != "3mf":
+            return None
+        payload = (await PrintPipeline._fetch(self, client)).payload
+        if payload is None:
+            return None
+        try:
+            return await asyncio.to_thread(read_filaments, io.BytesIO(payload))
+        except UnreadableFilamentsError as error:
+            logger.info(
+                "could not read the library file's filament slots; Bambuddy is asked instead",
+                extra={"library_file_id": file.id, "reason": str(error)},
+            )
+            return None
 
     @property
     def subject(self) -> PrintSubject:

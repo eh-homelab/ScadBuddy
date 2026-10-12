@@ -133,8 +133,15 @@ class PrintActivities:
     ) -> PrintSource:
         if spec.kind == "library":
             assert spec.file_id is not None
+            # The slots from the download the print uploads, never Bambuddy's
+            # filament-requirements, which a large 3MF outlasts (#2550).
             return await LibrarySource.load(
-                client, spec.file_id, uploads=self.d.uploads, settings=settings, sends=self.d.links
+                client,
+                spec.file_id,
+                uploads=self.d.uploads,
+                settings=settings,
+                sends=self.d.links,
+                read_own=True,
             )
         return await self._output_source(spec, settings)
 
