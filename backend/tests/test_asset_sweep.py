@@ -11,6 +11,7 @@ import pytest
 
 from scadbuddy import main
 from scadbuddy.store.bambuddy import BambuddyContentBackend
+from scadbuddy.store.cache import CachedBlobStore
 
 
 class _Remote:
@@ -135,3 +136,47 @@ async def test_the_blob_sweep_reconciles_unrecorded_work_files_on_bambuddy_only(
             <= cutoff
             <= datetime.now(UTC) - timedelta(seconds=86400)
         )
+
+
+class _Cache(CachedBlobStore):
+    """A worker cache that only records that it was trimmed."""
+
+    def __init__(self) -> None:
+        self.evicted = 0
+
+    def evict(self, *, now: float | None = None) -> list[str]:
+        self.evicted += 1
+        return []
+
+
+class _Unreachable(BambuddyContentBackend):
+    def __init__(self) -> None:
+        pass
+
+    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+        raise OSError("Bambuddy is down")
+
+
+@pytest.mark.parametrize("failing", ["sweep_content", "sweep_unrecorded"])
+async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
+    monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """#2115: a Bambuddy that is down fails the sweep, but the local cache is still
+    evicted, or it grows for as long as Bambuddy stays down. Both steps need it:
+    `sweep_content` releases each stale blob through Bambuddy too."""
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        if failing == "sweep_content":
+            raise OSError("Bambuddy is down")
+        return []
+
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    cache = _Cache()
+    state = SimpleNamespace(
+        store=SimpleNamespace(content=SimpleNamespace(backend=_Unreachable()), blobs=cache),
+        refs=object(),
+        config=SimpleNamespace(job_ttl=86400),
+    )
+    with pytest.raises(OSError, match="down"):
+        await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
+    assert cache.evicted == 1
