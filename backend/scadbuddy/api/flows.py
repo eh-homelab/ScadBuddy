@@ -47,6 +47,7 @@ from scadbuddy.flows.definitions import (
 )
 from scadbuddy.flows.forget import forget_run
 from scadbuddy.flows.history import ResetPreview, outward_since
+from scadbuddy.flows.images import BLOB_NAME, RunImage, open_image, run_images
 from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import (
     HOST_FN,
@@ -155,6 +156,9 @@ class RunView(BaseModel):
     pending: list[PendingEntry] = []
     #: Whether `pending` was read from the running workflow.
     live: bool = False
+    #: The images the run's tool calls returned (#2477), as pointers; each is served by
+    #: `GET /workflow-runs/{id}/images/{name}`.
+    images: list[RunImage] = []
 
 
 def _started_by() -> dict[str, Any]:
@@ -499,6 +503,7 @@ async def get_flow_run(run_id: str, flows: FlowsDep) -> RunView:
         version=run.version,
         name=run.name,
         run=run,
+        images=await run_images(flows.connect, run.id) if flows.connect is not None else [],
     )
     if run.status in TERMINAL:
         return view
@@ -507,6 +512,41 @@ async def get_flow_run(run_id: str, flows: FlowsDep) -> RunView:
         return view
     view.pending, view.live = await _pending(flows.client, run)
     return view
+
+
+#: An image's bytes never change under its name (the name is their sha256).
+_IMAGE_HEADERS = {
+    "Cache-Control": "private, max-age=31536000, immutable",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'",
+}
+
+
+@router.get(
+    "/workflow-runs/{run_id}/images/{name}",
+    response_class=Response,
+    responses={
+        200: {"content": {"image/png": {}, "image/jpeg": {}, "image/gif": {}, "image/webp": {}}}
+    },
+    summary="Get one of a flow run's images",
+)
+async def get_flow_run_image(run_id: str, name: str, flows: FlowsDep) -> Response:
+    """An image one of the run's tool calls returned (#2477), by the name its pointer
+    carries. Gone with the run once it is forgotten."""
+    try:
+        uuid.UUID(run_id)
+    except ValueError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such image.") from None
+    if not BLOB_NAME.match(name) or flows.connect is None or flows.keys is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such image.")
+    try:
+        found = await open_image(flows.connect, flows.keys, str(uuid.UUID(run_id)), name)
+    except SubjectForgottenError:
+        found = None
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such image.")
+    media_type, data = found
+    return Response(content=data, media_type=media_type, headers=_IMAGE_HEADERS)
 
 
 @router.delete(

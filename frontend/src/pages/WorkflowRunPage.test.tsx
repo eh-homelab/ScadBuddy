@@ -2,7 +2,7 @@ import { act, screen, waitFor } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
-import { flowRequests, moveFlowRunOn, setFlowRunOffline, setFlowRunStarting } from '../mocks/features/flows'
+import { flowRequests, moveFlowRunOn, setFlowRunImages, setFlowRunOffline, setFlowRunStarting } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { renderPage } from '../test/utils'
 import { WorkflowRunPage } from './WorkflowRunPage'
@@ -103,5 +103,23 @@ describe('WorkflowRunPage', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // #2477: a run's images, as thumbnails from the blob route, never inline data.
+  it("shows the run's images as thumbnails from their blob route", async () => {
+    const name = `${'a'.repeat(64)}.png`
+    setFlowRunImages('run-done', [{ name, mediaType: 'image/png', bytes: 2048 }])
+    render('run-done')
+    const images = await screen.findByRole('region', { name: 'Images' })
+    const img = images.querySelector('img')
+    expect(img).toHaveAttribute('src', `/api/v1/workflow-runs/run-done/images/${name}`)
+    expect(img?.getAttribute('src')).not.toMatch(/^data:/)
+    expect(screen.getByRole('link', { name: /Image 1/ })).toHaveAttribute('href', `/api/v1/workflow-runs/run-done/images/${name}`)
+  })
+
+  it('shows no images section for a run with none', async () => {
+    render('run-done')
+    await screen.findByTestId('flow-run-status')
+    expect(screen.queryByRole('region', { name: 'Images' })).not.toBeInTheDocument()
   })
 })

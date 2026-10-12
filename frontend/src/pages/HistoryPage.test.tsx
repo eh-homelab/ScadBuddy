@@ -429,7 +429,7 @@ describe('HistoryPage', () => {
             id: 'f'.repeat(32),
             name: 'Batch',
             params: {},
-            arranged_from: ['a'.repeat(32), 'c'.repeat(32)],
+            arranged_from: ['a'.repeat(32), 'c'.repeat(32), 'library:89'],
             // #2287 — an arrange's result, never sent anywhere.
             library_files: [],
             queue_item_id: null,
@@ -442,7 +442,8 @@ describe('HistoryPage', () => {
     render()
     const batch = await row('Batch')
     expect(within(batch).queryByRole('button', { name: 'Edit Batch' })).not.toBeInTheDocument()
-    expect(within(batch).getByText('Arranged from 2 outputs')).toBeInTheDocument()
+    // #2284 — every source counted, library files too.
+    expect(within(batch).getByText('Arranged from 2 outputs and 1 library file')).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Print Batch' })).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Send Batch' })).toBeInTheDocument()
   })

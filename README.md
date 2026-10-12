@@ -782,8 +782,7 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
   `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
-  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES`,
-  `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` and the backend's
+  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES` and the backend's
   `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE` and
   `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, each described below. With no database
   URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
@@ -859,17 +858,6 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     peer, is accepted. This is what stops DNS rebinding: an attacker's page
     re-pointed at the agent sends its own name in both `Host` and `Origin`,
     which is not on the list.
-- **Where the headless browser may go** (`agent/src/harness/browserOrigins.ts`,
-  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It opens ScadBuddy's
-  own origins as they are: `SCADBUDDY_PUBLIC_URL` (and the stored `public_url`
-  setting) and `SCADBUDDY_ALLOWED_ORIGINS`, through the ingress, so the agent pod
-  must reach at least one of them without an interactive login (#983). Only with
-  none configured does it open the backend (`SCADBUDDY_BACKEND_URL`) instead.
-  **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
-  (comma-separated origins, or `*` for any) lets it open other origins too, each only
-  after a human approves it once per session in the ScadBuddy UI. Unset, it opens
-  nothing else. `*` plus that approval is the intended setting for full use; it also
-  lets the model ask to open services on your LAN, so read the risks in that doc first.
 
   That is not authentication, and the human approval spec §8.2 asks for comes
   with #258.
@@ -885,19 +873,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - Plugins handed to the harness must not start processes of their own: command
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
-  credential's environment. The one exception is the headless browser (#349,
-  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)): the harness
-  writes that plugin itself and starts its server under `env -i`. It is off
-  until switched on in Settings ("AI headless browser", stored through
-  `PUT /api/v1/ai/settings/headless-browser`, guarded like the credential
-  writes), and the image carries its Chromium (about 600 MB of the image). The
-  backend refuses its outward requests unless a human approved that exact one
-  (`backend/scadbuddy/api/agent_actor.py`). A guard on every page refuses
-  any redirect off `SCADBUDDY_BACKEND_URL`'s origin, a proxy's included.
-  Chromium keeps its sandbox only where the pod's seccomp profile allows user
-  namespaces (not `RuntimeDefault`); otherwise the agent warns at the first
-  browser turn and runs it with `--no-sandbox`
-  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md), "Sandbox").
+  credential's environment. The image carries no browser: a session that needs
+  one gets Microsoft's Playwright MCP server, deployed beside ScadBuddy and added
+  as a plugin endpoint below
+  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)).
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
   no files) and managed through `/api/v1/ai/plugins` (below). The session
@@ -908,7 +887,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   plugin tool parks for approval like any other, #258). Sessions start from
   the assistant's chat socket and the session routes (next bullet). Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
-    host resolves to is loopback. Link-local and cloud metadata hosts are
+    host resolves to is loopback or private (10/8, 172.16/12, 192.168/16,
+    fc00::/7), such as an in-cluster Service. Link-local and cloud metadata hosts are
     refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
     for gateway base URLs. It is checked at save, at test, and again each
     time a run loads the plugin. No query string, no credentials in the URL,
@@ -992,8 +972,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
   | `PATCH …/{id}` | `{title?, done?: true}` → `{session}`: rename a session or mark it done (#795). Owner-only (`403`); done is refused while a turn runs and on a durable session (`409`) |
-  | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. With the headless browser's agent-actor marker, or through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
-  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. Through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, audited (#790) |
   | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
   | `GET/PUT /api/v1/ai/settings/printer-camera` | `{enabled}`: whether `get_printer_camera` may run (on by default); while off, every call to it is refused; audited (#1911) |
   | `GET/PUT /api/v1/ai/settings/model` | `{model}`: the Claude model (an alias such as `opus`, or a full id) every turn and the connection test use from the next one on, `null` for Claude Code's default; audited (#1917) |
@@ -1014,8 +994,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
-  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
-  Chromium use it), so the root filesystem can be read-only
+  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code
+  uses it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).

@@ -4,7 +4,7 @@ import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { SETTING_PRINTER_CAMERA, switchOn } from '../tools/switches.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './headlessBrowser.js'
+import type { SettingsRepo } from './httpRequest.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/printer-camera (#1911): turns the `get_printer_camera`
@@ -78,7 +78,7 @@ export function registerPrinterCameraRoutes(app: Hono, deps: PrinterCameraRouteD
   })
 }
 
-/** The printer camera tool's switch (#1911). `deps.settings` is declared in routes/headlessBrowser.ts. */
+/** The printer camera tool's switch (#1911). `deps.settings` is declared in routes/httpRequest.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerPrinterCameraRoutes(app, {

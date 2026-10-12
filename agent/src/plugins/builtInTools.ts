@@ -1,9 +1,4 @@
 import type { AuditContext } from '../audit/log.js'
-import {
-  BROWSER_TOOL_TIERS,
-  PLUGIN_NAME as BROWSER_PLUGIN_NAME,
-  TOOL_PREFIX as BROWSER_TOOL_PREFIX,
-} from '../harness/headlessBrowser.js'
 import { raiseTier, RISK_TIERS, type RiskTier } from '../harness/permissions.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { SERVER_NAME } from '../tools/projections.js'
@@ -19,8 +14,6 @@ import { PluginError } from './registry.js'
 //   - `scadbuddy`: every registry tool (tools/index.ts ALL_TOOLS), served
 //     in-process to the harness as `mcp__scadbuddy__<name>`, over /mcp, and to
 //     a durable session's `agent-tools` activities.
-//   - `playwright`: the headless browser's tools (harness/headlessBrowser.ts
-//     BROWSER_TOOL_TIERS), harness only.
 //
 // Which sets exist is builtins.ts BUILT_INS; their tools come from the code
 // that serves them, never from a list here.
@@ -53,8 +46,7 @@ export function builtInToolsSetting(set: string): string {
 
 /**
  * The tools of each built-in, from the code that serves them. ScadBuddy's own
- * are always served (its built-in's switch is its skills'); the headless
- * browser's are on with the browser.
+ * are always served (its built-in's switch is its skills').
  */
 const SOURCES: Readonly<Record<string, (tools: readonly Tool[]) => Omit<BuiltInToolSet, 'name'>>> = {
   [OWN_PLUGIN_NAME]: (tools) => {
@@ -65,15 +57,6 @@ const SOURCES: Readonly<Record<string, (tools: readonly Tool[]) => Omit<BuiltInT
       switchable: false,
     }
   },
-  [BROWSER_PLUGIN_NAME]: () => ({
-    tool_prefix: BROWSER_TOOL_PREFIX,
-    tools: Object.entries(BROWSER_TOOL_TIERS).map(([name, risk]) => ({
-      name,
-      harness_name: `${BROWSER_TOOL_PREFIX}${name}`,
-      risk,
-    })),
-    switchable: true,
-  }),
 }
 
 export function builtInToolSets(tools: readonly Tool[] = ALL_TOOLS): BuiltInToolSet[] {

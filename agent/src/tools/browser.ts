@@ -26,8 +26,8 @@ import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolCo
 // (frontend dom.ts `USER_ONLY`), so a human presses them, exactly as in the UI.
 //
 // Not here: the `screenshot()` fallback of #254, which PR #339 left out of the
-// tab on purpose. And not the headless browser (#349, harness/headlessBrowser.ts),
-// a separate Chromium that never sees the user's tab.
+// tab on purpose. And not a browser plugin's tools (Playwright MCP, added in
+// Settings → Plugins): a separate browser that never sees the user's tab.
 
 /** Where a tab's answer comes from, for the untrusted-data envelope (#258). */
 const SOURCE =

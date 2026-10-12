@@ -3,7 +3,10 @@ Temporal and Postgres, with the app's in-process `projects` worker."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
+import json
 import subprocess
 import time
 import uuid
@@ -16,7 +19,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.gitrepo import git_env
+from scadbuddy.core.secrets import seal_bytes
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.images import blob_context
+from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -272,6 +278,48 @@ def test_delete_forgets_the_run(client: TestClient, pg_conninfo: str) -> None:
             (f"flow-{run_id}",)
         ]
     assert client.delete(f"/api/v1/workflow-runs/{uuid.uuid4()}").status_code == 404
+
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+def test_a_runs_images_are_listed_served_from_their_blobs_and_forgotten_with_it(
+    client: TestClient, settings: Settings, pg_conninfo: str
+) -> None:
+    """#2477: the agent keeps a flow call's images sealed under the run's key; the run
+    lists them as pointers and serves each by name, until the run is forgotten."""
+    definition = register(client, script("return 1"))
+    run_id = start(client, definition["id"], "img").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+    subject = f"flow-{run_id}"
+    name = hashlib.sha256(PNG).hexdigest() + ".png"
+    keys = payload_keys(settings)
+    assert keys is not None
+    key = asyncio.run(keys[0].key_for(subject, False))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO ai_flow_blobs (subject, name, media_type, size, data)"
+            " VALUES (%s, %s, 'image/png', %s, %s)",
+            (subject, name, len(PNG), seal_bytes(key, PNG, blob_context(subject, name))),
+        )
+    view = client.get(f"/api/v1/workflow-runs/{run_id}").json()
+    assert view["images"] == [{"name": name, "mediaType": "image/png", "bytes": len(PNG)}]
+    # The run's view carries the pointer only.
+    assert base64.b64encode(PNG).decode()[:16] not in json.dumps(view)
+    served = client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}")
+    assert served.status_code == 200
+    assert (served.content, served.headers["content-type"]) == (PNG, "image/png")
+    assert "immutable" in served.headers["cache-control"]
+    other = "0" * 64 + ".png"
+    for missing in (other, "x.png", "..%2Fx.png"):
+        assert client.get(f"/api/v1/workflow-runs/{run_id}/images/{missing}").status_code == 404
+    assert client.get(f"/api/v1/workflow-runs/{uuid.uuid4()}/images/{name}").status_code == 404
+    assert client.delete(f"/api/v1/workflow-runs/{run_id}").status_code == 204
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM ai_flow_blobs").fetchone() == (0,)
+    assert client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}").status_code == 404
 
 
 class TestWithoutAKey:

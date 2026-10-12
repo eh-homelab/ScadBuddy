@@ -136,7 +136,8 @@ class OutputDetail(OutputSummary):
     #: The output's objects (spec 2026-09-27 §7); empty for one saved before phase 5,
     #: which therefore cannot be arranged.
     manifest: list[ManifestObject] = Field(default_factory=list)
-    #: For an arranged output, the outputs its objects came from (Task 5).
+    #: For an arranged output, the outputs its objects came from (Task 5), and each
+    #: library file ScadBuddy did not make as `library:<id>` (#2284).
     arranged_from: list[str] = Field(default_factory=list)
     #: The re-render queued to give it a manifest (#902): pending while ``error`` is
     #: None, failed with why otherwise; None when none was asked for or it attached.
@@ -342,7 +343,8 @@ class ArrangeRequest(BaseModel):
     colours: list[str] | None = None
     name: str | None = Field(default=None, max_length=200)
     #: The template the result is filed under (#1864): one of the outputs', omitted the
-    #: first one's. With library files only, any template, and required.
+    #: first one's. With a plain library file among them, any template (#2284); with
+    #: library files only, required.
     slug: str | None = Field(default=None, max_length=200)
     #: What reading each plain library file may spend (#2087), each omitted budget the
     #: setting's; none past its ceiling.
@@ -529,18 +531,18 @@ def arrange_inputs(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "a result of library files alone is filed under a template: name one in slug",
         )
-    if slugs and body.slug is not None and body.slug not in slugs:
+    # #2284: with a library file in the mix the result is anyone's to file, so it may go
+    # under any template (`arrange_outputs` checks it exists), not only its outputs'.
+    files = [f"library:{obj.library_file_id}" for obj in body.objects if obj.output_id is None]
+    if slugs and not files and body.slug is not None and body.slug not in slugs:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the result is filed under one of its objects' templates ({', '.join(slugs)}),"
             f" not {body.slug}",
         )
     slug = body.slug or slugs[0]
-    # A library file's objects belong to no template until this result files them.
-    provenance = {
-        key: entry.model_copy(update={"slug": slug}) if entry.library_file_id else entry
-        for key, entry in provenance.items()
-    }
+    # A library file's objects belong to no template: filing the result under one does
+    # not make them its (#2284), so their entries keep the empty slug they were read with.
     return slug, ArrangeInputs(
         items=items,
         goal=body.goal,
@@ -550,7 +552,8 @@ def arrange_inputs(
         colours=colours,
         name=body.name,
         provenance=provenance,
-        sources=chosen,
+        # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
+        sources=[*chosen, *dict.fromkeys(files)],
     )
 
 
@@ -606,7 +609,8 @@ async def arrange_outputs(
     slug, inputs = await asyncio.to_thread(
         arrange_inputs, outputs, body, plate_model=plate_model, library=library
     )
-    if not inputs.sources:
+    if plain:
+        # Filed under any template (#2284), so it must be one.
         await asyncio.to_thread(require_model_exists, catalogue, slug)
     with submit_problems():
         job = await render.arrange(slug, inputs)

@@ -3,8 +3,9 @@
 
 1. The subject's tombstone and its key's deletion, under the lock key creation takes,
    in one transaction: from then on every copy of the run's payloads (history,
-   Visibility, Archival) is undecryptable, whatever fails next. A process that read the
-   key keeps it 30 s at most (`PgPayloadKeys`).
+   Visibility, Archival) is undecryptable, whatever fails next. The run's images
+   (`ai_flow_blobs`, #2477), sealed under that key, are deleted in the same transaction.
+   A process that read the key keeps it 30 s at most (`PgPayloadKeys`).
 2. The workflow terminated if open, then its execution deleted.
 3. The `workflow_runs` row.
 """
@@ -46,6 +47,7 @@ async def forget_run(
             " ON CONFLICT (subject) DO NOTHING",
             (subject,),
         )
+        await conn.execute("DELETE FROM ai_flow_blobs WHERE subject = %s", (subject,))
         cur = await conn.execute("DELETE FROM ai_payload_keys WHERE subject = %s", (subject,))
         key = cur.rowcount > 0
     try:

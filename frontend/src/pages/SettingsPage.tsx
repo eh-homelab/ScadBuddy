@@ -12,7 +12,6 @@ import type { McpAuthMode } from '../api/mcpTokens'
 import { AiCredentialSection } from '../components/assistant/AiCredentialSection'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
-import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
@@ -1204,7 +1203,6 @@ export function SettingsPage() {
                 when on, the print and send tool can only open the dialog; you confirm it.
               </p>
             </div>
-            <HeadlessBrowserSetting />
             <HttpRequestSetting />
             {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
             <PrinterCameraSetting />

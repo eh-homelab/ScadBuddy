@@ -6,8 +6,10 @@ import itertools
 import uuid
 from typing import Any
 
+from google.protobuf.message import Message
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
+from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus
 
 from scadbuddy.flows.models import TERMINAL, Run, StoredDefinition
@@ -101,3 +103,32 @@ class Flows:
 def script(*body: str) -> str:
     lines = ["import asyncio", "async def main():", *(f"    {b}" for b in body)]
     return "\n".join([*lines, "asyncio.run(main())"])
+
+
+async def history_payloads(client: Client, workflow_id: str) -> bytes:
+    """Every payload of the workflow's history, decoded (opened, when sealed), joined: what
+    a test reads to check that nothing in it holds an image (#2477)."""
+    history = await client.get_workflow_handle(workflow_id).fetch_history()
+    found: list[Payload] = []
+
+    def walk(message: Message) -> None:
+        for field, value in message.ListFields():
+            if field.message_type is None:
+                continue
+            if field.message_type.GetOptions().map_entry:
+                items = list(value.values())
+            elif field.is_repeated:
+                items = list(value)
+            else:
+                items = [value]
+            for item in items:
+                if isinstance(item, Payload):
+                    found.append(item)
+                elif isinstance(item, Message):
+                    walk(item)
+
+    for event in history.events:
+        walk(event)
+    codec = client.data_converter.payload_codec
+    decoded = await codec.decode(found) if codec is not None else found
+    return b"\n".join(p.data for p in decoded)
