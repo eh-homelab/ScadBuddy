@@ -16,6 +16,8 @@ import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 const FlowEditor = lazy(async () => ({ default: (await import('../components/flows/FlowEditor')).FlowEditor }))
 const SourceDiff = lazy(async () => ({ default: (await import('../components/SourceDiff')).SourceDiff }))
 
+const NO_PROBLEMS: FlowScriptProblem[] = []
+
 /** How long typing settles before the script is checked. */
 export const FLOW_CHECK_DEBOUNCE_MS = 500
 
@@ -158,7 +160,11 @@ export function FlowPage() {
               {versions.data && versions.data.length > 0 && (
                 <Compare
                   key={`${id}:${versions.data.length}`}
-                  name={flow.data.name} versions={versions.data} viewed={id} sideBySide={!phone} />
+                  name={flow.data.name}
+                  versions={versions.data}
+                  viewed={id}
+                  sideBySide={!phone}
+                />
               )}
             </div>
           </div>
@@ -171,20 +177,30 @@ export function FlowPage() {
 function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved: FlowDefinition) => void }) {
   const [draft, setDraft] = useState(flow.script)
   const checked = useDebounced(draft, FLOW_CHECK_DEBOUNCE_MS)
-  const [problems, setProblems] = useState<FlowScriptProblem[] | null>(null)
+  // The last answer and the script it was for: kept while the next check runs, so the
+  // markers do not flicker as you type.
+  const [checkResult, setCheckResult] = useState<{ script: string; problems: FlowScriptProblem[] } | null>(null)
+  const problems = checkResult?.problems ?? null
   const [checkError, setCheckError] = useState<string>()
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
   const help = useAsync(() => api.getFlowHostFunctions(), [])
   const dirty = draft !== flow.script
 
+  // Leaving the page (a reload, a closed tab) asks first while an edit is unsaved.
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
+
   useEffect(() => {
     const controller = new AbortController()
-    setProblems(null)
     api
       .checkFlowScript(checked, controller.signal)
       .then((result) => {
-        setProblems(result.problems)
+        setCheckResult({ script: checked, problems: result.problems })
         setCheckError(undefined)
       })
       .catch((caught: unknown) => {
@@ -201,7 +217,7 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
       onSaved(await api.registerFlow({ name: flow.name, script: draft, ...approvalTimeout(flow.approval_timeout_s) }))
     } catch (caught) {
       const refused = refusedProblems(caught)
-      if (refused) setProblems(refused)
+      if (refused) setCheckResult({ script: draft, problems: refused })
       setSaveError(errorText(caught))
       setSaving(false)
     }
@@ -215,7 +231,7 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
           name={flow.name}
           initialValue={flow.script}
           onChange={setDraft}
-          problems={problems ?? []}
+          problems={problems ?? NO_PROBLEMS}
           hostFunctions={help.data}
           onSave={() => void save()}
           label="Script"
@@ -229,11 +245,11 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
         <span role="status" className="text-[12.5px] text-muted">
           {checkError
             ? `Could not check: ${checkError}`
-            : problems === null || checked !== draft
+            : !checkResult || checkResult.script !== draft
               ? 'Checking…'
-              : problems.length === 0
+              : checkResult.problems.length === 0
                 ? 'No problems'
-                : `${problems.length} ${problems.length === 1 ? 'problem' : 'problems'}`}
+                : `${checkResult.problems.length} ${checkResult.problems.length === 1 ? 'problem' : 'problems'}`}
         </span>
       </div>
       <p className="text-[12px] text-faint">Saving adds a new version; this one never changes.</p>

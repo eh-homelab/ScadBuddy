@@ -117,9 +117,6 @@ export function FlowEditor({ version, name, initialValue, onChange, problems, ho
     if (model) monaco.editor.setModelMarkers(model, FLOW_MARKER_OWNER, problemMarkers(problems, model.getValue()))
   }, [problems])
 
-  // `path` gives the script a model of its own, which is the page's to dispose.
-  useEffect(() => () => monaco.editor.getModel(monaco.Uri.parse(uri))?.dispose(), [uri])
-
   return (
     <div className="flex h-[28rem] flex-col rounded-[6px] border border-line">
       <div className="min-h-0 flex-1">

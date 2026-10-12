@@ -5,6 +5,7 @@ and hover (#2487). Rendered on each call by the harness from `SCRIPT_TOOLS`, the
 from __future__ import annotations
 
 import ast
+import copy
 
 from pydantic import BaseModel
 from temporal_agent_harness.harness.code_mode.stubs import render_host_interface
@@ -45,11 +46,12 @@ def host_interface() -> HostInterface:
     source = render_host_interface(SCRIPT_TOOLS)
     functions: list[HostFunction] = []
     types: list[HostType] = []
-    lines = source.splitlines()
     for node in ast.parse(source).body:
         if isinstance(node, ast.AsyncFunctionDef):
-            head = " ".join(lines[node.lineno - 1 : node.body[0].lineno - 1])
-            signature = head.strip().removesuffix(":")
+            stub = copy.copy(node)
+            stub.body = []
+            # `async def f(...) -> R:` with no body; unparse adds the colon.
+            signature = ast.unparse(stub).strip().removesuffix(":")
             functions.append(
                 HostFunction(
                     name=node.name,
