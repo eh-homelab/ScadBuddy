@@ -1217,7 +1217,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "referencing", specifier = ">=0.28" },
-    { name = "temporal-agent-harness", extras = ["code-mode"], git = "https://github.com/temporal-community/temporal-agent-harness?rev=04a49d1b037de46da2cba31676d2aa2f4c59118f" },
+    { name = "temporal-agent-harness", extras = ["code-mode"], git = "https://github.com/temporal-community/temporal-agent-harness?rev=a1cd66f4ffa0aead976ccf86d0ff84a50deb5383" },
     { name = "temporalio", extras = ["opentelemetry"], specifier = ">=1.33.0,<1.35" },
     { name = "trimesh", specifier = ">=4.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -1262,9 +1262,10 @@ wheels = [
 [[package]]
 name = "temporal-agent-harness"
 version = "0.6.0"
-source = { git = "https://github.com/temporal-community/temporal-agent-harness?rev=04a49d1b037de46da2cba31676d2aa2f4c59118f#04a49d1b037de46da2cba31676d2aa2f4c59118f" }
+source = { git = "https://github.com/temporal-community/temporal-agent-harness?rev=a1cd66f4ffa0aead976ccf86d0ff84a50deb5383#a1cd66f4ffa0aead976ccf86d0ff84a50deb5383" }
 dependencies = [
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "temporalio" },
 ]
 

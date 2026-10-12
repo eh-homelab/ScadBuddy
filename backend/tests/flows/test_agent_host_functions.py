@@ -267,16 +267,31 @@ async def test_a_schema_ref_that_cannot_be_resolved_is_a_script_error(
 IMAGE = {"name": "b" * 64 + ".png", "mediaType": "image/png", "bytes": 68}
 
 
+@pytest.mark.parametrize(
+    ("start", "send"),
+    [
+        # #2636: `images` is optional on `agent` and `ask_session` themselves.
+        (
+            "agent('What is this?', [], None, images=[img])",
+            f"ask_session({DURABLE!r}, 'And now?', [img, img])",
+        ),
+        # The deprecated names scripts registered before #2636 call.
+        (
+            "agent_with_images('What is this?', [], None, [img])",
+            f"ask_session_with_images({DURABLE!r}, 'And now?', [img, img])",
+        ),
+    ],
+)
 async def test_agent_and_ask_session_hand_on_images_as_flow_image_references(
-    outward: Outward, sessions: tuple[Sessions, str]
+    outward: Outward, sessions: tuple[Sessions, str], start: str, send: str
 ) -> None:
     """#2477: the receiving session gets the run's images by reference, never their bytes."""
     served, queue = sessions
     run_id = await outward.run(
         script(
             f"img = Image(name={IMAGE['name']!r}, mediaType='image/png', bytes=68)",
-            "a = await agent_with_images('What is this?', [], None, [img])",
-            f"b = await ask_session_with_images({DURABLE!r}, 'And now?', [img, img])",
+            f"a = await {start}",
+            f"b = await {send}",
             "return [a, b]",
         ),
         tools_queue=queue,
@@ -303,7 +318,7 @@ async def test_an_image_that_is_no_pointer_is_a_script_error_and_starts_nothing(
         script(
             "try:",
             "    img = Image(name='../../etc/passwd', mediaType='image/png', bytes=68)",
-            "    await agent_with_images('x', [], None, [img])",
+            "    await agent('x', [], None, [img])",
             "except Exception as e:",
             "    return 'refused'",
         ),
