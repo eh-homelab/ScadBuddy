@@ -154,7 +154,11 @@ class FlowHistory(GitRepo):
         completed = self._run("log", _FORMAT, check=False)
         assert isinstance(completed.stdout, str)
         if completed.returncode != 0:
-            return []
+            unborn = self._run("rev-parse", "--verify", "--quiet", "HEAD", check=False)
+            if unborn.returncode == 1 and not unborn.stdout:
+                return []
+            # Never "no versions": the next registration would number itself v1.
+            raise GitError(f"git log failed: {completed.stderr}", str(completed.stderr))
         found: list[tuple[str, str, str, datetime, str, AgentAuthor | None]] = []
         for record in completed.stdout.split(_RECORD):
             if not record.strip():

@@ -26,6 +26,7 @@ from scadbuddy.flows.keys import payload_keys
 from scadbuddy.flows.manifest import load_manifest
 from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.store import FlowStore
+from scadbuddy.library.repo_lock import flows_coordinator
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
@@ -80,7 +81,12 @@ def _build(core: Core, components: Components) -> Flows:
         return operation_activities(ops.store, core.settings_store, kinds)
 
     store = FlowStore(core.projection.pool, events=transactional_events(core.events))
-    history = FlowHistory(core.paths.flows, timeout=core.config.git_timeout)
+    # Every replica commits to the one repository on the share, as for models (#2385).
+    history = FlowHistory(
+        core.paths.flows,
+        timeout=core.config.git_timeout,
+        coordinator=flows_coordinator(core.settings.database_url),
+    )
     return Flows(
         store=store,
         settings=core.settings,

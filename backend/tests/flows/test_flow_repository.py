@@ -3,6 +3,7 @@ one commit per version, numbered by its position among its flow's commits."""
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import uuid
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.core.authorship import AGENT_AUTHOR_NAME, AgentAuthor, authored_as
-from scadbuddy.core.gitrepo import LOCK_NAME, RevisionNotFoundError
+from scadbuddy.core.gitrepo import LOCK_NAME, GitError, RevisionNotFoundError, git_env
 from scadbuddy.flows.repository import FlowHistory
 
 pytestmark = pytest.mark.requires_git
@@ -111,3 +112,26 @@ def test_concurrent_registrations_each_get_their_own_commits_position(
     assert sorted(v for _, v in results) == [1, 2, 3, 4, 5, 6]
     for commit, version in results:
         assert history.version_of("swap", commit) == version
+
+
+def test_a_failed_log_is_an_error_not_an_empty_history(
+    history: FlowHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register(history, "swap", ONE)
+    run = history._run
+
+    def failing(*args: str, **kwargs: object) -> object:
+        if args[0] == "log":
+            args = ("log", "--no-such-option")
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(history, "_run", failing)
+    with pytest.raises(GitError):
+        register(history, "swap", TWO)
+
+
+def test_a_repository_with_no_commit_has_no_versions(tmp_path: Path) -> None:
+    root = tmp_path / "flows"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], env=git_env(), check=True)
+    assert FlowHistory(root).commits() == []
