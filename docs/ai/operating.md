@@ -172,7 +172,6 @@ as unset (`present()`).
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
-| `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` | unset → ScadBuddy's own origins only | `parseBrowserAllowedOrigins()` in [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts) | Origins beyond ScadBuddy's own (its public URL and `SCADBUDDY_ALLOWED_ORIGINS`, or the backend's when neither is set) that the headless browser may open, each only after a human approves it once per session: a comma-separated list of `http(s)` origins, or `*` for any. A path, a non-origin or `*` mixed with origins is a `ConfigError` at start. See [headless-browser.md](headless-browser.md), "Beyond the backend". |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -197,8 +196,8 @@ configured, and any other value, `console` say, is off with one warning naming i
 `OTEL_RESOURCE_ATTRIBUTES`. `SCADBUDDY_VERSION` and `SCADBUDDY_REVISION` are stamped
 into the image by `build-image.yml` and become `service.version` and
 `scadbuddy.revision`. None of these reach the Claude Code subprocess, whose `env` is
-explicit (above). Only the backend client sends `traceparent`; plugins, `http_request`,
-the headless browser and Anthropic never get one. Design:
+explicit (above). Only the backend client sends `traceparent`; plugins, `http_request`
+and Anthropic never get one. Design:
 `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md` §5.4.
 
 ## 3. The key-encryption key
@@ -433,13 +432,6 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
   unreachable database or backend is *reported*, not failed on, so a Postgres blip
   does not restart the container (comment in `createApp()`).
 - The body is `{ status: "ok", ai, database, backend, secret_key, credential }` (type `Health`).
-- With sessions, it also carries `browser_origins`: whether the latest browser turn's
-  probe found one of ScadBuddy's UI origins the headless browser reaches without a login
-  (`reachable`, `none reachable`, or `not checked` before a browser turn has run;
-  [headless-browser.md](headless-browser.md), "Beyond the backend"). Only that, since
-  `/healthz` is unauthenticated: which origin answered what (`ok`, `sign-in`,
-  `unreachable`, with the redirect's origin or the error) is logged as
-  `headless browser: <origin> answers …` whenever an origin's answer changes.
 - `ai` is `"enabled"` only when every prerequisite holds. Otherwise it names the
   **first** one missing, in the order an operator has to fix them (`aiStatus()`):
 
@@ -712,8 +704,7 @@ its $1.00 budget.") and offers:
   mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
   (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
-  (take one over first), and never past $100. A request with the headless browser's
-  agent-actor marker (`X-ScadBuddy-Agent-Session`) is refused, no tool calls it, and
+  (take one over first), and never past $100. No tool calls it, and
   the panel's button carries `data-agent-user-only`, so the browser bridge cannot press
   it. A raise is a `settings` audit row with action `session_budget_usd` and the
   session id; refused and failed attempts are recorded from the route's status.
@@ -751,12 +742,12 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
   and every URL a package declares, go through the same egress check as the gateway
   (see [security.md](security.md#plugin-packages)).
-- **Built-in plugins.** The two plugins in the image are listed first by
+- **Built-in plugins.** The plugin in the image is listed first by
   `GET /api/v1/ai/plugin-packages`, with `built_in: true`
   ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
   `scadbuddy`, ScadBuddy's own plugin (on unless the `ai_settings` key
-  `scadbuddy_plugin_enabled` is `false`), and `playwright`, the headless browser (its
-  switch is `headless_browser_enabled`, [headless-browser.md](headless-browser.md)).
+  `scadbuddy_plugin_enabled` is `false`). A browser (Playwright MCP) is not built in
+  any more; it is added as a remote plugin ([headless-browser.md](headless-browser.md)).
   `PATCH` with `{ enabled }` sets that key; approve, re-pin and `DELETE` answer 409. An
   install whose package names one answers 409 with `built_in: true` instead of
   refusing it, and Settings shows that as a notice.
@@ -804,7 +795,7 @@ URL and their one header (at most one) are checked as a remote plugin's registra
 `Proxy-*` are refused. Claude Code loads every package without its own http entries: a
 copy under `<state dir>/plugins-local/<hash>/` whose `.mcp.json` and manifest keep only
 local servers (`withoutRemoteServers`). A query that reads plugins' MCP configs (with
-`strictMcpConfig` off, for the headless browser or an allowed package) refuses any
+`strictMcpConfig` off, for an allowed package) refuses any
 loaded plugin that still declares an http server (`harness/run.ts`). An allowed
 package's local servers still start as declared.
 
@@ -837,12 +828,11 @@ Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
 and "Plugins", the list of `/api/v1/ai/plugins`
 ([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)): ScadBuddy's
-own tool sets first (#1953, `built_in: true`; `scadbuddy` is every registry tool, `playwright`
-the headless browser's, both from
+own tool set first (#1953, `built_in: true`; `scadbuddy` is every registry tool, from
 [`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
 remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
 below the tier its code declares (a lower one answers 400); the overrides are the
-`ai_settings` keys `builtin_tools.scadbuddy` and `builtin_tools.playwright`, applied at the
+`ai_settings` key `builtin_tools.scadbuddy`, applied at the
 harness seam, on `/mcp` and in the durable `agent-tools` activities. The durable session
 workflow parks a call by the manifest's tier, so a tool raised to outward is not parked
 there: its activity finds no recorded approval and refuses it (NotApproved). Adding, removing,
@@ -1023,10 +1013,6 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   one of the agent's credentials (`ToolServices.secrets`, below): `workspace_read`
   redacts them, and an upload would otherwise carry them into a README, a source file,
   an asset or Bambuddy. The refusal names the upload, never the credential.
-- Headless-browser downloads land in the workspace as `downloads/<name>`, source
-  `{tool: 'browser', url}` with the query dropped. The caps hold while a download
-  runs: the per-file cap and the room left in the workspace, at most 5 downloads a
-  browser call and 20 a turn ([headless-browser.md](headless-browser.md#downloads)).
 - `workspace_read` redacts every saved Claude credential's secret from text (and, in a
   classic turn, the turn's plugin tokens) before the model sees it
   (`ToolServices.secrets`, `main.ts`).
@@ -1058,7 +1044,8 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   session the browser user does not own or that is archived) and appends a
   `workspace.file` event (`path`, `change`, `by`, and an upload's `size`, `mediaType`
   and `sha256`) to the session's log in the same transaction as the file, so the two
-  commit together: the panel's Files list reads again on it. An upload whose numbered
+  commit together: the panel's Files list reads again on it, and the feed shows it as a
+  line where it happened (#2399). An upload whose numbered
   `uploads/<name>` was taken meanwhile reads the list again and takes the next number,
   once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the

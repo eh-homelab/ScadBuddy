@@ -11,7 +11,6 @@ describe('loadConfig', () => {
       publicUrl: undefined,
       allowedOrigins: undefined,
       trustedProxies: undefined,
-      browserAllowedOrigins: undefined,
       temporalAddress: undefined,
       temporalNamespace: 'scadbuddy',
       temporalSearchAttributes: false,
@@ -29,7 +28,6 @@ describe('loadConfig', () => {
         SCADBUDDY_PUBLIC_URL: 'https://scadbuddy.example',
         SCADBUDDY_ALLOWED_ORIGINS: 'https://scadbuddy.internal.example, https://scadbuddy.lan',
         SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.42.0.0/16, fd00::/8',
-        SCADBUDDY_BROWSER_ALLOWED_ORIGINS: 'https://docs.example, http://printer.lan:8080',
         SCADBUDDY_TEMPORAL_ADDRESS: 'temporal-frontend:7233',
         SCADBUDDY_TEMPORAL_NAMESPACE: 'scadbuddy-dev',
         SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'true',
@@ -43,7 +41,6 @@ describe('loadConfig', () => {
       publicUrl: 'https://scadbuddy.example',
       allowedOrigins: 'https://scadbuddy.internal.example, https://scadbuddy.lan',
       trustedProxies: '10.42.0.0/16, fd00::/8',
-      browserAllowedOrigins: 'https://docs.example, http://printer.lan:8080',
       temporalAddress: 'temporal-frontend:7233',
       temporalNamespace: 'scadbuddy-dev',
       temporalSearchAttributes: true,
@@ -71,9 +68,6 @@ describe('loadConfig', () => {
     [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.0.0.0/33' }, /"10\.0\.0\.0\/33" is not an IP address or CIDR range/],
     [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: 'ingress-nginx' }, /SCADBUDDY_AGENT_TRUSTED_PROXIES/],
     [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.0.0.0/8/1' }, /SCADBUDDY_AGENT_TRUSTED_PROXIES/],
-    [{ SCADBUDDY_BROWSER_ALLOWED_ORIGINS: 'docs.example' }, /SCADBUDDY_BROWSER_ALLOWED_ORIGINS: "docs\.example" is not an http\(s\) origin/],
-    [{ SCADBUDDY_BROWSER_ALLOWED_ORIGINS: 'https://docs.example/manual' }, /SCADBUDDY_BROWSER_ALLOWED_ORIGINS/],
-    [{ SCADBUDDY_BROWSER_ALLOWED_ORIGINS: '*, https://docs.example' }, /cannot be combined/],
   ])('refuses a malformed %j', (env, message) => {
     expect(() => loadConfig(env)).toThrow(ConfigError)
     expect(() => loadConfig(env)).toThrow(message)
@@ -83,10 +77,6 @@ describe('loadConfig', () => {
     expect(
       loadConfig({ SCADBUDDY_DATABASE_URL: '  ', SCADBUDDY_BACKEND_URL: '', SCADBUDDY_SECRET_KEY_FILE: '' }),
     ).toEqual(loadConfig({}))
-  })
-
-  it('accepts `*` for the headless browser, meaning any origin (each still approved per session)', () => {
-    expect(loadConfig({ SCADBUDDY_BROWSER_ALLOWED_ORIGINS: ' * ' }).browserAllowedOrigins).toBe('*')
   })
 
   it('accepts both postgres URL schemes', () => {

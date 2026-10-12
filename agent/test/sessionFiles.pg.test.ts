@@ -250,8 +250,10 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     const id = await session()
     await m.edits.update(id, browser, { archived: true })
     expect((await upload(id, 'x.txt', 'x')).status).toBe(409)
+    expect((await remove(id, 'x.txt')).status).toBe(409)
     expect((await list(id)).status).toBe(200)
     expect((await rows('workspace_upload')).map((r) => r.outcome)).toEqual(['refused'])
+    expect((await rows('workspace_delete')).map((r) => r.outcome)).toEqual(['refused'])
   })
 
   it('writes the file and its event together, or neither (#2469)', async () => {

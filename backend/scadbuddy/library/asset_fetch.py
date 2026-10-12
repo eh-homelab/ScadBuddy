@@ -5,9 +5,8 @@ paths by hand. The fetch is the URL import's (`url_import.py`): https only on ev
 hop, public addresses only, pinned to the vetted address, capped in bytes as they
 arrive, one deadline for the whole exchange. On top of that, every hop's host must be
 on the **asset allowlist** (`asset_fetch_domains` in Settings, which only the user
-edits: the agent has no tool for `PUT /settings`, and its headless browser is refused
-it). So a redirect off the list is refused rather than followed, and the refusal names
-the host that was refused.
+edits: the agent has no tool for `PUT /settings`). So a redirect off the list is
+refused rather than followed, and the refusal names the host that was refused.
 
 What arrives is stored exactly as an upload is (`AssetStore.put`): sniffed rather than
 trusted by its name, an SVG stripped of scripts and external references, a PNG

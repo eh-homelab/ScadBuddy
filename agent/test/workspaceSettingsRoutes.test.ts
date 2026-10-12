@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/headlessBrowser.js'
+import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import type { SettingsWriter } from '../src/routes/mcpAuthMode.js'
 import {
   MAX_FILE_BYTES,
@@ -40,7 +40,7 @@ function setup(options: { ready?: boolean; settings?: boolean; stored?: Record<s
   const writes: string[][] = []
   const writer: SettingsWriter = {
     setMany: async (written, check, context) => {
-      if (!(await check({ get: repo.get }))) return false
+      if (check && !(await check({ get: repo.get }))) return false
       writes.push(Object.keys(written))
       for (const [key, value] of Object.entries(written)) await repo.set(key, value, context)
       return true
