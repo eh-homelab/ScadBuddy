@@ -29,7 +29,7 @@ const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 
 function seen(ctx: ToolContext) {
-  return json({ principal: ctx.principal, session: ctx.session, gate: ctx.gate ?? null })
+  return json({ principal: ctx.principal, session: ctx.session, gate: ctx.gate ?? null, flowTurn: ctx.flowTurn ?? null })
 }
 
 const whoami = defineTool({
@@ -138,6 +138,8 @@ describe('tool activities', () => {
     expect(text(content)).toContain('"session": "' + SESSION)
     expect(text(content)).toContain('"gate": "workflow"')
     expect(text(content)).toContain('"id": "browser"')
+    // A session's own call is no flow's: a turn it sends is never marked a flow turn (#2481).
+    expect(JSON.parse(text(content)).flowTurn).toBeNull()
     // The commit trailer names the session (authorship.ts, #252).
     expect(h.headers[0]!.get(AUTHOR_SESSION_HEADER)).toBe(SESSION)
     // What the session touched (#931), and the audit row the harness would write.
@@ -338,6 +340,8 @@ describe('flow runs in tool activities', () => {
     expect(text(content)).toContain('"id": "browser"')
     expect(text(content)).toContain('"gate": "workflow"')
     expect(text(content)).not.toContain('"session"')
+    // #2481: the run and its step, from the activity's own context, for a turn it sends.
+    expect(JSON.parse(text(content)).flowTurn).toEqual({ run_id: RUN, call_id: 'call_1' })
     expect(owners).toEqual([])
     expect(h.headers[0]!.get(AUTHOR_SESSION_HEADER)).toBeNull()
     expect(h.audits).toEqual([

@@ -417,6 +417,8 @@ export const sessionTools: Tool[] = [
           ...(mode === undefined ? {} : { mode }),
           ...(prompt === undefined ? {} : { prompt, tiers: ctx.principal.tiers }),
           ...(resolved ? { images: resolved.images } : {}),
+          // A flow run's call (#2481): its turn is the run's, so the run's grant may cover it.
+          ...(prompt !== undefined && ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
         }),
       )
       if (resolved?.attached.length) {
@@ -473,7 +475,11 @@ export const sessionTools: Tool[] = [
       const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
       const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
       const turn = await refusals(() =>
-        sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers, ...(resolved ? { images: resolved.images } : {}) }),
+        sessions.send(session_id, owner, text, {
+          tiers: ctx.principal.tiers,
+          ...(resolved ? { images: resolved.images } : {}),
+          ...(ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
+        }),
       )
       // The turn has the bytes; the uploads move into the session (attachments/store.ts `claim`).
       // A failed move is not the send's: the turn runs, and the staging rows expire.

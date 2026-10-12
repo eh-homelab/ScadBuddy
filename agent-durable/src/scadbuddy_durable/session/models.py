@@ -14,6 +14,9 @@ from temporalio.claude_agent_sdk import AgentState
 WORKFLOW = "DurableSession"
 TASK_QUEUE = "agent"
 TOOLS_QUEUE = "agent-tools"
+# Where the backend serves `flow_grant_check` (#2481): SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS's
+# default, as TOOLS_QUEUE is the agent tools queue's.
+PROJECTS_QUEUE = "projects"
 SEND_MESSAGE_UPDATE = "send_message"
 # What the segment runner reads from its workflow: the turn's images (Ruling 5) and the
 # system prompt's append (SegmentContext).
@@ -49,6 +52,17 @@ class ImageRef:
 
 
 @dataclass
+class FlowTurn:
+    """A turn a flow run sent (#2481, spec 2026-10-11 §3.4): set only by the agent
+    service, from the `sessions_start`/`sessions_send` activity's own context (a
+    `flow-<run>` workflow, activity `tool-<call id>`), never from a script's arguments.
+    The backend checks it against the run's own record of its steps."""
+
+    run_id: str
+    call_id: str
+
+
+@dataclass
 class TurnStart:
     """The turn that runs: carried across a continue-as-new in the middle of it."""
 
@@ -60,6 +74,8 @@ class TurnStart:
     # workflow.now() as the turn started (ISO 8601), the plugin's events' `at` clock:
     # a subscriber of a turn carried over by continue-as-new ignores an end before it.
     started_at: str | None = None
+    # The flow run and step that sent this turn (#2481); None for any other turn.
+    flow: FlowTurn | None = None
 
 
 @dataclass
@@ -91,6 +107,8 @@ class Message:
     # The append as Settings stand when this turn is sent (#2525): a session started
     # while the headless browser was off is told about it once it is on, and back.
     system_append: str | None = None
+    # Set by the agent service for a turn a flow run sent (#2481).
+    flow: FlowTurn | None = None
 
 
 @dataclass
