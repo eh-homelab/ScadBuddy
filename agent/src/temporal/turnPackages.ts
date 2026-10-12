@@ -1,4 +1,4 @@
-import { cp, mkdir, rename, rm } from 'node:fs/promises'
+import { cp, mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { declaredConfigs } from '../harness/plugins.js'
 import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
 import type { LoadedPackage } from '../plugins/packages/install.js'
-import { packageServerName, withoutRemoteServers } from '../plugins/packages/mcp.js'
+import { packageServerName, touch, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import { type TurnPackage, type TurnServer } from './turnTools.js'
 
 // Plugin packages in a durable session (#2320). A classic turn hands Claude Code each
@@ -74,7 +74,41 @@ export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: 
       await rm(tmp, { recursive: true, force: true })
     }
   }
+  // Its last share, which the sweep keeps it by (sweepPackageCopies).
+  await touch(target)
   return { name: pkg.name, dir: name, content_hash: contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
+}
+
+/** A copy is kept this long after the last turn that shared it (#2395). */
+export const PACKAGE_COPY_KEPT_MS = 7 * 24 * 3600_000
+/** A copy left half-made by a replica that stopped mid-copy is removed after this. */
+const TMP_KEPT_MS = 3600_000
+
+/**
+ * Removes package copies no turn has shared for PACKAGE_COPY_KEPT_MS (#2395), and copies
+ * left half-made: under the payload volume's `plugins/` (every replica sweeps it, so two
+ * may remove the same one) and under a pod's `plugins-local/`. A pin still enabled is
+ * shared again, and so touched, by every turn that lists it, and copied again if it was
+ * removed; a turn runs for minutes, never for the week a copy is kept.
+ */
+export async function sweepPackageCopies(root: string, now = Date.now()): Promise<string[]> {
+  const names = await readdir(root).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return [] as string[]
+    throw err
+  })
+  const removed: string[] = []
+  for (const name of names) {
+    const keep = /^[0-9a-f]{64}$/.test(name) ? PACKAGE_COPY_KEPT_MS : name.startsWith('.tmp-') ? TMP_KEPT_MS : undefined
+    if (keep === undefined) continue
+    const at = await stat(path.join(root, name)).then(
+      (s) => s.mtimeMs,
+      () => undefined,
+    )
+    if (at === undefined || now - at < keep) continue
+    await rm(path.join(root, name), { recursive: true, force: true })
+    removed.push(name)
+  }
+  return removed
 }
 
 async function matches(dir: string, contentHash: string): Promise<boolean> {

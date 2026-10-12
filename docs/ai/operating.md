@@ -827,7 +827,11 @@ Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
 it runs only with `Bash` offered, as in a classic turn (run.ts `builtinTools`). This was
-not measured in a durable engine. Copies on the volume are not pruned.
+not measured in a durable engine. Each listing touches the copies it shares, and each
+query the `plugins-local/` copy it loads; every replica removes, once an hour, the copies
+on the volume and its own `plugins-local/` copies that nothing has touched for 7 days,
+and copies left half-made for an hour (`sweepPackageCopies`, #2395). An enabled package
+is shared again at its next turn.
 
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))

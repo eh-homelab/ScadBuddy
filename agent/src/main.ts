@@ -56,7 +56,7 @@ import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } fr
 import { TASK_QUEUE } from './temporal/names.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
 import { BrowserHost, type HeadlessBrowserDeps, turnBrowserServers } from './temporal/turnBrowser.js'
-import { SHARED_PACKAGES } from './temporal/turnPackages.js'
+import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { subagentKey } from './temporal/subagentToken.js'
 import { pgRunning } from './routes/subagentMcp.js'
@@ -449,6 +449,17 @@ const workerDataConverter = dataConverter
 // classic turn would hand Claude Code, built again for every listing and call. One whose
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
 // own queue, HOST_QUEUE, served by `hostWorker` below.
+// Package copies no turn has used for a week (#2395): the shared ones on the payload
+// volume, and this pod's own copies without their http servers. Every hour.
+{
+  const roots = [path.join(paths.stateDir, 'plugins-local'), ...(config.payloadDir ? [path.join(config.payloadDir, SHARED_PACKAGES)] : [])]
+  const sweep = () =>
+    void Promise.all(roots.map((root) => sweepPackageCopies(root))).catch((err: unknown) =>
+      console.error('package copy sweep failed:', (err as Error).message),
+    )
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
 const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
 // The headless browsers this replica runs for durable sessions' pinned calls.
 const browserHost = new BrowserHost({ paths })

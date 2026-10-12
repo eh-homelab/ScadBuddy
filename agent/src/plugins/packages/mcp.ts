@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { declaredConfigs } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
@@ -168,6 +168,12 @@ function withoutRemote(map: unknown): unknown {
  * load: one already there is kept only while it hashes to the fresh copy, so it is
  * never trusted as it is. The original is never written to.
  */
+/** Marks a package copy as just used: its folder's mtime is what turnPackages.ts `sweepPackageCopies` reads. */
+export async function touch(dir: string): Promise<void> {
+  const now = new Date()
+  await utimes(dir, now, now).catch(() => {})
+}
+
 export async function withoutRemoteServers(dir: string, contentHash: string, root: string): Promise<string> {
   if (!declaresRemoteServers(dir)) return dir
   const target = path.join(root, contentHash.replace(/^sha256:/, ''))
@@ -189,7 +195,11 @@ export async function withoutRemoteServers(dir: string, contentHash: string, roo
     }
     if (declaresRemoteServers(tmp)) throw new Error(`could not strip the http MCP servers of ${dir}`)
     const want = (await hashTree(tmp)).hash
-    if (await hashesTo(target, want)) return target
+    if (await hashesTo(target, want)) {
+      // Its last use, which turnPackages.ts `sweepPackageCopies` keeps it by (#2395).
+      await touch(target)
+      return target
+    }
     await rm(target, { recursive: true, force: true })
     await rename(tmp, target).catch(async (err: NodeJS.ErrnoException) => {
       // Another turn placed it first: fine when it is the same copy.
