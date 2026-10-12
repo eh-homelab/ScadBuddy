@@ -28,6 +28,7 @@ from session_support import (
     events,
     insert_session,
     send,
+    send_next,
     settled,
     start_session,
     status,
@@ -492,6 +493,31 @@ async def _segment_options(
             await handle.terminate()
     [made] = recording.made
     return made
+
+
+async def test_each_turn_runs_with_the_append_it_was_sent_with(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2525: Settings changed between turns (the headless browser turned on, say) reach
+    the next turn's prompt; a turn sent without an append keeps the session's first."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    recording = Recording()
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=recording)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue, system_append="no browser")
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+            await agent_db.execute(
+                "UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,)
+            )
+            await send_next(handle, "again", system_append="a headless browser")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    appends = [m["extra_options"]["system_prompt"].get("append") for m in recording.made]
+    assert appends == ["no browser", "a headless browser"]
 
 
 async def _setting(conn: Conn, key: str, value: str) -> None:

@@ -58,6 +58,12 @@ async def step(n: int) -> StepResult:
     return StepResult(n=n, note=f"did {n}")
 
 
+@agent.tool_defn(inherently_safe=True)
+async def label(n: int, word: str = "step") -> str:
+    """Label `n` with `word`, which a script may leave out."""
+    return f"{word} {n}"
+
+
 @agent.activity_tool_defn(name="outward", activity_config=_CFG)
 async def outward(what: str) -> str:
     """An outward effect: needs a person's approval."""
@@ -112,8 +118,8 @@ async def child(n: int) -> int:
 
 
 #: Registered with the plugin; `human_answer` is not offered to the script.
-PROBE_TOOLS = [step, outward, human_answer, wait, gated_via_nested, child]
-SCRIPT_TOOLS = [step, outward, wait, gated_via_nested, child]
+PROBE_TOOLS = [step, label, outward, human_answer, wait, gated_via_nested, child]
+SCRIPT_TOOLS = [step, label, outward, wait, gated_via_nested, child]
 
 
 @activity.defn(name="probe_close")

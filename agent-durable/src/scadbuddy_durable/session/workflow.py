@@ -233,6 +233,7 @@ class DurableSession:
                     message.turn_id,
                     message.author,
                     list(message.images),
+                    message.system_append,
                     started_at=workflow.now().isoformat(),
                 )
                 await self._run_turn(prompt_of(message))
@@ -709,7 +710,12 @@ class DurableSession:
     def segment_context(self) -> SegmentContext:
         return SegmentContext(
             images=list(self._turn.images) if self._turn else [],
-            system_append=self._start.system_append,
+            # The turn's own append; a turn sent without one keeps the session's first (#2525).
+            system_append=(
+                self._turn.system_append
+                if self._turn is not None and self._turn.system_append is not None
+                else self._start.system_append
+            ),
             disabled_tools=list(self._settings.disabled_tools),
             packages=list(self._packages),
         )

@@ -342,13 +342,13 @@ agent("Slice and check plate 3", skills=["print"], result_schema=None,
   grant as it is.
 - `on_outside` is `"escalate"` (pass up) or `"deny"` (the call is refused at once, never
   parked, and recorded as denied by the flow).
-- `ask_session(session_id, message, grant, on_outside)` takes the same two.
-- The harness's Code Mode stubs render every parameter as required
-  (`flow_tools.py` `wait_for_human`'s note), so both are new required parameters of the
-  host functions, and the type check names them. Existing scripts that call `agent` or
-  `ask_session` with the old arity fail to type-check: the registration and the run-time
-  check (§7.2 of 10-01) refuse them, saying which parameters to add. No compatibility
-  shim (§8, Ruling 9).
+- `ask_session(session_id, message, images, grant, on_outside)` takes the same two.
+- Both are **optional** (§8, Ruling 9, as amended by #2636): `grant` defaults to `None`
+  (no narrowing) and `on_outside` to `"escalate"`. The harness's Code Mode stubs keep a
+  parameter's default since temporal-agent-harness c0f148f9 (#171), so a script may
+  leave them out. Every script registered before them, which calls `agent` or
+  `ask_session` with the old arity, keeps type-checking and runs as if it had passed
+  the defaults: no script breaks.
 - The step records the narrowing (`steps[].policy`), which `flow_grant_check` reads.
 
 ### 4.4 The starter session as a parent
@@ -644,8 +644,10 @@ sees or what is safe, and are listed in the PR for the user.
    to the starter** (§3.2, §3.5).
 7. **(user) Grant expiry at most 7 days, default 24 h** (§3.1).
 8. **(user) A token with the approval grant may not decide run-queue entries** (§4.2).
-9. **`agent`/`ask_session` gain required `grant` and `on_outside` parameters, and old
-   scripts must be edited** (§4.3), because the harness renders no defaults.
+9. **`agent`/`ask_session` gain optional `grant` (default `None`, no narrowing) and
+   `on_outside` (default `"escalate"`) parameters, and no script breaks** (§4.3).
+   Amended by #2636: this ruling first made both required, because the harness rendered
+   no defaults; the harness pin past c0f148f9 keeps them.
 10. **"Narrow" means "replace with an input the grant admits"** (§4.1). Whether the
     replacement is semantically smaller is not checked; the grant is the bound.
 11. **(user) A parent hop that times out passes up; with a run timeout of 0 the parent hop

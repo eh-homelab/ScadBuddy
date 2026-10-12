@@ -626,9 +626,14 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `agent` queue; without them a session whose mode came from this default runs classic
   and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
   and `sessions_start`), while one that asked for `durable` is refused 503
-  (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins,
-  packages, browser, `http_request`, Hindsight and settings (#2320, spec 2026-10-01
-  §6.3b); only forking is classic-only. The worker check counts only a
+  (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins
+  (a browser among them, as the `playwright` remote plugin, #2568), packages,
+  `http_request`, Hindsight, subagents and settings (#2320, spec 2026-10-01 §6.3b), with
+  three differences: forking is classic-only; a durable subagent has ScadBuddy's own tools
+  only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
+  plugin refuses a subagent the turn's durable tools; and of the built-ins an
+  `allow_refused` package names, a durable turn offers only `Bash` and `PowerShell`, each
+  parked for approval, and says which it left out (#2393). The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the

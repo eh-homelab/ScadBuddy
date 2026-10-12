@@ -448,3 +448,36 @@ async def test_the_workflow_registers_only_the_harness_handlers(probe: Probe) ->
     assert {u.name for u in definition.update_definitions} == HARNESS_UPDATES
     assert {q.name for q in definition.query_definitions} - builtin == HARNESS_QUERIES
     assert {s.name for s in definition.signal_definitions} == HARNESS_SIGNALS
+
+
+# 13: a parameter with a default may be left out (c0f148f9, #171; #2636). The stub
+# marks it `= ...` without its value, and the host function's own default applies.
+async def test_a_parameter_with_a_default_may_be_left_out(probe: Probe) -> None:
+    tool = agent.code_mode_tool(SCRIPT_TOOLS, name="run_flow")
+    script = _script("a = await label(1)", "b = await label(2, 'layer')", "return a + ', ' + b")
+    assert await agent.code_mode_type_check(tool, script) is None
+    wf_id, _ = await probe.start(script)
+    assert await probe.reply(wf_id) == "result: 'step 1, layer 2'"
+
+
+# 14: a call the script made but has not awaited runs with the next batch it awaits, so
+# it runs while the script waits on something else. True at 0.6.0 too: Monty reports
+# every outstanding call as pending at an await. Main past 0.6.0 (f843bc8) also starts
+# such calls at a file operation's stop, which a flow, having no mounts, never makes.
+async def test_an_unawaited_call_runs_with_the_next_awaited_batch(
+    probe: Probe, effects: Path
+) -> None:
+    wf_id, _ = await probe.start(
+        _script(
+            "pending = step(1)",
+            "await wait('go on?', 60)",
+            "r = await pending",
+            "return r['n']",
+        )
+    )
+    await _until(lambda: _read_effects(effects), bool)
+    client = AgentClient(probe.client, wf_id)
+    [waiting] = await _until(client.get_pending_callbacks, bool)
+    await client.provide_callback_result(waiting.tool_id, result={"answer": "yes"})
+    assert await probe.reply(wf_id) == "result: 1"
+    assert _effects(effects) == [{"tool": "step", "n": 1}]
