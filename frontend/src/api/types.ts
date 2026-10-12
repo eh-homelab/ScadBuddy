@@ -281,14 +281,6 @@ export interface Problem {
 }
 
 /**
- * The agent service's headless-browser setting (#349,
- * `GET/PUT /api/v1/ai/settings/headless-browser`). Off by default.
- */
-export interface HeadlessBrowserSetting {
-  enabled: boolean
-}
-
-/**
  * The agent service's switch for the assistant's `http_request` tool (#827,
  * `GET/PUT /api/v1/ai/settings/http-request`). On by default.
  */

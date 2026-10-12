@@ -108,22 +108,6 @@ function builtIns(): BuiltInPluginPackage[] {
       approved: true,
       enabled: true,
     },
-    {
-      name: 'playwright',
-      built_in: true,
-      source: { kind: 'built_in', path: 'agent/plugins/playwright' },
-      review: {
-        ...emptyReview,
-        name: 'playwright',
-        description: 'Browser automation and end-to-end testing MCP server by Microsoft.',
-        version: '0.0.83',
-        skills: [],
-        agents: [],
-        files: ['.claude-plugin/plugin.json', 'README.md'],
-      },
-      approved: true,
-      enabled: false,
-    },
   ]
 }
 
@@ -233,7 +217,7 @@ export function remotePluginList(): RemotePlugin[] {
 }
 
 /** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
-const BUILT_IN_SETS = new Set(['scadbuddy', 'playwright'])
+const BUILT_IN_SETS = new Set(['scadbuddy'])
 
 export const aiPluginHandlers = [
   // ---- remote MCP endpoints. A name that is no remote plugin falls through to

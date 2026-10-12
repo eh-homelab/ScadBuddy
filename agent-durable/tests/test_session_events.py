@@ -89,7 +89,7 @@ async def test_finish_turn_writes_once(agent_db: Conn, connect: object) -> None:
     acts = SessionActivities(connect)  # type: ignore[arg-type]
     args = FinishTurn(session_id=sid, turn_id="t", outcome="failed", message="it broke")
     assert await acts.finish_turn(args)
-    # The turn is over: a headless-browser grant made in it dies with it (#2320).
+    # The turn is over: it is no longer the session's running turn (#2320).
     cur = await agent_db.execute("SELECT durable_turn_id FROM ai_sessions WHERE id = %s", (sid,))
     assert await cur.fetchone() == (None,)
     assert not await acts.finish_turn(args)  # a retry writes nothing twice

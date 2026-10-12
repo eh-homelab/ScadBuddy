@@ -22,7 +22,6 @@ from temporalio.worker import Worker
 import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import health, libraries, media, metrics, models, outputs, telemetry
-from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
@@ -1125,7 +1124,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.projection.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
-        await app.state.agent_grants.aclose()
         await state.store.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
@@ -1155,14 +1153,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
-    # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
-    # refused on the method, path and marker header alone, before any body is read.
-    grants = postgres_grants(app_settings.database_url)
-    # Closed by the lifespan, after everything else has stopped.
-    app.state.agent_grants = grants
-    # Inside the gate: a commit made for the agent is authored as the agent (#252).
+    # A commit made for the agent is authored as the agent (#252).
     app.add_middleware(AgentAuthorship)
-    app.add_middleware(AgentActorGate, grants=grants)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(

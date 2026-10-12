@@ -171,7 +171,7 @@ export function repinMoves(pkg: PluginPackage): boolean {
 
 /**
  * A plugin that ships with the agent (agent `plugins/packages/builtins.ts`): ScadBuddy's
- * own and the headless browser's. Listed first; it can be enabled or disabled, never
+ * own. Listed first; it can be enabled or disabled, never
  * removed, approved or re-pinned.
  */
 export interface BuiltInPluginPackage {

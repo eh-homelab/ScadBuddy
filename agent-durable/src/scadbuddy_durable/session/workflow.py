@@ -171,7 +171,7 @@ class DurableSession:
         # The plugin keeps these objects and reads needs_approval as each call comes:
         # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
         self._tools = {t.name: t for t in manifest.durable_tools(entries)}
-        # This turn's other tools (plugins, http_request, the headless browser; #2320):
+        # This turn's other tools (plugins, http_request; #2320):
         # offered from what turn_tools listed, replaced every turn.
         self._turn_tools: set[str] = set()
         # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.

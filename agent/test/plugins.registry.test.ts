@@ -43,7 +43,8 @@ const forwardedMemory: HarnessPlugin = {
 }
 
 describe('plugin names', () => {
-  it.each(['memory', 'hindsight', 'my-memory', 'a1', 'x'.repeat(32)])('accepts %s', (name) => {
+  // `playwright` was reserved for the built-in headless browser; Microsoft's Playwright MCP is now added as one.
+  it.each(['memory', 'hindsight', 'playwright', 'my-memory', 'a1', 'x'.repeat(32)])('accepts %s', (name) => {
     expect(validatePluginName(name)).toBe(name)
   })
   it.each(['', 'a', 'Memory', '1mem', 'mem_ory', 'mem--ory', 'mem-', 'x'.repeat(33), 'mem.ory', 'mem ory'])(
@@ -54,7 +55,6 @@ describe('plugin names', () => {
   )
   it.each([
     'scadbuddy',
-    'playwright',
     'workspace',
     'computer-use',
     'claude-in-chrome',

@@ -504,10 +504,6 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect(own).toBeInstanceOf(BuiltInPluginError)
     expect((own as Error).message).toMatch(/ScadBuddy's own plugin is built in.*nothing to install/)
 
-    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'playwright' }) })
-    const browser = await installer.prepare(source).catch((e: unknown) => e)
-    expect(browser).toBeInstanceOf(BuiltInPluginError)
-    expect((browser as Error).message).toMatch(/Playwright plugin is built in as the headless browser/)
   })
 
   it('lists a fatal problem before the cap cuts the allowable ones', async () => {

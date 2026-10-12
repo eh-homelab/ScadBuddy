@@ -205,7 +205,7 @@ export class DurableTurns {
         turn.author.kind,
         turn.author.id,
         turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
-        // The running turn, which a headless-browser grant dies with (#2320).
+        // The running turn (#2320).
         turn.turnId,
       ],
     )

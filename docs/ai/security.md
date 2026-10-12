@@ -176,8 +176,7 @@ print, delete, settings or credential writes). A tool ScadBuddy does not recogni
 The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/harness/permissions.ts):
 
 - `decide(toolName, tierOf, input, guard)`: an optional `InputGuard` may deny a call
-  by its arguments first, at any tier (the headless browser's origin and file-name
-  checks, [headless-browser.md](headless-browser.md)). Then an unknown tool (`tierOf`
+  by its arguments first, at any tier. Then an unknown tool (`tierOf`
   returns `undefined`) is treated as `outward`. `read` and `write` are allowed.
   `outward` gets `needs_approval`.
 - **Approvals** (#258): in a session, `needs_approval` parks the call until a human
@@ -214,11 +213,10 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 - `tools: []`, which removes all built-in tools: no Bash, file or web tools.
 - `settingSources: []`, so nothing is read from a host `~/.claude` or a project
   `.claude/`.
-- `strictMcpConfig: true` and `mcpServers: {}`. A query with the headless browser
+- `strictMcpConfig: true` and `mcpServers: {}`. A query with an allowed plugin package
   sets `strictMcpConfig: false`, because with it Claude Code starts no plugin MCP server
   at all (measured on 2.1.283, #349, and on 2.1.287, #1540); `settingSources: []` still
-  keeps settings-file MCP configs out, which the e2e test checks with a planted
-  `.mcp.json`.
+  keeps settings-file MCP configs out.
 - A service-owned `CLAUDE_CONFIG_DIR` and `cwd`.
 - An explicit `env`, so the service's own environment (the database URL above all) does
   not reach the Claude Code subprocess.
@@ -551,15 +549,6 @@ unattended would be visible there. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the
 next section.
 
-**The one exception is the headless browser** (#349). Its plugin is not read from
-anyone's directory: `materializeHeadlessBrowser()` in
-[`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts)
-writes it per session from the vendored manifest, with a single stdio server that
-starts under `/usr/bin/env -i` and gets `HOME`, `TMPDIR` and `PLAYWRIGHT_BROWSERS_PATH`
-only, so the credential never reaches it or Chromium (measured from
-`/proc/<pid>/environ`). `assertHeadlessPlugin()` checks that file instead of
-`assertPluginAllowed()`, which would refuse it.
-
 ## Plugin packages
 
 Packages (#297) are Claude plugins that ScadBuddy fetches from a git URL or a marketplace
@@ -716,8 +705,7 @@ A turn that loads an allowed pin also gets two more things:
   name in `allowed-tools` or `tools` (`review.builtin_tools`, for example `Bash`, `Read`
   or `Write`). They are offered beside the run's own `Skill` and `Agent` (`run.ts`
   `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
-  `outward`, and in a session it parks for a human. The headless browser's
-  `disallowedTools` still remove `Bash` when the browser is on.
+  `outward`, and in a session it parks for a human.
 - **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
   false). Only an allowed package can carry it, because the vetting refuses it
   everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):
@@ -738,68 +726,23 @@ Not done yet:
 - per-part enabling. The review shows each part, but a package is enabled as a whole.
 - tier maps for a package's own MCP tools. They stay `outward`.
 
-## Headless browser (#349)
+## A browser plugin (Playwright MCP)
 
-Spec §8.6's row "Headless browser used to click past an approval, or to reach other
-origins or files", as built. Details and measurements are in
-[headless-browser.md](headless-browser.md).
+The built-in headless browser of #349 (its vendored plugin, the backend's
+`AgentActorGate` and its one-shot grants) was removed. A browser now reaches a session
+only as a remote plugin, Microsoft's Playwright MCP
+([headless-browser.md](headless-browser.md)), so it gets exactly what any remote plugin
+gets:
 
-- **Off by default**: the `ai_settings` key `headless_browser_enabled` must be `true`.
-  It is set only through `PUT /api/v1/ai/settings/headless-browser`, behind
-  `uiRequestProblem` like the other AI settings writes, from a user-only switch in
-  Settings.
-- **Tools the model cannot see**: `browser_run_code_unsafe`, `browser_evaluate`,
-  `browser_file_upload`, `browser_drop`, `browser_install` are in `disallowedTools`.
-  Every other tool has an explicit tier; a new one is `outward`, so denied.
-- **Origins**: the harness denies any `url` not on the backend's origin before the
-  server sees it (`browserInputProblem()`, using `normaliseOrigin()` from
-  `origins.ts`), and the server's `network.allowedOrigins` blocks navigations,
-  subresources and page `fetch` to other origins. That list does not cover redirects
-  (measured), so a **redirect guard** loaded on every page routes each request itself
-  with `maxRedirects: 0` and refuses any hop off the origin, including one added by a
-  proxy in front of the backend (measured: an off-origin redirect and an on→off chain
-  reach nothing).
-- **Files**: `filename` arguments must be plain names; the server's own
-  workspace-root restriction refuses `../` and outside absolute paths too. No
-  `--allow-unrestricted-file-access`, no downloads (`acceptDownloads: false`).
-- **Approvals cannot be bypassed through the UI**: every request carries
-  `X-ScadBuddy-Agent-Session` (a page `fetch` cannot replace it, measured), and
-  `AgentActorGate` in
-  [`backend/scadbuddy/api/agent_actor.py`](../../backend/scadbuddy/api/agent_actor.py)
-  answers `403` to every non-safe route that is not on its allowlist of read/write
-  routes. Default deny: a new route is refused until listed. The one exception is a
-  **grant**: the model asks for one exact method and path with
-  `mcp__scadbuddy_browser__authorize_request`, an outward tool that parks for a human
-  approval (#258); the approved call writes a one-shot row to `ai_headless_grants`,
-  and the backend's `GRANT_SQL` uses it once, only while the turn that made it is the
-  session's live turn and only if its approval is approved and consumed. Any database
-  problem refuses. The marker is not authentication; forging it can only get a request
-  refused (a request without it is as trusted as today), and a forged marker cannot use
-  a grant without knowing the session id, the grant's exact path, and landing inside its
-  turn and two-minute window, for a request a human already approved.
-- **A grant binds method and path, not the body** (review of #518), so settings routes
-  (`/api/v1/settings` and below) are never grantable: a granted settings write could
-  point `bambuddy_url` at another host and send the API key there. Both the agent's
-  authorize tool and the backend gate refuse them. For print and send, the printer,
-  plate and options in the body are not shown to the approver.
-- **The grant check cannot be flooded** (review of #518): the marker is free for anyone
-  to send, so the lookup it triggers is bounded. It runs on its own async pool of 2
-  Postgres connections (`PostgresGrants`), at most 4 checks at once, and one more is
-  refused at once without touching the database; a pooled connection that is not free
-  within 2 s refuses too. Markers that are not UUIDs, and paths outside `/api/v1/`,
-  are refused before any of that. Measured: 200 concurrent bogus markers opened at most
-  2 connections, and a real grant still worked right after
-  (`backend/tests/api/test_agent_actor_grants.py`).
-- **No open redirects from the backend** either, as defence in depth:
-  `backend/tests/api/test_no_open_redirect.py`
-  ([headless-browser.md](headless-browser.md#redirects-guarded-in-the-browser-and-none-from-the-backend)).
-- **Isolation**: `--isolated`, no profile on disk, one server per query, so no state
-  crosses sessions (or turns).
-- **Chromium's sandbox is on where the pod allows it**: the agent probes it once and
-  asks for it (`chromiumSandbox: true`) when it starts; otherwise it warns and runs with
-  `--no-sandbox`, where a renderer exploit would land in the agent container. It needs
-  a seccomp profile that allows user namespaces, not `RuntimeDefault`
-  ([headless-browser.md](headless-browser.md#sandbox)).
+- Its tools are `outward` until an admin tiers them in Settings → Plugins, so every call
+  parks for a human until then; tiers and disabled tools are the plugin's own.
+- ScadBuddy no longer marks or limits what that browser requests. Nothing on the backend
+  tells its requests from a person's. Where it may go is decided where it is deployed:
+  its `--allowed-origins`/`--blocked-origins` and the network. Do not let it reach
+  ScadBuddy's backend or agent API without the sign-in a person needs, or a page it
+  opens could make outward requests that no approval sees.
+- **No open redirects from the backend** stays, since Playwright MCP's origin lists do
+  not cover redirects: `backend/tests/api/test_no_open_redirect.py`.
 
 ## HTTP request tool (#827)
 
@@ -831,9 +774,8 @@ so a name re-pointed between check and connect reaches nothing new.
 - **Only the model's headers.** The request is built from the tool input alone: no
   user agent, no cookies, no proxy variables, nothing from the agent's environment. The
   Claude credential lives in Claude Code's per-query `env`, which this code never reads.
-- **Never the agent-actor header.** A request naming `X-ScadBuddy-Agent-Session` (any
-  case) is refused, as are `Host`, `Content-Length`, `Transfer-Encoding` and the other
-  connection-level headers Node sets itself.
+- **Never the connection's headers.** `Host`, `Content-Length`, `Transfer-Encoding`
+  and the other connection-level headers Node sets itself are refused.
 - **Never the turn's secrets.** A header value (`Authorization`, `Cookie` or any other),
   the URL or the body that contains the Claude credential or a plugin's header token
   (the same list the event log is redacted of) is refused, so an injected instruction
@@ -1171,9 +1113,8 @@ From the merged code and PR bodies:
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
 7. **Plugins are vetted before every turn.** `main.ts` gives the
-   `SessionManager` ScadBuddy's registry tools, the enabled remote plugins, plugin
-   packages and the headless browser's vendored plugin (when enabled, see
-   [headless-browser.md](headless-browser.md)) for each turn, however the session was
+   `SessionManager` ScadBuddy's registry tools, the enabled remote plugins and plugin
+   packages for each turn, however the session was
    started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
@@ -1198,8 +1139,10 @@ From the merged code and PR bodies:
     the credential routes' interim gate (item 1). Someone who can reach Settings can
     point `/mcp` at an IdP they control, which is the "Stated plainly" caveat of spec
     §8.3.
-12. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
-    without its sandbox** (see above).
+12. **A browser plugin's reach and sandbox are its deployment's.** The built-in
+    headless browser is gone; Playwright MCP, added as a plugin, runs wherever it is
+    deployed, and ScadBuddy does not limit what it opens
+    ([A browser plugin](#a-browser-plugin-playwright-mcp)).
 13. **The `http_request` tool's reach is open until it runs in a sandbox** (#827,
     decided 2026-09-30; [HTTP request tool](#http-request-tool-827)). A `GET` runs
     without a human, so injected content can make the model read anything on the
@@ -1228,7 +1171,6 @@ the primary, since a hot standby refuses `LISTEN` and `NOTIFY`
 ([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html));
 see [mcp-resources.md](mcp-resources.md#the-event-source).
 
-#349 measured the headless-browser rows and moved them to spec §3.1 (see
-[headless-browser.md](headless-browser.md), "Measured"), including how the backend
-matches the agent-actor marker to an approved outward action (a one-shot grant in the
-shared database).
+#349 measured the headless-browser rows and moved them to spec §3.1. That browser,
+and the backend's agent-actor gate it needed, have since been removed
+([headless-browser.md](headless-browser.md)).
