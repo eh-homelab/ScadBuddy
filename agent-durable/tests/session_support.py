@@ -119,6 +119,7 @@ class StandInTools:
         self.memory: list[tuple[str, str]] = []
         self.memory_fails = False
         self.tier_refuses = False
+        self.turn_tools_fails = False
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -190,6 +191,8 @@ class StandInTools:
 
         @activity.defn(name="turn_tools")
         async def turn_tools() -> dict[str, Any]:
+            if self.turn_tools_fails:
+                raise ApplicationError("the agent is away", non_retryable=True)
             return {"tools": self.turn_offered, "packages": self.turn_packages}
 
         # As httpRequest.ts httpTierOf tiers http_request: no method, a GET or a HEAD is

@@ -947,3 +947,24 @@ async def test_a_turn_tool_call_the_agent_cannot_tier_parks(
     assert entry["kind"] == "approval"
     assert harness.stand_in.ran == []
     await _replays(harness, handle)
+
+
+async def test_a_turn_whose_other_tools_cannot_be_listed_goes_on_with_its_own(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A failed turn_tools never fails the session: the turn runs with the manifest's tools
+    and offers none of last turn's others, as a classic turn reports the plugin and goes on."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    assert await settled(connect, sid) == "idle"
+    harness.stand_in.turn_tools_fails = True
+    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+    await send_next(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    # The second turn ran to its result, offered no turn tool, and called none.
+    types = _types(await events(agent_db, sid))
+    assert types.count("session.result") == 2
+    assert types.count("tool.call") == 1
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
+    await _replays(harness, handle)
