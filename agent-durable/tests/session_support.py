@@ -264,18 +264,30 @@ async def start_session(
 
 
 async def send(
-    handle: WorkflowHandle[Any, Any], text: str, images: list[ImageRef] | None = None
+    handle: WorkflowHandle[Any, Any],
+    text: str,
+    images: list[ImageRef] | None = None,
+    system_append: str | None = None,
 ) -> SendAnswer:
     answer: SendAnswer = await handle.execute_update(
         SEND_MESSAGE_UPDATE,
-        Message(turn_id=str(uuid.uuid4()), text=text, author=ME, images=images or []),
+        Message(
+            turn_id=str(uuid.uuid4()),
+            text=text,
+            author=ME,
+            images=images or [],
+            system_append=system_append,
+        ),
         result_type=SendAnswer,
     )
     return answer
 
 
 async def send_next(
-    handle: WorkflowHandle[Any, Any], text: str, timeout: float = 30.0
+    handle: WorkflowHandle[Any, Any],
+    text: str,
+    timeout: float = 30.0,
+    system_append: str | None = None,
 ) -> SendAnswer:
     """`send` for the turn after one `settled` saw end. `finish_turn` writes the idle
     `settled` reads, and the workflow leaves the turn only once that activity's result
@@ -284,7 +296,7 @@ async def send_next(
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
         try:
-            return await send(handle, text)
+            return await send(handle, text, system_append=system_append)
         except WorkflowUpdateFailedError as err:
             busy = isinstance(err.cause, ApplicationError) and err.cause.type == "busy"
             if not busy or asyncio.get_running_loop().time() > deadline:

@@ -49,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
 
 MIN_WAIT_S = 10
 MAX_WAIT_S = 86_400
+DEFAULT_WAIT_S = 3_600
 
 
 class HumanAnswer(BaseModel):
@@ -65,12 +66,12 @@ async def human_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body
 
 @agent.tool_defn(inherently_safe=True)
 async def wait_for_human(
-    question: str, timeout_s: int, runner: agent.Injected[AgentWorkflowRunner]
+    question: str,
+    runner: agent.Injected[AgentWorkflowRunner],
+    timeout_s: int = DEFAULT_WAIT_S,
 ) -> HumanAnswer:
-    """Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400) for the
-    answer. Raises TimeoutError if nobody answers in time."""
-    # timeout_s has no default: the pinned harness's stubs render every parameter as
-    # required (code_mode/stubs.py at 04a49d1), so a default would never be used.
+    """Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400, an hour
+    if left out) for the answer. Raises TimeoutError if nobody answers in time."""
     if not MIN_WAIT_S <= timeout_s <= MAX_WAIT_S:
         raise ValueError(f"timeout_s must be {MIN_WAIT_S} to {MAX_WAIT_S} seconds")
     call_id = str(workflow.uuid4())
@@ -117,8 +118,8 @@ class ArrangeResult(BaseModel):
 
 class Image(BaseModel):
     """An image a flow holds: a pointer to bytes kept with the run, never the bytes
-    (#2477). `bytes` is its size. Pass it to `agent_with_images` or
-    `ask_session_with_images`, or return it; the run page shows the run's images."""
+    (#2477). `bytes` is its size. Pass it to `agent` or `ask_session` as
+    `images`, or return it; the run page shows the run's images."""
 
     name: str = Field(pattern=r"^[0-9a-f]{64}\.(png|jpg|gif|webp)$")
     mediaType: Literal["image/png", "image/jpeg", "image/gif", "image/webp"]  # noqa: N815
@@ -778,14 +779,19 @@ async def _start_session(
 
 
 async def _agent_session(
-    prompt: str, skills: list[str], result_schema: dict[str, Any] | None
+    prompt: str,
+    skills: list[str],
+    result_schema: dict[str, Any] | None,
+    images: list[Image] | None = None,
 ) -> Any:
     """Start a durable agent session with `prompt`, as the person who started this run,
     and wait for its answer. `skills` names ScadBuddy skills for it to use (may be
     empty). With `result_schema` (a JSON Schema, or None) the answer is the JSON value
-    it answered with, checked against the schema; without, its text. The session's own
-    outward calls wait for approval in its chat."""
-    return await _start_session(prompt, skills, result_schema, [])
+    it answered with, checked against the schema; without, its text. `images` (this
+    run's, from `tool_result`) are sent with the prompt: the session sees them as images
+    its user sent, never as text. The session's own outward calls wait for approval in
+    its chat."""
+    return await _start_session(prompt, skills, result_schema, images or [])
 
 
 # `agent` is the harness's module here; the host function takes the name the script calls.
@@ -797,8 +803,8 @@ agent_session = agent.tool_defn(inherently_safe=True)(_agent_session)
 async def agent_with_images(
     prompt: str, skills: list[str], result_schema: dict[str, Any] | None, images: list[Image]
 ) -> Any:
-    """`agent`, with `images` (this run's, from `tool_result`) sent with the prompt: the
-    session sees them as images its user sent, never as text."""
+    """Deprecated: call `agent(prompt, skills, result_schema, images)`, which takes
+    `images` now (#2636). Kept so scripts registered before keep running."""
     return await _start_session(prompt, skills, result_schema, images)
 
 
@@ -816,16 +822,18 @@ async def _ask(session_id: str, message: str, images: list[Image]) -> str:
 
 
 @agent.tool_defn(inherently_safe=True)
-async def ask_session(session_id: str, message: str) -> str:
+async def ask_session(session_id: str, message: str, images: list[Image] | None = None) -> str:
     """Send `message` to the durable agent session `session_id` (one the person who
-    started this run owns) and wait for its answer's text."""
-    return await _ask(session_id, message, [])
+    started this run owns) and wait for its answer's text. `images` (this run's, from
+    `tool_result`) are sent with the message: the session sees them as images its user
+    sent, never as text."""
+    return await _ask(session_id, message, images or [])
 
 
 @agent.tool_defn(inherently_safe=True)
 async def ask_session_with_images(session_id: str, message: str, images: list[Image]) -> str:
-    """`ask_session`, with `images` (this run's, from `tool_result`) sent with the
-    message: the session sees them as images its user sent, never as text."""
+    """Deprecated: call `ask_session(session_id, message, images)`, which takes `images`
+    now (#2636). Kept so scripts registered before keep running."""
     return await _ask(session_id, message, images)
 
 

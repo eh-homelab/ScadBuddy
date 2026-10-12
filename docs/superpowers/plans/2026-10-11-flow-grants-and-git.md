@@ -250,7 +250,7 @@ audited `refused` like `NotApproved`.
 **Files:**
 - Modify: `agent/src/sessions/durable.ts` (`DurableTurns.send` sets `flow` from the activity context), `agent/src/temporal/toolActivities.ts` (pass the flow run and call id to `sessions_start`/`sessions_send` runs)
 - Modify: `agent-durable/src/scadbuddy_durable/session/models.py` (`Message.flow: FlowTurn | None`), `session/workflow.py` (`_park`: grant check first, behind `workflow.patched("session-flow-grant")`)
-- Modify: `backend/scadbuddy/workflows/flow_tools.py` (`agent`, `ask_session` take `grant: dict | None` and `on_outside: str`; validated with `Narrowing`; recorded as `steps[].policy`), `workflows/flow_steps.py`, `flows/typecheck.py` if stubs need it
+- Modify: `backend/scadbuddy/workflows/flow_tools.py` (`agent`, `ask_session` take `grant: dict | None = None` and `on_outside: str = "escalate"`, both optional (amendment Ruling 9 as amended by #2636); validated with `Narrowing`; recorded as `steps[].policy`), `workflows/flow_steps.py`, `flows/typecheck.py` if stubs need it
 - Test: `agent-durable/tests/test_session_workflow.py`, `agent/test/durable.test.ts`, `backend/tests/flows/test_agent_host_functions.py`
 
 **Interfaces:**
@@ -282,9 +282,8 @@ script cannot name a run.
   false` → parks; a Message's `flow` naming another run's step → parks. See them fail.
 - [ ] Test (agent): `sessions_send` from a non-flow context never sets `flow`; from a
   flow activity it sets the run and call id.
-- [ ] Implement; update the old-arity script fixtures in
-  `backend/tests/flows/` (amendment Ruling 9: no shim) and the plugin's flow examples
-  if any mention `agent(`.
+- [ ] Implement. Old-arity scripts keep working (amendment Ruling 9 as amended by
+  #2636): keep a test that one still type-checks and runs with the defaults.
 - [ ] agent-durable `uv run --frozen ruff check . && mypy && pytest`; agent and backend
   suites.
 

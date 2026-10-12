@@ -43,8 +43,8 @@ export function SessionModePicker({
           <option value="durable">Durable</option>
         </select>
         <span>
-          Same tools and plugins either way. Durable chats keep running through a restart of the assistant, and cannot
-          be forked.
+          Same tools and plugins either way, except that a durable chat&apos;s subagents have only ScadBuddy&apos;s own
+          tools. Durable chats keep running through a restart of the assistant, and cannot be forked.
         </span>
       </div>
     </details>
