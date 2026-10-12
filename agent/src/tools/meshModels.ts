@@ -11,7 +11,13 @@ import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspac
 // backend/scadbuddy/api/mesh_models.py. Nothing here writes to Bambuddy.
 
 const vec3 = z.tuple([z.number(), z.number(), z.number()])
-const num = z.union([z.number(), z.object({ expose: z.string().max(64), value: z.number() })])
+// An exposed parameter's name: the backend's IDENT (meshmodel/scene.py). Not an object id (o1, o2_x), an sb_ name or an OpenSCAD keyword.
+const KEYWORDS = ['if', 'else', 'for', 'let', 'each', 'module', 'function', 'include', 'use', 'assert', 'echo', 'intersection_for', 'true', 'false', 'undef', 'PI']
+const ident = z
+  .string()
+  .max(64)
+  .regex(new RegExp(`^(?!o[0-9]+(?:_|$))(?!sb_)(?!(?:${KEYWORDS.join('|')})$)[A-Za-z_][A-Za-z0-9_]*$`), 'not a usable parameter name (o<digits>, sb_…, an OpenSCAD keyword and PI are reserved)')
+const num = z.union([z.number(), z.object({ expose: ident, value: z.number() })])
 const nvec3 = z.tuple([num, num, num])
 const object = z.string().regex(/^o[0-9]+$/)
 
@@ -24,8 +30,8 @@ const edit = z.discriminatedUnion('edit', [
     normal: vec3.describe('The plane normal, world; the new object is the side it points to'),
     joint: z
       .object({
-        diameter: z.number().positive().optional().describe('Peg diameter; default 60% of the room at the section centre'),
-        depth: z.number().positive().default(6),
+        diameter: z.number().positive().max(100).optional().describe('Peg diameter; default 60% of the room at the section centre'),
+        depth: z.number().positive().max(100).default(6),
         clearance: z.number().min(0).max(2).default(0.2),
         key: z.enum(['none', 'flat', 'hex']).default('flat'),
         peg_on: z.enum(['above', 'below']).default('above'),
@@ -41,7 +47,7 @@ const edit = z.discriminatedUnion('edit', [
   z.object({ edit: z.literal('duplicate'), object, offset: vec3.default([20, 0, 0]) }),
   z.object({ edit: z.literal('rename'), object, name: z.string().min(1).max(200) }),
   z.object({ edit: z.literal('remove_op'), object, op: z.number().int().min(0) }),
-  z.object({ edit: z.literal('expose'), object, op: z.number().int().min(0).nullable().describe('The op index, or null for the object\'s transform'), field: z.string().regex(/^[a-z_]+(\.[0-2])?$/).describe('e.g. diameter, or point.2 for a tuple element'), name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(64) }),
+  z.object({ edit: z.literal('expose'), object, op: z.number().int().min(0).nullable().describe('The op index, or null for the object\'s transform'), field: z.string().regex(/^[a-z_]+(\.[0-2])?$/).describe('e.g. diameter, or point.2 for a tuple element'), name: ident }),
   z.object({ edit: z.literal('unexpose'), object, op: z.number().int().min(0).nullable(), field: z.string().regex(/^[a-z_]+(\.[0-2])?$/) }),
 ])
 
@@ -58,7 +64,7 @@ export const meshModelTools: Tool[] = [
       name: z.string().min(1).max(200),
       description: z.string().max(10_000).optional(),
       library_file_id: z.number().int().positive().optional(),
-      output_id: z.string().optional(),
+      output_id: z.string().regex(/^[0-9a-f]{32}$/).optional(),
       filename: z.string().min(1).max(255).optional().describe('The upload\'s name, ending .3mf or .stl; with workspace_path, the file\'s own name by default'),
       content_base64: z.string().min(1).optional().describe('The mesh as base64; a large one is better sent from the workspace'),
       workspace_path: workspacePathInput.optional(),

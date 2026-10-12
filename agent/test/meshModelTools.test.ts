@@ -55,8 +55,8 @@ describe('mesh model tools', () => {
 
   it('creates from an output', async () => {
     const { seen, client } = backend()
-    await call('create_model_from_mesh', { name: 'Carrot', output_id: 'o_1' }, client)
-    expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh', body: { name: 'Carrot', output_id: 'o_1', description: '' } }))
+    await call('create_model_from_mesh', { name: 'Carrot', output_id: 'a'.repeat(32) }, client)
+    expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh', body: { name: 'Carrot', output_id: 'a'.repeat(32), description: '' } }))
   })
 
   it('uploads base64 as multipart', async () => {
@@ -70,7 +70,7 @@ describe('mesh model tools', () => {
     const b64 = Buffer.from('x').toString('base64')
     for (const args of [
       { name: 'X' },
-      { name: 'X', library_file_id: 1, output_id: 'o' },
+      { name: 'X', library_file_id: 1, output_id: 'a'.repeat(32) },
       { name: 'X', content_base64: b64 },
       { name: 'X', content_base64: b64, filename: 'x.obj' },
     ]) {
@@ -105,6 +105,26 @@ describe('mesh model tools', () => {
     const sent = [{ ...edits[0], joint: { depth: 5, clearance: 0.2, key: 'flat', peg_on: 'above' } }, edits[1]]
     expect(seen[0]).toEqual(expect.objectContaining({ method: 'POST', path: '/api/v1/models/carrot/scene/edits', body: { edits: sent, drop_from_presets: false } }))
     expect(seen[0]!.key).toBeTruthy()
+  })
+
+  it('refuses what the backend would: a joint over 100, a reserved parameter name, a bad output id', async () => {
+    const { seen, client } = backend()
+    const split = (joint: object) => [{ edit: 'split_at_plane', object: 'o1', point: [0, 0, 1], normal: [0, 0, 1], joint }]
+    const expose = (name: string) => [{ edit: 'expose', object: 'o1', op: null, field: 'translate.0', name }]
+    const inline = (name: string) => [{ edit: 'transform', object: 'o1', translate: [{ expose: name, value: 1 }, 0, 0] }]
+    const bad = [
+      call('edit_scene', { slug: 'carrot', edits: split({ depth: 101 }) }, client),
+      call('edit_scene', { slug: 'carrot', edits: split({ diameter: 101 }) }, client),
+      ...['o1', 'o2_x', 'sb_x', 'true', 'PI'].flatMap((n) => [
+        call('edit_scene', { slug: 'carrot', edits: expose(n) }, client),
+        call('edit_scene', { slug: 'carrot', edits: inline(n) }, client),
+      ]),
+      call('create_model_from_mesh', { name: 'X', output_id: 'o_1' }, client),
+    ]
+    for (const result of await Promise.all(bad)) expect(JSON.stringify(firstText(result))).toMatch(/invalid|not a usable|expected|too_big|pattern|must/i)
+    expect(seen).toEqual([])
+    await call('edit_scene', { slug: 'carrot', edits: expose('width') }, client)
+    expect(seen).toHaveLength(1)
   })
 
   it('ejects', async () => {
