@@ -48,6 +48,7 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
@@ -465,6 +466,8 @@ const temporalWorker =
             currentTiers: liveTokenTiers(tokens),
             // A result's images, for the durable segment's view_tool_images (#2320).
             blobs: new SessionBlobs(temporal.sql),
+            // A flow call's images, sealed under its run's payload key (#2477).
+            ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and

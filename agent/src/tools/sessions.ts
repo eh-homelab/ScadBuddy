@@ -375,6 +375,8 @@ export const sessionTools: Tool[] = [
       'says why a default durable session runs classic.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
+      // #2477: references only, as sessions_send's, sent with the prompt.
+      images: ImageRefsSchema.optional().describe(`With \`prompt\`: ${IMAGE_REFS_DESCRIPTION}`),
       title: z.string().max(200).optional(),
       tags: z.array(z.string().min(1).max(50)).max(10).optional(),
       scope: z
@@ -397,10 +399,15 @@ export const sessionTools: Tool[] = [
     risk: 'write',
     routes: [],
     source: TRANSCRIPT_SOURCE,
-    summarize: ({ title, prompt }) => `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}`,
+    summarize: ({ title, prompt, images }) =>
+      `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}${images ? ` and ${images.length} image${images.length === 1 ? '' : 's'}` : ''}`,
     waitsMs: ({ wait_seconds }) => wait_seconds * 1000,
-    handler: async ({ prompt, title, tags, scope, mode, wait_seconds }, ctx) => {
+    handler: async ({ prompt, images, title, tags, scope, mode, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
+      if (images && prompt === undefined) throw new ToolError('images are sent with a prompt: give the prompt too', 400)
+      const owner = ownerOf(ctx.principal)
+      const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
+      const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
       const { session, turn, modeFallback } = await refusals(() =>
         sessions.start(ownerOf(ctx.principal), {
           origin: originOf(ctx.principal),
@@ -409,8 +416,14 @@ export const sessionTools: Tool[] = [
           ...(scope === undefined ? {} : { scope }),
           ...(mode === undefined ? {} : { mode }),
           ...(prompt === undefined ? {} : { prompt, tiers: ctx.principal.tiers }),
+          ...(resolved ? { images: resolved.images } : {}),
         }),
       )
+      if (resolved?.attached.length) {
+        await ctx.attachments?.claim(session.id, owner, resolved.attached).catch((err: unknown) => {
+          console.error(`sessions_start: session ${session.id}: could not move its attachments: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }
       const fellBack = modeFallback ? { mode_fallback: modeFallback } : {}
       if (!turn) return json({ session: sessionView(session, viewerOf(ctx)), ...fellBack })
       const outcome = await waitFor(turn, wait_seconds, ctx)
@@ -458,7 +471,7 @@ export const sessionTools: Tool[] = [
       // Resolved after the session check, so a caller cannot use an unknown session to probe images.
       // An `attachment` resolves only for the principal that uploaded it (#1941).
       const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
-      const resolved = images ? await resolveSendImages(images, ctx.backend, attachments) : undefined
+      const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
       const turn = await refusals(() =>
         sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers, ...(resolved ? { images: resolved.images } : {}) }),
       )

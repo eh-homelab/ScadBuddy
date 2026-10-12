@@ -670,6 +670,8 @@ export const api = {
   },
 
   getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+  /** #2477: one of a run's images, from its blob route. */
+  flowRunImageUrl: (id: string, name: string) => `${API_BASE}/workflow-runs/${seg(id)}/images/${seg(name)}`,
 
   answerFlowRun: (id: string, callId: string, answer: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {

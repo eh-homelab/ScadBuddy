@@ -31,7 +31,11 @@ export const flowTools: Tool[] = [
       '`ask_session(session_id, message)` sends to a durable session the starter owns and returns its answer; ' +
       "a session's own outward calls wait for approval in its chat. `tool(name, args)` calls a tool as the " +
       "run's starter and returns its text: one of ScadBuddy's, or an enabled plugin's or http_request named " +
-      '`<server>__<tool>` (e.g. `scadbuddy_http__http_request`); an outward one waits for approval. Results are ' +
+      '`<server>__<tool>` (e.g. `scadbuddy_http__http_request`); an outward one waits for approval. ' +
+      '`tool_result(name, args)` returns {text, images}, each image a pointer {name, mediaType, bytes} kept with ' +
+      'the run (never its bytes), which `agent_with_images(prompt, skills, result_schema, images)` and ' +
+      '`ask_session_with_images(session_id, message, images)` send to a session, and a script may return; the ' +
+      "run page shows the run's images. Results are " +
       'dicts; a refusal is an exception in ScadBuddy\'s words, and a denial a ToolApprovalDenied. The script ' +
       'is `import asyncio`, an `async def main()` that awaits host functions, and `asyncio.run(main())`; it may ' +
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
