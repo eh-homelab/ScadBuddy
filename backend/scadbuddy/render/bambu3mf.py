@@ -403,6 +403,14 @@ def project_settings(
     it takes the first preset it lists, Bambu ABS, for a file whose sources were PLA. A
     partial list is not written: a slot with ``""`` would get that same guess, and
     what Bambu Studio makes of one was never measured.
+
+    Sources: the dialog's pick is ``pickFilamentForSlot`` in Bambuddy's
+    ``frontend/src/utils/slicePresetPicker.ts``, fed by the ``filament_type`` its
+    ``library.py`` reads from this file (read 2026-10-12 at maziggy/bambuddy main).
+    A Bambu Studio project states it beside ``filament_colour`` (Bambuddy's filament
+    requirements read both there, as :mod:`scadbuddy.bambuddy.filaments3mf` does), and
+    ScadBuddy copies the strings a library project stated. Not yet measured: a
+    ScadBuddy-written 3MF carrying it, sliced by Bambuddy's headless slicer.
     """
     settings: dict[str, str | list[str]] = {
         "filament_colour": list(colours),

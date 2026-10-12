@@ -151,6 +151,17 @@ def test_an_object_keeps_the_material_the_project_states_for_each_of_its_colours
     assert obj.materials == {"#FF0000": "PLA"}
 
 
+def test_one_colour_in_two_materials_is_of_unknown_material() -> None:
+    payload = bambu_project(
+        items=[at(50, 50)],
+        parts={1: (_box(20, 10, 5), "normal_part", 1), 2: (_box(5, 5, 5), "normal_part", 3)},
+        colours=("#FF0000", "#00FF00", "#FF0000"),
+        types=("PLA", "PLA", "PETG"),
+    )
+    [obj] = read_objects(payload)
+    assert obj.materials == {}
+
+
 def test_a_project_stating_no_material_leaves_its_colours_without_one() -> None:
     payload = bambu_project(items=[at(50, 50)], parts={1: (_box(20, 10, 5), "normal_part", 2)})
     [obj] = read_objects(payload)

@@ -23,13 +23,16 @@ from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _scope
 from scadbuddy.workflows.arrange import arrange
 from scadbuddy.workflows.models import (
     Layout,
+    LayoutPlate,
     OutputRequest,
     PackItem,
     PackRequest,
     PieceRequest,
+    Placed,
     PlateSize,
     piece_key,
 )
+from scadbuddy.workflows.outputs import _materials, manifest_of
 from scadbuddy.workflows.packing import PackError, explicit_plate
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from tests.support.openscad import install_fake_openscad
@@ -265,6 +268,55 @@ def _from_library(part: Part, materials: dict[str, str]) -> ManifestObject:
         count=1,
         library_file_id=7,
     )
+
+
+def test_an_arranged_output_keeps_its_objects_materials_for_the_next_arrange() -> None:
+    part = Part(
+        piece_key="lib3-a",
+        file="keychain.3mf",
+        bbox=BoundingBox(min=(0, 0, 0), max=(10, 10, 2), size=(10, 10, 2)),
+        colours=["#FF0000"],
+    )
+    req = OutputRequest(
+        job_id="j1",
+        index=0,
+        slug="demo",
+        layout=Layout(plates=[LayoutPlate(items=[Placed(piece_key="lib3-a", x=0, y=0)])]),
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record(["lib3-a"]),
+        provenance={"lib3-a": _from_library(part, {"#FF0000": "PLA"})},
+    )
+    [obj] = manifest_of(req)
+    assert obj.materials == {"#FF0000": "PLA"}
+
+
+def test_a_colour_two_sources_give_different_materials_is_unknown() -> None:
+    red = Part(
+        piece_key="lib3-a",
+        file="a.3mf",
+        bbox=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        colours=["#FF0000"],
+    )
+    other = red.model_copy(update={"piece_key": "lib3-b", "colours": ["#FF0000", "#00FF00"]})
+    req = OutputRequest(
+        job_id="j1",
+        index=0,
+        slug="demo",
+        layout=Layout(plates=[]),
+        parts=[red, other],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([]),
+        provenance={
+            "lib3-a": _from_library(red, {"#ff0000": "PLA"}),
+            "lib3-b": _from_library(other, {"#FF0000": "PETG", "#00FF00": "PLA"}),
+        },
+    )
+    assert _materials(req) == {"#00FF00": "PLA"}
 
 
 async def _arranged_settings(

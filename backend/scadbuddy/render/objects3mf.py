@@ -360,17 +360,20 @@ def _filament_colours(archive: _Archive) -> list[str]:
 
 
 def _filament_materials(archive: _Archive) -> dict[str, str]:
-    """Each filament colour's ``filament_type``, as the project states it. Two slots of
-    one colour keep the first slot's material: an object is read by colour, so that is
-    all it can be told apart by."""
+    """Each filament colour's ``filament_type``, as the project states it. An object is
+    read by colour, so two slots of one colour in different materials cannot be told
+    apart: that colour's material is unknown."""
     types = _project_settings(archive).get("filament_type")
     if not isinstance(types, list):
         return {}
     materials: dict[str, str] = {}
+    conflicting: set[str] = set()
     for colour, material in zip(_filament_colours(archive), types, strict=False):
-        if isinstance(material, str) and material.strip():
-            materials.setdefault(colour, material.strip())
-    return materials
+        if not isinstance(material, str) or not material.strip():
+            continue
+        if materials.setdefault(colour, material.strip()) != material.strip():
+            conflicting.add(colour)
+    return {c: m for c, m in materials.items() if c not in conflicting}
 
 
 def _root_model_name(archive: _Archive) -> str:
