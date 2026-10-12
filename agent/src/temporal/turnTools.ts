@@ -47,6 +47,8 @@ export const TURN_TOOL_TIER_ACTIVITY = 'turn_tool_tier'
 /** The activity type a turn tool's call runs as: `turn:<server>__<tool>`. */
 export const TURN_TOOL_PREFIX = 'turn:'
 const SEPARATOR = '__'
+/** How long one server's tool listing may take before it is left out of the turn. */
+const LIST_TIMEOUT_MS = 20_000
 
 /** One MCP server a turn offers beside ScadBuddy's own tools. */
 export type TurnServer = {
@@ -97,6 +99,8 @@ export type TurnToolsDeps = {
   report?: ((session: string, problems: readonly string[]) => Promise<void>) | undefined
   /** This replica's own queue (`agent-tools.<host>`), where a pinned server's calls run. */
   hostQueue?: string | undefined
+  /** How long one server's listing may take (LIST_TIMEOUT_MS by default). */
+  listTimeoutMs?: number | undefined
   /** Where a call's result images are kept for `view_tool_images` (toolActivities.ts `resultText`). */
   blobs?: ResultBlobs | undefined
 }
@@ -164,6 +168,16 @@ async function listed(server: TurnServer, signal: AbortSignal) {
   })
 }
 
+/** `promise`, or the signal's reason once it aborts (a connect that stalls takes no signal). */
+function within<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason as Error)
+    if (signal.aborted) abort()
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
+}
+
 async function withServers<T>(deps: TurnToolsDeps, context: TurnContext, use: (set: TurnServers) => Promise<T>): Promise<T> {
   const set = await deps.servers(context)
   try {
@@ -197,17 +211,22 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const signal = Context.current().cancellationSignal
       return withServers(deps, { session, owner, signal }, async (set) => {
         const scrub = (text: string) => redact(text, set.secrets)
-        if (set.problems.length) await deps.report?.(session, set.problems.map(scrub))
+        // Listed side by side, each within LIST_TIMEOUT_MS: a plugin that stalls is
+        // reported and left out, never the whole listing's deadline.
+        const listings = await Promise.all(
+          set.servers.map(async (server) => {
+            try {
+              const bounded = AbortSignal.any([signal, AbortSignal.timeout(deps.listTimeoutMs ?? LIST_TIMEOUT_MS)])
+              return { server, offered: await within(listed(server, bounded), bounded) }
+            } catch (err) {
+              if (signal.aborted) throw new CancelledFailure('the listing was cancelled')
+              return { server, problem: `plugin ${server.name} is not available in this turn: ${(err as Error).message}` }
+            }
+          }),
+        )
         const tools: TurnToolEntry[] = []
-        for (const server of set.servers) {
-          let offered: Awaited<ReturnType<typeof listed>>
-          try {
-            offered = await listed(server, signal)
-          } catch (err) {
-            await deps.report?.(session, [scrub(`plugin ${server.name} is not available in this turn: ${(err as Error).message}`)])
-            continue
-          }
-          for (const { tool, name } of offered) {
+        for (const { server, offered } of listings) {
+          for (const { tool, name } of offered ?? []) {
             tools.push({
               name: turnToolName(server.name, tool.name),
               description: tool.description ?? '',
@@ -217,6 +236,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
             })
           }
         }
+        // Said once, after the listing, so a retried attempt does not say it again.
+        const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : []))]
+        if (problems.length) await deps.report?.(session, problems.map(scrub))
         return { tools }
       })
     },
@@ -242,7 +264,8 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const context = Context.current()
     const { activityType, activityId, workflowExecution } = context.info
     if (!activityType.startsWith(TURN_TOOL_PREFIX)) {
-      throw ApplicationFailure.nonRetryable(`no activity ${activityType} is served on this queue`, TOOL_ERROR)
+      // Retryable, as the SDK's own not-found is: a newer worker's activity during a deploy heals.
+      throw ApplicationFailure.retryable(`no activity ${activityType} is served on this queue`, 'NotFoundError')
     }
     const name = activityType.slice(TURN_TOOL_PREFIX.length)
     const { session, owner, turnTiers: sent } = await durableSession(name, deps.sessions)
