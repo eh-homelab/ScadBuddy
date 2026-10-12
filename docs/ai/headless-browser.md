@@ -24,7 +24,7 @@ from the next turn on, every session turn gets the browser (`main.ts` gives the
 | The official plugin's manifest, vendored byte for byte from [`anthropics/claude-plugins-official` at `fa59bc9`](https://github.com/anthropics/claude-plugins-official/tree/fa59bc9037741ecfa131aa27938272605710d7b2/external_plugins/playwright) (Apache-2.0, the repository's root `LICENSE`) | [`agent/plugins/playwright/`](../../agent/plugins/playwright/README.md) |
 | Per-session plugin copy, server config, tier map, disallowed tools, input guard, request guard | [`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts) |
 | Where it may go: ScadBuddy's own origins, and origins a human approved per session | [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts), table `ai_browser_origins` ([migration](../../agent/src/db/migrations/20260930T0342Z_browser_origins.sql)), `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` in [`agent/src/config.ts`](../../agent/src/config.ts) |
-| Its downloads, into the session's workspace (#2329) | [`agent/src/harness/browserDownloads.ts`](../../agent/src/harness/browserDownloads.ts) (`drainDownloads`, `downloadsHook`) |
+| Its downloads, into the session's workspace (#2329) | [`agent/src/harness/browserDownloads.ts`](../../agent/src/harness/browserDownloads.ts) (`drainDownloads`, `downloadsHook`, `turnEndDownloadsHook`) |
 | Loading it into a query | `buildHarness()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts) (`HarnessRun.headlessBrowser`) |
 | Turning it on per turn | `runTurn()` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts): `deps.headlessBrowser` **and** the `ai_settings` key `headless_browser_enabled` = `true` |
 | Its directory | `sessionBrowserDir()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts): `<state dir>/browser/<session id>` |
@@ -210,8 +210,16 @@ to 10 s for a download the call started:
   `additionalContext`, never the URL; `workspace_list` shows the source.
 
 A download still running after the wait is drained by the next browser call. One that
-finishes after the turn's last browser call is not drained: it goes with the browser
-directory when the turn ends.
+finishes after the turn's last browser call (#2397) is drained when the turn ends: a
+`Stop` hook (`turnEndDownloadsHook`, added in `run.ts`) waits up to the same 10 s for
+any still running, while the query and Chromium still live, and drains the directory
+under the same caps; then the session manager drains it once more, without waiting,
+just before it removes the browser directory, for a turn that ended without its `Stop`
+hook (stopped, failed, out of turns or budget). Neither tells the model; `workspace_list`
+shows the files. A download still running when that wait runs out, or one the guard is
+still reading at the route (before the browser starts it, so there is nothing on the disk
+to wait for), goes with the browser directory. The durable session's `BrowserHost`
+(`turnBrowser.ts`) does not drain at the turn's end yet.
 
 ### Limits, while a download runs
 
@@ -472,8 +480,13 @@ became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only 
   available when connecting remotely"), since the server's connection counts as remote,
   so the guard waits on `download.failure()`; and deleting the artifact while the server
   copies it fails the tool call, so a kept download's artifact is left to Playwright. The
-  hooks themselves are unit-tested (`agent/test/workspace.test.ts`), not yet through
-  Claude Code.
+  hooks are unit-tested (`agent/test/workspace.test.ts`) and run through a live classic
+  session (`agent/test/headlessBrowser.session.e2e.test.ts`, #2398): a click on the
+  download link lands `downloads/part.stl` in `ai_session_files` with the model told
+  after the click, and a download the page starts 3 s after the turn's last browser
+  call lands at the turn's end, with the model never told. Measured with the Claude Code
+  `@anthropic-ai/claude-agent-sdk` 0.3.289 bundles, @playwright/mcp 0.0.83 and
+  chromium-headless-shell 1247 on 2026-10-11.
 - **Bounded reads**: an endless attachment (a 64 KiB chunk at a time, never ending) is
   answered 413 at a 1000-byte cap and an endless `text/html` page 502 at
   `PAGE_MAX_BYTES`, each in under 3 s; the test server counts what it got out before the
