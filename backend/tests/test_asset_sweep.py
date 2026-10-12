@@ -133,13 +133,17 @@ class _Unreachable(BambuddyContentBackend):
         raise OSError("Bambuddy is down")
 
 
-async def test_a_failing_reconcile_still_trims_the_worker_cache(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("failing", ["sweep_content", "sweep_unrecorded"])
+async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
+    monkeypatch: pytest.MonkeyPatch, failing: str
 ) -> None:
     """#2115: a Bambuddy that is down fails the sweep, but the local cache is still
-    evicted, or it grows for as long as Bambuddy stays down."""
+    evicted, or it grows for as long as Bambuddy stays down. Both steps need it:
+    `sweep_content` releases each stale blob through Bambuddy too."""
 
     async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        if failing == "sweep_content":
+            raise OSError("Bambuddy is down")
         return []
 
     monkeypatch.setattr(main, "sweep_content", sweep_content)
