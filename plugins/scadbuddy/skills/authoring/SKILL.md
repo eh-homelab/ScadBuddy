@@ -645,6 +645,25 @@ with `normal: "largest_flat"`, which is usually the cut face. Pass `joint.key` `
 `hex` so the halves cannot spin; `none` is a round peg. Scale the object before you split
 it, not after.
 
+Printing one colour in place into another (the carrot's leaves into its body): a painted
+region is not a part, so it prints in the part's own colour (below). Anchor it with a
+coloured `add` instead: a `cylinder` in the leaves' colour, centred on the neck where the
+leaves meet the body, wider than the neck and a few mm tall, through it. An `add` with a
+`colour` takes its whole volume from every other colour, so no volume has two colours,
+and the green prints joined into the orange as one piece. An `add` without a `colour` is
+in the object's first colour and carves the others the same way. Keep it short enough to
+touch nothing else on the object, or it joins that too. Sources: the compiler
+`backend/scadbuddy/meshmodel/compile.py` (`_apply`); measured on a MakerWorld carrot in
+`backend/tests/test_mesh_models_fixtures.py`
+(`test_the_carrot_neck_anchored_in_green_prints_as_one_piece`: one piece, the two colours'
+volumes summing to the one-colour render's).
+
+Paint: a part painted in Bambu Studio keeps its paint codes beside its mesh, but nothing
+carries them into renders or prints yet (paint transfer is phase 3 of the design, §7):
+OpenSCAD's import drops paint, so each part renders and prints in its own colour.
+`get_scene`'s notes say so for each painted object. Source:
+`backend/scadbuddy/meshmodel/ingest.py`.
+
 What the backend refuses (a 422 from `edit_scene`, with the reason in the message; read it,
 do not retry the same edit):
 

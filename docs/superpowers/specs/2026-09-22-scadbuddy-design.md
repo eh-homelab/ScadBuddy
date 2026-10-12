@@ -198,7 +198,7 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   `protected`. So the URL import refuses MakerWorld links with a pointer to
   Upload, and a resolver needs a signed-in token (#174).
 - **OpenSCAD imports a colourless 3MF inside `color()` and cuts it** (measured
-  2026-10-12, #2146, in `scadbuddy:test` built from the pinned
+  2026-10-12, #2146, in an image built from the Dockerfile's `test` target on the pinned
   `openscad/openscad:dev.2026-10-05`, `openscad --version` 2026.10.05, `--backend=Manifold`,
   by `backend/tests/test_mesh_models_openscad.py`). A core 3MF with no `basematerials`
   imported as `color("#F08A24") import("part.3mf")` renders in that colour; the same
