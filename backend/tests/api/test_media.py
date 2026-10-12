@@ -4,6 +4,7 @@ served with Range support, written through their own upload gate."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -21,12 +22,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from starlette.requests import Request
 from starlette.types import Message
 
 from scadbuddy.api import media as media_api
 from scadbuddy.api.limits import MAX_MULTIPART_BODY_BYTES
 from scadbuddy.api.media import MAX_CONCURRENT_THUMBNAILS, THUMBNAIL_VERSION
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import GIT, git_env
 from scadbuddy.main import create_app
@@ -1327,3 +1330,44 @@ def test_the_thumbnail_cache_takes_the_same_key_to_put_and_get(tmp_path: Path) -
     cache.put(key, thumbnail)
     assert cache.get(key) is thumbnail
     assert cache.get(media_api._cache_key(source, stat, 128)) is None
+
+
+def _multipart_request(body: bytes) -> Request:
+    sent = False
+
+    async def receive() -> Message:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [(b"content-type", b"multipart/form-data; boundary=b")],
+    }
+    return Request(scope, receive)
+
+
+def test_receive_keeps_a_file_parts_name_and_the_text_parts_asked_for(tmp_path: Path) -> None:
+    """A mesh upload's type is its file name, and its model's name a text part (#2146)."""
+    body = (
+        b"--b\r\nContent-Disposition: form-data; name=file; filename=carrot.stl\r\n\r\n"
+        b"solid\r\n"
+        b"--b\r\nContent-Disposition: form-data; name=name\r\n\r\nCarrot\r\n"
+        b"--b\r\nContent-Disposition: form-data; name=other\r\n\r\nskipped\r\n--b--\r\n"
+    )
+    received = asyncio.run(
+        media_api._receive(_multipart_request(body), tmp_path, fields={"name": 10})
+    )
+    try:
+        assert received.filenames == {"file": "carrot.stl"}
+        assert received.fields == {"name": bytearray(b"Carrot")}
+        assert received.files["file"].read_bytes() == b"solid"
+    finally:
+        received.discard()
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(media_api._receive(_multipart_request(body), tmp_path, fields={"name": 3}))
+    assert refused.value.status == 422
+    assert not list(tmp_path.iterdir())

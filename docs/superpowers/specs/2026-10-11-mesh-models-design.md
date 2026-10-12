@@ -29,8 +29,9 @@ today), mesh repair beyond what reading already refuses, sculpting or vertex edi
   translate([0,0,5]) cube(100); }` exported to 3MF with `Status: NoError`, 264 facets;
   the same with `import("src.stl")`. The imported file's `basematerials` colours reach
   the output (`#FF0000`, `#0000FF` bases present). That image is an older nightly than
-  the pinned `dev.2026-10-05` (2026.10.05); the `requires_openscad` test in §10 re-measures it on the
-  pinned image, and spec 2026-09-22 §3 gains the fact when it passes.
+  the pinned `dev.2026-10-05` (2026.10.05); `backend/tests/test_mesh_models_openscad.py`
+  re-measured it on the pinned image on 2026-10-12 (a colourless core 3MF in `color()`, see
+  spec 2026-09-22 §3).
 - **Library 3MFs are already read faithfully.** `render/objects3mf.py` `read_objects`
   returns each object as closed meshes per colour (`ReadObject.parts`, `ColourPart`),
   with Bambu Studio per-part extruders, `basematerials` colours, and Bambu `paint_color`
@@ -62,12 +63,16 @@ A mesh model is an ordinary model directory with three extra things:
 
 ```
 models/<slug>/
-  model.json            # as today, plus "scene": true and "upstream"-style provenance
+  model.json            # as today, plus "mesh_source" (the provenance; kept after an eject)
   model.scad            # GENERATED from scene.json; committed
   scene.json            # the source of truth
   meshes/<object>-<part>.3mf   # one closed mesh per (object, colour part); never edited
   meshes/<object>-<part>.paint.json   # that part's paint codes, when painted (§7)
 ```
+
+A model is a mesh model while it has a `scene.json` (`meshmodel/operations.py`
+`read_scene`); `model.json` carries no `scene` flag, only `mesh_source`
+(`library/catalogue.py` `ModelMeta`).
 
 `model.scad` is compiled from `scene.json` by a pure function, so the render, version,
 Arrange and print paths see a plain `.scad` template and need no change. The agent and
@@ -83,7 +88,7 @@ the UI both edit `scene.json`, only through `scene_edit` (§5).
              "name": "2 Carrot Garden Print by Object.3mf", "sha256": "…"},
   "objects": [
     {"id": "o1", "name": "Carrot 1",
-     "parts": [{"mesh": "meshes/o1-p1.3mf", "colour": "#F08A24", "painted": true}],
+     "parts": [{"id": "p1", "mesh": "meshes/o1-p1.3mf", "colour": "#F08A24", "painted": true}],
      "ops": [],
      "transform": {"translate": [0, 0, 0], "rotate": [0, 0, 0], "scale": [1, 1, 1]}}
   ]
@@ -95,6 +100,8 @@ the UI both edit `scene.json`, only through `scene_edit` (§5).
   mesh's own frame, then its `transform` (rotate in degrees, X then Y then Z, as
   OpenSCAD's `rotate([x,y,z])`).
 - Object and part ids are stable across edits; a new object gets the next free id.
+- Caps (`meshmodel/scene.py`): 200 objects, 64 parts and 100 ops an object, 16 cuts an
+  object (`MAX_CUTS`: `section.cut_points` is cubic in them), a name of 200 characters.
 
 ### 3.2 Ops
 
@@ -102,7 +109,7 @@ the UI both edit `scene.json`, only through `scene_edit` (§5).
 |---|---|---|
 | `cut` | `point`, `normal`, `keep: above\|below` | `intersection()` with a half-space: a cube larger than the object's bounding box, aligned to the plane |
 | `joint` | `at: [x,y,z]`, `axis`, `diameter`, `depth`, `clearance`, `key: none\|flat\|hex`, `role: peg\|socket` | peg: `union()` with the keyed cylinder; socket: `difference()` with it grown by `clearance` radially and at the bottom |
-| `add` | `primitive: cube\|cylinder\|sphere`, `size`, `transform`, `colour?` | `union()`; with `colour`, the shape is first `difference()`d from everything else, then unioned in its own colour, so no volume has two colours |
+| `add` | `primitive: cube\|cylinder\|sphere`, `size`, `transform`, `colour?` | the shape is first `difference()`d from every other piece, then added as a piece in `colour` (or the object's first printed part's), so no volume has two colours |
 | `subtract` | as `add` | `difference()` |
 | `custom` | `scad` (text) | the snippet, given the geometry so far as `children()` |
 
@@ -122,10 +129,21 @@ A part's mesh file is written with no `basematerials` and no colour of its own (
 object, one mesh): OpenSCAD keeps the innermost colour (§2 measured an imported 3MF's
 `basematerials` reaching the output), so a mesh that carried one would ignore the outer
 `color()` and `set_colour`. With the colour only in `color()`, `render/solids.py`'s
-per-colour re-render (which shadows `color`) still yields one closed solid per colour. Ops apply to the object's union of parts, each part keeping
-its `color()`.
+per-colour re-render (which shadows `color`) still yields one closed solid per colour.
 
-## 4. Opening a mesh (`model_from_mesh`)
+An object compiles per piece (`compile.py` `_modules`, `_apply`): one `color(c)
+<statement>;` per colour piece, starting with one per printed part. An op that removes
+geometry (a cut's half-space, a socket, a `subtract`, the negative parts) wraps every
+piece; a `custom` op is given each piece on its own as its `children()`; an op that adds
+geometry (a peg, an `add`) appends a piece, and an `add` is first cut out of every other
+piece. So every cutter sits inside its piece's `color()`: in OpenSCAD 2026.10.05's
+Manifold 3MF a face takes the colour of the solid that made it, and a cutter outside
+every `color()` made the cut faces the default material (measured in the image,
+`backend/tests/test_mesh_models_openscad.py`). The geometry is that of wrapping the
+union, since (A ∪ B) − C = (A − C) ∪ (B − C). The compiled `model.scad` is capped at
+8 MiB (`meshmodel/operations.py` `MAX_SOURCE_BYTES`; a 422).
+
+## 4. Opening a mesh (`mesh_model_create`)
 
 An `OperationKind` on the `library` queue (§6), exported with `model_kinds`.
 
@@ -134,20 +152,24 @@ Sources:
 - **Bambuddy library file** (`library_file_id`): `bambuddy/library_objects.py`'s read
   (once per sha256; the same refusals Arrange gives: sliced, past the cap, unreadable),
   so a file Arrange has listed is neither downloaded nor parsed again.
-- **Upload**: `POST /api/v1/models/from-mesh`, multipart, streamed into the claim store
+- **Upload**: `POST /api/v1/models/from-mesh/upload`, multipart, streamed into the claim store
   with `ClaimStore.hold_file` as media uploads are; `.3mf` and `.stl` only (the formats
   `read_objects` and `bambu3mf.stl_3mf` read); at most `MAX_DOWNLOAD_BYTES`. An STL
   becomes one object of one part in the default colour. OBJ is out of phase 1: nothing
   reads it today, and its groups and `.mtl` materials need rules of their own (#959).
 - **Output** (`output_id`): the output's own 3MF on the volume.
 
-Run: read the objects (`read_objects` under a `ReadBudget`), write each part as
+Run: read the objects (`read_objects` under the operator's read budget, `budget_of`, as
+Arrange reads; a file past the scene's caps, 200 objects with copies counted or 64 parts
+an object, is a 422 naming the cap, and a longer name is cut to 200 characters), write each part as
 `meshes/<object>-<part>.3mf` (and its `.paint.json` when painted) in the frame
 `read_objects` gives it, and build `scene.json`: an object read with `count` copies
 becomes that many scene objects sharing its meshes, and the objects start in a row
-along X with 5 mm gaps, resting on Z=0. Then compile `model.scad`, write `model.json`
-with `scene: true` and the provenance (source kind, id, name, sha256, and the licence
-when the source states one), one git commit. `meshes/` as a whole is held to the same
+along X with 5 mm gaps, their printed parts resting on Z=0 (a negative part may reach
+below the bed). Then compile `model.scad`, write `model.json` with `mesh_source`, the
+provenance (source kind, id, name, sha256, and the licence when the source states one),
+one git commit. A painted part's paint is kept beside its mesh but not carried into
+renders or prints until §7 (phase 3); its object's note says so. `meshes/` as a whole is held to the same
 cap. Nothing is written to Bambuddy.
 
 `meshes/` is the only place binary files are written; `PUT …/files/{name}` stays
@@ -171,12 +193,13 @@ Edits (what callers send; they expand into ops):
 | edit | effect |
 |---|---|
 | `transform {object, translate?, rotate?, scale?}` | sets the object's transform |
-| `split_at_plane {object, point, normal, joint?}` | the plane is in world coordinates. With `M` the transform's linear part (object frame to world) and `t` its translation, the point maps as `M⁻¹(p − t)` and the normal as `Mᵀn`, renormalised (a plane's normal transforms by the inverse-transpose, which matters once the scale is non-uniform). The object becomes two (`<id>` keeps `cut keep:below`, a new one `cut keep:above`), both keeping the parent's ops. With `joint {diameter?, depth, clearance, key, peg_on: above\|below}`: the section at the plane is measured with trimesh at edit time; the peg sits at the section's centroid and the diameter defaults to 60 % of the largest inscribed circle; refused when the circle is smaller than `diameter + 2*clearance + 0.8 mm` (two 0.4 mm walls). The measured position and size are stored in the ops, so compiling stays pure |
+| `split_at_plane {object, point, normal, joint?}` | the plane is in world coordinates. With `M` the transform's linear part (object frame to world) and `t` its translation, the point maps as `M⁻¹(p − t)` and the normal as `Mᵀn`, renormalised (a plane's normal transforms by the inverse-transpose, which matters once the scale is non-uniform). The object becomes two (`<id>` keeps `cut keep:below`, a new one `cut keep:above`), both keeping the parent's ops. With `joint {diameter?, depth, clearance, key, peg_on: above\|below}`: the section at the plane is measured with trimesh at edit time; the peg sits at the section's centroid and the diameter defaults to `1.2 * room` (60 % of the circle about the centroid), `room` being the distance from the centroid to the section's nearest edge; refused unless `room >= diameter / 2 + clearance + 0.8` mm (two 0.4 mm walls), or for a hex key `room >= (diameter / 2 + clearance) / cos 30° + 0.8`, its corners standing past its flats (`edits.py`), and refused for a ring (the centroid outside the section) and past 16 cuts. The measured position and size are stored in the ops, so compiling stays pure |
 | `lay_flat {object, normal \| "largest_flat"}` | `normal` is a world-space direction (the viewer sends the normal of the face clicked on the preview; no face index, since the preview is the rendered mesh after ops and its triangles change with each render). The object is rotated so that direction points to −Z, the rotation written into the transform and the object dropped to Z=0. `"largest_flat"` picks the largest coplanar facet of the object's part meshes after its ops' cuts (trimesh `facets`), which is what a cut face usually is |
 | `add`, `subtract {object, primitive, size, transform}` | appends the op; `add` takes an optional `colour` (above) |
 | `custom {object, scad}` | appends the op |
 | `set_colour {object, part, colour}` | a part's colour |
 | `delete`, `duplicate`, `rename {object, …}` | as named |
+| `remove_op {object, op}` | removes the op at that index |
 | `expose {object, op, field, name}` | makes an op field a customizer parameter; `unexpose` reverses it |
 
 Joints stay whole (review of #2388): a peg takes the colour of the part the cut goes
@@ -193,23 +216,26 @@ parameter on an earlier cut) is not checked again, and the render is the check.
 
 Exposed parameters and presets: an exposed name belongs to the op, not to the object's
 id or name, so `rename` and `transform` never change it. An edit that removes one
-(`unexpose`, deleting its op or object) is refused while a saved preset (`saved_presets`)
-or a `model.json` preset names it, since a render naming an unknown parameter fails
-(`render/runner.py` `UnknownParameterError`), unless the edit carries
-`drop_from_presets: true`, which removes that key from those presets in the same
-operation. Outputs keep the parameters they were rendered with, at their own revision.
+(`unexpose`, deleting its op or object) is refused (409) while a preset names it, since a
+render naming an unknown parameter fails (`render/runner.py` `UnknownParameterError`).
+A saved preset (`saved_presets`) is released by `drop_from_presets: true`, which removes
+that key from it; the model's own `model.json` presets are read-only and are never
+dropped, so that 409 stands until they are edited (`operations.py` `edit_run`). Outputs keep the parameters they were rendered with, at their own revision.
 
 Measuring (sections, inscribed circles, faces) runs in `asyncio.to_thread` under a
-`ReadBudget`, with the kind's `run_timeout` sized for the cap.
+`ReadBudget`, with the kind's `run_timeout` sized for the cap: 10 minutes, a library pin's
+(`PIN_TIMEOUT`), under the 15 minutes the browser and the agent follow a 202. The commit
+runs to its end (`operations.kinds.to_thread_to_end`), so a run past its timeout whose
+commit lands still announces it.
 
-`scene_eject`: deletes `scene.json` and clears `scene` in `model.json`, one commit. The
+`scene_eject`: deletes `scene.json`, one commit (`model.json` keeps `mesh_source`). The
 model is then an ordinary template whose source imports `meshes/`.
 
 ## 6. Temporal, operations, flows and pipelines
 
 No new workflow type and no new queue.
 
-- `model_from_mesh`, `scene_edit` and `scene_eject` are `OperationKind`s with
+- `mesh_model_create`, `scene_edit` and `scene_eject` are `OperationKind`s with
   `queue="library"`, run by `OperationWorkflow` (check, insert, run, finish), exported
   from `library/operations.py` through `model_kinds`. The library worker runs in the API
   process, which holds the data volume and the Bambuddy client. Routes run them through
@@ -286,7 +312,7 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
 - Paint transfer: on a synthetic painted mesh, an op-free object keeps 100 % of its
   codes verbatim; a cut object keeps every uncut face's code verbatim and gives cut faces
   the part's own colour.
-- API (`requires_postgres`, `requires_temporal`): `model_from_mesh` from an upload and
+- API (`requires_postgres`, `requires_temporal`): `mesh_model_create` from an upload and
   from a mocked library file (the recorded Bambuddy client); `scene_edit` and
   `scene_eject` through `run_operation`; claim release.
 - `requires_openscad` (the image): a 3MF made with OpenSCAD is opened, split with a
@@ -305,7 +331,7 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
 ## 11. Phases
 
 1. Open as editable model: `meshes/` write path, `scene.json`, compiler (cut, joint,
-   add, subtract, custom), `model_from_mesh`, `create_model_from_mesh`, `get_scene`.
+   add, subtract, custom), `mesh_model_create`, `create_model_from_mesh`, `get_scene`.
    Acceptance: a library 3MF opens and renders the same geometry and colours (paint by
    phase 3).
 2. Editing: `scene_edit` with every edit of §5, `scene_eject`, `edit_scene`,

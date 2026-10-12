@@ -21,6 +21,7 @@ import logging
 import os
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -133,7 +134,11 @@ class _Received:
     sizes: dict[str, int] = field(default_factory=dict)
     #: Each file part's sha256, computed while it streamed: its claim's name (#1054).
     hashes: dict[str, HASH] = field(default_factory=dict)
+    #: Each file part's name as the client sent it, or "" (#2146: a mesh's type).
+    filenames: dict[str, str] = field(default_factory=dict)
     caption: bytearray = field(default_factory=bytearray)
+    #: The other text parts the route asked ``_receive`` for, by name.
+    fields: dict[str, bytearray] = field(default_factory=dict)
 
     def discard(self) -> None:
         """Remove whatever was not moved into ``media/``."""
@@ -144,9 +149,11 @@ class _Received:
 class _Receiver:
     """`MultipartParser` callbacks writing ``file`` and ``poster`` to ``directory``."""
 
-    def __init__(self, directory: FilePath, received: _Received) -> None:
+    def __init__(self, directory: FilePath, received: _Received, fields: Mapping[str, int]) -> None:
         self.directory = directory
         self.received = received
+        #: The text parts to keep, each with its cap in bytes.
+        self._fields = fields
         self._field = bytearray()
         self._value = bytearray()
         self._disposition = b""
@@ -181,6 +188,7 @@ class _Receiver:
             self.received.files[name] = path
             self.received.sizes[name] = 0
             self.received.hashes[name] = hashlib.sha256()
+            self.received.filenames[name] = options.get(b"filename", b"").decode("utf-8", "replace")
             self._out = path.open("xb")
         self._part = name
 
@@ -196,6 +204,15 @@ class _Receiver:
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
                     f"a caption is at most {MAX_CAPTION_CHARS} characters",
+                )
+        elif self._part is not None and self._part in self._fields:
+            part, cap = self._part, self._fields[self._part]
+            value = self.received.fields.setdefault(part, bytearray())
+            value += chunk
+            if len(value) > cap:
+                raise ApiError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"the {part!r} part is at most {cap} bytes",
                 )
 
     def on_part_end(self) -> None:
@@ -218,14 +235,17 @@ def _boundary(request: Request) -> bytes:
     return boundary
 
 
-async def _receive(request: Request, directory: FilePath) -> _Received:
+async def _receive(
+    request: Request, directory: FilePath, *, fields: Mapping[str, int] | None = None
+) -> _Received:
     """Stream the body's parts to ``directory``. On any failure the files written
     so far are removed and the error raised -- including the gate's, when the
-    body passes the limit part-way."""
+    body passes the limit part-way. ``fields`` names the text parts besides the
+    caption to keep, each with its cap in bytes."""
     boundary = _boundary(request)
     directory.mkdir(parents=True, exist_ok=True)
     received = _Received()
-    receiver = _Receiver(directory, received)
+    receiver = _Receiver(directory, received, fields or {})
     parser = MultipartParser(
         boundary,
         callbacks={

@@ -36,6 +36,7 @@ agent/src/tools/catalogue.ts	(png|content)_base64: z.string	#2510: binary tool i
 agent/src/tools/customizer.ts	content_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/outputs.ts	png_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/workspace.ts	content_base64: z.string	#2510: binary tool inputs by pointer
+agent/src/tools/meshModels.ts	content_base64: z.string	#2510: binary tool inputs by pointer (a mesh, not an image; workspace_path is the pointer form)
 agent/src/harness/httpRequest.ts	page.toString\('base64'\)	#2511: http_request's binary body as a workspace file
 backend/scadbuddy/api/print_history.py	data:image/jpeg;base64,	#2512: timelapse poster frames by URL
 EOF

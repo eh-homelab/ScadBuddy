@@ -21,11 +21,26 @@ from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import health, libraries, media, metrics, models, outputs, telemetry
+from scadbuddy.api import (
+    health,
+    libraries,
+    media,
+    mesh_models,
+    metrics,
+    models,
+    outputs,
+    telemetry,
+)
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
-from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
+from scadbuddy.api.limits import (
+    BODY_LIMITS,
+    MEDIA_UPLOAD_PATH,
+    MESH_UPLOAD_PATH,
+    BodySizeGate,
+    RouteLimit,
+)
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.client import client_for
@@ -33,6 +48,7 @@ from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
+from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
@@ -1190,6 +1206,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 "a media upload",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
             ),
+            RouteLimit(
+                "POST",
+                MESH_UPLOAD_PATH,
+                MAX_DOWNLOAD_BYTES + 64 * 1024,  # the file plus the form's framing
+                "a mesh upload",
+                "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
+            ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
         ],
@@ -1212,7 +1235,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource, media.MediaUpload, outputs.NeedsBackfillProblem)
+    _name_in_openapi(
+        app,
+        models.PastedSource,
+        media.MediaUpload,
+        mesh_models.MeshUpload,
+        outputs.NeedsBackfillProblem,
+    )
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()
