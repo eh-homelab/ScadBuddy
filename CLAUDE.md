@@ -344,6 +344,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
   `prelude`, another kind run first on its own queue: `output_delete` (library) names
   `output_inbox_delete` (bambuddy).
+- `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
+  model history (`library/history.py` `ModelHistory`) and flow scripts
+  (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per
+  version; `flows/backfill.py` is the start-time backfill and reconciler;
+  `flows/history.py` is the Reset preview, not git). Both repositories are shared by
+  every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
+  (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so

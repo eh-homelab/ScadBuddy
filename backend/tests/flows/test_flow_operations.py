@@ -29,7 +29,7 @@ from scadbuddy.flows.operations import (
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, ProjectionWrite
 from scadbuddy.workflows.flows_client import harness_plugins
-from tests.flows.flows_support import HASH_KEY, Flows, Keys, script
+from tests.flows.flows_support import HASH_KEY, Flows, Keys, define, script
 from tests.flows.harness_probe import (
     PROBE_TOOLS,
     PROBE_WORKFLOW,
@@ -157,7 +157,7 @@ async def _gated(flows: Flows) -> tuple[Run, str]:
         await asyncio.sleep(0.1)
     call_id = pending[0].tool_id
     described = await flows.client.get_workflow_handle(wf_id).describe()
-    definition = await flows.store.create_definition("probe", script("return 1"), {})
+    definition = await define(flows.store, "probe")
     await flows.store.insert_run(
         FlowRecord(
             run_id=run_id,

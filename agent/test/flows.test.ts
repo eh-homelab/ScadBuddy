@@ -67,6 +67,52 @@ describe('flow tools (#1057)', () => {
     expect(JSON.parse(seen[0]!.body)).toEqual({ approval_timeout: 'never' })
   })
 
+  it("reads a flow's history and restores a commit as a write (#2503)", async () => {
+    expect(
+      ['list_flow_versions', 'get_flow_version_source', 'diff_flow_version', 'restore_flow_version'].map(
+        (n) => tool(n).risk,
+      ),
+    ).toEqual(['read', 'read', 'read', 'write'])
+    const COMMIT = 'a'.repeat(40)
+    const restored: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/workflows/names/swap/versions`, ({ request }) =>
+        HttpResponse.json(
+          [2, 1].map((version) => ({
+            id: DEFINITION,
+            commit: String(version).repeat(40),
+            short: String(version).repeat(7),
+            version,
+            message: 'Register swap',
+            created_by: { kind: 'browser' },
+            created_at: '2026-10-11T00:00:00Z',
+            current: version === 2 && new URL(request.url).searchParams.get('limit') === '500',
+          })),
+        ),
+      ),
+      http.get(`${BACKEND}/api/v1/workflows/names/swap/versions/${COMMIT}/diff`, ({ request }) =>
+        HttpResponse.json({ name: 'swap', base: new URL(request.url).searchParams.get('base'), head: COMMIT, patch: '' }),
+      ),
+      http.post(`${BACKEND}/api/v1/workflows/names/swap/versions/${COMMIT}/restore`, ({ request }) => {
+        restored.push(request.url)
+        return HttpResponse.json({ id: DEFINITION, name: 'swap', version: 3, commit: 'c'.repeat(40), script: 'x' })
+      }),
+    )
+    const listed = firstText(await runTool(tool('list_flow_versions'), { name: 'swap' }, ctx())) as {
+      items: { version: number; current: boolean }[]
+    }
+    expect(listed.items.map((v) => [v.version, v.current])).toEqual([
+      [2, true],
+      [1, false],
+    ])
+    const base = 'b'.repeat(40)
+    const diff = await runTool(tool('diff_flow_version'), { name: 'swap', commit: COMMIT, base }, ctx())
+    expect((firstText(diff) as { base: string }).base).toBe(base)
+    const done = await runTool(tool('restore_flow_version'), { name: 'swap', commit: COMMIT }, ctx())
+    expect((firstText(done) as { version: number }).version).toBe(3)
+    expect(restored).toHaveLength(1)
+  })
+
   it('registers a script and reports its problems', async () => {
     server.use(
       http.post(`${BACKEND}/api/v1/workflows`, () =>

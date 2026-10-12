@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import itertools
 import uuid
 from typing import Any
 
@@ -11,7 +12,7 @@ from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus
 
-from scadbuddy.flows.models import TERMINAL, Run
+from scadbuddy.flows.models import TERMINAL, Run, StoredDefinition
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 
@@ -27,6 +28,24 @@ class Keys:
         return hashlib.sha256(subject.encode()).digest()
 
 
+_VERSIONS = itertools.count(1)
+
+
+async def define(store: FlowStore, name: str) -> StoredDefinition:
+    """A version row for a run to name: its commit is made up, since a run's tests send
+    the script as the run's input and never read it from git (`test_flow_repository.py`
+    and `tests/api/test_flows.py` do)."""
+    return await asyncio.to_thread(
+        store.insert_version,
+        str(uuid.uuid4()),
+        name,
+        next(_VERSIONS),
+        uuid.uuid4().hex + "0" * 8,
+        {"kind": "browser"},
+        approval_timeout_s=None,
+    )
+
+
 class Flows:
     def __init__(self, client: Client, queue: str, store: FlowStore) -> None:
         self.client = client
@@ -36,7 +55,7 @@ class Flows:
         self.cleanup: list[tuple[Any, Any]] = []
 
     async def start(self, script: str, *, update_id: str | None = None) -> str:
-        definition = await self.store.create_definition("t", script, {"kind": "browser"})
+        definition = await define(self.store, "t")
         run_id = str(uuid.uuid4())
         await self.send(run_id, definition.id, script, update_id=update_id)
         return run_id

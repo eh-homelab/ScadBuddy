@@ -603,6 +603,13 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   `render`, `save_output`, `queue_print` and `arrange` call the API's own routes there
   (`workflows/flow_routes.py`). No data volume
   and no Bambuddy key: nothing outward runs in it. Health and metrics on 9090.
+- **Scripts are git** (#2503): each flow version is one commit in `/data/flows`
+  (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
+  volume, on the same git code (`core/gitrepo.py`). Only the API reads it: a run's
+  script goes to the worker as the run's input. `workflow_definitions` keeps a row per
+  version naming its commit, and `workflow_runs` the commit each run ran. The first
+  start after the upgrade backfills the versions Postgres held (`flows/backfill.py`),
+  one commit each with its author and date; it is idempotent, and the log says how many.
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
 - **Memory:** `pydantic-monty` keeps a process-wide pool, so the worker's memory does

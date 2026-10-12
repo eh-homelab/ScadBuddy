@@ -230,6 +230,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // Flows (#1057) touch no kind of resource here: a session's runs are found by
   // list_flow_runs' `session`, and a run's own steps say what it did.
   register_flow: () => [],
+  restore_flow_version: () => [],
   start_flow_run: () => [],
   reset_flow_run: () => [],
   // Models.
