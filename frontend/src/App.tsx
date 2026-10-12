@@ -4,6 +4,7 @@ import { AppShell } from './components/AppShell'
 import { CataloguePage } from './pages/CataloguePage'
 import { CustomizePage } from './pages/CustomizePage'
 import { EditPage } from './pages/EditPage'
+import { FlowPage } from './pages/FlowPage'
 import { HistoryPage } from './pages/HistoryPage'
 import { LibraryPage } from './pages/LibraryPage'
 import { PrintDetailPage } from './pages/PrintDetailPage'
@@ -77,6 +78,8 @@ export function App() {
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="library/*" element={<LibraryPage />} />
         <Route path="workflows" element={<WorkflowsPage />} />
+        <Route path="workflows/flows" element={<WorkflowsPage tab="flows" />} />
+        <Route path="workflows/flows/:id" element={<FlowPage />} />
         <Route path="workflows/runs/:id" element={<WorkflowRunPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

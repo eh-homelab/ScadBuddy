@@ -1,0 +1,82 @@
+import { useState } from 'react'
+import { useNavigate } from 'react-router'
+import { api, ApiError } from '../../api/client'
+import type { FlowRunStatus } from '../../api/types'
+import { USER_ONLY } from '../../agent/dom'
+import { FLOW_TERMINAL } from '../../lib/flows'
+import { Button } from '../ui/Button'
+import { Dialog } from '../ui/Dialog'
+import { Spinner } from '../ui/Spinner'
+
+/**
+ * #2350 — forget a run (`DELETE /workflow-runs/{id}`): its sealed payload key first, so
+ * its recorded history can never be read again, then its workflow (stopped if open) and
+ * its row. A person's decision only: the route refuses an agent, and the confirmation is
+ * user-only.
+ */
+export function ForgetRun({ runId, status }: { runId: string; status: FlowRunStatus }) {
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const ended = FLOW_TERMINAL.has(status)
+
+  async function forget() {
+    setBusy(true)
+    setError(undefined)
+    try {
+      await api.deleteFlowRun(runId)
+      void navigate('/workflows')
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.detail : String(caught))
+      setBusy(false)
+    }
+  }
+
+  const close = () => {
+    if (busy) return
+    setOpen(false)
+    setError(undefined)
+  }
+
+  return (
+    <>
+      <Button variant="danger" size="sm" onClick={() => setOpen(true)}>
+        {ended ? 'Forget run' : 'Stop and forget'}
+      </Button>
+      <Dialog
+        open={open}
+        title="Forget this run?"
+        onClose={close}
+        footer={
+          <>
+            <Button variant="ghost" onClick={close} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={() => void forget()} disabled={busy} {...USER_ONLY}>
+              {busy ? <Spinner /> : ended ? 'Forget run' : 'Stop and forget'}
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2 text-[13px] text-muted">
+          {!ended && (
+            <p className="text-warn">
+              This run has not finished. It is stopped first, and anything it waits on for you is dropped.
+            </p>
+          )}
+          <p>
+            Its steps, your answers and approvals, and its result are deleted, and so is the key its recorded history
+            is sealed with: nobody can read that history again, here or in Temporal. This can&apos;t be undone.
+          </p>
+          <p>The flow itself stays registered. Prints or files the run already made are not touched.</p>
+          {error && (
+            <p role="alert" className="text-warn">
+              {error}
+            </p>
+          )}
+        </div>
+      </Dialog>
+    </>
+  )
+}

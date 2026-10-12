@@ -137,6 +137,13 @@ export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
 export type FlowStep = Schemas['FlowStep']
 export type FlowDecided = Schemas['Decided']
+/** #2350 — a registered flow version, with and without its script. */
+export type FlowDefinition = Schemas['Definition']
+export type FlowSummary = Schemas['DefinitionSummary']
+export type FlowRunStarted = Schemas['RunAnswer']
+export type FlowResetPoints = Schemas['ResetPoints']
+export type FlowResetPreview = Schemas['ResetPreview']
+export type FlowReset = Schemas['Reset']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 

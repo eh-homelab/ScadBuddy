@@ -8,6 +8,7 @@ are sealed; the preview reads only event types and activity ids.
 
 import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -23,8 +24,9 @@ from temporalio.api.workflowservice.v1 import (
 from temporalio.client import Client, WorkflowHistory
 
 from scadbuddy.flows import history
-from scadbuddy.flows.history import outward_since, preview_of
+from scadbuddy.flows.history import outward_since, points_of, preview_of
 from scadbuddy.flows.models import Run
+from scadbuddy.workflows.flow_models import FlowStep
 from tests.flows.fake_api import PLAN, Outward
 from tests.flows.flows_support import script
 
@@ -179,6 +181,40 @@ async def test_a_point_past_the_end_is_pinned_to_the_last_event() -> None:
         cast(Client, _Served(events)), run, events[-1].event_id + 10, run_id="r1"
     )
     assert (preview.valid, preview.as_of_event_id) == (False, events[-1].event_id)
+
+
+def _step(seq: int, history_length: int) -> FlowStep:
+    return FlowStep(
+        seq=seq,
+        fn="queue_print",
+        call_id=f"c{seq}",
+        status="succeeded",
+        outward=True,
+        started_at=datetime(2026, 10, 11, tzinfo=UTC),
+        history_length=history_length,
+    )
+
+
+def test_the_reset_points_are_the_valid_points_with_the_first_step_each_runs_again() -> None:
+    """#2350: the run page lists the points a Reset takes, rather than probing ids."""
+    events = _events()
+    first, second = _sends(events)
+    # Each print's step started in the task that scheduled it: its started event.
+    before_first, before_second = (_task_before(events, s.event_id) for s in (first, second))
+    steps = [_step(1, before_first - 1), _step(2, before_second - 1)]
+    found = points_of(events, steps)
+    assert found.as_of_event_id == events[-1].event_id
+    assert [p.event_id for p in found.points] == [
+        e.event_id for e in events if preview_of(events, e.event_id).valid
+    ]
+    first_step = {p.event_id: p.first_step for p in found.points}
+    assert first_step[before_first] == 1
+    assert first_step[before_second] == 2
+    assert first_step[_task_before(events, events[-1].event_id)] is None
+    # A step that ended in the task done again is reopened: it waits or runs again.
+    steps[0].ended_history_length = before_second - 1
+    reopened = {p.event_id: p.first_step for p in points_of(events, steps).points}
+    assert reopened[before_second] == 1
 
 
 @pytest.mark.requires_temporal

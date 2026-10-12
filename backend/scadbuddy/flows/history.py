@@ -30,6 +30,7 @@ from temporalio.api.workflowservice.v1 import GetWorkflowExecutionHistoryReverse
 from temporalio.client import Client
 
 from scadbuddy.flows.models import Run
+from scadbuddy.workflows.flow_models import FlowStep
 from scadbuddy.workflows.flow_tools import OUTWARD_PREFIX, TOOL_PREFIX, TURN_PREFIX
 
 #: Events per page of a history read.
@@ -55,6 +56,62 @@ class ResetPreview(BaseModel):
     #: last event: what a flow's Reset takes.
     valid: bool
     calls: list[OutwardCall]
+
+
+class ResetPoint(BaseModel):
+    """A point a Reset takes (#2350)."""
+
+    event_id: int
+    #: The first step a Reset here runs again or reopens (one that ended after it waits
+    #: or runs again), by `seq`; every later one too. None when it touches no step.
+    first_step: int | None = None
+
+
+class ResetPoints(BaseModel):
+    """Every point of the run's current execution a Reset takes, oldest first."""
+
+    workflow_run_id: str = ""
+    as_of_event_id: int
+    points: list[ResetPoint]
+
+
+def points_of(events: Iterable[HistoryEvent], steps: Sequence[FlowStep]) -> ResetPoints:
+    """The valid points over one execution's whole history: a completed workflow task
+    after `execute` was accepted and before the last event, as `preview_of` says."""
+    completed: list[int] = []
+    started = False
+    last = 0
+    for event in events:
+        last = event.event_id
+        if _executes(event):
+            started = True
+        elif started and event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+            completed.append(event.event_id)
+    points = []
+    for event_id in completed:
+        if event_id >= last:
+            continue
+        # The Reset's task is done again: a step started in it or later runs again, and
+        # one that ended in it or later is reopened (`FlowStore.reset`'s `redone`).
+        redone = event_id - 1
+        again = [
+            s.seq
+            for s in steps
+            if s.history_length >= redone
+            or (s.ended_history_length is not None and s.ended_history_length >= redone)
+        ]
+        points.append(ResetPoint(event_id=event_id, first_step=min(again, default=None)))
+    return ResetPoints(as_of_event_id=last, points=points)
+
+
+async def reset_points(client: Client, run: Run) -> ResetPoints:
+    """The points of the run's current execution, read whole."""
+    run_id = (await client.get_workflow_handle(run.workflow_id).describe()).run_id
+    handle = client.get_workflow_handle(run.workflow_id, run_id=run_id)
+    events = [e async for e in handle.fetch_history_events(page_size=PAGE_SIZE)]
+    found = points_of(events, run.steps)
+    found.workflow_run_id = run_id
+    return found
 
 
 def _executes(event: HistoryEvent) -> bool:

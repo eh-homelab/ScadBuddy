@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
-import { setFlowRuns } from '../mocks/features/flows'
+import { setFlowDefinitions, setFlowRuns } from '../mocks/features/flows'
 import { renderPage } from '../test/utils'
 import { WorkflowsPage } from './WorkflowsPage'
 
@@ -39,6 +39,33 @@ describe('WorkflowsPage', () => {
     expect(within(runs).getAllByRole('listitem')).toHaveLength(1)
     expect(row('run-ask')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Show all runs' })).toHaveAttribute('href', '/workflows')
+  })
+
+  it('lists every flow on the Flows tab, with its latest version and who registered it (#2350)', async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/workflows" element={<WorkflowsPage />} />
+        <Route path="/workflows/flows" element={<WorkflowsPage tab="flows" />} />
+      </Routes>,
+      { route: '/workflows' },
+    )
+    await list()
+    await user.click(screen.getByRole('link', { name: 'Flows' }))
+    const flows = await screen.findByRole('list', { name: 'Flows' })
+    const plates = flows.querySelector<HTMLElement>('[data-flow="plates"]')!
+    expect(within(plates).getByRole('link', { name: 'plates' })).toHaveAttribute('href', '/workflows/flows/def-plates-2')
+    expect(plates).toHaveTextContent('v2 · 2 versions')
+    expect(plates).toHaveTextContent('Registered by you, in the browser')
+    const swap = flows.querySelector<HTMLElement>('[data-flow="swap"]')!
+    expect(swap).toHaveTextContent('v1')
+    expect(swap).toHaveTextContent('Registered by an assistant (session sess-1)')
+    expect(screen.getByRole('link', { name: 'Flows' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('says when no flow is registered', async () => {
+    setFlowDefinitions([])
+    renderPage(<WorkflowsPage tab="flows" />)
+    expect(await screen.findByText(/No flows registered yet/)).toBeInTheDocument()
   })
 
   it('reads again when a run changes', async () => {

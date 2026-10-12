@@ -33,3 +33,17 @@ export const flowRunTopic = (id: string) => `workflow-run:${id}`
 export const FLOW_POLL_MS = 5_000
 
 export const flowRunPath = (id: string) => `/workflows/runs/${encodeURIComponent(id)}`
+
+/** #2350 — the Flows tab, and one flow version's page. */
+export const FLOWS_PATH = '/workflows/flows'
+export const flowPath = (id: string) => `${FLOWS_PATH}/${encodeURIComponent(id)}`
+
+/** The statuses a run has ended in: forgetting one stops nothing. */
+export const FLOW_TERMINAL: ReadonlySet<FlowRunStatus> = new Set(['succeeded', 'failed', 'terminated'])
+
+/** Who registered a flow or started a run (`created_by`, `started_by`), as a phrase. */
+export function actorText(actor: Record<string, unknown>): string {
+  if (actor['kind'] !== 'agent') return 'you, in the browser'
+  const session = actor['session']
+  return typeof session === 'string' && session ? `an assistant (session ${session})` : 'an assistant'
+}

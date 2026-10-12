@@ -78,8 +78,14 @@ import type {
   TrayAssigned,
   PrintRun,
   FlowDecided,
+  FlowDefinition,
+  FlowReset,
+  FlowResetPoints,
+  FlowResetPreview,
   FlowRun,
+  FlowRunStarted,
   FlowRunView,
+  FlowSummary,
   Operation,
   OperationAccepted,
   PrintRunRequest,
@@ -675,6 +681,48 @@ export const api = {
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
       method: 'POST',
       body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+    }),
+
+  // #2350 — the Flows tab: every registered flow version, one with its script, and a
+  // run started from it. Version history, diffs and the editor come with #2503/#2487.
+  listFlows: () => request<FlowSummary[]>('/workflows'),
+
+  /**
+   * One flow's versions, newest first. The one place the page reads them from: when
+   * flows move to git (#2503), this is the line that changes to the git-backed route.
+   */
+  listFlowVersions: async (name: string) =>
+    (await request<FlowSummary[]>('/workflows')).filter((f) => f.name === name).sort((a, b) => b.version - a.version),
+
+  getFlow: (id: string) => request<FlowDefinition>(`/workflows/${seg(id)}`),
+
+  /** A start is keyed per press: a re-send after an answer that never arrived reaches the same run. */
+  startFlowRun: (id: string, key: string = newRequestId()) =>
+    reattach(() =>
+      request<FlowRunStarted>(`/workflows/${seg(id)}/runs`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify({}),
+      }),
+    ),
+
+  /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
+  deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
+
+  getFlowResetPoints: (id: string) => request<FlowResetPoints>(`/workflow-runs/${seg(id)}/reset-points`),
+
+  previewFlowReset: (id: string, eventId: number) =>
+    request<FlowResetPreview>(`/workflow-runs/${seg(id)}/reset-preview?event_id=${eventId}`),
+
+  /** Pinned to the preview the person saw: a 409 `flow-reset-changed` carries the new one. */
+  resetFlowRun: (id: string, preview: Pick<FlowResetPreview, 'event_id' | 'as_of_event_id' | 'workflow_run_id'>) =>
+    command<FlowReset>(`/workflow-runs/${seg(id)}/reset`, {
+      method: 'POST',
+      body: JSON.stringify({
+        event_id: preview.event_id,
+        as_of_event_id: preview.as_of_event_id,
+        workflow_run_id: preview.workflow_run_id,
+      }),
     }),
 
   listModels: () => request<ModelSummary[]>('/models'),
