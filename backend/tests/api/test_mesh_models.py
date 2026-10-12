@@ -20,8 +20,10 @@ from scadbuddy.meshmodel import operations as mesh_operations
 from scadbuddy.meshmodel.scene import load_scene, text_sha256
 from scadbuddy.render.bambu3mf import stl_3mf
 from scadbuddy.render.read_budget import ReadBudget
+from tests.api.conftest import wait_for_job
 from tests.api.test_print_library import library_file
-from tests.api.test_send import configure
+from tests.api.test_send import configure, make_output
+from tests.support.fixtures import makerworld_path
 from tests.support.operations import press
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
@@ -392,3 +394,21 @@ def test_an_output_with_no_3mf_is_a_404(client: TestClient) -> None:
         headers=press(),
     )
     assert missing.status_code == 404, missing.text
+
+
+@pytest.mark.requires_fixtures
+def test_arranging_a_mesh_models_output_writes_a_3mf_and_no_revision(client: TestClient) -> None:
+    """The user's rule (#2146): arranging makes a 3MF output; it never adds to a model's history."""
+    data = makerworld_path("411-broccoli.3mf").read_bytes()
+    slug = upload(client, name="Broccoli", data=data, filename="broccoli.3mf").json()["slug"]
+    versions = client.get(f"/api/v1/models/{slug}/versions").json()
+    output_id = make_output(client, slug)
+    arranged = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"output_id": output_id, "count": 4}]},
+        headers=press(),
+    )
+    assert arranged.status_code == 202, arranged.text
+    job = wait_for_job(client, arranged.json()["id"])
+    assert job["status"] == "done" and job["outputs"]
+    assert client.get(f"/api/v1/models/{slug}/versions").json() == versions
