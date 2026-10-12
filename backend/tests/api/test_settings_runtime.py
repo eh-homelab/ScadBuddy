@@ -440,6 +440,33 @@ def test_settings_names_presets_now_and_prunes_the_gone(client: TestClient) -> N
     assert {entry["preset_id"] for entry in listed} == {None, "template-fish"}
 
 
+@pytest.mark.parametrize(
+    "written",
+    [
+        '{"presets": [{"name": "Fi',  # half-written
+        '{"presets": "not a list"}',
+        "[]",
+    ],
+)
+def test_an_unreadable_model_json_prunes_nothing(client: TestClient, written: str) -> None:
+    """#2505: a model.json that cannot be read says nothing about which presets the
+    template has, so a read during a half-written save forgets none of its entries."""
+    _catalogue(client, "critter")
+    _template_presets(client, "critter", "Fish")
+    client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "preset_name": "Fish", "project_id": 2},
+    )
+    path = _state(client).paths.model_dir("critter") / "model.json"
+    path.write_text(written, encoding="utf-8")
+    remembered = {"critter/template-fish": {"project_id": 2, "preset_name": "Fish"}}
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == remembered
+
+    # Readable again, it still has its entry: nothing was forgotten in between.
+    _template_presets(client, "critter", "Fish")
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == remembered
+
+
 def _remember_project_targets(client: TestClient) -> None:
     uploads = _state(client).uploads
 

@@ -49,7 +49,7 @@ from scadbuddy.core.settings import (
     env_var,
 )
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.presets import PresetStore
+from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
     DisplayUnit,
     ModelPrintChoices,
@@ -435,7 +435,8 @@ def _current_model_projects(
     preset's name now, and none for a preset its model no longer lists. A template's
     preset dropped from ``model.json`` deletes nothing of ours, so its entry is
     forgotten here instead. A model not in the catalogue, or whose presets cannot be
-    read, keeps its entries as they are."""
+    read (the database, or a ``model.json`` that is not valid), keeps its entries as
+    they are."""
     names: dict[str, dict[str, str] | None] = {}
     current: dict[str, ModelProject] = {}
     for scope, project in settings.model_projects.items():
@@ -443,11 +444,13 @@ def _current_model_projects(
         if separator and model_id not in names:
             try:
                 names[model_id] = (
-                    {preset.id: preset.name for preset in presets.presets(model_id)}
+                    {preset.id: preset.name for preset in presets.presets(model_id, strict=True)}
                     if catalogue.exists(model_id)
                     else None
                 )
-            except psycopg.Error:
+            except (psycopg.Error, TemplatePresetsUnreadableError):
+                # Unreadable is not "lists none": a half-written model.json must not
+                # forget every template preset's entry for good.
                 logger.exception("could not read a model's presets", extra={"slug": model_id})
                 names[model_id] = None
         listed = names.get(model_id) if separator else None
