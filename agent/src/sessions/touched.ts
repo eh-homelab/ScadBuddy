@@ -233,6 +233,9 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   restore_flow_version: () => [],
   start_flow_run: () => [],
   reset_flow_run: () => [],
+  archive_flow: () => [],
+  unarchive_flow: () => [],
+  delete_flow: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),

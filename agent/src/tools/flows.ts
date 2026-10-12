@@ -76,14 +76,74 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'list_flows',
-    description: 'The registered flows, each at its newest version (no script; get_flow has it).' + PAGED,
-    input: z.object({ ...pageInput }),
+    description:
+      'The registered flows, each at its newest version (no script; get_flow has it). Archived and deleted ' +
+      'flows only with `include_archived`, each with `archived_at`/`archived_by` or `deleted_at`/`deleted_by`.' +
+      PAGED,
+    input: z.object({
+      include_archived: z.boolean().optional().describe('Also list archived and deleted flows'),
+      ...pageInput,
+    }),
     risk: 'read',
     routes: ['GET /api/v1/workflows'],
-    handler: async (args, { backend }) => {
-      const items = await ok(backend.GET('/api/v1/workflows'), 'list flows')
-      return json(page(items, args, (item) => item.id, 'list_flows'))
+    handler: async ({ include_archived, ...args }, { backend }) => {
+      const query = include_archived ? { archived: true } : {}
+      const items = await ok(backend.GET('/api/v1/workflows', { params: { query } }), 'list flows')
+      return json(page(items, { include_archived, ...args }, (item) => item.id, 'list_flows'))
     },
+  }),
+
+  defineTool({
+    name: 'archive_flow',
+    description:
+      'Archive a flow, every version of it: it leaves the Flows list (list_flows shows it with ' +
+      '`include_archived`) and no run of it starts until unarchive_flow. Runs already started keep running, ' +
+      'and finished runs keep their script. Reversible.',
+    input: z.object({ name: flowName }),
+    risk: 'write',
+    routes: ['POST /api/v1/workflows/names/{name}/archive'],
+    handler: async ({ name }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/workflows/names/{name}/archive', { params: { path: { name } } }),
+          `archive flow ${name}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'unarchive_flow',
+    description: 'Unarchive a flow: it is listed again, and its versions start again.',
+    input: z.object({ name: flowName }),
+    risk: 'write',
+    routes: ['POST /api/v1/workflows/names/{name}/unarchive'],
+    handler: async ({ name }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/workflows/names/{name}/unarchive', { params: { path: { name } } }),
+          `unarchive flow ${name}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'delete_flow',
+    description:
+      "Delete a flow: one commit removing its script from the flows' git history, which keeps every version. " +
+      'Nothing new starts; runs in progress keep running the version they started, and finished runs still ' +
+      'show the script they ran. restore_flow_version on one of its versions (list_flow_versions) brings it ' +
+      'back as its next version. Needs a human approval.',
+    input: z.object({ name: flowName }),
+    risk: 'outward',
+    routes: ['DELETE /api/v1/workflows/names/{name}'],
+    summarize: ({ name }) => `Delete the flow "${name}" (its history keeps every version)`,
+    handler: async ({ name }, { backend }) =>
+      json(
+        await ok(
+          backend.DELETE('/api/v1/workflows/names/{name}', { params: { path: { name } } }),
+          `delete flow ${name}`,
+        ),
+      ),
   }),
 
   defineTool({

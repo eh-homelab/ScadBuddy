@@ -142,6 +142,8 @@ export type FlowDefinition = Schemas['Definition']
 export type FlowSummary = Schemas['DefinitionSummary']
 /** #2503 — one version of a flow's git history. */
 export type FlowVersion = Schemas['FlowVersion']
+/** #2485 — whether a flow is archived or deleted, and by whom. */
+export type FlowState = Schemas['FlowState']
 /** #2487 — the editor's Save body, its check, and what it completes. */
 export type FlowRegister = Schemas['DefinitionCreate']
 export type FlowScriptCheck = Schemas['ScriptCheckResult']

@@ -38,6 +38,8 @@ from scadbuddy.core.gitrepo import (
 FLOW_FILE = "flow.py"
 FLOW_TRAILER = "ScadBuddy-Flow"
 VERSION_TRAILER = "ScadBuddy-Flow-Version"
+#: A delete's commit (#2485): it names the flow, but is none of its versions.
+DELETED_TRAILER = "ScadBuddy-Flow-Deleted"
 _GITIGNORE = f"# Written by ScadBuddy.\n{LOCK_NAME}\n"
 _FORMAT = (
     "--format=format:%x1e%H%x1f%aI%x1f%s"
@@ -146,6 +148,28 @@ class FlowHistory(GitRepo):
             raise GitError(f"no commit for {name} v{version}")
         index(commit, version)
         return commit, version
+
+    def delete(self, name: str, record: Callable[[str], None]) -> str:
+        """Remove ``<name>/`` as one commit, ``Delete <name>``, carrying
+        ``ScadBuddy-Flow-Deleted: <name>`` (#2485). Not a version: its versions stay in
+        the history, each script readable at its commit, and a restore of one brings the
+        flow back as its next version. Under the write lock: the commit, then
+        ``record(commit)``. A flow already gone commits nothing and records the commit
+        that removed it. :class:`RevisionNotFoundError` for a name with no version."""
+        with self.write_lock():
+            if not self.versions(name):
+                raise RevisionNotFoundError(f"no flow named {name!r}")
+            commit: str | None = None
+            if self._tracked(name):
+                self._run("rm", "-r", "-q", "--", name)
+                commit = self._commit_locked(
+                    f"Delete {name}", name, trailers=[f"{DELETED_TRAILER}: {name}"]
+                )
+            if commit is None:
+                commit = self.last_commit(name)
+            assert commit is not None  # a flow with a version has a commit touching it
+            record(commit)
+            return commit
 
     # ── reading ───────────────────────────────────────────────────────────────
 

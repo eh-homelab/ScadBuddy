@@ -37,6 +37,26 @@ class DefinitionSummary(BaseModel):
     approval_timeout_s: int | None = None
     created_by: dict[str, Any]
     created_at: datetime
+    #: When the flow (every version) was archived and by whom (#2485): hidden from the
+    #: list by default and never started, until unarchived. None when it is not.
+    archived_at: datetime | None = None
+    archived_by: dict[str, Any] | None = None
+    #: When the flow was deleted and by whom (#2485): its folder removed from
+    #: `data/flows` by a commit, its versions kept in the history. None when it is not.
+    deleted_at: datetime | None = None
+    deleted_by: dict[str, Any] | None = None
+
+
+class FlowState(BaseModel):
+    """Whether a flow is archived or deleted, and who did it (#2485)."""
+
+    name: str
+    archived_at: datetime | None = None
+    archived_by: dict[str, Any] | None = None
+    deleted_at: datetime | None = None
+    deleted_by: dict[str, Any] | None = None
+    #: The commit that removed `<name>/` from `data/flows`.
+    deleted_commit: str | None = None
 
 
 class Definition(DefinitionSummary):

@@ -55,6 +55,7 @@ from scadbuddy.flows.models import (
     Definition,
     DefinitionSummary,
     FlowDiff,
+    FlowState,
     FlowVersion,
     Run,
     RunStatus,
@@ -76,6 +77,8 @@ FLOW_NAMESPACE = uuid.UUID("5b6f1d0e-6a8f-4f0e-9a51-0c1f1e57f10f")
 FLOWS_UNAVAILABLE = "https://scadbuddy.dev/problems/flows-unavailable"
 SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
 SCRIPT_MISSING = "https://scadbuddy.dev/problems/flow-script-missing"
+FLOW_ARCHIVED = "https://scadbuddy.dev/problems/flow-archived"
+FLOW_DELETED = "https://scadbuddy.dev/problems/flow-deleted"
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
 ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
@@ -214,8 +217,15 @@ async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
 
 
 @router.get("/workflows", response_model=list[DefinitionSummary], summary="List flows")
-async def list_flows(flows: FlowsDep) -> list[DefinitionSummary]:
-    return await flows.definitions.flows()
+async def list_flows(
+    flows: FlowsDep,
+    archived: Annotated[
+        bool, Query(description="Archived and deleted flows too, each with when and by whom.")
+    ] = False,
+) -> list[DefinitionSummary]:
+    """Each flow at its newest version, by name. Archived and deleted flows (#2485) only
+    with `archived`."""
+    return await flows.definitions.flows(hidden=archived)
 
 
 @router.get("/workflows/{definition_id}", response_model=Definition, summary="Get a flow")
@@ -316,6 +326,59 @@ async def restore_flow_version(name: NamePath, commit: CommitPath, flows: FlowsD
         return await flows.definitions.restore(name, commit, _started_by())
 
 
+@router.post(
+    "/workflows/names/{name}/archive",
+    response_model=FlowState,
+    summary="Archive a flow (every version): hidden from the list, and never started",
+)
+async def archive_flow(name: NamePath, flows: FlowsDep) -> FlowState:
+    """Reversible (`unarchive`). Runs already started keep running; finished runs keep
+    their script. One archived already keeps who archived it and when."""
+    with _versioned():
+        return await flows.definitions.archive(name, _started_by())
+
+
+@router.post(
+    "/workflows/names/{name}/unarchive",
+    response_model=FlowState,
+    summary="Unarchive a flow: listed again, and its versions start again",
+)
+async def unarchive_flow(name: NamePath, flows: FlowsDep) -> FlowState:
+    with _versioned():
+        return await flows.definitions.unarchive(name)
+
+
+@router.delete(
+    "/workflows/names/{name}",
+    response_model=FlowState,
+    summary="Delete a flow: a commit removing its script; its history keeps every version",
+)
+async def delete_flow(name: NamePath, flows: FlowsDep) -> FlowState:
+    """One commit in `data/flows` removing `<name>/` (#2485). Its versions stay in the
+    history and their records stay: runs in progress keep running the version they
+    started with, finished runs still show the script they ran, and nothing new starts.
+    Restoring one of its versions, or registering the name again, brings it back as its
+    next version. A flow deleted already is answered as it is."""
+    with _versioned():
+        return await flows.definitions.delete(name, _started_by())
+
+
+def _refuse_hidden(definition: Definition) -> None:
+    """An archived or deleted flow never starts (#2485)."""
+    if definition.deleted_at is not None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This flow was deleted. Restore one of its versions to run it.",
+            type_=FLOW_DELETED,
+        )
+    if definition.archived_at is not None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This flow is archived. Unarchive it to run it.",
+            type_=FLOW_ARCHIVED,
+        )
+
+
 async def _execution(client: Client, run_id: str) -> WorkflowExecutionStatus | None:
     """The run's execution's status; None when there is none."""
     try:
@@ -357,6 +420,7 @@ async def start_flow_run(
     if (existing := await flows.store.get_run(run_id)) is not None:
         response.status_code = status.HTTP_200_OK
         return RunAnswer(id=existing.id, status=existing.status, repeated=True)
+    _refuse_hidden(definition)
     client = _client(flows)
     if problems := await check_script(definition.script):
         raise _script_problems(problems, "The flow no longer type-checks.")

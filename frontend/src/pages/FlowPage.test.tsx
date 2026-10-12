@@ -3,7 +3,7 @@ import { Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
-import { flowRequests } from '../mocks/features/flows'
+import { flowRequests, setFlowState } from '../mocks/features/flows'
 import { renderPage } from '../test/utils'
 import { FlowPage } from './FlowPage'
 
@@ -198,6 +198,46 @@ describe('FlowPage', () => {
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     expect(await screen.findByTestId('source-diff')).toHaveAttribute('data-side-by-side', 'false')
     expect(screen.getByRole('button', { name: 'Start run' })).toBeInTheDocument()
+  })
+
+  it('archives the flow, stopping new runs until it is unarchived (#2485)', async () => {
+    const { user } = render('def-swap')
+    await user.click(await screen.findByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive swap?' })
+    expect(dialog).toHaveTextContent('Finished runs keep their steps, their result and the script they ran')
+    await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    expect(await screen.findByText(/Archived by you, in the browser/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Unarchive' }))
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled())
+    expect(screen.queryByText(/Archived by/)).not.toBeInTheDocument()
+  })
+
+  it('deletes the flow and restores the version viewed as its next (#2485)', async () => {
+    const { user } = render('def-plates-1')
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete plates?' })
+    expect(dialog).toHaveTextContent('which keeps every version')
+    await user.click(within(dialog).getByRole('button', { name: 'Delete flow' }))
+    expect(await screen.findByText(/Deleted by you, in the browser/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled()
+    // Its script and versions are still read from the history.
+    expect(((await screen.findByRole('textbox', { name: 'Script' })) as HTMLTextAreaElement).value).toContain('return 1')
+    await user.click(screen.getByRole('button', { name: 'Restore v1' }))
+    expect(await screen.findByRole('heading', { name: 'plates v3' })).toBeInTheDocument()
+    expect(screen.queryByText(/Deleted by/)).not.toBeInTheDocument()
+    expect(flowRequests().map((r) => r.path)).toEqual([
+      '/api/v1/workflows/names/plates',
+      `/api/v1/workflows/names/plates/versions/${'c0ffee1'.padEnd(40, '0')}/restore`,
+    ])
+  })
+
+  it('offers Restore for a deleted flow on a phone too (#2485)', async () => {
+    asPhone()
+    setFlowState({ name: 'swap', deleted_at: '2026-10-12T00:00:00Z', deleted_by: { kind: 'browser' } })
+    render('def-swap')
+    expect(await screen.findByRole('button', { name: 'Restore v1' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled()
   })
 
   it('says when there is no such flow', async () => {

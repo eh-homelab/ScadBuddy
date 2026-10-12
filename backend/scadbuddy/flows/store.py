@@ -30,7 +30,6 @@ from scadbuddy.flows.models import (
     TERMINAL,
     BackfillRow,
     Decision,
-    DefinitionSummary,
     Run,
     StoredDefinition,
 )
@@ -41,7 +40,6 @@ _DECISION = (
     " input_hash, created_at"
 )
 _DEFINITION = "id, name, version, commit, script, approval_timeout_s, created_by, created_at"
-_SUMMARY = "id, name, version, commit, approval_timeout_s, created_by, created_at"
 _RUN = (
     "id, definition_id, version, name, status, waiting_on, steps, result,"
     " result_truncated, approval_timeout_s, commit, workflow_id, workflow_run_id,"
@@ -175,10 +173,6 @@ class FlowStore:
                 (definition_id,),
             ).fetchone()
         return StoredDefinition.model_validate(row) if row else None
-
-    async def list_definitions(self) -> list[DefinitionSummary]:
-        """The newest version of each name, by name."""
-        return await asyncio.to_thread(self._list_definitions)
 
     # -- runs -------------------------------------------------------------------
 
@@ -336,14 +330,6 @@ class FlowStore:
                 conn,
                 FlowRunEvent(run_id=run.id, definition_id=run.definition_id, status=run.status),
             )
-
-    def _list_definitions(self) -> list[DefinitionSummary]:
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                f"SELECT DISTINCT ON (name) {_SUMMARY} FROM workflow_definitions"
-                " ORDER BY name, version DESC"
-            ).fetchall()
-        return [DefinitionSummary.model_validate(row) for row in rows]
 
     def _get_run(self, run_id: str) -> Run | None:
         with self._pool.connection() as conn:
