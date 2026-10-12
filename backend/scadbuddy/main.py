@@ -520,16 +520,24 @@ async def _sweep_flow_runs_logged(state: AppState) -> None:
     if flows.client is None:
         logger.debug("no flow-run sweep: flows are unavailable without the secret key file")
         return
+    # Each its own: one failing never starves the other (review of #2643).
+    failed: Exception | None = None
     try:
         ended = await sweep_flow_runs(flows.store, flows.client)
-        orphans = await sweep_orphan_grants(flows.store, flows.client)
-    except Exception:
+        if ended:
+            logger.info("ended flow runs whose execution closed", extra={"count": len(ended)})
+    except Exception as err:
         logger.exception("could not sweep flow runs")
-        raise
-    if ended:
-        logger.info("ended flow runs whose execution closed", extra={"count": len(ended)})
-    if orphans:
-        logger.info("deleted grants whose run never started", extra={"count": len(orphans)})
+        failed = err
+    try:
+        orphans = await sweep_orphan_grants(flows.store, flows.client)
+        if orphans:
+            logger.info("deleted grants whose run never started", extra={"count": len(orphans)})
+    except Exception as err:
+        logger.exception("could not sweep the grants of runs that never started")
+        failed = failed or err
+    if failed is not None:
+        raise failed
 
 
 async def _sweep_preview_slices_logged(state: AppState) -> None:
