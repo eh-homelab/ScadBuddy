@@ -988,7 +988,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `workspace_file_max_bytes` and `workspace_max_bytes` (bytes), which Settings →
   Assistant workspace writes through `PUT /api/v1/ai/settings/workspace`
   `{file_max_bytes, workspace_max_bytes}` (1 MiB to 100 MiB a file, 1 MiB to 2 GiB a
-  workspace, the file cap no larger; each a `settings` audit row;
+  workspace, the file cap no larger; both in one transaction, each a `settings` audit row;
   [`agent/src/routes/workspaceSettings.ts`](../../agent/src/routes/workspaceSettings.ts)).
   Each is read at every write. Size the database for them.
 - Tools, with their tiers: `workspace_list` and `workspace_read` (read),
@@ -1049,9 +1049,13 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   - `DELETE /api/v1/ai/sessions/:id/files/<path>[?expected_sha256=]`: `204`, `404` when
     there is none, `409` on a stale sha256.
 
-  An upload or a delete is a `resource` audit row (`workspace_upload`, refusals
-  included, or `workspace_delete`) and appends a `workspace.file` event (`path`,
-  `change`, `by`, and an upload's `size`, `mediaType` and `sha256`) to the session's
-  log: the panel's Files list reads again on it. A running turn is not interrupted;
+  An upload or a delete is a `resource` audit row (`workspace_upload` or
+  `workspace_delete`, refusals included: a bad path, a cap, a stale sha256, and a
+  session the browser user does not own or that is archived) and appends a
+  `workspace.file` event (`path`, `change`, `by`, and an upload's `size`, `mediaType`
+  and `sha256`) to the session's log in the same transaction as the file, so the two
+  commit together: the panel's Files list reads again on it. An upload whose numbered
+  `uploads/<name>` was taken meanwhile reads the list again and takes the next number,
+  once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.
