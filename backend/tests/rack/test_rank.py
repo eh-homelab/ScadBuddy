@@ -212,6 +212,7 @@ def test_an_open_pick_does_not_change_oldest_or_newest_first() -> None:
         serial(18): Usage(first_seen_at=datetime(2026, 9, 1, tzinfo=UTC)),
     }
     assert positions(rank_rack([group()], rack, "oldest_first", usage, {})) == {0: 2}
+    assert positions(rank_rack([group()], rack, "newest_first", usage, {})) == {0: 3}
 
 
 def test_oldest_and_newest_first_order_on_first_seen_with_the_unseen_last_and_first() -> None:

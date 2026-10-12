@@ -309,7 +309,9 @@ describe('assistant panel', () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Deny' }))
     expect(respondRequests()).toMatchObject([{ body: { kind: 'approval', decision: 'deny' } }])
-    await screen.findByText('Denied: nothing was sent.')
+    // The call reads as not run; the refusal its result carries is the model's, not shown (#2149).
+    await waitFor(() => expect(screen.getByTestId('agent-tool-status')).toHaveTextContent('Not run'))
+    expect(screen.queryByText('Denied: nothing was sent.')).not.toBeInTheDocument()
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
   })
 

@@ -234,6 +234,18 @@ export function validatePluginName(name: string): string {
 }
 
 /**
+ * Why a stored plugin cannot run under its name, or null (#2127). A row saved
+ * before its name joined `RESERVED_PLUGIN_NAMES` is still in the table, but
+ * Claude Code drops a server by that name without a word, so it is reported
+ * rather than handed to the harness.
+ */
+export function reservedNameProblem(name: string): string | null {
+  return RESERVED_PLUGIN_NAMES.has(name)
+    ? `its name "${name}" is reserved by Claude Code, which drops the server; delete it and register it again under another name`
+    : null
+}
+
+/**
  * Normalises an endpoint URL: http(s), no credentials, no query or fragment
  * (a token belongs in the sealed header, not in a URL stored in the clear), and
  * no `$` anywhere, so Claude Code's `${VAR}` expansion of MCP config values can
@@ -443,8 +455,9 @@ export type LoadedPlugins = { plugins: CheckedPlugin[]; problems: string[] }
  * The enabled plugins for one harness run: opened, and each endpoint checked
  * again (egress + https, `assertEndpointAllowed`) since its name may resolve
  * differently now than at save. The address checked is the one the forwarder
- * connects to. A plugin that fails either is left out and named in
- * `problems`; the run goes ahead without it.
+ * connects to. A plugin that fails either, or whose name Claude Code now
+ * reserves (`reservedNameProblem`), is left out and named in `problems`; the
+ * run goes ahead without it.
  */
 export async function loadEnabledPlugins(
   store: Pick<PluginStore, 'enabled'>,
@@ -454,6 +467,11 @@ export async function loadEnabledPlugins(
   const { plugins, problems } = await store.enabled(kek)
   const allowed: CheckedPlugin[] = []
   for (const plugin of plugins) {
+    const reserved = reservedNameProblem(plugin.name)
+    if (reserved) {
+      problems.push(`plugin ${plugin.name} was not loaded: ${reserved}`)
+      continue
+    }
     try {
       const [address] = await assertEndpointAllowed(plugin.url, resolve)
       if (address === undefined) throw new EgressError(`url host of ${plugin.name} resolves to no address`)

@@ -47,7 +47,7 @@ from scadbuddy.render.bambu3mf import (
 from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.jobs import MAX_PLATES
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, Paint
 from scadbuddy.render.thumbnail import (
     PLATE_PNG_SIZE,
     PLATE_SMALL_PNG_SIZE,
@@ -1319,3 +1319,26 @@ def test_a_mesh_inside_a_mesh_is_refused() -> None:
 
     with pytest.raises(ValueError, match="inside another"):
         parse_model(archive, "3D/3dmodel.model")
+
+
+@pytest.mark.parametrize(
+    ("painted_in", "tower"),
+    [
+        pytest.param(LID, False, id="its-own-filament"),
+        pytest.param("#FF6AC1", True, id="another-filament"),
+    ],
+)
+def test_a_painting_needs_a_tower_only_in_a_filament_the_plate_does_not_use(
+    tmp_path: Path, painted_in: str, tower: bool
+) -> None:
+    """#2108: one part, painted all over (state 1 is whole-triangle ``4``) in its own
+    filament, uses one filament and needs no tower; in another, it uses two."""
+    mesh = trimesh.creation.box(extents=(20, 20, 4))
+    paint = Paint(("4",) * len(mesh.faces), (painted_in,))
+    part = ColourPart(1, "Lid", LID, mesh, paint=paint)
+    colours = [LID] if painted_in == LID else [LID, painted_in]
+    out = tmp_path / "painted.3mf"
+    write_plates_3mf([PlateParts((part,), (1,))], colours, out, thumbnails=None)
+    with zipfile.ZipFile(out) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert ("wipe_tower_x" in settings) is tower

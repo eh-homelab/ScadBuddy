@@ -440,7 +440,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     const { session } = await api.forkAiSession(id, options.upTo === undefined ? {} : { upTo: options.upTo })
     chat.patch(patchOf(session))
     chat.select(session.id)
-    if (options.draft !== undefined) writeDraft(options.draft)
+    // #2161: the message comes back to edit only into an empty composer; a draft the
+    // user is writing is theirs, and the fork must not throw it away.
+    if (options.draft !== undefined && draftNow.current.trim() === '') writeDraft(options.draft)
     setPickerOpen(false)
     focusSession()
   }
@@ -451,10 +453,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       throw reason(caught)
     }
   }
-  const [forkError, setForkError] = useState<string | null>(null)
+  // #2161: kept with the session that failed to fork, so it is not shown on another.
+  const [forkError, setForkError] = useState<{ session: string; message: string } | null>(null)
   const fork = (id: string, options: { upTo?: string; draft?: string } = {}) => {
     setForkError(null)
-    openFork(id, options).catch((caught: unknown) => setForkError(reason(caught).message))
+    openFork(id, options).catch((caught: unknown) => setForkError({ session: id, message: reason(caught).message }))
   }
   // #795 — rename and done answer with the session, shown at once; a refusal is the row's to show.
   const updateSession = async (id: string, edit: AiSessionEdit) => {
@@ -692,9 +695,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               </button>
             </div>
           )}
-          {forkError && (
+          {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">
-              The chat was not forked: {forkError}
+              The chat was not forked: {forkError.message}
             </p>
           )}
           {active.modeFallback && (

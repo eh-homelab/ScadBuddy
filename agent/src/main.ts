@@ -1,6 +1,9 @@
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
+import os from 'node:os'
+import path from 'node:path'
+import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
@@ -50,11 +53,15 @@ import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { TASK_QUEUE } from './temporal/names.js'
+import { turnServers } from './temporal/turnServers.js'
+import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
 import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
+import { SessionBlobs } from './sessions/blobs.js'
 import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
@@ -429,8 +436,47 @@ if (temporal && !payloadKeys) {
 const workerDataConverter = dataConverter
   ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }
   : undefined
+// What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
+// classic turn would hand Claude Code, built again for every listing and call. One whose
+// state lives on this pod (http_request's saved bodies) runs its calls on this replica's
+// own queue, HOST_QUEUE, served by `hostWorker` below.
+const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
+const turnToolDeps = temporal
+  ? {
+      sessions: new PgSessionOwners(temporal.sql),
+      servers: turnServers({
+        ...(plugins
+          ? { remotePlugins: async () => forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder) }
+          : {}),
+        ...(settings ? { settings } : {}),
+        credentialSecrets: async () => {
+          if (!credentials) return []
+          const pool = new CredentialPool({ repo: credentials, kek, audit })
+          return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)
+        },
+        // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
+        httpRequest: { saveRoot: path.join(paths.stateDir, 'durable-turns'), audit },
+      }),
+      hostQueue: HOST_QUEUE,
+      approvals: new PgApprovalRecords(temporal.sql),
+      audit,
+      currentTiers: liveTokenTiers(tokens),
+      blobs: new SessionBlobs(temporal.sql),
+      ...(sessions
+        ? {
+            report: async (session: string, problems: readonly string[]) => {
+              await sessions.events.append(
+                session,
+                problems.map((message) => event({ type: 'error', sessionId: session, code: 'plugin_unavailable', message })),
+              )
+            },
+          }
+        : {}),
+    }
+  : undefined
+
 const temporalWorker =
-  temporal && operationStore
+  temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
@@ -443,8 +489,14 @@ const temporalWorker =
             audit,
             answers: new PgAnswers(temporal.sql),
             currentTiers: liveTokenTiers(tokens),
+            // A result's images, for the durable segment's view_tool_images (#2320).
+            blobs: new SessionBlobs(temporal.sql),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
+          // A durable turn's plugin and http_request tools (#2320): listed per turn, and
+          // each call the `default` activity `turn:<server>__<tool>`.
+          ...turnToolActivities(turnToolDeps),
+          default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
@@ -454,6 +506,18 @@ const temporalWorker =
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
         },
+      })
+    : undefined
+// This replica's own queue: a pinned turn tool's calls (#2320). Its tools die with the
+// pod; a call scheduled after that fails at its schedule-to-close timeout.
+const hostWorker =
+  temporal && operationStore && turnToolDeps
+    ? AgentWorker.start({
+        address: temporal.address,
+        namespace: config.temporalNamespace,
+        taskQueue: HOST_QUEUE,
+        activities: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
+        ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
 // Routes start commands, and reach durable sessions' gates, through a lazy client: a
@@ -594,6 +658,7 @@ async function stop(): Promise<void> {
   // and at 15 s it stops regardless: inside the turns' 17 s budget.
   await Promise.all([
     temporalWorker?.stop(),
+    hostWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])
   stopSessionWake?.()

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { ApiError, OFFLINE, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
-import { READ_RETRIES, TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
+import { READ_RETRIES, SNAPSHOT_PENDING_MAX_SECONDS, TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
 const JOB_B = 'b'.repeat(32)
@@ -230,6 +230,38 @@ describe('useRenderJob', () => {
     expect(submit).toHaveBeenCalledTimes(TRANSIENT_RETRIES + 3)
     expect(result.current.error).toBeUndefined()
     expect(result.current.busy).toBeUndefined()
+  })
+
+  it('gives up on a snapshot that never finishes uploading, as an error it can try again (#2101)', async () => {
+    submit.mockRejectedValue(
+      new ApiError({
+        title: 'Service Unavailable',
+        status: 503,
+        detail: "demo@abc: the revision's snapshot is still uploading",
+        retry_after: 2,
+        code: 'snapshot_pending',
+      }),
+    )
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    const waits = SNAPSHOT_PENDING_MAX_SECONDS / 2
+    for (let i = 0; i < waits + 5; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+    }
+
+    expect(submit).toHaveBeenCalledTimes(waits + 1)
+    expect(result.current.busy).toBeUndefined()
+    expect(result.current.rendering).toBe(false)
+    expect(result.current.error?.message).toBe("demo@abc: the revision's snapshot is still uploading")
+    expect(canRetry(result.current.error)).toBe(true)
+
+    submit.mockResolvedValueOnce(accepted(JOB_B))
+    act(() => result.current.retry())
+    await settle()
+    expect(submit).toHaveBeenCalledTimes(waits + 2)
+    expect(result.current.error).toBeUndefined()
   })
 
   it('says why it waits: an unreachable render service, or a request still accepting', async () => {

@@ -705,7 +705,9 @@ its $1.00 budget.") and offers:
   into a new session with the current Settings budget, owned by the browser user, and
   the panel switches to it. It counts against the new-session limit (`429`). With
   `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. Each fork is a `resource` audit row (action `session_fork`).
+  that reply. Each fork, from this route or the `sessions_fork` tool, is a `resource`
+  audit row (action `session_fork`), written once the fork is complete; a rename or
+  mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
   (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
   (take one over first), and never past $100. A request with the headless browser's

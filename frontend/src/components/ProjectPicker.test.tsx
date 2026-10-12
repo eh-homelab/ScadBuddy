@@ -218,9 +218,9 @@ describe('ProjectPicker', () => {
     mount()
     await listed()
 
-    // ScadBuddy remembers one id so the picker opens where it was left. It models no
-    // relationship between a model and a project — which prints belong to a project is
-    // on the project's own page, and a second answer here would go stale.
+    // ScadBuddy remembers one id so the picker opens where it was left. It keeps no
+    // project membership — which prints belong to a project is on the project's own
+    // page, and a second answer here would go stale.
     await waitFor(() => expect(select()).toHaveValue('1'))
   })
 

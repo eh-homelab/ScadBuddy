@@ -36,8 +36,13 @@ clients reach over `/mcp`, plus an in-app assistant. Both are in use:
   **MCP access tokens** (#251) and plugins show once the agent answers
   `GET /api/v1/ai/status` with `configured`, that is, with a credential saved
   (`useAiAvailability()` in
-  [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts));
-  the panel talks over the agent's chat socket
+  [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts)).
+  The panel is hidden even with a credential saved when that status also says
+  `chat: 'refused'`: the page was opened somewhere the chat socket's origin gate
+  refuses, such as a LAN address or plain HTTP rather than `SCADBUDDY_PUBLIC_URL`'s
+  origin over HTTPS. Open ScadBuddy at its public URL
+  ([operating.md §6](operating.md#6-origin-allowlist-and-trusted-proxies)). The panel
+  talks over the agent's chat socket
   ([`frontend/src/agent/chat/transport.ts`](../../frontend/src/agent/chat/transport.ts)).
 - `/mcp` serves the tool registry (#368). Sessions start from the panel's chat socket
   and the session routes (#527), and from other agents over `/mcp` through the

@@ -1006,7 +1006,7 @@ async def queue_plate(
         nozzle_rack_choice=choice.nozzle_rack_choice if choice is not None else None,
     )
     picks = list(choice.picks) if choice is not None else []
-    await save_picks(rack, planned.printer_id, [item], picks)
+    await save_picks(rack, planned.printer_id, [item], picks, copies=planned.copies)
     return QueuedPlate(
         item_id=item,
         # Group ids repeat across plates, so each pick names its plate.

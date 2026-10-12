@@ -49,6 +49,8 @@ import type {
   MigrateResult,
   ModelPatch,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -1335,9 +1337,9 @@ export const api = {
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
-   * the one the last send went to so the picker opens where it was left. ScadBuddy
-   * models no relationship between a model and a project: which prints belong to a
-   * project is on the project's own page.
+   * the one the last send went to. ScadBuddy keeps no project membership: which prints
+   * belong to a project is on the project's own page. What it remembers per model is
+   * only the default the Customize page's picker opens on (#1660).
    */
   getProjects: () => request<ProjectChoices>('/print/projects'),
 
@@ -1354,6 +1356,16 @@ export const api = {
     request<LastProject>('/print/projects/last', {
       method: 'PUT',
       body: JSON.stringify({ project_id: projectId } satisfies LastProject),
+    }),
+
+  /** #1660 — the project this model was last filed into, per preset it was generated with. */
+  getModelProjects: (slug: string) => request<ModelProjects>(`/print/models/${seg(slug)}/projects`),
+
+  /** #1660 — remember the project Generate filed this model into; a `null` project forgets it. */
+  putModelProject: (slug: string, body: ModelProjectPut) =>
+    request<ModelProjects>(`/print/models/${seg(slug)}/project`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     }),
 
   /**

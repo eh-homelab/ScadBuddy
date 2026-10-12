@@ -42,13 +42,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
   const clients: Client[] = []
 
   /** A replica; `hears` drops the relay notifications it returns false for. */
-  function replica(mcp: { maxSessionsPerCaller?: number } = {}, hears: (payload: string) => boolean = () => true): Replica {
+  function replica(
+    mcp: { maxSessionsPerCaller?: number } = {},
+    hears: (payload: string) => boolean = () => true,
+    log: (message: string) => void = () => {},
+  ): Replica {
     const listener = new PgEventListener(url, { searchPath: 'public', log: () => {} })
     const relay = new PgMcpSessionRelay(db.sql, {
       listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload) ? f(payload) : undefined)),
       ackTimeoutMs: ACK_TIMEOUT_MS,
       beatMs: BEAT_MS,
-      log: () => {},
+      log,
     })
     listener.start()
     const bus = new MemoryEventSource()
@@ -230,6 +234,37 @@ describe.skipIf(!TEST_DATABASE_URL)(`/mcp sessions across replicas${TEST_DATABAS
     expect(written).not.toContain(id)
     expect(written.toLowerCase()).not.toContain('authorization')
     expect((await pending).status).toBe(404)
+  })
+
+  it("does not sweep or uncount a live session's row inside the touch interval (#2213)", async () => {
+    // `last_seen` is written at most every 30 s, so a row a few seconds past the
+    // idle limit can belong to a session its owner still holds.
+    await a.relay.register('live-hash', 'caller')
+    await db.sql`UPDATE ai_mcp_sessions SET last_seen = now() - interval '5 seconds' WHERE id_hash = 'live-hash'`
+    expect(await a.relay.counts('caller', 1_000)).toEqual({ total: 1, caller: 1 })
+    expect(await db.sql`SELECT 1 FROM ai_mcp_sessions WHERE id_hash = 'live-hash'`).toHaveLength(1)
+  })
+
+  it('says so when an owner that took no request loses its session from the directory (#2213)', async () => {
+    const logged: string[] = []
+    await swap('a', () => replica({}, (payload) => JSON.parse(payload).t !== 'req'))
+    await swap('b', () => replica({}, () => true, (m) => logged.push(m)))
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    const client = await connect(token, () => a)
+    const id = sessionOf(client)
+    expect((await post(b, token, id, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status).toBe(404)
+    expect(logged.join('\n')).toMatch(new RegExp(`dropped its session ${sessionHash(id).slice(0, 12)} from the directory`))
+  })
+
+  it('counts a session whose directory row could not be written against the limits (#2213)', async () => {
+    await swap('a', () => replica({ maxSessionsPerCaller: 1 }))
+    a.relay.register = async () => {
+      throw new Error('register failed')
+    }
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    await connect(token, () => a)
+    expect(await db.sql`SELECT 1 FROM ai_mcp_sessions`).toHaveLength(0)
+    await expect(connect(token, () => a)).rejects.toMatchObject({ code: 429 })
   })
 
   it('keeps waiting, and keeps the session, when the owner took a request whose ack was lost', async () => {

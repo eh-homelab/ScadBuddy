@@ -72,8 +72,11 @@ replica serves it, because the bytes are in Postgres like the rest of the sessio
 
 - **Table** `ai_session_blobs (session_id → ai_sessions ON DELETE CASCADE, name,
   media_type, data bytea, created_at, PRIMARY KEY (session_id, name))`, a new migration.
-  A session's images go when it is deleted. A fork copies its parent's rows along with
-  the events that name them (`manager.ts` `fork`).
+  A session's images go when it is deleted, and not before: a session keeps every image
+  its transcript names, so the panel can show any of them, and its growth is bounded by
+  its budget (each image is a paid tool call). A fork copies only the rows the events it
+  copies name (`forkPoint.ts` `blobNames`, `manager.ts` `fork`, #2150), so a fork up to an
+  earlier reply does not carry the parent's later images down the fork chain.
 - **Name** `<sha256 of the bytes, hex>.<png|jpg|gif|webp>`, so the same image twice in a
   session is one row (`ON CONFLICT DO NOTHING`).
 - **What is kept.** Only the four types the Messages API takes, only when the bytes

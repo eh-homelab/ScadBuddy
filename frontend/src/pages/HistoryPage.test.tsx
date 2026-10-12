@@ -209,6 +209,45 @@ describe('HistoryPage', () => {
     expect(within(plates).queryByText('queued #72')).not.toBeInTheDocument()
   })
 
+  // #2117: an unreadable plate list leaves each plate's number, and the row stands.
+  it('keeps the plate numbers when the plates cannot be read', async () => {
+    let read = false
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () =>
+        HttpResponse.json([
+          {
+            id: '9'.repeat(32),
+            slug: 'name-keychain',
+            name: 'Plates',
+            job_id: '8'.repeat(32),
+            created_at: '2026-09-22T10:00:00Z',
+            has_thumbnail: false,
+            params: {},
+            bbox_mm: bbox(10, 10, 10),
+            colors: ['#1B6CA8'],
+            queue_item_id: 72,
+            slice_job_id: 10,
+            plates: [
+              { plate_id: 1, queue_item_id: 71, slice_job_id: 9 },
+              { plate_id: 2, queue_item_id: 72, slice_job_id: 10 },
+            ],
+          },
+        ]),
+      ),
+      http.get('/api/v1/outputs/:id/plates', () => {
+        read = true
+        return HttpResponse.json({ detail: 'Bambuddy is down' }, { status: 500 })
+      }),
+    )
+    render()
+    const plates = await row('Plates')
+    await waitFor(() => expect(read).toBe(true))
+    expect(within(plates).getByRole('link', { name: 'Plate 1 queued #71' })).toBeInTheDocument()
+    expect(within(plates).getByRole('link', { name: 'Plate 2 queued #72' })).toBeInTheDocument()
+    expect(within(plates).getByRole('button', { name: /^Edit / })).toBeInTheDocument()
+    expect(screen.queryByText(/Bambuddy is down/)).not.toBeInTheDocument()
+  })
+
   it('edits an output through its deep link', async () => {
     const { user } = render()
     await user.click(within(await row('Nova')).getByRole('button', { name: /^Edit / }))
@@ -497,7 +536,20 @@ describe('HistoryPage · libraries an output was rendered with (#1296)', () => {
     const item = await row('Reagan')
     await waitFor(() =>
       expect(within(item).getByLabelText('Rendered with libraries')).toHaveTextContent(
-        'dotSCAD v3.3 · bb33edf(now dotSCAD v3.4 · c0ffee1)',
+        'dotSCAD v3.3 · bb33edf (now dotSCAD v3.4 · c0ffee1)',
+      ),
+    )
+  })
+
+  // #2109: the line is read (and copied) as text, so its parts need real separators.
+  it('separates a library from its warning and from the next library in the text', async () => {
+    const bosl = { name: 'BOSL2', ref: 'v2.0', url: 'https://github.com/BelfrySCAD/BOSL2', commit: 'aaaa1110123456789abcdef0123456789abcdef0' }
+    serve([dotscad, bosl], [{ ...dotscad, ref: 'v3.4', commit: 'c0ffee1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }, bosl])
+    render()
+    const item = await row('Reagan')
+    await waitFor(() =>
+      expect(within(item).getByLabelText('Rendered with libraries').textContent).toBe(
+        'dotSCAD v3.3 · bb33edf (now dotSCAD v3.4 · c0ffee1), BOSL2 v2.0 · aaaa111',
       ),
     )
   })

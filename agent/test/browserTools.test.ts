@@ -380,6 +380,33 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
   }
   const tick = () => new Promise((r) => setTimeout(r, 0))
 
+  it("prefers this replica's pairing while its write to the shared row has failed (#2211)", async () => {
+    const { rows } = sharedRows()
+    let failing = true
+    const logged: string[] = []
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        if (failing) throw new Error('session tab write failed')
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+    }
+    const here = new TabHub({ sessionTabs: store, log: (m) => logged.push(m) })
+    await tab(here, TAB)
+    rows.set('s-new', OTHER_TAB) // an older pairing, on a tab nobody holds now
+    here.pairSession('s-new', TAB)
+    expect(await here.sessionHasTab('s-new')).toBe(true)
+    expect(await here.status({ principal: browser, sessionId: 's-new' })).toMatchObject({ attached: true, via: 'session' })
+    expect(logged.join('\n')).toMatch(/session tab write failed/)
+
+    // A later write that lands hands the answer back to the row.
+    failing = false
+    here.pairSession('s-new', TAB)
+    await tick()
+    rows.set('s-new', OTHER_TAB) // another replica paired it since
+    expect(await here.sessionHasTab('s-new')).toBe(false)
+  })
+
   it("leaves a session alone when attached from another tab while another replica holds the session's tab", async () => {
     const { rows, store } = sharedRows()
     const relay: TabRelay = { serve: () => {}, forward: async () => ({ op: 'status', route: '/', live: [] }) }

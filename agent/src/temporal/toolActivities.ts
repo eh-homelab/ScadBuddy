@@ -3,6 +3,7 @@ import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { AuditLog } from '../audit/log.js'
 import { type Tier, TIERS } from '../auth/principal.js'
+import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
 import { effectiveTool, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
@@ -113,6 +114,8 @@ export type ToolActivityDeps = {
    * it, and a flow's token starter runs with it (#2320). Undefined: not kept anywhere.
    */
   currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
+  /** Where a durable call's result images are kept for `view_tool_images`; placeholders without it. */
+  blobs?: ResultBlobs | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
   heartbeatMs?: number
 }
@@ -130,17 +133,52 @@ export const UNKNOWN_FLOW = 'UnknownFlow'
 /** The failure type of a tool a flow cannot use: a browser tool (no tab) or an answer tool (no session). */
 export const NOT_FOR_FLOWS = 'NotForFlows'
 
-/** What the model reads in place of an image a tool returned (plan 5c Ruling 4). */
-export const DURABLE_IMAGE_NOTE =
-  '[The tool returned an image. Durable sessions do not yet receive images from tools; use a classic session to see it.]'
+/**
+ * The durable segment's in-process tool that shows the model the images a tool returned
+ * (agent-durable session/runner.py `view_tool_images`, #2320).
+ */
+export const TOOL_IMAGES_TOOL = 'view_tool_images'
+/** What stands where a tool returned an image the model could not take (not one of the four types, or not what it claims). */
+export const UNUSABLE_IMAGE = '[an image the model cannot take]'
+/** Where a flow's call returned an image: a flow has no session to keep it in, and no model to show it to. */
+export const FLOW_IMAGE = '[an image]'
+
+/** Where a durable activity keeps a result's images: the session's blobs (sessions/blobs.ts). */
+export type ResultBlobs = { put(sessionId: string, images: readonly SessionImage[]): Promise<void> }
 
 /**
  * A result as the durable plugin hands it to the model: text. The plugin delivers an
  * activity's result as `ToolOutcome(content=result)` and JSON-encodes anything but a
  * string, so content blocks would reach the model as JSON, an image as its base64.
+ * So each image is kept in the session's blobs, named by its bytes (sessions/blobs.ts),
+ * and named in the text, which tells the model to call `view_tool_images` with the
+ * names: that tool returns them as image blocks, as a classic turn's tool result is.
+ * At most RESULT_IMAGES_MAX are kept; one past it, or with no session, is a placeholder.
  */
-function resultText(content: readonly { type: string; text?: string }[]): string {
-  return content.map((block) => (block.type === 'text' ? (block.text ?? '') : DURABLE_IMAGE_NOTE)).join('\n')
+export async function resultText(
+  content: readonly { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
+  keep?: { session: string; blobs: ResultBlobs },
+): Promise<string> {
+  const images: SessionImage[] = []
+  const parts = content.map((block) => {
+    if (block.type === 'text') return block.text ?? ''
+    if (block.type !== 'image') return `[${block.type}]`
+    if (!keep) return FLOW_IMAGE
+    const image = imageOfBlock({ type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } })
+    if (!image || images.length >= RESULT_IMAGES_MAX) return UNUSABLE_IMAGE
+    if (!images.some((i) => i.name === image.name)) images.push(image)
+    return `[image ${image.name}]`
+  })
+  if (images.length && keep) {
+    await keep.blobs.put(keep.session, images)
+    const n = images.length
+    parts.push(
+      `[The tool returned ${n === 1 ? 'an image' : `${n} images`}. Call ${TOOL_IMAGES_TOOL} with ${n === 1 ? 'its name' : 'their names'} (${images
+        .map((i) => i.name)
+        .join(', ')}) to see ${n === 1 ? 'it' : 'them'}.]`,
+    )
+  }
+  return parts.join('\n')
 }
 
 // Lowercase only, as the codec's subjects are (payloadCodec.ts): a session's payloads are sealed.
@@ -165,7 +203,7 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
 }
 
 /** The durable session the current activity's workflow is, and its owner; refused otherwise. */
-async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[] }> {
+export async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[] }> {
   const { workflowExecution } = Context.current().info
   const session = sessionOf(workflowExecution?.workflowId)
   // A lookup that throws (the database is away) is left to the activity's retries.
@@ -218,10 +256,10 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
  * (`turn_tiers`), cut to what the owner holds now, so a token revoked or lowered since
  * the turn was sent takes effect at once. None recorded: the owner's default.
  */
-async function turnTiers(
+export async function turnTiers(
   owner: Owner,
   sent: readonly Tier[] | undefined,
-  deps: ToolActivityDeps,
+  deps: Pick<ToolActivityDeps, 'currentTiers'>,
 ): Promise<readonly Tier[] | undefined> {
   if (!sent || owner.kind === 'browser') return undefined
   const now = await deps.currentTiers?.(owner)
@@ -339,7 +377,7 @@ async function runAsActivity(
   })
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
-  return resultText(run.result.content)
+  return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs } : undefined)
 }
 
 /**

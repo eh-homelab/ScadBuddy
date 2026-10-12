@@ -312,7 +312,10 @@ keeps its `first_seen_at` and its print history, and the write updates
   so a pick stops counting `PENDING_PICK_MAX_AGE` (3 days) after it was made;
   a print still waiting or running past that stops counting until it settles.
   The dialog lists each position's open picks as "N queued". Oldest and
-  Newest first ignore them.
+  Newest first ignore them. A queue item of several copies (Bambuddy's
+  `quantity`) is one pick that settles a print row per copy, so the pick
+  records its `copies` and counts once for each copy without a print row yet
+  (#2134, `20261011T2300Z_rack_nozzle_pick_copies.sql`).
 - Until history builds up every count is 0, so color and then position decide. If
   the printer's `wear` ever reports real values, it replaces `print_seconds` as the
   key with no UI change.

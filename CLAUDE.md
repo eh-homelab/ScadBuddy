@@ -31,6 +31,14 @@ points at a Postgres they can create schemas in, e.g.
 postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
+`test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
+`manifest.json` says what each covers) and skip, naming every missing file, without
+them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
+it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
+and each shard mounts them at `/app/test-fixtures`. Add or change a fixture only on a
+branch of this repo: a fork's LFS objects live in the fork's store, which that job's
+`git lfs pull` cannot reach.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
@@ -452,7 +460,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
     `ai_sessions.mode` is `durable`, or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
-    approval; no browser or answer tools)), and `AgentOperation` (`workflows.ts`, bundled by
+    approval; no browser or answer tools)), a durable turn's other tools (#2320,
+    `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins
+    through the forwarder, `http_request`): `turn_tools` lists them per turn as
+    `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
+    and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
+    the servers again and checks tier, principal and approval as it runs; and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
     the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
