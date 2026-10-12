@@ -407,6 +407,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const size = '1.2 KB (1,234 bytes)'
       expect(humanSize(1)).toBe('1 byte')
       expect(humanSize(5 * 1024 * 1024)).toBe('5.0 MB (5,242,880 bytes)')
+      expect(humanSize(3 * 1024 ** 3)).toBe('3.0 GB (3,221,225,472 bytes)')
       expect(await withWorkspaceSize(files, ws, call)).toEqual({ ...call, workspace_size: size })
       // A file that is gone or no longer at that sha256, or a bad path, is said to be; an input with no upload is left alone.
       const stale = await withWorkspaceSize(files, ws, { ...call, workspace_sha256: 'f'.repeat(64) })
@@ -414,6 +415,9 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect((await withWorkspaceSize(files, ws, { ...call, workspace_path: '../x' })).workspace_size).toMatch(/^no such file/)
       expect(await withWorkspaceSize(files, ws, { slug: 'box' })).toEqual({ slug: 'box' })
       expect(await withWorkspaceSize(undefined, ws, call)).toEqual(call)
+      // A store that cannot be read says so; the gate still parks the call.
+      const down = { stat: async () => Promise.reject(new Error('connection refused')) } as unknown as SessionFiles
+      expect((await withWorkspaceSize(down, ws, call)).workspace_size).toBe('unknown: the workspace could not be read')
 
       // Classic: the session's approval row (the card's summary), hashed over the call's own input.
       const classic = await m.approvals.create({
