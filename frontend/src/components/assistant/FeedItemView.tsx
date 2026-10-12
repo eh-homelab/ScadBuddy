@@ -476,7 +476,10 @@ export function FeedItemView({
     case 'file':
       return (
         <p className="text-[11.5px] text-faint" data-testid="agent-file">
-          {item.by.label} {item.change} <span className="font-mono">{item.path}</span>
+          {item.by.label} {item.change}{' '}
+          <span className="break-all font-mono" title={item.path}>
+            {item.path}
+          </span>
           {item.size !== undefined && <> ({formatBytes(item.size)})</>}
           {item.change === 'uploaded' && ' to the workspace'}
           {item.change === 'deleted' && ' from the workspace'}

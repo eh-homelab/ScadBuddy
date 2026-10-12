@@ -278,12 +278,14 @@ function push(session: SessionState, item: FeedItem): SessionState {
   return { ...session, items: [...session.items, item] }
 }
 
-/** An error id no item has: the feed can shrink (`dropErrorsAbout`), so its length alone may repeat one. */
-function errorId(session: SessionState): string {
+/** An id no item has: the feed can shrink (`dropErrorsAbout`), so its length alone may repeat one. */
+function freshId(session: SessionState, prefix: string): string {
   let n = session.items.length
-  while (session.items.some((i) => i.id === `error-${n}`)) n += 1
-  return `error-${n}`
+  while (session.items.some((i) => i.id === `${prefix}-${n}`)) n += 1
+  return `${prefix}-${n}`
 }
+
+const errorId = (session: SessionState) => freshId(session, 'error')
 
 /** Without the respond errors about `id`, which a resolution has made stale (#1359). */
 function dropErrorsAbout(session: SessionState, id: string): SessionState {
@@ -502,7 +504,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         push(s, {
           kind: 'memory',
-          id: `memory-${s.items.length}`,
+          id: freshId(s, 'memory'),
           action: event.action,
           bank: event.bank,
           outcome: event.outcome,
@@ -520,7 +522,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           { ...s, workspaceChanges: (s.workspaceChanges ?? 0) + 1 },
           {
             kind: 'file',
-            id: `file-${s.items.length}`,
+            id: freshId(s, 'file'),
             path: event.path,
             change: event.change,
             by: event.by,
