@@ -914,6 +914,7 @@ export class SessionManager {
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
+      workspace: this.files,
       resume: (approval, by) => this.resumeApproved(approval, by),
     })
     this.questions = new QuestionService({

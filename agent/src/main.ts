@@ -444,7 +444,7 @@ const temporalWorker =
             answers: new PgAnswers(temporal.sql),
             currentTiers: liveTokenTiers(tokens),
           }),
-          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
+          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),

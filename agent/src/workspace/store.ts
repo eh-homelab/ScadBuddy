@@ -46,6 +46,42 @@ export function workspaceOf(ctx: { session?: string | undefined; principal: { ki
     : { kind: 'principal', principalKind: ctx.principal.kind, principalId: ctx.principal.id }
 }
 
+/** A size as a person reads it, with the exact count: "12.1 KB (12,345 bytes)". */
+export function humanSize(bytes: number): string {
+  const exact = `${bytes.toLocaleString('en-US')} byte${bytes === 1 ? '' : 's'}`
+  if (bytes < 1024) return exact
+  const [n, unit] = bytes < 1024 * 1024 ? [bytes / 1024, 'KB'] : [bytes / (1024 * 1024), 'MB']
+  return `${n.toFixed(1)} ${unit} (${exact})`
+}
+
+/**
+ * The input an approval shows for a call that uploads a workspace file (#2396):
+ * the input with `workspace_size` added, the size of the row `workspace_sha256`
+ * pins in the workspace the call runs in, or saying there is no such file (the
+ * upload is then refused when it runs). Every gate that describes a call goes
+ * through this: the classic gate and /mcp's prepare (approvals/service.ts
+ * `create`, `createPrepared`) and a durable call (temporal/toolActivities.ts
+ * `gate.describe_call`). Only what is SHOWN: the hash an approval binds to is
+ * always of the call's own input, so the size is never something the model gave.
+ */
+export async function withWorkspaceSize(
+  files: SessionFiles | undefined,
+  ws: WorkspaceRef | undefined,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { workspace_path: path, workspace_sha256: digest } = input
+  if (files === undefined || ws === undefined || typeof path !== 'string' || typeof digest !== 'string') return input
+  let info: WorkspaceFileInfo | undefined
+  try {
+    info = await files.stat(ws, path)
+  } catch (err) {
+    if (!(err instanceof WorkspaceError)) throw err
+  }
+  const size =
+    info?.sha256 === digest ? humanSize(info.size) : 'no such file at this sha256 in the workspace: the upload will be refused'
+  return { ...input, workspace_size: size }
+}
+
 function keyOf(ws: WorkspaceRef): { key: string; sessionId: string | null } {
   return ws.kind === 'session'
     ? { key: `session:${ws.sessionId}`, sessionId: ws.sessionId }
