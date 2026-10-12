@@ -250,7 +250,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   Monty's builtin shadows); `tool(name, args)` takes a manifest tool, or a
   `<server>__<tool>` turn tool (a remote plugin's, `scadbuddy_http__http_request`;
   #2320, behind `patched("flow-turn-tools-2320")`) that the agent's `turn_tool_tier`
-  tiers and names the queue of, as the run's starter, never the headless browser;
+  tiers and names the queue of, as the run's starter;
   `flow_activities.py`, `flow_models.py`,
   `projects_worker.py`, on the `projects` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), unversioned: a change must replay
@@ -472,8 +472,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
     approval; no browser or answer tools)), a durable turn's other tools (#2320,
     `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins
-    through the forwarder, `http_request`, and `turnBrowser.ts`'s headless browser and
-    its grant tool): `turn_tools` lists them per turn as
+    through the forwarder and `http_request`): `turn_tools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
     and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
     the servers again and checks tier, principal and approval as it runs (a `flow-<id>`
@@ -522,9 +521,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
     Never a file on the pod. Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
-    `SessionFiles.chunks` into the multipart route, text decoded as UTF-8); the headless
-    browser's downloads are drained into `downloads/` after each browser call by a
-    `PostToolUse` hook (`src/harness/browserDownloads.ts`).
+    `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
     The panel's Files (part 3) are `routes/sessionFiles.ts`
     (list, download as an attachment, multipart upload, delete; the session routes'
     guards, writes owner-only, each write a `workspace.file` event) and the caps' route

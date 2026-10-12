@@ -1,10 +1,10 @@
 """The backend's origin serves no open redirect (#349).
 
-The agent's headless browser may only open the backend's own origin, and the
-origin allow-list of the pinned ``@playwright/mcp`` does not apply to redirects
-(measured: a same-origin URL that redirects elsewhere reaches the other origin,
-agent-actor marker included; ``docs/ai/headless-browser.md``). So nothing the
-backend serves may redirect off its origin. Two checks:
+A browser the agent drives (a browser plugin such as Playwright MCP) may be limited to
+the backend's own origin, and Playwright MCP's origin allow-list does not apply to
+redirects (measured on ``@playwright/mcp`` 0.0.82: a same-origin URL that redirects
+elsewhere reaches the other origin). So nothing the backend serves may redirect off
+its origin. Two checks:
 
 - at runtime, the app (with a built SPA mounted) answers paths shaped to provoke a
   redirect, and every ``Location`` it sends resolves to the request's own origin;
@@ -85,8 +85,8 @@ def test_no_module_builds_a_redirect_without_review() -> None:
         if REDIRECT.search(path.read_text(encoding="utf-8"))
     )
     assert [f for f in found if f not in REVIEWED] == [], (
-        "a module builds an HTTP redirect; the headless browser follows redirects off the "
-        "origin (#349), so review it and add it to REVIEWED"
+        "a module builds an HTTP redirect; a browser the agent drives follows redirects off "
+        "the origin (#349), so review it and add it to REVIEWED"
     )
 
 

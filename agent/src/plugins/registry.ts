@@ -62,8 +62,7 @@ export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/
 
 /**
  * Names a plugin may not take: the in-process ScadBuddy server (#251's
- * `mcp__scadbuddy__*`) and the headless browser plugin (#349), whose tools have
- * tiers of their own, plus the vendor names, plus the server names Claude Code
+ * `mcp__scadbuddy__*`), whose tools have tiers of their own, plus the vendor names, plus the server names Claude Code
  * treats specially and drops or never offers tools from. Read from the pinned
  * CLI (2.1.289, the native binary of @anthropic-ai/claude-agent-sdk-<platform>
  * 0.3.289): search the binary for the message `Cannot add MCP server "${e}":
@@ -78,7 +77,6 @@ export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/
  */
 export const RESERVED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
   'scadbuddy',
-  'playwright',
   'claude',
   'anthropic',
   'plugin',

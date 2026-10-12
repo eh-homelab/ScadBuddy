@@ -14,8 +14,7 @@ const MAX_TURNS = 200
  * take, stored by the agent service (`/api/v1/ai/settings/session-limits`). A change
  * applies to chats started after it; a chat that ran out is raised from the panel.
  *
- * Hidden when the agent service or its database is not there, like the headless
- * browser switch. Save is user-only: the budget spends money, and an agent must not
+ * Hidden when the agent service or its database is not there. Save is user-only: the budget spends money, and an agent must not
  * raise its own (AI design spec §8.1).
  */
 export function SessionLimitsSetting() {
