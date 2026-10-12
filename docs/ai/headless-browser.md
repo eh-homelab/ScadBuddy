@@ -12,14 +12,22 @@ in the user's own tab (`mcp__scadbuddy__browser_*`).
 
 ## Adding it
 
-The server is deployed beside ScadBuddy, not by it: eh-homelab/clusters#2174 runs
-`mcr.microsoft.com/playwright/mcp` with its Streamable HTTP endpoint at `/mcp`. Then,
-as an admin, in **Settings → Plugins → Add endpoint**:
+The server is deployed beside ScadBuddy, not by it, **in its own pod**:
+eh-homelab/clusters#2174 runs `mcr.microsoft.com/playwright/mcp` as its own Deployment
+and Service, with its Streamable HTTP endpoint at
+`http://playwright-mcp.bambuddy:8931/mcp`. Then, as an admin, in **Settings → Plugins →
+Add endpoint**:
 
 - **Name** `playwright`. Its tools reach a classic turn as `mcp__playwright__browser_*`
   and a durable turn as `playwright__browser_*`.
-- **URL** the server's `/mcp` endpoint. A plugin URL must be `https`, except on
-  loopback (`127.0.0.1`, `::1`, `localhost`), where plain `http` is accepted.
+- **URL** `http://playwright-mcp.bambuddy:8931/mcp`. A plugin URL must be `https`,
+  except to loopback or a private address (an in-cluster Service), where plain `http`
+  is accepted.
+
+**Never run it as a sidecar** in the pod of the backend or the agent, or anywhere else
+that shares their network. A browser on that pod's loopback reaches the backend
+(`:8080`) and the agent (`:8081`) with no sign-in, so a page it opens could take
+ScadBuddy's own outward actions (print, send to Bambuddy) with no approval.
 
 Nothing else in ScadBuddy knows about it: its tools are tiered, disabled and approved
 exactly as any plugin's (`agent/src/plugins/registry.ts`).
@@ -33,21 +41,30 @@ Plugins. A starting point:
 | Tier | Tools |
 |---|---|
 | `read` | `browser_snapshot`, `browser_take_screenshot`, `browser_console_messages`, `browser_network_requests`, `browser_wait_for` |
-| `write` | `browser_navigate`, `browser_navigate_back`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_select_option`, `browser_press_key`, `browser_hover`, `browser_drag`, `browser_handle_dialog`, `browser_resize`, `browser_close`, `browser_tabs` |
+| `write` | `browser_resize`, `browser_close` |
+| `outward` (the default) | `browser_navigate`, `browser_navigate_back`, `browser_tabs`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_select_option`, `browser_press_key`, `browser_hover`, `browser_drag`, `browser_handle_dialog` |
 | `outward`, or disabled | `browser_evaluate` and `browser_run_code_unsafe` (they run JavaScript), `browser_file_upload`, anything the server adds later |
 
-`browser_tabs` both lists and opens tabs, so it cannot be `read` as a whole. Navigation
-is a `write` here because it decides where the browser goes; leave it `outward` if
-every new site should be approved.
+Navigation and input stay `outward`: they decide where the browser goes and what it
+does there, and nothing in ScadBuddy tells the browser's requests from a person's.
+Lower them to `write` only when the server **cannot reach ScadBuddy itself** (next
+section). `browser_tabs` both lists and opens tabs, so it cannot be `read` as a whole.
 
 ## What the server can reach
 
 The browser runs where the server runs and reaches whatever that network position
 reaches. ScadBuddy no longer adds a marker to its requests or refuses them on the
-backend, so limit it where it is deployed: the server's own `--allowed-origins` /
-`--blocked-origins`, and a network policy. Its origin lists do not apply to redirects
-(measured on `@playwright/mcp` 0.0.82), which is why the backend still serves no
-off-origin redirect (`backend/tests/api/test_no_open_redirect.py`).
+backend, so the boundary is the network where it is deployed, not its own
+`--allowed-origins` / `--blocked-origins`: those do not apply to redirects (measured on
+`@playwright/mcp` 0.0.82), which is also why the backend still serves no off-origin
+redirect (`backend/tests/api/test_no_open_redirect.py`).
+
+eh-homelab/clusters#2174's deployment is that boundary: its pod's egress policy allows
+DNS and the public internet only (no 10/8, 172.16/12, 192.168/16, 100.64/10, loopback
+or link-local), so it reaches no pod, Service or LAN host, ScadBuddy included. Its
+ingress policy admits only ScadBuddy's pods. ScadBuddy's public URL is behind SSO,
+which the browser has no way through. Only with all of that in place is `write` for
+navigation and input reasonable.
 
 ## One browser per MCP session
 

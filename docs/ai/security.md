@@ -740,7 +740,10 @@ gets:
   tells its requests from a person's. Where it may go is decided where it is deployed:
   its `--allowed-origins`/`--blocked-origins` and the network. Do not let it reach
   ScadBuddy's backend or agent API without the sign-in a person needs, or a page it
-  opens could make outward requests that no approval sees.
+  opens could make outward requests that no approval sees. So it runs in its own pod,
+  never as a sidecar of the backend or agent (their loopback needs no sign-in), behind
+  an egress policy that allows no private address; and its navigation and input tools
+  stay `outward` unless that isolation is in place.
 - **No open redirects from the backend** stays, since Playwright MCP's origin lists do
   not cover redirects: `backend/tests/api/test_no_open_redirect.py`.
 
