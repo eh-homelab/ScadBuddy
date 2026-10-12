@@ -47,8 +47,10 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
 
   async function submit(event?: FormEvent) {
     event?.preventDefault()
-    // Enter submits the form too: the wait holds it as it holds the button.
-    if (!url.trim() || wait > 0) return
+    // Enter submits the form too: an import in flight and the wait hold it as they
+    // hold the button. Each call mints its own Idempotency-Key, so a second Enter
+    // would be a second import.
+    if (!url.trim() || importing || wait > 0) return
     setImporting(true)
     setError(null)
     setBusy(false)
@@ -121,9 +123,10 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
             className={inputClass}
           />
         </label>
-        {/* A form of two fields with no submit button ignores Enter, and the Import
-            button sits in the dialog's footer, outside the form (#2114). */}
-        <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
+        {/* A form of two fields with no submit button ignores Enter (implicit
+            submission, https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#implicit-submission),
+            and the Import button sits in the dialog's footer, outside the form (#2114). */}
+        <button type="submit" hidden tabIndex={-1} />
       </form>
       {error && (
         <p role="alert" className="mt-3 text-[13px] text-warn">

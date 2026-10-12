@@ -111,6 +111,37 @@ describe('ImportDialog (#1295)', () => {
     await vi.waitFor(() => expect(posts).toBe(2))
   })
 
+  it('sends one import for Enter pressed again while it is in flight (#2114)', async () => {
+    let posts = 0
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post('/api/v1/models/import', async () => {
+        posts += 1
+        await held
+        return HttpResponse.json(
+          { title: 'Unprocessable', status: 422, detail: 'not a .scad file' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ImportDialog open onClose={vi.fn()} onImported={vi.fn()} />)
+    const field = screen.getByLabelText('URL')
+    await user.type(field, URL_)
+    await user.type(field, '{Enter}')
+    await vi.waitFor(() => expect(posts).toBe(1))
+    expect(screen.getByRole('button', { name: 'Importing' })).toBeDisabled()
+
+    await user.type(field, '{Enter}')
+    await user.type(screen.getByLabelText('Name (optional)'), '{Enter}')
+    release()
+    expect(await screen.findByRole('alert')).toHaveTextContent('not a .scad file')
+    expect(posts).toBe(1)
+  })
+
   it('shows only the alert for a 503 that names no wait (#2114)', async () => {
     server.use(
       http.post('/api/v1/models/import', () =>
