@@ -618,6 +618,8 @@ def test_a_create_whose_commit_fails_is_a_503_that_leaves_nothing(client: TestCl
 
     assert response.status_code == 503, response.text
     assert "try again" in response.json()["detail"]
+    # git's own words (paths on the volume, ref names) stay in the server's log.
+    assert "cannot lock ref" not in response.text
     assert client.get("/api/v1/models/name-keychain").status_code == 404
     # Nothing held the slug: the same create goes through, with its revision.
     created = _upload(client)

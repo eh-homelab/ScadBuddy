@@ -44,9 +44,7 @@ class _PgHold:
                 (commit,),
             )
         except psycopg.Error as error:
-            raise RepoLockError(
-                f"could not record {commit[:7]} as the models HEAD: {error}"
-            ) from error
+            raise RepoLockError(f"could not record {commit[:7]} as the models HEAD") from error
         self.expected = commit
 
 
@@ -64,7 +62,7 @@ class PgRepoCoordinator:
                 self.conninfo, autocommit=True, connect_timeout=max(1, round(timeout))
             )
         except psycopg.Error as error:
-            raise RepoLockError(f"could not reach Postgres for the models lock: {error}") from error
+            raise RepoLockError("could not reach Postgres for the models lock") from error
         try:
             try:
                 while True:
@@ -80,7 +78,7 @@ class PgRepoCoordinator:
                     time.sleep(LOCK_POLL_SECONDS)
                 head = conn.execute("SELECT head FROM models_repo_head WHERE id").fetchone()
             except psycopg.Error as error:
-                raise RepoLockError(f"could not take the models lock: {error}") from error
+                raise RepoLockError("could not take the models lock") from error
             yield _PgHold(conn, head[0] if head is not None else None)
         finally:
             conn.close()
