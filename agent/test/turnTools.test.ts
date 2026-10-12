@@ -175,6 +175,22 @@ describe('turn tools in a durable session', () => {
     expect((await failure(env('turn:notes__read_note').run(h.call, { id: 'a' }))).message).toContain('not offered any more')
   })
 
+  it('leaves out a server whose listing stalls, says so once, and lists the others (review of #2324)', async () => {
+    const reported: string[] = []
+    const stalled: TurnServer = { name: 'stuck', connect: () => new Promise(() => {}), tierOf }
+    const fine: TurnServer = { name: 'notes', connect: () => connectInProcess(notes([])), tierOf, mayPark }
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: async () => ({ servers: [stalled, fine], problems: [], secrets: [], release: () => {} }),
+      report: async (_session, problems) => void reported.push(...problems),
+      listTimeoutMs: 50,
+    }
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(turnToolActivities(deps)[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(tools.map((t) => t.name)).toContain('notes__post')
+    expect(tools.some((t) => t.name.startsWith('stuck__'))).toBe(false)
+    expect(reported).toEqual([expect.stringMatching(/^plugin stuck is not available in this turn/)])
+  })
+
   it('tiers a call from its input', async () => {
     const h = harness()
     const tier = (input: unknown) => env(TURN_TOOL_TIER_ACTIVITY).run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input })

@@ -252,15 +252,20 @@ class DurableSession:
         if workflow.patched(TURN_TOOLS_PATCH):
             # What a classic turn would hand Claude Code beside ScadBuddy's own tools,
             # listed by the agent as it is now; from the result, so a replay offers the same.
-            offered = await workflow.execute_activity(
-                TURN_TOOLS,
-                task_queue=TOOLS_QUEUE,
-                start_to_close_timeout=TURN_TOOLS_TIMEOUT,
-                retry_policy=RetryPolicy(
-                    maximum_attempts=3, non_retryable_error_types=["UnknownSession"]
-                ),
-                result_type=TurnTools,
-            )
+            try:
+                offered = await workflow.execute_activity(
+                    TURN_TOOLS,
+                    task_queue=TOOLS_QUEUE,
+                    start_to_close_timeout=TURN_TOOLS_TIMEOUT,
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3, non_retryable_error_types=["UnknownSession"]
+                    ),
+                    result_type=TurnTools,
+                )
+            except FailureError:
+                # As a classic turn whose plugins cannot be reached: it goes on with
+                # ScadBuddy's own tools, and offers none of last turn's others.
+                offered = TurnTools()
             # The plugin's own table, which each segment declares its tools from.
             self._turn_tools = manifest.offer_turn_tools(
                 self._agent._tools, self._tools, self._turn_tools, offered.tools
