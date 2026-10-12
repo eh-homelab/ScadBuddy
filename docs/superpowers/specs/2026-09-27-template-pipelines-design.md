@@ -689,6 +689,11 @@ re-rendering; this makes that the rule.
   tower) | `keep_together` groups. It produces a new layout → 3MF in seconds, with no
   re-render. `ctx.pack(goal=…, filament_plan=…)` in a pipeline awaits the same
   packing activity with the same parameters (§5.2).
+- A saved arranged output records its plates as `layout_plates` (#2281): per plate,
+  its index, bbox and colours, as the render reported them. It is kept so History,
+  the Print dialog and agents can check or summarise each plate against a printer
+  without reading the 3MF; no UI consumes it yet (#2557). Distinct from `plates`,
+  which records what the last print queued.
 - Heuristic, not a solver: group by colour signature, first-fit-decreasing 2D packing
   against `plate.py`'s exclusion zones and prime-tower rules, then order plates to
   minimise swaps. `Goal` is pluggable.

@@ -48,7 +48,9 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_output',
-    description: "One output's detail: parameters, model version, parts, colours, plates, and where it was sent or printed.",
+    description: "One output's detail: parameters, model version, parts, colours, plates, and where it was sent or printed. " +
+      '`layout_plates` lists each plate of an arranged or multi-plate output (index, bounding box, colours) ' +
+      'without reading the 3MF; `plates` is what the last print queued.',
     input: z.object({ output_id: outputId }),
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}'],
