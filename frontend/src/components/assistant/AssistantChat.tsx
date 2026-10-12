@@ -40,6 +40,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
+import { SessionFiles } from './SessionFiles'
 import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -195,6 +196,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [toolResults])
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
+  // #2329 — the active session's Files (its workspace).
+  const [filesOpen, setFilesOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
   function toggleAdvanced() {
     setAdvanced((was) => {
@@ -224,6 +227,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
   const touchedId = useId()
+  const filesId = useId()
   const voiceNoteId = useId()
   const archivedNoteId = useId()
   /** #1885 — a refused Unarchive, shown for that chat only. */
@@ -454,7 +458,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     const { session } = await api.forkAiSession(id, options.upTo === undefined ? {} : { upTo: options.upTo })
     chat.patch(patchOf(session))
     chat.select(session.id)
-    if (options.draft !== undefined) writeDraft(options.draft)
+    // #2161: the message comes back to edit only into an empty composer; a draft the
+    // user is writing is theirs, and the fork must not throw it away.
+    if (options.draft !== undefined && draftNow.current.trim() === '') writeDraft(options.draft)
     setPickerOpen(false)
     focusSession()
   }
@@ -465,10 +471,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       throw reason(caught)
     }
   }
-  const [forkError, setForkError] = useState<string | null>(null)
+  // #2161: kept with the session that failed to fork, so it is not shown on another.
+  const [forkError, setForkError] = useState<{ session: string; message: string } | null>(null)
   const fork = (id: string, options: { upTo?: string; draft?: string } = {}) => {
     setForkError(null)
-    openFork(id, options).catch((caught: unknown) => setForkError(reason(caught).message))
+    openFork(id, options).catch((caught: unknown) => setForkError({ session: id, message: reason(caught).message }))
   }
   // #795 — rename and done answer with the session, shown at once; a refusal is the row's to show.
   const updateSession = async (id: string, edit: AiSessionEdit) => {
@@ -691,6 +698,16 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           >
             Touched
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={filesOpen}
+            aria-controls={filesOpen ? filesId : undefined}
+            title="The files in this session's workspace: download them, or upload one for the assistant"
+            onClick={() => setFilesOpen((o) => !o)}
+          >
+            Files
+          </Button>
           <BudgetMeter session={active} />
           {active.parentId && (
             <div className="flex w-full items-center gap-1 text-[11.5px] text-muted">
@@ -706,9 +723,9 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
               </button>
             </div>
           )}
-          {forkError && (
+          {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">
-              The chat was not forked: {forkError}
+              The chat was not forked: {forkError.message}
             </p>
           )}
           {active.modeFallback && (
@@ -748,6 +765,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             key={active.id}
             sessionId={active.id}
             refreshKey={`${active.status}:${finishedTools}`}
+          />
+        </section>
+      )}
+
+      {active && filesOpen && (
+        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-line bg-surface-2">
+          {/* Read again when a tool call finishes or a file is uploaded or deleted. */}
+          <SessionFiles
+            key={active.id}
+            sessionId={active.id}
+            refreshKey={`${active.status}:${finishedTools}:${active.workspaceChanges ?? 0}`}
+            canWrite={canSend}
+            onInsert={(text) => {
+              const now = draftNow.current
+              writeDraft(now && !/\s$/.test(now) ? `${now} ${text}` : `${now}${text}`)
+            }}
           />
         </section>
       )}

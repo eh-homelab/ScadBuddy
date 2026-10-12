@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { Client } from '@temporalio/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
@@ -158,7 +159,7 @@ describe.skipIf(skip !== undefined)(`session archive${skip ? ` (skipped: ${skip}
     // Never reached: the claim must refuse before Temporal is asked.
     const client = new Proxy({}, { get: () => { throw new Error('the workflow was reached') } }) as Client
     const durable = new DurableTurns({ client, sql: db.sql, events: m.events })
-    const turn = { turnId: 't', prompt: 'more', text: 'more', author: browser, images: [], systemAppend: '' }
+    const turn = { turnId: randomUUID(), prompt: 'more', text: 'more', author: browser, images: [], systemAppend: '' }
     expect(await durable.send(before, turn)).toBeUndefined()
     const [row] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`
     expect(row?.status).not.toBe('running')

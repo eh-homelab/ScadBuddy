@@ -145,6 +145,30 @@ async def test_an_open_pick_counts_as_pending_until_its_print_settles(
     assert (usage[B].prints, usage[B].pending) == (1, 0)
 
 
+async def test_each_unsettled_copy_of_a_pick_counts_as_pending(
+    store: RackUsageStore,
+) -> None:
+    """#2134: copies go to Bambuddy as one queue item, and each copy settles its own
+    print row. A 3-copy pick is 3 pending, still 2 after the first copy settles."""
+    await store.record_picks(51, 1, [PickedHotend(group_id=0, position=2, serial=A)], copies=3)
+    assert (await store.usage([A]))[A].pending == 3
+
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=60, grams=None
+    )
+    assert ((await store.usage([A]))[A].prints, (await store.usage([A]))[A].pending) == (1, 2)
+
+    for archive_id in (102, 103):
+        await store.record_prints(
+            archive_id=archive_id,
+            queue_item_id=51,
+            settled_at=AT,
+            print_seconds=60,
+            grams=None,
+        )
+    assert ((await store.usage([A]))[A].prints, (await store.usage([A]))[A].pending) == (3, 0)
+
+
 async def test_an_open_pick_stops_counting_once_it_is_older_than_the_pending_age(
     store: RackUsageStore, pg_conninfo: str
 ) -> None:

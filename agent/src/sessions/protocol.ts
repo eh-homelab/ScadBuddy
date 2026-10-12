@@ -232,6 +232,21 @@ export type ServerEvent = V &
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
     /** The budget changed (a raise, #790), or a send was refused because it is spent. */
     | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
+    /**
+     * #2329: someone changed a file in the session's workspace through its files
+     * route (routes/sessionFiles.ts): the panel's Files list reads again, and the
+     * feed says what arrived. `size`, `mediaType` and `sha256` are an upload's.
+     */
+    | {
+        type: 'workspace.file'
+        sessionId: string
+        path: string
+        change: 'uploaded' | 'deleted'
+        by: Owner
+        size?: number
+        mediaType?: string
+        sha256?: string
+      }
     /** `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again. */
     | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string }
     /**

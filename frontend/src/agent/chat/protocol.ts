@@ -425,6 +425,22 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     costUsd: z.number().nonnegative(),
     budgetUsd: z.number().positive(),
   }),
+  /**
+   * #2329 — a file was uploaded into, or deleted from, the session's workspace through
+   * its files route: the Files list reads again, and the feed notes it. `size`,
+   * `mediaType` and `sha256` are an upload's.
+   */
+  z.object({
+    v,
+    type: z.literal('workspace.file'),
+    sessionId,
+    path: z.string().min(1),
+    change: z.enum(['uploaded', 'deleted']),
+    by: OwnerSchema,
+    size: z.number().int().nonnegative().optional(),
+    mediaType: z.string().optional(),
+    sha256: z.string().optional(),
+  }),
   z.object({
     v,
     type: z.literal('error'),

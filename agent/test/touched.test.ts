@@ -87,15 +87,29 @@ describe('extractors', () => {
   })
 
   // #1071: the backend's ModelRecord names the revision before it, whichever tool made it.
-  it("takes every revision's parent from the record's previous_version, over the call's own base", () => {
+  it("takes every revision's parent from the record's previous_version", () => {
     const record = { slug: 'box', version: C2, previous_version: C1 }
     const revision = { type: 'revision', id: C2, action: 'created', model: 'box', before: C1, after: C2 }
     for (const name of ['write_source_file', 'delete_source_file', 'set_readme', 'delete_readme', 'set_model_thumbnail', 'delete_model_thumbnail', 'restore_version']) {
       expect(touches(name, { slug: 'box', commit: 'c'.repeat(40) }, record)).toEqual([revision])
     }
-    expect(touches('apply_patch', { slug: 'box', base: 'd'.repeat(40) }, record)).toEqual([revision])
+    expect(touches('apply_patch', { slug: 'box', base: C1 }, record)).toEqual([revision])
     expect(touches('update_from_upstream', { slug: 'box', action: 'merge' }, { model: record, taken: [] })).toEqual([revision])
     expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, record)[0]).toEqual(revision)
+  })
+
+  // #2158: a call with a `base` was refused unless the model was at it, so its commit is base's child.
+  it("takes the call's own base over a previous_version that disagrees with it", () => {
+    const other = 'd'.repeat(40)
+    const record = { slug: 'box', version: C2, previous_version: other }
+    for (const name of ['apply_patch', 'update_source']) {
+      expect(touches(name, { slug: 'box', base: C1 }, record)[0]).toMatchObject({ before: C1, after: C2 })
+    }
+  })
+
+  it('keeps the full previous_version when a short base agrees with it', () => {
+    const record = { slug: 'box', version: C2, previous_version: C1 }
+    expect(touches('apply_patch', { slug: 'box', base: C1.slice(0, 7) }, record)[0]).toMatchObject({ before: C1 })
   })
 
   it('records a revision tool with no new commit in its answer as a model change, never its slug as a revision', () => {

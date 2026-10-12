@@ -109,28 +109,63 @@ export async function recordGrant(
 
 /** The in-process MCP server a turn with the headless browser gets. */
 export function headlessGrantServer(context: GrantContext): McpSdkServerConfigWithInstance {
-  const authorize = tool(
-    AUTHORIZE_TOOL,
-    'Ask the human to allow ONE outward request from the headless browser: send, print or delete ' +
-      '(never a settings change, which only the human can make in the UI). The backend refuses such requests from the headless browser (403 "Needs ' +
-      'approval"). Give the method and exact path the page uses (browser_network_requests shows them). ' +
-      'When the human approves, repeat the click once, within two minutes and in this same turn.',
-    AuthorizeInput,
-    async (args) => {
-      const result = await recordGrant(context, args)
-      return result.ok
-        ? {
-            content: [
-              {
-                type: 'text' as const,
-                text:
-                  `Approved: the headless browser may now make ${args.method} ${args.path} once, ` +
-                  `until ${result.expiresAt}, in this turn. Repeat the click now.`,
-              },
-            ],
-          }
-        : { content: [{ type: 'text' as const, text: `Not granted: ${result.reason}.` }], isError: true }
-    },
-  )
+  const authorize = tool(AUTHORIZE_TOOL, AUTHORIZE_DESCRIPTION, AuthorizeInput, async (args) => grantText(await recordGrant(context, args), args))
+  return createSdkMcpServer({ name: GRANT_SERVER, tools: [authorize] })
+}
+
+const AUTHORIZE_DESCRIPTION =
+  'Ask the human to allow ONE outward request from the headless browser: send, print or delete ' +
+  '(never a settings change, which only the human can make in the UI). The backend refuses such requests from the headless browser (403 "Needs ' +
+  'approval"). Give the method and exact path the page uses (browser_network_requests shows them). ' +
+  'When the human approves, repeat the click once, within two minutes and in this same turn.'
+
+function grantText(result: GrantResult, args: { method: string; path: string }) {
+  return result.ok
+    ? {
+        content: [
+          {
+            type: 'text' as const,
+            text:
+              `Approved: the headless browser may now make ${args.method} ${args.path} once, ` +
+              `until ${result.expiresAt}, in this turn. Repeat the click now.`,
+          },
+        ],
+      }
+    : { content: [{ type: 'text' as const, text: `Not granted: ${result.reason}.` }], isError: true }
+}
+
+
+/**
+ * A durable session's grant (#2320): its approval is the call's own approved
+ * `ai_input_responses` row (the workflow's gate wrote it before the call ran, and the
+ * activity checked it was given for this exact input), and its turn is the one the
+ * session runs now (`ai_sessions.durable_turn_id`). The backend's GRANT_SQL lets it
+ * through only while that turn runs.
+ */
+export async function recordDurableGrant(
+  context: { sql: Sql; sessionId: string; requestId: string; ttlSeconds?: number },
+  input: { method: (typeof METHODS)[number]; path: string },
+): Promise<GrantResult> {
+  if (!grantable(input.path)) {
+    return { ok: false, reason: `${input.path} cannot be granted: a human has to make that change in the UI` }
+  }
+  const id = randomUUID()
+  const ttl = context.ttlSeconds ?? GRANT_TTL_SECONDS
+  const [row] = await context.sql<{ expires_at: Date }[]>`
+    INSERT INTO ai_headless_grants (id, session_id, turn_id, request_id, method, path, expires_at)
+    SELECT ${id}, s.id, s.durable_turn_id, r.request_id, ${input.method}, ${input.path},
+           now() + (${ttl} * interval '1 second')
+    FROM ai_sessions s JOIN ai_input_responses r ON r.session_id = s.id
+    WHERE s.id = ${context.sessionId} AND s.mode = 'durable' AND s.durable_turn_id IS NOT NULL
+      AND r.request_id = ${context.requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
+    ON CONFLICT (request_id) DO NOTHING
+    RETURNING expires_at`
+  if (!row) return { ok: false, reason: 'no approved call of this exact request was found in the running turn, or it was already used' }
+  return { ok: true, id, expiresAt: row.expires_at.toISOString() }
+}
+
+/** The grant tool for one durable call (`recordDurableGrant`): built for the call it answers. */
+export function durableGrantServer(context: { sql: Sql; sessionId: string; requestId: string }): McpSdkServerConfigWithInstance {
+  const authorize = tool(AUTHORIZE_TOOL, AUTHORIZE_DESCRIPTION, AuthorizeInput, async (args) => grantText(await recordDurableGrant(context, args), args))
   return createSdkMcpServer({ name: GRANT_SERVER, tools: [authorize] })
 }

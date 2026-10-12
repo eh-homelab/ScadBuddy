@@ -12,7 +12,9 @@ import { z } from 'zod'
 // `{name, mediaType, preview: {name, mediaType}}`, and every watcher loads them
 // from the session's blob route. The one place the bytes become base64 is
 // `userPrompt`: the SDK user message Claude Code turns into the Messages API
-// request, which takes an image no other way. An MCP transcript keeps only
+// request, which takes an image no other way (Claude Code keeps that message in
+// its own transcript, ai_session_entries, which resume reads and no watcher is
+// sent). An MCP transcript keeps only
 // their count (tools/sessions.ts `condense`). Nothing logs or traces the bytes,
 // and a refusal never quotes them.
 //

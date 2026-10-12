@@ -281,7 +281,12 @@ class BrokenUsage(RackUsageStore):
         return {}
 
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int:
         raise psycopg.OperationalError("the database went away")
 
@@ -332,6 +337,28 @@ def test_the_picks_are_recorded_against_the_queue_item(client: TestClient, model
     assert [(row["group_id"], row["slot_id"], float(row["grams"])) for row in spools] == [
         (0, 1, 3.2)
     ]
+
+
+@respx.mock
+def test_a_multi_copy_print_records_its_copies_on_the_pick(client: TestClient, model: str) -> None:
+    """#2134: copies are one queue item, so the pick carries how many, for Least used's
+    pending count."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_print(
+        client,
+        output_id,
+        json={**body(nozzles=[{"size": "0.4"}], tier="standard"), "copies": 3},
+    )
+
+    assert response.status_code == 200, response.text
+    assert asyncio.run(rack_usage(client).usage([serial(19)]))[serial(19)].pending == 3
 
 
 @respx.mock
