@@ -176,6 +176,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
         text: 'make me a bracket\n\n[page: /models/bracket]',
         author: browser,
         images: [{ name: PNG_NAME, mediaType: 'image/png' }],
+        // Each turn carries the append as Settings stand when it is sent (#2525).
+        system_append: start.system_append,
       },
     ])
     // The blob the worker reads, by the name the message carries (Ruling 5).

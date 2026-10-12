@@ -76,8 +76,8 @@ export type SessionStart = {
   system_append: string | null
 }
 
-/** The `send_message` Update's argument (models.py `Message`). */
-export type DurableMessage = { turn_id: string; text: string; author: WireOwner; images: ImageRef[] }
+/** The `send_message` Update's argument (models.py `Message`); each turn carries its own append (#2525). */
+export type DurableMessage = { turn_id: string; text: string; author: WireOwner; images: ImageRef[]; system_append: string | null }
 type SendAnswer = { accepted: boolean; turn_id: string }
 
 /** One turn as SessionManager.send hands it over. */
@@ -271,6 +271,7 @@ export class DurableTurns {
       text: turn.text,
       author: wire(turn.author),
       images: blobs.map((b) => ({ name: b.name, mediaType: b.mediaType })),
+      system_append: turn.systemAppend,
     }
     const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
