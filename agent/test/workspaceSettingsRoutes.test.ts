@@ -40,7 +40,7 @@ function setup(options: { ready?: boolean; settings?: boolean; stored?: Record<s
   const writes: string[][] = []
   const writer: SettingsWriter = {
     setMany: async (written, check, context) => {
-      if (!(await check({ get: repo.get }))) return false
+      if (check && !(await check({ get: repo.get }))) return false
       writes.push(Object.keys(written))
       for (const [key, value] of Object.entries(written)) await repo.set(key, value, context)
       return true

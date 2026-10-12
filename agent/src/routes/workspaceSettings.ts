@@ -122,7 +122,7 @@ export function registerWorkspaceSettingsRoutes(app: Hono, deps: WorkspaceSettin
     const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
     await settings.setMany(
       { [WORKSPACE_FILE_MAX_SETTING]: body.file_max_bytes, [WORKSPACE_MAX_SETTING]: body.workspace_max_bytes },
-      () => Promise.resolve(true),
+      undefined,
       context,
     )
     return c.json(workspaceSettings(body.file_max_bytes, body.workspace_max_bytes))
