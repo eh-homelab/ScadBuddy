@@ -137,6 +137,15 @@ export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
 export type FlowStep = Schemas['FlowStep']
 export type FlowDecided = Schemas['Decided']
+/** #2350 — a registered flow version, with and without its script. */
+export type FlowDefinition = Schemas['Definition']
+export type FlowSummary = Schemas['DefinitionSummary']
+/** #2503 — one version of a flow's git history. */
+export type FlowVersion = Schemas['FlowVersion']
+export type FlowRunStarted = Schemas['RunAnswer']
+export type FlowResetPoints = Schemas['ResetPoints']
+export type FlowResetPreview = Schemas['ResetPreview']
+export type FlowReset = Schemas['Reset']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 
@@ -281,14 +290,6 @@ export interface Problem {
 }
 
 /**
- * The agent service's headless-browser setting (#349,
- * `GET/PUT /api/v1/ai/settings/headless-browser`). Off by default.
- */
-export interface HeadlessBrowserSetting {
-  enabled: boolean
-}
-
-/**
  * The agent service's switch for the assistant's `http_request` tool (#827,
  * `GET/PUT /api/v1/ai/settings/http-request`). On by default.
  */
@@ -389,11 +390,14 @@ export interface WorkspaceFileList {
 /**
  * #1941 — an image the composer uploaded when it was attached (agent `POST
  * /api/v1/ai/attachments`, `src/routes/attachments.ts`): the id a message sends, and the
- * preview the transcript will show. Unsent, it expires after an hour.
+ * names the image and its preview take in the session (#2479: pointers, never bytes).
+ * Unsent, it expires after an hour.
  */
 export interface AttachmentView {
   id: string
-  preview: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }
+  name: string
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
+  preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' }
 }
 
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */

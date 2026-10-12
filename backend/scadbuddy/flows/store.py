@@ -1,6 +1,9 @@
 """``workflow_definitions`` and ``workflow_runs`` (#1057, spec 2026-10-01 §7.3).
 
-A definition is written by its route. A run's row is written only by the run's own
+A definition is one row per version (spec 2026-10-11-flow-grants-and-git-design.md
+§6.2): its script is a commit in ``data/flows`` (``flows/repository.py``), and the row is
+inserted under that repository's write lock, with the version git numbered it
+(``flows/definitions.py``). A run's row is written only by the run's own
 workflow (plan 2026-10-09-durable-phase-6-flows.md Ruling 7), each write with its
 ``flow_run.changed`` event in the same transaction, and only by the sweep otherwise
 (``mark_terminated``, ``follow_run``).
@@ -9,9 +12,8 @@ workflow (plan 2026-10-09-durable-phase-6-flows.md Ruling 7), each write with it
 from __future__ import annotations
 
 import asyncio
-import uuid
 from collections.abc import Callable, Coroutine
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -26,10 +28,11 @@ from scadbuddy.flows.manifest import OVERRIDES_SETTING
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
+    BackfillRow,
     Decision,
-    Definition,
     DefinitionSummary,
     Run,
+    StoredDefinition,
 )
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
 
@@ -37,12 +40,12 @@ _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
     " input_hash, created_at"
 )
-_DEFINITION = "id, name, version, script, approval_timeout_s, created_by, created_at"
-_SUMMARY = "id, name, version, approval_timeout_s, created_by, created_at"
+_DEFINITION = "id, name, version, commit, script, approval_timeout_s, created_by, created_at"
+_SUMMARY = "id, name, version, commit, approval_timeout_s, created_by, created_at"
 _RUN = (
     "id, definition_id, version, name, status, waiting_on, steps, result,"
-    " result_truncated, approval_timeout_s, workflow_id, workflow_run_id, started_by,"
-    " created_at, updated_at"
+    " result_truncated, approval_timeout_s, commit, workflow_id, workflow_run_id,"
+    " started_by, created_at, updated_at"
 )
 
 
@@ -105,21 +108,73 @@ class FlowStore:
 
     # -- definitions ------------------------------------------------------------
 
-    async def create_definition(
+    def insert_version(
         self,
+        version_id: str,
         name: str,
-        script: str,
+        version: int,
+        commit: str,
         created_by: dict[str, Any],
         *,
-        approval_timeout_s: int | None = None,
-    ) -> Definition:
-        """A new version of ``name``; the first is 1."""
-        return await asyncio.to_thread(
-            self._create_definition, name, script, created_by, approval_timeout_s
-        )
+        approval_timeout_s: int | None,
+        created_at: datetime | None = None,
+    ) -> StoredDefinition:
+        """A version's row, naming its commit, with the version number git gave it. Run
+        under the flows repository's write lock, after the commit."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "INSERT INTO workflow_definitions"
+                " (id, name, version, commit, approval_timeout_s, created_by, created_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()))"
+                f" RETURNING {_DEFINITION}",
+                (
+                    version_id,
+                    name,
+                    version,
+                    commit,
+                    approval_timeout_s,
+                    Jsonb(created_by),
+                    created_at,
+                ),
+            ).fetchone()
+        assert row is not None
+        return StoredDefinition.model_validate(row)
 
-    async def get_definition(self, definition_id: str) -> Definition | None:
-        return await asyncio.to_thread(self._get_definition, definition_id)
+    def version_commits(self) -> dict[str, str | None]:
+        """Every version id, and the commit it names (None before its backfill): the
+        reconciler's check."""
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT id, commit FROM workflow_definitions").fetchall()
+        return {row["id"]: row["commit"] for row in rows}
+
+    def unbackfilled(self) -> list[BackfillRow]:
+        """The rows written before flows were in git, in ``(name, version)`` order."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, name, version, script, created_by, created_at"
+                " FROM workflow_definitions WHERE commit IS NULL ORDER BY name, version"
+            ).fetchall()
+        return [BackfillRow.model_validate(row) for row in rows]
+
+    def set_commit(self, definition_id: str, commit: str) -> None:
+        """Join a row to its commit, and its runs with it."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "UPDATE workflow_definitions SET commit = %s WHERE id = %s AND commit IS NULL",
+                (commit, definition_id),
+            )
+            conn.execute(
+                "UPDATE workflow_runs SET commit = %s WHERE definition_id = %s AND commit IS NULL",
+                (commit, definition_id),
+            )
+
+    def stored_definition(self, definition_id: str) -> StoredDefinition | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_DEFINITION} FROM workflow_definitions WHERE id = %s",
+                (definition_id,),
+            ).fetchone()
+        return StoredDefinition.model_validate(row) if row else None
 
     async def list_definitions(self) -> list[DefinitionSummary]:
         """The newest version of each name, by name."""
@@ -282,33 +337,6 @@ class FlowStore:
                 FlowRunEvent(run_id=run.id, definition_id=run.definition_id, status=run.status),
             )
 
-    def _create_definition(
-        self, name: str, script: str, created_by: dict[str, Any], approval_timeout_s: int | None
-    ) -> Definition:
-        with self._pool.connection() as conn, conn.transaction():
-            # One writer per name at a time, so two registrations never race for a version.
-            conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"workflow_definitions:{name}",)
-            )
-            row = conn.execute(
-                "INSERT INTO workflow_definitions"
-                " (id, name, version, script, approval_timeout_s, created_by)"
-                " SELECT %s, %s, COALESCE(MAX(version), 0) + 1, %s, %s, %s"
-                " FROM workflow_definitions WHERE name = %s"
-                f" RETURNING {_DEFINITION}",
-                (str(uuid.uuid4()), name, script, approval_timeout_s, Jsonb(created_by), name),
-            ).fetchone()
-        assert row is not None
-        return Definition.model_validate(row)
-
-    def _get_definition(self, definition_id: str) -> Definition | None:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                f"SELECT {_DEFINITION} FROM workflow_definitions WHERE id = %s",
-                (definition_id,),
-            ).fetchone()
-        return Definition.model_validate(row) if row else None
-
     def _list_definitions(self) -> list[DefinitionSummary]:
         with self._pool.connection() as conn:
             rows = conn.execute(
@@ -344,10 +372,12 @@ class FlowStore:
 
     def _insert_run(self, record: FlowRecord) -> Run:
         with self._pool.connection() as conn, conn.transaction():
+            # A run started before #2503 names no commit: its version's, once backfilled.
             row = conn.execute(
                 "INSERT INTO workflow_runs (id, definition_id, version, name, status,"
-                " approval_timeout_s, workflow_id, workflow_run_id, started_by)"
-                " VALUES (%s, %s, %s, %s, 'running', %s, %s, %s, %s)"
+                " approval_timeout_s, commit, workflow_id, workflow_run_id, started_by)"
+                " VALUES (%s, %s, %s, %s, 'running', %s, COALESCE(NULLIF(%s, ''),"
+                " (SELECT commit FROM workflow_definitions WHERE id = %s)), %s, %s, %s)"
                 f" ON CONFLICT (id) DO NOTHING RETURNING {_RUN}",
                 (
                     record.run_id,
@@ -355,6 +385,8 @@ class FlowStore:
                     record.version,
                     record.name,
                     record.approval_timeout_s,
+                    record.commit,
+                    record.definition_id,
                     record.workflow_id,
                     record.workflow_run_id,
                     Jsonb(record.started_by),

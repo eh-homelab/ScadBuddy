@@ -23,7 +23,7 @@ from scadbuddy.workflows.flow_routes import FlowRoutes
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 from scadbuddy.workflows.projects_worker import projects_worker
-from tests.flows.flows_support import Flows, Keys
+from tests.flows.flows_support import Flows, Keys, define
 
 PROBLEM = "application/problem+json"
 STILL_ACCEPTING = "https://scadbuddy.dev/problems/command-still-accepting"
@@ -123,7 +123,7 @@ class Outward(Flows):
     async def run(
         self, body: str, *, approval_timeout_s: int = 0, tools_queue: str = "agent-tools"
     ) -> str:
-        definition = await self.store.create_definition("t", body, {"kind": "browser"})
+        definition = await define(self.store, "t")
         run_id = str(uuid.uuid4())
         await AgentClient(self.client, f"flow-{run_id}").start_and_submit_message(
             "execute",

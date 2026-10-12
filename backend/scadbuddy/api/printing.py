@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Annotated, Any
@@ -604,6 +605,7 @@ async def accept_run(
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
+    prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
 ) -> PrintRun:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
@@ -614,7 +616,7 @@ async def accept_run(
     answers 200 with its run and touches nothing else. Otherwise ``PrintRun`` is started
     (or attached to) with update-with-start, and its ``accepted`` Update answers with
     the new row (202), the run it repeats (200) or the refusal, raised as the problem it
-    carries.
+    carries. ``prepare`` completes ``source`` for a run that is not a repeat (#2550).
     """
     key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
@@ -622,6 +624,8 @@ async def accept_run(
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
+    if prepare is not None:
+        source = await prepare(source)
     arg = PrintRunInput(
         subject=subject.run_subject,
         slug=slug,

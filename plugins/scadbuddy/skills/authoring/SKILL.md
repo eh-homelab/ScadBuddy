@@ -204,9 +204,8 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
   (`agent/src/tools/files.ts`, issue #813).
 - A source, README or picture you got from elsewhere goes through your workspace
   (#2329; `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`), not
-  through the conversation. Save it there (`http_request` with `save_to_workspace`, a
-  headless-browser download into `downloads/`, or `workspace_save` for a ScadBuddy
-  file), view it with `workspace_read` or fix it with `workspace_edit`, then send it
+  through the conversation. Save it there (`http_request` with `save_to_workspace`, or
+  `workspace_save` for a ScadBuddy file), view it with `workspace_read` or fix it with `workspace_edit`, then send it
   with `workspace_path` and the `workspace_sha256` you read it at, in place of the
   inline content: `create_model` or `import_model` (a `.scad`), `write_file` or
   `write_source_file`, `set_readme`, `set_model_thumbnail`, `add_model_media` (an image

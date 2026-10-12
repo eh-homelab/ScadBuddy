@@ -1,17 +1,22 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
-import type { FlowPending, FlowStep } from '../api/types'
+import type { FlowPending, FlowRunView, FlowStep } from '../api/types'
+import { FlowScript } from '../components/flows/FlowScript'
+import { ForgetRun } from '../components/flows/ForgetRun'
+import { ResetPanel } from '../components/flows/ResetPanel'
 import { Button } from '../components/ui/Button'
 import {
+  actorText,
   FLOW_POLL_MS,
   FLOW_STATUS_LABEL,
+  flowPath,
   flowRunTopic,
   isStaleEntry,
   STALE_ENTRY_MESSAGE,
   waitingText,
 } from '../lib/flows'
-import { formatDuration } from '../lib/format'
+import { formatBytes, formatDuration } from '../lib/format'
 import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
 import { usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
@@ -21,8 +26,9 @@ const FIELD = 'w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[1
 /**
  * #1057 — one flow run (`/workflows/runs/:id`, plan 2026-10-09 Task F1): its steps, and
  * what it waits on, answered or approved here (`POST …/answer`, `…/decide`). Live over
- * `workflow-run:<id>`, and read every 5 s while the socket is down. No Reset here: that
- * is the route and its tool (spec §7.4).
+ * `workflow-run:<id>`, and read every 5 s while the socket is down. #2350 — the version
+ * it ran and that version's script, who started it, a Reset (preview first, then a
+ * confirmation), and forgetting it.
  */
 export function WorkflowRunPage() {
   const { id = '' } = useParams()
@@ -53,7 +59,13 @@ export function WorkflowRunPage() {
           </Link>
           <span className="text-faint">/</span>
           <h1 className="text-[13px] font-medium">
-            {view.data ? `${view.data.name} v${view.data.version}` : id}
+            {view.data ? (
+              <Link to={flowPath(view.data.definition_id)} className="hover:underline" title="The flow version it ran">
+                {view.data.name} v{view.data.version}
+              </Link>
+            ) : (
+              id
+            )}
           </h1>
           {temporal && (
             <a href={temporal} target="_blank" rel="noreferrer" className="ml-auto text-[12px] text-accent hover:underline">
@@ -70,10 +82,21 @@ export function WorkflowRunPage() {
           <p className="text-[13px] text-muted">Loading…</p>
         ) : (
           <>
-            <p className="mb-3 text-[13px]">
-              <span className="text-muted">Status: </span>
-              <span data-testid="flow-run-status">{FLOW_STATUS_LABEL[view.data.status]}</span>
-            </p>
+            <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[13px]">
+              <p>
+                <span className="text-muted">Status: </span>
+                <span data-testid="flow-run-status">{FLOW_STATUS_LABEL[view.data.status]}</span>
+              </p>
+              {run && (
+                <p>
+                  <span className="text-muted">Started by </span>
+                  {actorText(run.started_by)}
+                </p>
+              )}
+              <div className="ml-auto">
+                <ForgetRun runId={id} status={view.data.status} />
+              </div>
+            </div>
             {!view.data.live && view.data.status !== 'starting' && (
               <p className="mb-3 text-[12.5px] text-muted">Live status unavailable; showing the last known state</p>
             )}
@@ -86,6 +109,7 @@ export function WorkflowRunPage() {
               <PendingCard key={entry.call_id} entry={entry} runId={id} respond={respond} />
             ))}
             {run && run.steps.length > 0 && <Steps steps={run.steps} />}
+            {view.data.images && view.data.images.length > 0 && <Images runId={id} images={view.data.images} />}
             {run?.result && (
               <section aria-label="Result" className="mt-4">
                 <h2 className="mb-1 text-[13px] font-medium">Result</h2>
@@ -95,10 +119,42 @@ export function WorkflowRunPage() {
                 </pre>
               </section>
             )}
+            {run && <ResetPanel runId={id} steps={run.steps} onReset={() => view.refresh()} />}
+            <RunScript definitionId={view.data.definition_id} />
           </>
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * #2477: the images the run's tool calls returned, each a thumbnail of its blob route
+ * (`GET /workflow-runs/{id}/images/{name}`), never inline data. A click opens it whole.
+ */
+function Images({ runId, images }: { runId: string; images: NonNullable<FlowRunView['images']> }) {
+  return (
+    <section aria-label="Images" className="mt-4">
+      <h2 className="mb-1 text-[13px] font-medium">Images</h2>
+      <ul className="flex flex-wrap gap-2">
+        {images.map((image, i) => {
+          const url = api.flowRunImageUrl(runId, image.name)
+          const label = `Image ${i + 1} (${formatBytes(image.bytes)})`
+          return (
+            <li key={image.name}>
+              <a href={url} target="_blank" rel="noreferrer" aria-label={label} title={image.name}>
+                <img
+                  src={url}
+                  alt={label}
+                  loading="lazy"
+                  className="h-24 w-24 rounded-[6px] border border-line bg-surface-2 object-contain"
+                />
+              </a>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
   )
 }
 
@@ -172,6 +228,34 @@ function PendingCard({ entry, runId, respond }: CardProps) {
         </div>
       )}
     </section>
+  )
+}
+
+/** The script of the version the run ran; folding it away stops reading it. */
+function RunScript({ definitionId }: { definitionId: string }) {
+  const [open, setOpen] = useState(true)
+  return (
+    <details open={open} className="mt-4" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="cursor-pointer text-[13px] font-medium">Script</summary>
+      {open && <LoadedScript definitionId={definitionId} />}
+    </details>
+  )
+}
+
+function LoadedScript({ definitionId }: { definitionId: string }) {
+  const flow = useAsync(() => api.getFlow(definitionId), [definitionId])
+  if (flow.error) {
+    return (
+      <p role="alert" className="mt-2 text-[13px] text-warn">
+        {flow.error.message}
+      </p>
+    )
+  }
+  if (!flow.data) return <p className="mt-2 text-[13px] text-muted">Loading…</p>
+  return (
+    <div className="mt-2">
+      <FlowScript script={flow.data.script} />
+    </div>
   )
 }
 

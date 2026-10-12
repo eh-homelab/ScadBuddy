@@ -50,8 +50,7 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 // the install with a 422. ScadBuddy's own plugin is answered 409 with
 // `built_in: true`: the harness already loads it (install.ts BuiltInPluginError).
 //
-// The built-in plugins (builtins.ts: ScadBuddy's own and the headless browser's)
-// are listed first, with `built_in: true`. PATCH turns one on or off (its
+// The built-in plugins (builtins.ts: ScadBuddy's own) are listed first, with `built_in: true`. PATCH turns one on or off (its
 // setting); approve, re-pin and DELETE answer 409, since it ships with the agent,
 // and an install that names one answers 409 with `built_in: true`. A package
 // stored under a built-in's name before then is never loaded (install.ts

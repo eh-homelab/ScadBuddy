@@ -55,6 +55,9 @@ class TurnStart:
     turn_id: str
     author: Owner
     images: list[ImageRef] = field(default_factory=list)
+    # workflow.now() as the turn started (ISO 8601), the plugin's events' `at` clock:
+    # a subscriber of a turn carried over by continue-as-new ignores an end before it.
+    started_at: str | None = None
 
 
 @dataclass
@@ -117,7 +120,7 @@ class SendAnswer:
 @dataclass
 class TurnTool:
     """One of a turn's other tools (agent/src/temporal/turnTools.ts ``TurnToolEntry``):
-    a remote plugin's, ``http_request``, the headless browser's (#2320). Its calls run
+    a remote plugin's or ``http_request`` (#2320). Its calls run
     as the activity ``turn:<name>`` on agent-tools."""
 
     name: str
@@ -126,7 +129,7 @@ class TurnTool:
     # Whether a call may be outward: it then asks turn_tool_tier before it parks.
     may_park: bool
     # The replica's own queue when its server's state lives there (http_request's saved
-    # bodies, the headless browser); None: agent-tools.
+    # bodies); None: agent-tools.
     task_queue: str | None = None
 
 
@@ -170,6 +173,8 @@ class FollowArgs:
     workflow_id: str
     # The turn sent a prompt: it ends only on an end that follows its `prompt` event.
     prompted: bool = False
+    # TurnStart.started_at: an end published before it is an earlier turn's (#2123).
+    since: str | None = None
 
 
 @dataclass

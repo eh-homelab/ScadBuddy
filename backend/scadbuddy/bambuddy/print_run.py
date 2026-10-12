@@ -62,7 +62,12 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
+from scadbuddy.bambuddy.print_source import (
+    FilamentReader,
+    LibrarySource,
+    OutputSource,
+    PrintSource,
+)
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
     PrintChoices,
@@ -251,6 +256,15 @@ class PrintRunResult(BaseModel):
     rack_picks: list[RackSentPick] = Field(default_factory=list)
 
 
+def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
+    """A library file's slots as read from the file itself, for every plate (#2550):
+    every copy of it has the same slots, so they answer for whichever copy is read.
+    ``None`` when they came from Bambuddy, which is then asked per plate."""
+    if isinstance(source, LibrarySource) and source.local is not None:
+        return source.local.for_plate
+    return None
+
+
 async def filament_options(
     client: BambuddyClient,
     source: PrintSource,
@@ -296,6 +310,7 @@ async def filament_options(
             fallback_colours=list(source.colours),
             own_colours=file.own_colours,
             inventory=settled(inventory),
+            known=known_slots(source),
         )
     finally:
         # Awaited even when a read failed, so the status read never outlives the call.
@@ -566,6 +581,7 @@ async def _slot_errors(
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
+        known=known_slots(source),
     )
     per_plate = [
         with_trays(options, prepared.printer_status, prepared.printer_id) for options in per_plate
@@ -821,11 +837,15 @@ async def check_for_library(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
+    filaments: FilamentReader | None = None,
 ) -> PrintCheck:
-    """:func:`check_print` for a file already in Bambuddy's library."""
+    """:func:`check_print` for a file already in Bambuddy's library; with ``filaments``,
+    its slots read from the file itself (#2550)."""
     return await check_print(
         client,
-        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
+        await LibrarySource.load(
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+        ),
         settings,
         request,
         rack=rack,
@@ -1116,6 +1136,7 @@ async def plan_run(
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
         inventory=inventory,
+        known=known_slots(source),
     )
     per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
     every, errors = await resolve_plates(
@@ -1325,11 +1346,15 @@ async def filament_options_for_library(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    filaments: FilamentReader | None = None,
 ) -> FilamentOptions:
-    """:func:`filament_options` for a file already in Bambuddy's library (#313)."""
+    """:func:`filament_options` for a file already in Bambuddy's library (#313); with
+    ``filaments``, its slots read from the file itself (#2550)."""
     return await filament_options(
         client,
-        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
+        await LibrarySource.load(
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+        ),
         printer_id=printer_id,
         plate_id=plate_id,
         all_plates=all_plates,
