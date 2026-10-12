@@ -239,6 +239,11 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     expect(up.status).toBe(403)
     expect(((await up.json()) as { detail: string }).detail).toMatch(/take it over/)
     expect((await remove(id, 'theirs.txt')).status).toBe(403)
+    // Each refusal is audited (#2400).
+    expect((await rows('workspace_upload')).map((r) => [r.outcome, r.session_id, r.input_summary?.split(':')[0]])).toEqual([
+      ['refused', id, 'forbidden'],
+    ])
+    expect((await rows('workspace_delete')).map((r) => [r.outcome, r.session_id])).toEqual([['refused', id]])
   })
 
   it('refuses changes to an archived session with 409', async () => {
@@ -246,6 +251,25 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     await m.edits.update(id, browser, { archived: true })
     expect((await upload(id, 'x.txt', 'x')).status).toBe(409)
     expect((await list(id)).status).toBe(200)
+    expect((await rows('workspace_upload')).map((r) => r.outcome)).toEqual(['refused'])
+  })
+
+  it('writes the file and its event together, or neither (#2469)', async () => {
+    const id = await session()
+    expect((await upload(id, 'a.txt', 'one')).status).toBe(201)
+    const append = vi.spyOn(m.events, 'append').mockRejectedValue(new Error('the event log is unreachable'))
+    try {
+      expect((await upload(id, 'b.txt', 'two')).status).toBe(500)
+      expect((await remove(id, 'a.txt')).status).toBe(500)
+    } finally {
+      append.mockRestore()
+    }
+    // Neither change committed: a.txt is still there, b.txt never was.
+    const listed = (await (await list(id)).json()) as { files: FileView[] }
+    expect(listed.files.map((f) => f.path)).toEqual(['a.txt'])
+    expect((await logged(id)).filter((e) => e.type === 'workspace.file')).toEqual([
+      expect.objectContaining({ path: 'a.txt', change: 'uploaded' }),
+    ])
   })
 
   it('guards reads and writes as the session routes do', async () => {
