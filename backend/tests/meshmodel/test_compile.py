@@ -47,11 +47,8 @@ def test_a_plain_object_compiles_to_imports_in_colour() -> None:
     assert compile_scene(scene(plain)) == (
         "// Generated from scene.json by ScadBuddy; edit the scene, or eject (scene_eject) to edit this file\n"
         "\n"
-        "module o1_parts() {\n"
-        '  color("#F08A24") import("meshes/o1-p1.3mf");\n'
-        "}\n"
         "module o1() {\n"
-        "  o1_parts();\n"
+        '  color("#F08A24") import("meshes/o1-p1.3mf");\n'
         "}\n"
         "\n"
         "translate([0, 0, 0]) rotate([0, 0, 0]) scale([1, 1, 1]) o1();\n"
@@ -123,11 +120,13 @@ def test_add_and_subtract_place_centred_primitives() -> None:
     add = Add(primitive="cylinder", size=(3, 3, 8), transform=Transform(translate=(0, 0, 30)))
     sub = Subtract(primitive="cube", size=(2, 2, 2))
     text = compile_scene(scene(carrot(ops=[add, sub])))
+    # The added cylinder is a piece of its own, which the later subtract cuts too.
     assert (
-        'color("#F08A24") translate([0, 0, 30]) rotate([0, 0, 0]) scale([1, 1, 1]) cylinder(h = 8, d = 3, center = true, $fn = 64);'
-        in text
-    )
-    assert "difference() {" in text and "cube([2, 2, 2], center = true);" in text
+        '  color("#F08A24") difference() {\n'
+        "    translate([0, 0, 30]) rotate([0, 0, 0]) scale([1, 1, 1]) cylinder(h = 8, d = 3, center = true, $fn = 64);\n"
+        "    translate([0, 0, 0]) rotate([0, 0, 0]) scale([1, 1, 1]) cube([2, 2, 2], center = true);\n"
+        "  }\n"
+    ) in text
 
 
 def test_a_coloured_add_carves_its_space_out_of_the_rest() -> None:
@@ -139,11 +138,19 @@ def test_a_coloured_add_carves_its_space_out_of_the_rest() -> None:
     )
     text = compile_scene(scene(carrot(ops=[add])))
     shape = "translate([0, 0, 30]) rotate([0, 0, 0]) scale([1, 1, 1]) cylinder(h = 12, d = 8, center = true, $fn = 64);"
-    # Inside `module o1()`, so two spaces deeper than `_wrap` writes it.
     assert (
-        f'    difference() {{\n      o1_parts();\n      {shape}\n    }}\n    color("#0ACC38") {shape}'
-        in text
-    )
+        "module o1() {\n"
+        '  color("#F08A24") difference() {\n'
+        '    import("meshes/o1-p1.3mf");\n'
+        f"    {shape}\n"
+        "  }\n"
+        '  color("#3A7D2C") difference() {\n'
+        '    import("meshes/o1-p2.3mf");\n'
+        f"    {shape}\n"
+        "  }\n"
+        f'  color("#0ACC38") {shape}\n'
+        "}\n"
+    ) in text
 
 
 def test_a_negative_part_is_cut_out_of_the_printed_parts() -> None:
@@ -153,10 +160,25 @@ def test_a_negative_part_is_cut_out_of_the_printed_parts() -> None:
     )
     text = compile_scene(scene(holed))
     assert (
-        "module o1_parts() {\n  difference() {\n    union() {\n"
-        '      color("#F08A24") import("meshes/o1-p1.3mf");\n    }\n'
-        '    import("meshes/o1-p2.3mf");\n  }\n}'
+        "module o1() {\n"
+        '  color("#F08A24") difference() {\n'
+        '    import("meshes/o1-p1.3mf");\n'
+        '    import("meshes/o1-p2.3mf");\n'
+        "  }\n"
+        "}\n"
     ) in text
+
+
+def test_ops_add_in_the_first_printed_parts_colour() -> None:
+    obj = carrot(ops=[Add(primitive="cube", size=(2, 2, 2))])
+    holed = obj.model_copy(
+        update={"parts": [obj.parts[0].model_copy(update={"negative": True}), obj.parts[1]]}
+    )
+    text = compile_scene(scene(holed))
+    assert (
+        'color("#3A7D2C") translate([0, 0, 0]) rotate([0, 0, 0]) scale([1, 1, 1]) cube([2, 2, 2], center = true);'
+        in text
+    )
 
 
 def test_a_custom_op_is_a_module_given_the_geometry_as_children() -> None:
@@ -168,7 +190,17 @@ def test_a_custom_op_is_a_module_given_the_geometry_as_children() -> None:
     assert (
         'module o1_op0() {\necho("a\nb");\nchildren();\n}' in multi
     )  # a string literal keeps its text
-    assert "o1_op0() {\n    o1_parts();\n  }" in text
+    # Each colour's piece is given to it on its own.
+    assert (
+        "module o1() {\n"
+        '  color("#F08A24") o1_op0() {\n'
+        '    import("meshes/o1-p1.3mf");\n'
+        "  }\n"
+        '  color("#3A7D2C") o1_op0() {\n'
+        '    import("meshes/o1-p2.3mf");\n'
+        "  }\n"
+        "}\n"
+    ) in text
 
 
 def test_the_object_is_placed_by_its_transform() -> None:
@@ -178,3 +210,34 @@ def test_the_object_is_placed_by_its_transform() -> None:
         )
     )
     assert text.endswith("translate([5, -2.25, 0]) rotate([90, 0, 0]) scale([1, 1, 2]) o1();\n")
+
+
+def body(text: str, oid: str) -> list[str]:
+    """The lines of ``module <oid>() {…}``, without its braces."""
+    lines = text.splitlines()
+    start = lines.index(f"module {oid}() {{")
+    return lines[start + 1 : lines.index("}", start)]
+
+
+def test_every_cutter_is_inside_its_pieces_colour() -> None:
+    # A cutter outside every color() makes faces of no colour (the Default material) or
+    # of a third one, in OpenSCAD 2026.10.05's Manifold 3MF.
+    cut = Cut(point=(0, 0, 30), normal=(0, 0, 1), keep="below")
+    socket = Joint(
+        at=(0, 0, 30), axis=(0, 0, -1), diameter=4, depth=6, clearance=0.2, role="socket"
+    )
+    hole = Subtract(primitive="sphere", size=(3, 3, 3))
+    text = compile_scene(scene(carrot(ops=[cut, socket, hole])))
+    statements = body(text, "o1")
+    assert [line for line in statements if not line.startswith("    ")] == [
+        '  color("#F08A24") difference() {',
+        "  }",
+        '  color("#3A7D2C") difference() {',
+        "  }",
+    ]
+    for colour in ("#F08A24", "#3A7D2C"):
+        start = statements.index(f'  color("{colour}") difference() {{')
+        piece = "\n".join(statements[start : statements.index("  }", start)])
+        assert piece.count("cube(4000);") == 1
+        assert piece.count('"flat", 0.2);') == 1
+        assert piece.count("sphere(d = 3, $fn = 64);") == 1

@@ -20,7 +20,7 @@ from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import Joint, Scene, SceneSource, value
 from scadbuddy.meshmodel.section import measure
 from scadbuddy.render.objects3mf import ReadObject
-from scadbuddy.render.split import ColourPart, split_by_material
+from scadbuddy.render.split import DEFAULT_MATERIAL_NAME, ColourPart, split_by_material
 from tests.conftest import openscad_binary
 from tests.meshmodel.test_section import neck
 
@@ -109,6 +109,10 @@ def test_a_joint_renders_two_closed_parts_and_a_socket_grown_by_the_clearance(
     bodies: dict[str, trimesh.Trimesh] = {}
     for obj in split.objects:
         parts = render(tmp_path, split.model_copy(update={"objects": [obj]}))
+        # The cut faces and the socket's wall take the piece's colour: no Default
+        # material, no colour the scene does not have.
+        assert [(p.name, p.colour) for p in parts if p.name == DEFAULT_MATERIAL_NAME] == []
+        assert [p.colour for p in parts] == ["#F08A24"], obj.id
         body = trimesh.util.concatenate([p.mesh for p in parts])
         assert isinstance(body, trimesh.Trimesh)
         # split_by_material keeps a vertex per triangle corner; weld them to test closure.
