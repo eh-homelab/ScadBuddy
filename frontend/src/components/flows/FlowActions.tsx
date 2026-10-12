@@ -76,7 +76,7 @@ export function FlowActions({
           )
         ) : archived ? (
           <Button size="sm" disabled={busy} onClick={() => void act(() => api.unarchiveFlow(flow.name), onChanged)}>
-            {busy && pending === null ? <Spinner /> : 'Unarchive'}
+            {busy ? <Spinner /> : 'Unarchive'}
           </Button>
         ) : (
           <Button size="sm" onClick={() => setPending('archive')}>

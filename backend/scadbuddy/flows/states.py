@@ -69,10 +69,15 @@ class FlowStates:
         )
 
     def revive(self, name: str) -> None:
-        """A version was registered or restored: the flow is no longer deleted."""
+        """A version was registered or restored: the flow is no longer deleted. A deleted
+        flow comes back unarchived too, so its restore is one that runs; a flow only
+        archived stays archived."""
         self._write(
-            "UPDATE workflow_flow_states SET deleted_at = NULL, deleted_by = NULL,"
-            " deleted_commit = NULL WHERE name = %(name)s",
+            "UPDATE workflow_flow_states SET"
+            " archived_at = CASE WHEN deleted_at IS NULL THEN archived_at END,"
+            " archived_by = CASE WHEN deleted_at IS NULL THEN archived_by END,"
+            " deleted_at = NULL, deleted_by = NULL, deleted_commit = NULL"
+            " WHERE name = %(name)s",
             {"name": name},
         )
 

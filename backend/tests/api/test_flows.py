@@ -321,10 +321,15 @@ def test_a_deleted_flow_keeps_its_runs_scripts_and_restores_as_a_new_version(
 
 def test_registering_a_deleted_name_brings_it_back(client: TestClient) -> None:
     register(client, script("return 1"))
+    # Archived, then deleted: it comes back unarchived, ready to run.
+    assert client.post("/api/v1/workflows/names/swap/archive").status_code == 200
     assert client.delete("/api/v1/workflows/names/swap").status_code == 200
     again = register(client, script("return 2"))
-    assert (again["version"], again["deleted_at"]) == (2, None)
+    assert (again["version"], again["deleted_at"], again["archived_at"]) == (2, None, None)
     assert listed(client) == [("swap", 2)]
+    # One only archived stays archived when a version is added.
+    assert client.post("/api/v1/workflows/names/swap/archive").status_code == 200
+    assert register(client, script("return 3"))["archived_at"] is not None
 
 
 def test_the_approval_timeout_resolves_run_then_flow_then_setting(client: TestClient) -> None:
