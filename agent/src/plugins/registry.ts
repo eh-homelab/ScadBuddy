@@ -1,6 +1,6 @@
 import type { Sql } from 'postgres'
 import { isLoopbackPeer } from '../http/origins.js'
-import { assertHostAllowed, EgressError, type Resolver, systemResolver } from '../http/egress.js'
+import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { RISK_TIERS, type RiskTier, type TierResolver } from '../harness/permissions.js'
 import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
 
@@ -33,8 +33,10 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 //
 // TRANSPORT. Spec D5: "MCP: Streamable HTTP only, over HTTPS". So `type: 'http'`
 // only (the SDK's `'sse'` is the legacy HTTP+SSE transport D5 rejects), and the
-// URL is https unless every address it resolves to is loopback (spec §8.4's one
-// exception, "loopback, for local development and tests"). The host must also
+// URL is https unless every address it resolves to is loopback or private
+// (10/8, 172.16/12, 192.168/16, fc00::/7): an MCP server in the same cluster,
+// such as the Playwright MCP Service, or on the LAN, which never leaves the
+// private network. A public host still needs https. The host must also
 // pass the egress check (http/egress.ts: no link-local, no cloud metadata),
 // at save, at test, and each time a harness run loads the plugin.
 //
@@ -261,7 +263,7 @@ export function normalisePluginUrl(raw: string): string {
     throw new PluginError('url is not a valid URL', 400)
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new PluginError(`url must be https (or http to loopback), not ${url.protocol}//`, 400)
+    throw new PluginError(`url must be https (or http to a loopback or private address), not ${url.protocol}//`, 400)
   }
   if (url.username || url.password) {
     throw new PluginError('url must not carry credentials; use auth_header and secret', 400)
@@ -278,7 +280,7 @@ export function normalisePluginUrl(raw: string): string {
 /**
  * Spec §8.4 and the egress rule for a URL a secret is sent to: the host must
  * not be (or resolve to) link-local or cloud metadata, and plain http is
- * allowed only when every address the host resolves to is loopback. Resolves
+ * allowed only when every address the host resolves to is loopback or private. Resolves
  * to the checked addresses; the forwarder connects to the first of them and
  * does not resolve the name again.
  */
@@ -286,9 +288,9 @@ export async function assertEndpointAllowed(url: string, resolve: Resolver = sys
   const addresses = await assertHostAllowed(url, resolve, 'url', 'an MCP endpoint')
   const parsed = new URL(url)
   if (parsed.protocol === 'https:') return addresses
-  if (!addresses.every((a) => isLoopbackPeer(a))) {
+  if (!addresses.every((a) => isLoopbackPeer(a) || isPrivateAddress(a))) {
     throw new EgressError(
-      `url must be https: plain http is allowed only to loopback, and ${parsed.hostname} is not (spec §8.4)`,
+      `url must be https: plain http is allowed only to loopback or private addresses, and ${parsed.hostname} is not (spec §8.4)`,
     )
   }
   return addresses

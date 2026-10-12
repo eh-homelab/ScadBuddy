@@ -901,7 +901,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   plugin tool parks for approval like any other, #258). Sessions start from
   the assistant's chat socket and the session routes (next bullet). Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
-    host resolves to is loopback. Link-local and cloud metadata hosts are
+    host resolves to is loopback or private (10/8, 172.16/12, 192.168/16,
+    fc00::/7), such as an in-cluster Service. Link-local and cloud metadata hosts are
     refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
     for gateway base URLs. It is checked at save, at test, and again each
     time a run loads the plugin. No query string, no credentials in the URL,

@@ -134,9 +134,10 @@ describe('endpoint egress check (https unless loopback; no link-local or metadat
     ['6to4 of the metadata address', 'https://[2002:a9fe:a9fe::1]/mcp', []],
     ['IPv4-compatible metadata address', 'https://hs.example/mcp', ['::a9fe:a9fe']],
     ['Teredo embedding the metadata address', 'https://hs.example/mcp', ['2001:0:4136:e378:8000:63bf:5601:5601']],
-    ['plain http to a LAN host', 'http://10.1.2.3:8888/mcp/', ['10.1.2.3']],
     ['plain http to a public name', 'http://hs.example/mcp/', ['203.0.113.5']],
-    ['plain http to a name resolving to loopback AND LAN', 'http://mixed.example/mcp/', ['127.0.0.1', '10.0.0.5']],
+    ['plain http to a name resolving to private AND public', 'http://mixed.example/mcp/', ['10.0.0.5', '203.0.113.5']],
+    ['plain http to a public IPv6 literal', 'http://[2001:db8::1]/mcp/', []],
+    ['plain http to CGNAT space', 'http://100.64.0.1/mcp/', []],
   ])('refuses %s', async (_name, url, addresses) => {
     await expect(assertEndpointAllowed(url, resolveTo(addresses))).rejects.toThrow(EgressError)
   })
@@ -158,6 +159,11 @@ describe('endpoint egress check (https unless loopback; no link-local or metadat
     ['http to 127.0.0.1', 'http://127.0.0.1:8888/mcp/', []],
     ['http to [::1]', 'http://[::1]:8888/mcp/', []],
     ['http to localhost resolving to loopback', 'http://localhost:8888/mcp/', ['127.0.0.1', '::1']],
+    ['http to a LAN host', 'http://10.1.2.3:8888/mcp/', ['10.1.2.3']],
+    ['http to an in-cluster Service name', 'http://playwright-mcp.bambuddy:8931/mcp', ['10.43.12.34']],
+    ['http to 172.16/12 and 192.168/16', 'http://lan.example/mcp/', ['172.20.0.5', '192.168.1.9']],
+    ['http to a name resolving to loopback AND LAN', 'http://mixed.example/mcp/', ['127.0.0.1', '10.0.0.5']],
+    ['http to an IPv6 ULA', 'http://[fd12:3456::1]:8931/mcp', []],
   ])('allows %s, returning the checked addresses', async (_name, url, addresses) => {
     const checked = await assertEndpointAllowed(url, resolveTo(addresses))
     expect(checked.length).toBeGreaterThan(0)
