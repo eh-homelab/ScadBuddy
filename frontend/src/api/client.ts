@@ -81,6 +81,9 @@ import type {
   PrintRun,
   FlowDecided,
   FlowDefinition,
+  FlowHostInterface,
+  FlowRegister,
+  FlowScriptCheck,
   FlowReset,
   FlowResetPoints,
   FlowResetPreview,
@@ -693,7 +696,7 @@ export const api = {
     }),
 
   // #2350 — the Flows tab: every registered flow version, one with its script, and a
-  // run started from it. Version history, diffs and the editor come with #2503/#2487.
+  // run started from it. #2487: its editor's Save, check, completion, diff and restore.
   listFlows: () => request<FlowSummary[]>('/workflows'),
 
   /**
@@ -703,6 +706,24 @@ export const api = {
   listFlowVersions: (name: string) => request<FlowVersion[]>(`/workflows/names/${seg(name)}/versions`),
 
   getFlow: (id: string) => request<FlowDefinition>(`/workflows/${seg(id)}`),
+
+  /** #2487 — the editor's Save: a new version (a commit), never an edit. A 422 lists `problems`. */
+  registerFlow: (body: FlowRegister) =>
+    request<FlowDefinition>('/workflows', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** The check a registration runs, storing nothing. */
+  checkFlowScript: (script: string, signal?: AbortSignal) =>
+    request<FlowScriptCheck>('/workflow-script/check', { method: 'POST', body: JSON.stringify({ script }), signal }),
+
+  /** What the editor completes: the host functions the check uses, and the manifest's tools. */
+  getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
+
+  getFlowVersionSource: (name: string, commit: string) =>
+    requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
+
+  /** A new version with the script at `commit`: a new commit, type-checked first. */
+  restoreFlowVersion: (name: string, commit: string) =>
+    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
 
   /** A start is keyed per press: a re-send after an answer that never arrived reaches the same run. */
   startFlowRun: (id: string, key: string = newRequestId()) =>

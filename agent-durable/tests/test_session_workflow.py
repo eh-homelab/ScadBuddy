@@ -53,13 +53,14 @@ from scadbuddy_durable.gate.names import (
     PENDING_INPUT_QUERY,
     RESPOND_UPDATE,
 )
-from scadbuddy_durable.gate.store import ResolveInput
+from scadbuddy_durable.gate.store import OpenInput, ResolveInput
 from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     SEGMENT_CONTEXT_QUERY,
+    TOOLS_QUEUE,
     TURN_QUERY,
     FinishTurn,
     GateSettings,
@@ -716,6 +717,56 @@ async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
 
 
+class SlowOpen(GateActivities):
+    """open_input writes its row, then its result is slow to reach the workflow."""
+
+    def __init__(self, connect: Connect) -> None:
+        super().__init__(connect)
+        self.written = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @activity.defn(name="open_input")
+    async def open_input(self, args: OpenInput) -> bool:
+        opened = await super().open_input(args)
+        self.written.set()
+        await self.release.wait()
+        return opened
+
+
+async def test_a_respond_as_soon_as_the_row_is_written_is_taken(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A respond read from ai_pending_input before open_input's result reached the
+    workflow was refused stale (flowSessions.e2e on #2582's CI). It now waits for the
+    open, then resolves the call."""
+    await harness.agent.shutdown()
+    gate = SlowOpen(connect)
+    harness.gate_activities = gate
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await asyncio.wait_for(gate.written.wait(), 60)
+        cur = await agent_db.execute(
+            "SELECT request_id FROM ai_pending_input WHERE session_id = %s", (sid,)
+        )
+        [(request_id,)] = await cur.fetchall()
+        answer = asyncio.create_task(
+            handle.execute_update(
+                RESPOND_UPDATE,
+                _respond({"id": request_id}, {"kind": "approval", "decision": "deny"}),
+            )
+        )
+        await asyncio.sleep(1)
+        # Taken, and waiting for the open: no response was written before the row's open ended.
+        assert not answer.done()
+        gate.release.set()
+        assert await answer == {"kind": "approval", "outcome": "denied"}
+        assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+    resolved = [e for e in await events(agent_db, sid) if e["type"] == "input.resolved"]
+    assert [e["outcome"] for e in resolved] == ["denied"]
+
+
 class Outage(GateActivities):
     """Postgres out for one resolve outcome: every attempt fails until the test lets it go."""
 
@@ -1027,6 +1078,53 @@ async def test_a_failed_recall_or_retain_never_fails_the_turn(
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert texts == ["you said: hello there"]
     assert [name for name, _ in harness.stand_in.memory] == ["memory_recall", "memory_retain"]
+    await _replays(harness, handle)
+
+
+async def test_a_session_stays_on_the_replica_its_plugin_calls_are_pinned_to(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2581: the replica that holds the session's plugin MCP clients lists its next turn
+    too, so the pin (and a browser's page) outlives the turn; the session's end closes
+    them there."""
+    host = f"agent-tools.pod-{uuid.uuid4().hex[:6]}"
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.host_queue = host
+    async with Worker(harness.client, task_queue=host, activities=harness.stand_in.activities()):
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "get it")
+        assert await settled(connect, sid) == "idle"
+        await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        await send_next(handle, "hello there")
+        assert await settled(connect, sid) == "idle"
+        await handle.signal(END_SIGNAL, {})
+        await asyncio.wait_for(handle.result(), 30)
+    assert harness.stand_in.called_on == [host]
+    assert harness.stand_in.listed_on == [TOOLS_QUEUE, host]
+    assert harness.stand_in.closed_on == [host]
+    await _replays(harness, handle)
+
+
+async def test_a_session_whose_replica_is_gone_lists_its_next_turn_anywhere(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2581: a pinned replica that does not pick the listing up is gone: the turn is
+    listed on agent-tools (its plugins start new sessions there), and goes on."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.host_queue = f"agent-tools.gone-{uuid.uuid4().hex[:6]}"
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    harness.stand_in.host_queue = None
+    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+    await send_next(handle, "get it")
+    assert await settled(connect, sid, timeout=60) == "idle"
+    assert harness.stand_in.listed_on == [TOOLS_QUEUE, TOOLS_QUEUE]
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
+    await handle.signal(END_SIGNAL, {})
+    await asyncio.wait_for(handle.result(), 30)
+    # Nothing was pinned last: nothing to close.
+    assert harness.stand_in.closed_on == []
     await _replays(harness, handle)
 
 

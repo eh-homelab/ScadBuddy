@@ -33,14 +33,21 @@ from session_support import (
     start_session,
     status,
     tools_worker,
+    until,
 )
-from temporalio.claude_agent_sdk import ClaudeAgentSdkRunner, SegmentInput, SegmentOutput
-from temporalio.claude_agent_sdk.testing import Final, ScriptedClaude
+from temporalio.claude_agent_sdk import (
+    ClaudeAgentSdkRunner,
+    SegmentInput,
+    SegmentOutput,
+    ToolOutcome,
+)
+from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.credentials import credential_aad
+from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.models import ImageRef
@@ -48,6 +55,7 @@ from scadbuddy_durable.session.runner import (
     IMAGE_TOO_LARGE,
     IMAGES_SERVER,
     NO_CREDENTIAL,
+    PLUGIN_REJECTION,
     VIEW_IMAGES_TOOL,
     VIEW_TOOL_IMAGES_TOOL,
     Image,
@@ -56,7 +64,9 @@ from scadbuddy_durable.session.runner import (
     image_size,
     tool_images_loader,
     view_tool_images_tool,
+    with_refusals,
 )
+from scadbuddy_durable.session.workflow import refusal
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -694,3 +704,94 @@ async def test_view_tool_images_returns_this_sessions_blobs_as_images(
     assert bad.get("is_error") is True
     many = await view.handler({"names": [name] * 5})
     assert many.get("is_error") is True
+
+
+def test_a_refusal_is_said_as_a_classic_turn_says_it() -> None:
+    """#2392: agent/src/approvals/service.ts ``refusal``, word for word."""
+    what = "print_output (approval durable:s:r:t)"
+    assert refusal("print_output", "durable:s:r:t", "denied", None) == (
+        f"The user denied {what}; it was not run. Do not retry it unless the user asks you to."
+    )
+    assert refusal("print_output", "durable:s:r:t", "expired", None) == (
+        f"Nobody decided on {what} before it expired, so it was not run. "
+        "Tell the user it needs their approval."
+    )
+    assert refusal("print_output", "durable:s:r:t", "cancelled", "the turn was stopped") == (
+        f"The approval for {what} was cancelled (the turn was stopped), so it was not run."
+    )
+    assert refusal("print_output", "durable:s:r:t", "withdrawn", None) == (
+        f"The approval for {what} was withdrawn before it ran (no reason given), so it was not run."
+    )
+
+
+def test_only_the_plugins_rejection_is_added_to_and_it_stays_an_error() -> None:
+    injected: dict[str, Any] = {
+        "t1": ToolOutcome(content=PLUGIN_REJECTION, is_error=True),
+        "t2": {"content": PLUGIN_REJECTION, "is_error": True},
+        "t3": ToolOutcome(content="printed", is_error=False),
+    }
+    out = with_refusals(injected, {"t1": "why 1", "t2": "why 2", "t3": "why 3", "t4": "gone"})
+    assert out["t1"] == ToolOutcome(content=f"{PLUGIN_REJECTION}\n\nwhy 1", is_error=True)
+    assert out["t2"] == {"content": f"{PLUGIN_REJECTION}\n\nwhy 2", "is_error": True}
+    assert out["t3"] == injected["t3"]
+    assert set(out) == {"t1", "t2", "t3"}
+
+
+class Delivered(ScriptedClaude):
+    """A scripted model that records the results each segment delivers."""
+
+    def __init__(self) -> None:
+        def policy(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
+            if history:
+                return Final("told")
+            return ToolCall("print_output", {"output_id": "o1"})
+
+        super().__init__(policy)
+        self.injected: list[dict[str, Any]] = []
+
+    async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+        self.injected.append(dict(inp.injected))
+        return await super().run(inp, attempt)
+
+
+async def test_a_denied_call_is_followed_by_why_in_a_classic_turns_words(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2392: the plugin's decide(False) and its fixed rejection stay; the model is also
+    told the user denied the call, as a classic turn tells it."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    model = Delivered()
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=lambda **_: model)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "print it")
+            entries: list[dict[str, Any]] = []
+
+            async def parked() -> bool:
+                nonlocal entries
+                entries = await handle.query(PENDING_INPUT_QUERY)
+                return bool(entries)
+
+            await until(parked)
+            [entry] = entries
+            await handle.execute_update(
+                RESPOND_UPDATE,
+                {
+                    "request_id": entry["id"],
+                    "response": {"kind": "approval", "decision": "deny"},
+                    "responder": {"kind": "browser", "id": "browser", "label": "You"},
+                    "role": "browser",
+                },
+            )
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    [result] = [r for seg in model.injected for r in seg.values()]
+    content = result.content if isinstance(result, ToolOutcome) else result["content"]
+    is_error = result.is_error if isinstance(result, ToolOutcome) else result["is_error"]
+    assert content == (
+        f"{PLUGIN_REJECTION}\n\n" + refusal("print_output", entry["id"], "denied", None)
+    )
+    assert is_error is True

@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -498,7 +498,22 @@ export type PluginsForRun = {
    * automatic memory (memory/hindsight.ts). Never given to Claude Code.
    */
   hindsight?: CheckedPlugin
+  /**
+   * A plugin's route for a client that outlives this run (#2581, a durable session's
+   * kept MCP client, temporal/sessionClients.ts): its own registration, released by its
+   * holder, and a fingerprint of what the route forwards to (URL, header, the address
+   * checked, tool settings), so a holder knows when its route no longer matches the plugin.
+   */
+  keep?(name: string): { fingerprint: string; register(): Registration } | undefined
   release(): void
+}
+
+/** What a plugin's route depends on, hashed: equal fingerprints forward the same way. */
+export function pluginFingerprint({ plugin, address }: CheckedPlugin): string {
+  const { url, header, toolTiers, disabledTools } = plugin
+  return createHash('sha256')
+    .update(JSON.stringify([url, header?.name ?? null, header?.value ?? null, address, toolTiers, disabledTools]))
+    .digest('base64url')
 }
 
 /** Registers the loaded plugins for one run; `release()` when the run ends. */
@@ -518,6 +533,12 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
     problems: loaded.problems,
     secrets: loaded.plugins.flatMap(({ plugin }) => (plugin.header ? headerSecretVariants(plugin.header.value) : [])),
     ...(hindsight ? { hindsight } : {}),
+    keep: (name) => {
+      const checked = loaded.plugins.find(({ plugin }) => plugin.name === name)
+      return checked
+        ? { fingerprint: pluginFingerprint(checked), register: () => forwarder.register(checked.plugin, checked.address) }
+        : undefined
+    },
     release: () => {
       for (const { registration } of registrations) registration.release()
     },

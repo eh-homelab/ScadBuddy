@@ -23,7 +23,9 @@ test.describe('workflows (#1057)', () => {
 })
 
 // #2350 — the Flows tab, a flow's script and Start run, a run's reset preview, and
-// forgetting a run, on a laptop and a phone.
+// forgetting a run, on a laptop and a phone. #2487 — the script editor: an error by
+// line, Save as a new version, a diff of two versions and Restore; on a phone the
+// script and the diff are read only.
 for (const { name, viewport } of [
   { name: '1440×900', viewport: { width: 1440, height: 900 } },
   { name: '390×844', viewport: { width: 390, height: 844 } },
@@ -32,6 +34,7 @@ for (const { name, viewport } of [
     test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack is covered by real-backend.spec.ts')
     test.use({ viewport })
 
+    const phone = viewport.width < 640
     const noSideScroll = async (page: Page) =>
       expect(await page.evaluate<number>('document.documentElement.scrollWidth')).toBeLessThanOrEqual(viewport.width)
 
@@ -46,10 +49,17 @@ for (const { name, viewport } of [
 
       await page.locator('[data-flow="swap"]').getByRole('link', { name: 'swap' }).click()
       await expect(page).toHaveURL(/\/workflows\/flows\/def-swap$/)
-      const script = page.getByLabel('Script', { exact: true })
-      await expect(script).toContainText('await wait_for_human("Swap to pink?", 600)')
-      await expect(script.locator('[data-token="keyword"]').first()).toHaveText('async')
-      await expect(script).toBeInViewport()
+      if (phone) {
+        // #2487 — read only on a phone: highlighted text, no editor.
+        const script = page.getByLabel('Script', { exact: true })
+        await expect(script).toContainText('await wait_for_human("Swap to pink?", 600)')
+        await expect(script.locator('[data-token="keyword"]').first()).toHaveText('async')
+        await expect(script).toBeInViewport()
+      } else {
+        const script = page.locator('.monaco-editor .view-lines')
+        await expect(script).toContainText('await wait_for_human("Swap to pink?", 600)')
+        await expect(script).toBeInViewport()
+      }
       await noSideScroll(page)
 
       await page.getByRole('button', { name: 'Start run' }).click()
@@ -75,6 +85,78 @@ for (const { name, viewport } of [
       await dialog.getByRole('button', { name: 'Reset run' }).click()
       await expect(page.getByText('Reset. The run continues from that point.')).toBeVisible()
       await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
+    })
+
+    test('edits a script, sees an error by line, saves a new version, diffs two versions and restores one', async ({
+      page,
+    }) => {
+      test.skip(phone, 'a phone reads the script; the next test')
+      await page.goto('/workflows/flows/def-swap')
+      const lines = page.locator('.monaco-editor .view-lines')
+      // The editor is Monaco's lazy chunk, fetched on this first visit.
+      await expect(lines).toContainText('await wait_for_human("Swap to pink?", 600)', { timeout: 15_000 })
+      // A new line 3, under the comment: Monaco keeps the indent and closes the brackets.
+      await lines.click()
+      await expect(page.getByRole('textbox', { name: /^Script\./ })).toBeFocused()
+      await page.keyboard.press('ControlOrMeta+Home')
+      await page.keyboard.press('ArrowDown')
+      await page.keyboard.press('End')
+      await page.keyboard.press('Enter')
+      await page.keyboard.type('await sleep("soon"')
+      const problems = page.getByRole('list', { name: 'Problems' })
+      await expect(problems.getByRole('listitem')).toHaveText([/^Line 3.*sleep/])
+      await expect(page.locator('.monaco-editor .squiggly-error').first()).toBeVisible()
+      await noSideScroll(page)
+
+      await page.keyboard.press('Home')
+      await page.keyboard.press('Shift+End')
+      await page.keyboard.type('await sleep(5')
+      await expect(lines).toContainText('await sleep(5)')
+      await expect(page.getByRole('status')).toHaveText('No problems')
+      await expect(problems).toHaveCount(0)
+      await page.getByRole('button', { name: 'Save' }).click()
+      await expect(page).toHaveURL(/\/workflows\/flows\/def-swap-2$/)
+      await expect(page.getByRole('heading', { name: 'swap v2' })).toBeVisible()
+      const versions = page.getByRole('region', { name: 'Versions' })
+      await expect(versions.getByRole('listitem').first()).toContainText('v2 you, in the browser')
+
+      const compare = page.getByRole('region', { name: 'Compare versions' })
+      await expect(compare.getByRole('combobox', { name: 'From' })).toHaveValue(/^c0ffee1/)
+      await compare.getByRole('button', { name: 'Compare' }).click()
+      await expect(compare.getByRole('heading', { name: 'v1 → v2' })).toBeVisible()
+      const diff = page.locator('.monaco-diff-editor')
+      await expect(diff.locator('.line-insert').first()).toBeVisible()
+      await expect(diff.locator('.modified-in-monaco-diff-editor .view-lines')).toContainText('await sleep(5)')
+      await noSideScroll(page)
+
+      await versions.getByRole('link', { name: 'v1' }).click()
+      await expect(page).toHaveURL(/\/workflows\/flows\/def-swap$/)
+      await page.getByRole('button', { name: 'Restore v1' }).click()
+      await expect(page).toHaveURL(/\/workflows\/flows\/def-swap-3$/)
+      await expect(page.getByRole('heading', { name: 'swap v3' })).toBeVisible()
+      await expect(lines).toContainText('await wait_for_human("Swap to pink?", 600)')
+      await expect(lines).not.toContainText('sleep(5)')
+      await expect(page.getByRole('button', { name: /^Restore/ })).toHaveCount(0)
+    })
+
+    test('on a phone, reads a script and diffs two versions, with nothing to edit', async ({ page }) => {
+      test.skip(!phone, 'the laptop edits; the test before')
+      await page.goto('/workflows/flows/def-plates-1')
+      const script = page.getByLabel('Script', { exact: true })
+      await expect(script).toContainText('return 1')
+      await expect(page.locator('.monaco-editor')).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Save' })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: /^Restore/ })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Start run' })).toBeVisible()
+
+      const compare = page.getByRole('region', { name: 'Compare versions' })
+      await compare.getByRole('combobox', { name: 'To' }).selectOption({ label: 'v2' })
+      await compare.getByRole('button', { name: 'Compare' }).click()
+      await expect(compare.getByRole('heading', { name: 'v1 → v2' })).toBeVisible()
+      const diff = page.locator('.monaco-diff-editor')
+      await expect(diff).toBeVisible()
+      await expect(diff).toContainText('queue_print')
+      await noSideScroll(page)
     })
 
     test('forgets a run once confirmed', async ({ page }) => {
