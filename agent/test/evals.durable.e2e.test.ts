@@ -23,6 +23,14 @@ function textOf(content: unknown): string {
   return Array.isArray(content) ? (content as { type?: string; text?: string }[]).map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('') : ''
 }
 
+/** The engine's rejection and what the workflow adds to it (agent-durable session/workflow.py `refusal`), for a call the eval denied. */
+function deniedNote(c: { tool: string; id: string }): RegExp {
+  const quote = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(
+    `^${quote(DURABLE_REJECTION)}\\n\\nThe user denied ${quote(c.tool)} \\(approval durable:[^:]+:[^:]+:${quote(c.id)}\\); it was not run\\. Do not retry it unless the user asks you to\\.$`,
+  )
+}
+
 describe.skipIf(skip !== undefined)(`eval scenarios in a durable session, scripted${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let fake: FakeAnthropic
   let stack: DurableEvalStack
@@ -70,7 +78,9 @@ describe.skipIf(skip !== undefined)(`eval scenarios in a durable session, script
       for (const c of outcome.toolCalls) {
         const block = seen.get(c.id)
         expect(block, c.tool).toBeDefined()
-        expect(textOf(block?.content), c.tool).toBe(c.result)
+        // A denied call: the engine's own rejection, then why, in a classic turn's words (#2392).
+        if (c.result === DURABLE_REJECTION) expect(textOf(block?.content), c.tool).toMatch(deniedNote(c))
+        else expect(textOf(block?.content), c.tool).toBe(c.result)
         expect(block?.is_error === true, c.tool).toBe(c.ok === false)
       }
       expect(calls.length).toBeGreaterThan(0)
@@ -97,6 +107,9 @@ describe.skipIf(skip !== undefined)(`eval scenarios in a durable session, script
     expect(outcome.approvals).toHaveLength(1)
     expect(outcome.approvals[0]).toMatchObject({ toolName: `${DURABLE_EVAL_TOOL_PREFIX}print_output`, tier: 'outward' })
     expect(outcome.toolCalls[0]).toMatchObject({ ok: false, result: DURABLE_REJECTION })
+    // And the model was told the user denied it, as a classic turn tells it (#2392).
+    const told = JSON.stringify(fake.messageCalls().at(-1)?.body?.messages ?? [])
+    expect(told).toContain(`The user denied print_output (approval durable:`)
     expect(outcome.backend.requests(/\/print\//)).toEqual([])
   }, 180_000)
 

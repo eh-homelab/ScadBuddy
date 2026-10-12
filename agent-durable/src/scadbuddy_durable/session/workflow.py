@@ -174,6 +174,32 @@ def _refused(code: str, message: str) -> ApplicationError:
     return ApplicationError(message, type=refused_failure_type(code), non_retryable=True)
 
 
+def refusal(tool: str, request_id: str, outcome: str, reason: str | None) -> str:
+    """What the model is told when its call was not approved, in the words a classic turn
+    uses (agent/src/approvals/service.ts ``refusal``)."""
+    what = f"{tool} (approval {request_id})"
+    if outcome == "denied":
+        return (
+            f"The user denied {what}; it was not run. Do not retry it unless the user asks you to."
+        )
+    if outcome == "expired":
+        return (
+            f"Nobody decided on {what} before it expired, so it was not run. "
+            "Tell the user it needs their approval."
+        )
+    if outcome == "cancelled":
+        return (
+            f"The approval for {what} was cancelled ({reason or 'no reason given'}), "
+            "so it was not run."
+        )
+    if outcome == "withdrawn":
+        return (
+            f"The approval for {what} was withdrawn before it ran "
+            f"({reason or 'no reason given'}), so it was not run."
+        )
+    return f"{what} was not approved, so it was not run."
+
+
 @workflow.defn(name=WORKFLOW)
 class DurableSession:
     @workflow.init
@@ -615,6 +641,14 @@ class DurableSession:
         # An approval runs only with its approved row (Ruling 10); an answer's call reads
         # whatever was recorded, so it is let through to report it.
         go = parked.kind == "answer" or (written and outcome == "approved")
+        if not go and self._turn is not None:
+            # The plugin gives the model a fixed rejection; the runner adds why (#2392).
+            self._turn.refusals[parked.call_id] = refusal(
+                parked.tool,
+                parked.entry.id,
+                "withdrawn" if outcome == "approved" else outcome,
+                reason,
+            )
         # The turn may have ended while resolve_input ran (an interrupt): the call then
         # waits no more, and its row is already right (review of #1958).
         with contextlib.suppress(ValueError):
@@ -772,6 +806,7 @@ class DurableSession:
             ),
             disabled_tools=list(self._settings.disabled_tools),
             packages=list(self._packages),
+            refusals=dict(self._turn.refusals) if self._turn else {},
         )
 
     @workflow.query(name=TURN_QUERY)

@@ -57,6 +57,9 @@ class TurnStart:
     images: list[ImageRef] = field(default_factory=list)
     # The append this turn was sent with (#2525); None for one sent before it was.
     system_append: str | None = None
+    # Why each of its calls refused at the gate was not run, by tool_use id (#2392): the
+    # segment runner adds it to the plugin's fixed rejection the model is given.
+    refusals: dict[str, str] = field(default_factory=dict)
     # workflow.now() as the turn started (ISO 8601), the plugin's events' `at` clock:
     # a subscriber of a turn carried over by continue-as-new ignores an end before it.
     started_at: str | None = None
@@ -118,6 +121,9 @@ class SegmentContext:
     # The turn's plugin packages (#2320), which the segment runner loads once each hashes
     # to its pin.
     packages: list[TurnPackage] = field(default_factory=list)
+    # The turn's refused calls, by tool_use id: what the model is told besides the
+    # plugin's fixed rejection, in a classic turn's words (#2392).
+    refusals: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
