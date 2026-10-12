@@ -147,8 +147,7 @@ export const catalogueTools: Tool[] = [
     }),
     risk: 'outward',
     // From a workspace file it creates the model through `POST /api/v1/models`, create_model's
-    // route. Not listed here: a route an outward tool lists is outward for the backend's
-    // agent-actor gate (agent_actor.py AGENT_ALLOWED_WRITES), and a create is a `write`.
+    // route, which create_model lists.
     routes: ['POST /api/v1/models/import'],
     summarize: ({ url, workspace_path, workspace_sha256, name }) =>
       url !== undefined

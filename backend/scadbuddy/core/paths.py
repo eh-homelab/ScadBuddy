@@ -75,6 +75,11 @@ class DataPaths:
         return self.root / "models"
 
     @property
+    def flows(self) -> Path:
+        """Flow scripts' git repository (#2503), beside the models' own."""
+        return self.root / "flows"
+
+    @property
     def outputs(self) -> Path:
         return self.root / "outputs"
 

@@ -24,15 +24,6 @@ import {
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
-import { drainDownloads } from '../harness/browserDownloads.js'
-import {
-  browserDownloadsDir,
-  browserTierOf,
-  browserToolsGuide,
-  GRANT_SERVER,
-  SETTING_HEADLESS_BROWSER,
-} from '../harness/headlessBrowser.js'
-import { headlessGrantServer } from '../harness/headlessGrants.js'
 import {
   HTTP_SERVER,
   type HttpLimits,
@@ -44,8 +35,6 @@ import {
   SETTING_HTTP_REQUEST,
 } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
-import { browserOrigins, loadApprovedOrigins, rememberApprovedOrigin } from '../harness/browserOrigins.js'
-import type { UiReachMap } from '../harness/browserReach.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import {
@@ -58,14 +47,7 @@ import {
 } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
-import {
-  ensureSessionDir,
-  isUuid,
-  removeSessionBrowserDirs,
-  sessionBrowserDir,
-  sessionBrowserTmpDir,
-  sessionWorkDir,
-} from '../harness/stateDirs.js'
+import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
@@ -85,18 +67,19 @@ import {
   ownerSeenBy,
   publicLabel,
   sameOwner,
+  type SentImage,
   type ServerEvent,
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
+import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
-import { type ImagePreview, previewsOf, userPrompt, type UserImage } from './images.js'
+import { userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
@@ -584,8 +567,8 @@ export type SendOptions = {
   context?: string
   /**
    * Images the user sent with the message (#1866, images.ts): the model gets
-   * them as image blocks before the text; the `user.turn` event shows their
-   * previews.
+   * them as image blocks before the text; the `user.turn` event names them and
+   * their previews, stored with the session first (#2479).
    */
   images?: readonly UserImage[]
   /**
@@ -677,35 +660,6 @@ export type SessionManagerDeps = {
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
   memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
-  /**
-   * The headless browser (#349, spec §5.3). A session's turns get it only when
-   * this is set AND the `headless_browser_enabled` setting is `true`; it is off
-   * by default. `publicUrl`, `livePublicUrl` and `uiOrigins`
-   * (SCADBUDDY_PUBLIC_URL, the backend's stored `public_url`, read once per
-   * turn, and SCADBUDDY_ALLOWED_ORIGINS) are ScadBuddy's own origins, which it
-   * opens as they are (#983); `backendUrl` (SCADBUDDY_BACKEND_URL) is the one
-   * it opens when none is configured; `browserAllowedOrigins`
-   * (SCADBUDDY_BROWSER_ALLOWED_ORIGINS) is what else a human may let it open,
-   * once per origin per session (harness/browserOrigins.ts, `ai_browser_origins`).
-   */
-  headlessBrowser?: {
-    backendUrl: string
-    publicUrl?: string
-    /** The backend's `public_url` setting now; a failed read leaves it out for the turn. */
-    livePublicUrl?: () => Promise<string | undefined>
-    uiOrigins?: string
-    browserAllowedOrigins?: string
-    /** Tests only: a Chromium other than the pinned one. */
-    executablePath?: string
-    /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
-    sandbox?: () => Promise<boolean>
-    /**
-     * Asks each of the turn's UI origins whether it answers without a login
-     * (harness/browserReach.ts `UiOriginProbe`), once per turn, so the browser
-     * is sent to one that does. Left out, the origins are taken as configured.
-     */
-    probe?: (origins: readonly string[]) => Promise<UiReachMap>
-  }
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
    * session's turns get it when this is set and the `http_request_enabled`
@@ -848,13 +802,31 @@ function describe(err: unknown): string {
 }
 
 /**
+ * Which browser a `browser_*` tool drives, for the session's system prompt. ScadBuddy's
+ * bridge tools and a browser plugin's (Microsoft's Playwright MCP, added in Settings →
+ * Plugins) share bare names (`browser_snapshot`, `browser_click`), and a model that has
+ * seen one set calls the other's names on the wrong server: in production it called
+ * `mcp__scadbuddy__browser_find`, which only Playwright's set has.
+ */
+export const BROWSER_TOOLS_GUIDE = [
+  '<browser_tools>',
+  "The mcp__scadbuddy__browser_* tools drive the user's own open ScadBuddy tab, which they watch. Use only the names " +
+    'that server lists; it has no browser_find, browser_type or browser_select_option. To find something on the ' +
+    'page, call mcp__scadbuddy__browser_snapshot; to set a field or a select, mcp__scadbuddy__browser_fill (a ' +
+    "select takes an option's value or its label as the snapshot shows it).",
+  "browser_* tools of any other server (a plugin's, such as mcp__playwright__browser_*) drive a separate browser " +
+    "that the user cannot see and that never shows the user's tab. Use them only when the user has no tab attached " +
+    'or asks for that browser.',
+  '</browser_tools>',
+].join('\n')
+
+/**
  * What every turn appends to Claude Code's own system prompt: the data/instruction
  * boundary (#258, safety/untrusted.ts: only the user's messages are instructions, tool
- * results are data), then which browser each browser_* tool drives. A durable turn has
- * the headless browser too, as turn tools (#2320, superseding plan 5c Ruling 15).
+ * results are data), then which browser each browser_* tool drives.
  */
-export function systemAppend(headlessBrowser: boolean): string {
-  return `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(headlessBrowser)}`
+export function systemAppend(): string {
+  return `${UNTRUSTED_CONTENT_POLICY}\n\n${BROWSER_TOOLS_GUIDE}`
 }
 
 export const TITLE_MAX = 80
@@ -1098,28 +1070,6 @@ export class SessionManager {
     return this.events.follow(id, options.afterSeq ?? 0, options.signal)
   }
 
-  /**
-   * How the turn's UI origins answer the browser (harness/browserReach.ts), or
-   * undefined when they could not be worked out (materializeHeadlessBrowser then
-   * reports the configuration error) or the probe failed.
-   */
-  private async probeUiOrigins(
-    hb: NonNullable<SessionManagerDeps['headlessBrowser']>,
-    livePublicUrl: string | undefined,
-  ): Promise<UiReachMap | undefined> {
-    let origins: ReturnType<typeof browserOrigins>
-    try {
-      origins = browserOrigins({ backendUrl: hb.backendUrl, publicUrl: hb.publicUrl, livePublicUrl, uiOrigins: hb.uiOrigins })
-    } catch {
-      return undefined
-    }
-    // With no UI origin configured the backend is the only one (dev, in-process
-    // runs): there is nowhere else to send the browser, so it is not asked, and
-    // one slow /healthz cannot refuse every navigation (#2155).
-    if (origins.ui.length === 1 && origins.ui[0] === origins.backend) return undefined
-    return hb.probe?.(origins.ui).catch(() => undefined)
-  }
-
   // -- writes ------------------------------------------------------------------
 
   private async limits(): Promise<{ maxTurns: number; budgetUsd: number }> {
@@ -1275,10 +1225,7 @@ export class SessionManager {
         text: options.context ? `${prompt}\n\n${options.context}` : prompt,
         author: principal,
         images: options.images ?? [],
-        // The headless browser is offered as turn tools (temporal/turnBrowser.ts) whenever it is on.
-        systemAppend: systemAppend(
-          this.deps.headlessBrowser !== undefined && (await this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER)) === true,
-        ),
+        systemAppend: systemAppend(),
         ...(options.tiers ? { tiers: options.tiers } : {}),
       })
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
@@ -1294,9 +1241,22 @@ export class SessionManager {
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
+    // The images and their previews are stored once the claim proves the sender owns the
+    // session and may start a turn, so the turn's event can name them (#2479). A store
+    // that fails gives the claim back and refuses the message. (A durable send does the
+    // same under its own claim, durable.ts.)
+    let sent: SentImage[] | undefined
+    if (options.images?.length) {
+      try {
+        sent = await this.storeSentImages(id, options.images)
+      } catch (err) {
+        await this.releaseClaim(id, turnId)
+        throw err
+      }
+    }
     return this.startTurn(claimed(claim), turnId, prompt, principal, {
       ...(options.context ? { context: options.context } : {}),
-      ...(options.images?.length ? { images: options.images } : {}),
+      ...(options.images?.length && sent ? { images: options.images, sent } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
   }
@@ -1391,20 +1351,19 @@ export class SessionManager {
   }
 
   /**
-   * The `user.turn` event's images: each preview with the name of the full
-   * image, stored before the event is logged (blobs.ts), as a tool result's
-   * are, so the panel's full-size view can load it. If they cannot be stored,
-   * the previews go without names.
+   * Stores a turn's images and their previews with the session (blobs.ts), as a
+   * tool result's are, and answers what the `user.turn` event names them by
+   * (#2479): the panel loads both by name, from any tab.
    */
-  private async sentImages(id: string, images: readonly UserImage[]): Promise<(ImagePreview & { name?: string })[]> {
-    const named = images.map((image) => ({ image, blob: sessionImage(image.mediaType, Buffer.from(image.data, 'base64')) }))
+  private async storeSentImages(id: string, images: readonly UserImage[]): Promise<SentImage[]> {
+    const { blobs, sent } = sentImageBlobs(images)
     try {
-      await this.blobs.put(id, named.map((n) => n.blob))
+      await this.blobs.put(id, blobs)
     } catch (err) {
       this.deps.stderr?.(`session ${id}: could not store a turn's images: ${err instanceof Error ? err.message : String(err)}\n`)
-      return previewsOf(images)
+      throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
     }
-    return named.map(({ image: { preview }, blob }) => ({ mediaType: preview.mediaType, data: preview.data, name: blob.name }))
+    return sent
   }
 
   private async startTurn(
@@ -1412,7 +1371,14 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string; context?: string; images?: readonly UserImage[]; tiers?: readonly Tier[] } = {},
+    options: {
+      keepResumeTurn?: string
+      context?: string
+      images?: readonly UserImage[]
+      /** What the `user.turn` event names `images` by, stored already (`storeSentImages`). */
+      sent?: readonly SentImage[]
+      tiers?: readonly Tier[]
+    } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
@@ -1431,7 +1397,7 @@ export class SessionManager {
         turnId,
         text: prompt,
         author,
-        ...(options.images?.length ? { images: await this.sentImages(id, options.images) } : {}),
+        ...(options.sent?.length ? { images: [...options.sent] } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
@@ -1493,12 +1459,11 @@ export class SessionManager {
     // The http tools' tier depends on the method in their input (#827).
     const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
     // Widened with the plugins' tiers once they are loaded below, so the
-    // panel shows a plugin tool at the tier the permission seam applies. The
-    // headless browser's tools are tiered too (spec §5.3, "Tiers").
+    // panel shows a plugin tool at the tier the permission seam applies.
     // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
     let builtIn: BuiltInPolicy | undefined
     const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
-    let eventTierOf: TierResolver = (name, input) => raised(name, browserTierOf(name) ?? tierOf(name, input))
+    let eventTierOf: TierResolver = (name, input) => raised(name, tierOf(name, input))
     // AskUserQuestion and ask_user (#940) only ask the user: shown and audited as `read`, as the harness tiers them.
     const asksUser = session.owner.kind === 'browser'
     const shownTierOf: TierResolver = (name, input) =>
@@ -1598,8 +1563,6 @@ export class SessionManager {
       let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
       /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
       let inProcessServers: string[] = []
-      /** Whether this turn wrote headless-browser folders, removed when it ends. */
-      let browserDirs = false
       try {
         // The credentials first, and into `secrets` at once: whatever fails
         // after this point is redacted before it reaches the event log. Every
@@ -1658,7 +1621,7 @@ export class SessionManager {
           pluginPaths: [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])],
           allowedPluginPaths: packages?.allowedPaths ?? [],
         })
-        eventTierOf = (name, input) => raised(name, browserTierOf(name) ?? pluginTiers(name, input))
+        eventTierOf = (name, input) => raised(name, pluginTiers(name, input))
         // A plugin left out of this turn is said so in the session, not only in the log.
         const unavailable = (message: string) =>
           this.events.append(id, [
@@ -1715,11 +1678,10 @@ export class SessionManager {
             }
           }
         }
-        const [cwd, resume, model, browserSetting, httpSetting] = await Promise.all([
+        const [cwd, resume, model, httpSetting] = await Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
-          this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
           this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
         ])
         // The http_request tool (#827): on unless the setting is `false`. Its
@@ -1741,7 +1703,6 @@ export class SessionManager {
                 ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
               })
             : undefined
-        const hb = this.deps.headlessBrowser
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1756,41 +1717,6 @@ export class SessionManager {
               return call ? log([call]) : Promise.resolve()
             }),
         })
-        const sandbox =
-          this.deps.headlessBrowser?.sandbox && browserSetting === true
-            ? await this.deps.headlessBrowser.sandbox()
-            : false
-        const livePublicUrl =
-          hb?.livePublicUrl && browserSetting === true ? await hb.livePublicUrl().catch(() => undefined) : undefined
-        const uiReach = hb?.probe && browserSetting === true ? await this.probeUiOrigins(hb, livePublicUrl) : undefined
-        const browser =
-          hb && browserSetting === true
-            ? {
-                ...(sandbox ? { sandbox: true } : {}),
-                sessionId: id,
-                backendUrl: hb.backendUrl,
-                ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
-                ...(livePublicUrl ? { livePublicUrl } : {}),
-                ...(uiReach ? { uiReach } : {}),
-                ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
-                ...(hb.browserAllowedOrigins
-                  ? {
-                      browserAllowedOrigins: hb.browserAllowedOrigins,
-                      // Approved once per origin per session, in Postgres, so a
-                      // later turn (on any replica) does not ask again.
-                      approvedOrigins: await loadApprovedOrigins(sql, id),
-                      rememberOrigin: (origin: string, approvalId: string | undefined) =>
-                        rememberApprovedOrigin(sql, id, origin, approvalId),
-                    }
-                  : {}),
-                dir: sessionBrowserDir(this.deps.paths, id),
-                tmpDir: sessionBrowserTmpDir(id),
-                // Its downloads land in the session's workspace (#2329, harness/browserDownloads.ts).
-                downloads: { files: this.files, ref: { kind: 'session' as const, sessionId: id } },
-                ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
-              }
-            : undefined
-        browserDirs = browser !== undefined
         // AskUserQuestion (#940): only the user in the panel answers, so only a
         // session the browser user owns is given the tool. Any other owner's turn
         // would wait on someone who is not asked.
@@ -1819,12 +1745,11 @@ export class SessionManager {
           ...(builtIn ? { builtInPolicy: builtIn } : {}),
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
-          systemPromptAppend: systemAppend(browser !== undefined),
-          ...(browser ? { headlessBrowser: browser } : {}),
+          systemPromptAppend: systemAppend(),
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
-          ...(this.deps.mcpServers || browser || http
+          ...(this.deps.mcpServers || http
             ? {
                 mcpServers: {
                   ...(this.deps.mcpServers
@@ -1843,18 +1768,6 @@ export class SessionManager {
                       )
                     : {}),
                   ...(http ? { [HTTP_SERVER]: http } : {}),
-                  // The one way past the backend's agent-actor gate: a human
-                  // approves one exact outward request (harness/headlessGrants.ts).
-                  ...(browser
-                    ? {
-                        [GRANT_SERVER]: headlessGrantServer({
-                          sql,
-                          sessionId: id,
-                          turnId,
-                          hash: (tool, input) => this.approvals.hash(tool, input),
-                        }),
-                      }
-                    : {}),
                 },
               }
             : {}),
@@ -1916,21 +1829,6 @@ export class SessionManager {
         await auditor?.finish(
           controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
         )
-        // The query has ended, and with it the playwright server and Chromium:
-        // its screenshots and profile go now, not when the volume fills.
-        if (browserDirs) {
-          // A download that ended after the turn's last drain is kept, also when
-          // the turn ended without its Stop hook (#2397, harness/browserDownloads.ts).
-          await drainDownloads(browserDownloadsDir(sessionBrowserDir(this.deps.paths, id)), {
-            files: this.files,
-            ref: { kind: 'session', sessionId: id },
-          }).catch((err: unknown) =>
-            this.deps.stderr?.(`cannot keep the headless-browser downloads of session ${id}: ${String(err)}\n`),
-          )
-          await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
-            this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
-          )
-        }
       }
       // The loop has ended only after the SDK's last transcript append (measured:
       // `last-prompt` and `cost-state` entries arrive after the `result`
@@ -2364,8 +2262,7 @@ export class SessionManager {
    *
    * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
    * route) gives the child a budget of its own. Like `raiseBudget`, that is
-   * enforced here: `freshBudget` from any other principal, or with the headless
-   * browser's agent-actor marker (`agentActor`), is ignored (#1447). Any other fork, `sessions_fork`
+   * enforced here: `freshBudget` from any other principal is ignored (#1447). Any other fork, `sessions_fork`
    * above all, spends from the parent's budget: nothing is copied or moved, the
    * child joins the parent's lineage (`budget_root_id`), and a turn in either
    * debits the one budget. Forking therefore never creates budget, and cannot
@@ -2383,13 +2280,12 @@ export class SessionManager {
       origin?: Origin
       rateLimited?: boolean
       freshBudget?: boolean
-      agentActor?: boolean
       upTo?: string
       audit?: Omit<AuditContext, 'actor'>
     } = {},
   ): Promise<SessionRecord> {
     const startedAt = new Date()
-    const fresh = options.freshBudget === true && principal.kind === 'browser' && !options.agentActor
+    const fresh = options.freshBudget === true && principal.kind === 'browser'
     const parent = await this.get(id, principal)
     if (parent.mode === 'durable') {
       throw new SessionError(
@@ -2479,10 +2375,7 @@ export class SessionManager {
    * fork its lineage's, which the parent and every other fork of it share
    * (#823). User-only and owner-only:
    * it spends money, so only the browser user may raise it, and only on a
-   * session it owns (take one over first). `agentActor` is set when the
-   * request carried the headless browser's agent-actor marker
-   * (harness/headlessBrowser.ts AGENT_ACTOR_HEADER), and is refused like any
-   * other principal. No tool calls this; the one caller is the HTTP route
+   * session it owns (take one over first). No tool calls this; the one caller is the HTTP route
    * (routes/sessions.ts). A raise is a `settings` audit row on the session
    * (action `session_budget_usd`); a refused or failed one is recorded by
    * app.ts's `auditWrites` from the route's status, like other refused writes.
@@ -2491,10 +2384,10 @@ export class SessionManager {
     id: string,
     principal: Owner,
     addUsd: number,
-    context: Omit<AuditContext, 'actor'> & { agentActor?: boolean },
+    context: Omit<AuditContext, 'actor'>,
   ): Promise<SessionRecord> {
     const startedAt = new Date()
-    if (context.agentActor || principal.kind !== 'browser') {
+    if (principal.kind !== 'browser') {
       throw new SessionError('forbidden', "only you can raise a chat's budget, in the ScadBuddy UI")
     }
     const add = cents(addUsd)

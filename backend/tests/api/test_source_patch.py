@@ -205,18 +205,6 @@ def test_a_restore_in_a_threadpool_route_is_the_agents_too(
     assert restored.json()["agent"] == {"principal": "browser", "session": None}
 
 
-def test_the_headless_browsers_marker_names_the_session(client: TestClient) -> None:
-    upload(client)
-    response = client.put(
-        f"/api/v1/models/{SLUG}/source",
-        json={"source": "a = 3;\n"},
-        headers={**press(), "X-ScadBuddy-Agent-Session": "headless-1"},
-    )
-    assert response.status_code == 200, response.text
-    latest = client.get(f"/api/v1/models/{SLUG}/versions").json()[0]
-    assert latest["agent"] == {"principal": None, "session": "headless-1"}
-
-
 @pytest.mark.parametrize(
     "headers",
     [{AUTHOR_HEADER: "has space"}, {AUTHOR_SESSION_HEADER: "a\tb"}, {AUTHOR_HEADER: "x" * 301}],

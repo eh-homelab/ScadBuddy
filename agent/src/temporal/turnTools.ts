@@ -27,7 +27,7 @@ import {
 
 // The rest of a turn's tools in a durable session (#2320). A classic turn hands Claude
 // Code more MCP servers than ScadBuddy's own (sessions/manager.ts `runTurn`): the remote
-// plugins through the loopback forwarder, `http_request`, the headless browser. A
+// plugins through the loopback forwarder and `http_request`. A
 // durable turn's tools are the workflow's durable tools, each an activity on
 // `agent-tools`, so the same servers are offered there as durable tools too:
 //
@@ -48,7 +48,7 @@ import {
 // (backend/scadbuddy/workflows/flow_tools.py): `turn_tool_tier`, then the call, as the
 // run's starter (flowRuns.ts), an outward one only with the backend's
 // `workflow_run_decisions` approval, as a flow's ScadBuddy tools are. A flow has no
-// session, so no headless browser (TurnContext.flow), and it lists nothing.
+// session, and it lists nothing.
 
 export const TURN_TOOLS_ACTIVITY = 'turn_tools'
 export const TURN_TOOL_TIER_ACTIVITY = 'turn_tool_tier'
@@ -77,38 +77,22 @@ export type TurnServer = {
   /**
    * Whether some call of the tool could be outward, whatever its input. Listed as
    * `may_park`: only a tool listed so is ever asked about, so a tool whose tier depends
-   * on its input (http_request's method, the headless browser's origin) must say yes.
+   * on its input (http_request's method) must say yes.
    * Absent: every tool may (fail toward asking).
    */
   mayPark?(harnessName: string): boolean
   /**
    * Whether its calls must run on the replica that listed it (`TurnToolsDeps.hostQueue`):
    * a server whose state lives in this process or on this pod's disk (http_request's
-   * saved bodies, the headless browser).
+   * saved bodies).
    */
   pinned?: boolean
-  /** A long-lived client the server owns (the headless browser's process): never closed after a use. */
-  keepOpen?: boolean
-  /** A `keepOpen` client given back after each use, so the server knows which calls are in flight. */
-  release?(): void
-  /**
-   * Reads what its tiers, refusals and listing depend on, before any of them is asked
-   * (the browser's options): awaited first by every listing, tier check and call, so a
-   * call of another server's tool never pays for it.
-   */
-  ready?(): Promise<void>
-  /** Why a call must not run at all, by its input (the browser's filename and origin rules); undefined: it may. */
-  refusal?(harnessName: string, input: unknown): string | undefined
   /**
    * What its tool list depends on (a remote plugin's name and the tools Settings disabled):
    * with one, a listing is kept for LISTING_KEPT_MS, so a tier check and the call after it
    * do not list the plugin again (#2497). The forwarder still refuses a disabled tool's call.
    */
   listingKey?: string
-  /** Whether a tool the server lists is offered (the browser's fixed deny list, Settings → Plugins). */
-  offers?(tool: string): boolean
-  /** Once an outward call's approval is verified, before it runs (an approved origin is remembered). */
-  approved?(harnessName: string, input: unknown, requestId: string): Promise<void>
 }
 
 export type TurnServers = {
@@ -129,14 +113,12 @@ export type TurnServers = {
 export type TurnContext = {
   /** The session, or `flow-<run id>` for a flow run's call (then `flow` is set). */
   session: string
-  /** The flow run a call comes from: it has no session, so no session-bound server (the browser). */
+  /** The flow run a call comes from: it has no session. */
   flow?: string
   /** The durable turn running now (`ai_sessions.durable_turn_id`), for audit rows; none for a flow. */
   turnId?: string
   owner: Owner
   signal: AbortSignal
-  /** The call being made, for a server built for it (the browser's grant names its approval). */
-  call?: { requestId: string; toolUseId: string }
   /** The turn's listing (`turn_tools`): the plugin packages are shared with the segment runner. */
   listing?: boolean
 }
@@ -220,8 +202,7 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
   try {
     return await use(client)
   } finally {
-    if (server.keepOpen) server.release?.()
-    else await client.close().catch(() => {})
+    await client.close().catch(() => {})
   }
 }
 
@@ -235,13 +216,12 @@ type Listed = { tool: Awaited<ReturnType<Client['listTools']>>['tools'][number];
 const kept = new Map<string, { at: number; tools: Listed }>()
 
 async function listed(server: TurnServer, signal: AbortSignal, reuse = false): Promise<Listed> {
-  await server.ready?.()
   const key = server.listingKey === undefined ? undefined : `${server.name}\0${server.listingKey}`
   const hit = key === undefined ? undefined : kept.get(key)
   if (reuse && hit && Date.now() - hit.at < LISTING_KEPT_MS) return hit.tools
   const tools = await withClient(server, async (client) => {
     const { tools } = await client.listTools(undefined, { signal })
-    const named = tools.filter((tool) => server.offers?.(tool.name) ?? true).map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+    const named = tools.map((tool) => ({ tool, name: harnessToolName(tool.name) }))
     const seen = new Map<string, number>()
     for (const { name } of named) seen.set(name, (seen.get(name) ?? 0) + 1)
     return named.filter(({ name }) => seen.get(name) === 1)
@@ -391,22 +371,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const caller = await turnCaller(deps, TURN_TOOL_TIER_ACTIVITY, '')
       const signal = Context.current().cancellationSignal
       return withServers(deps, { ...caller.context, signal }, async (set) => {
-        // A pinned server is not listed here: this check runs on whichever replica took it,
-        // and listing the headless browser would start one there for nothing (#2523). Its
-        // tier is by name and input; its call, on its own replica, still lists it.
-        const { server, harnessName } = await (async () => {
-          const { parts, server } = serverOf(set, tool)
-          if (!server.pinned) return resolve(set, tool, signal)
-          await server.ready?.()
-          if (!(server.offers?.(parts.tool) ?? true)) {
-            throw ApplicationFailure.nonRetryable(`${tool} is not offered any more by ${server.name}`, TOOL_ERROR)
-          }
-          return { server, harnessName: `mcp__${server.name}__${parts.tool}` }
-        })()
+        const { server, harnessName } = await resolve(set, tool, signal)
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
         const queue = server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}
-        // A call that will be refused is not parked: its activity says why.
-        if (server.refusal?.(harnessName, input) !== undefined) return { tier: 'read' as const, ...queue }
         return { tier: server.tierOf(harnessName, input), ...queue }
       })
     },
@@ -432,7 +399,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
     const fields = inputObject(input)
     const signal = context.cancellationSignal
-    return withServers(deps, { ...caller.context, signal, call: { requestId, toolUseId } }, async (set) => {
+    return withServers(deps, { ...caller.context, signal }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
       const { server, tool, harnessName } = await resolve(set, name, signal)
       const tier = server.tierOf(harnessName, input)
@@ -459,8 +426,6 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         await record('refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
-      const refused = server.refusal?.(harnessName, input)
-      if (refused !== undefined) await refuse(refused, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
         const who = caller.context.flow ? "this flow run's starter" : "this session's turn"
         await refuse(`${name} needs the "${tier}" tier, which ${who} does not hold`, TOOL_ERROR)
@@ -471,7 +436,6 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         if (!(await caller.approved(requestId, binding))) {
           await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
         }
-        await server.approved?.(harnessName, input, requestId)
       }
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>

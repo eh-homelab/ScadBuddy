@@ -1,19 +1,21 @@
 import { HttpResponse, http } from 'msw'
-import type { ImagePreview, SentImage } from '../../agent/chat/protocol'
+import type { SentImage } from '../../agent/chat/protocol'
 import { storeSentImage } from './assistantBlobs'
 
 /**
  * #1941 — the agent's `POST /api/v1/ai/attachments` and `DELETE …/:id`
  * (agent `src/routes/attachments.ts`): the composer uploads each image it is given, and
- * a message names it by id. The scripted agent (`../agent.ts`) shows an attachment's
- * preview in the `user.turn`, as the real one does, with the name its full image is then
- * served under (`./assistantBlobs.ts`), and forgets the upload once sent.
+ * a message names it by id. #2479 — the upload is multipart, two typed file parts
+ * (`image`, `preview`), and the answer names them; no image is base64 in JSON. The
+ * scripted agent (`../agent.ts`) names an attachment's image and preview in the
+ * `user.turn`, as the real one does, by the names they are served under
+ * (`./assistantBlobs.ts`), and forgets the upload once sent.
  */
 
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
 const PREVIEW_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 
-const uploads = new Map<string, { image: { mediaType: string; data: string }; preview: ImagePreview }>()
+const uploads = new Map<string, SentImage>()
 let next = 0
 
 export function reset(): void {
@@ -21,39 +23,35 @@ export function reset(): void {
   next = 0
 }
 
-/**
- * The preview an upload carried, and the name its image is now served under, taken as the
- * real agent moves it into the session; undefined when unknown.
- */
+/** The names an upload's image and preview are served under, as the turn gives them; undefined when unknown. */
 export function takeAttachment(id: string): SentImage | undefined {
   const upload = uploads.get(id)
   uploads.delete(id)
-  return upload && { ...upload.preview, name: storeSentImage(upload.image) }
+  return upload
 }
+
+// A file part, not a text field; by shape, since under vitest the parser's `File` is Node's, not jsdom's.
+const isFile = (value: FormDataEntryValue | null, types: string[]): value is File =>
+  typeof value === 'object' && value !== null && types.includes(value.type) && value.size > 0
 
 export const handlers = [
   http.post('/api/v1/ai/attachments', async ({ request }) => {
-    const body = (await request.json()) as {
-      mediaType?: unknown
-      data?: unknown
-      preview?: { mediaType?: unknown; data?: unknown }
+    if (!request.headers.get('content-type')?.startsWith('multipart/form-data')) {
+      return HttpResponse.json({ detail: 'request body must be multipart/form-data' }, { status: 415 })
     }
-    const { preview } = body
-    if (
-      typeof body.mediaType !== 'string' ||
-      !IMAGE_TYPES.includes(body.mediaType) ||
-      typeof body.data !== 'string' ||
-      body.data === '' ||
-      typeof preview?.mediaType !== 'string' ||
-      !PREVIEW_TYPES.includes(preview.mediaType) ||
-      typeof preview.data !== 'string'
-    ) {
-      return HttpResponse.json({ detail: 'mediaType: a PNG, JPEG, GIF or WebP image with a preview' }, { status: 400 })
+    const body = await request.formData()
+    const image = body.get('image')
+    const preview = body.get('preview')
+    if (!isFile(image, IMAGE_TYPES) || !isFile(preview, PREVIEW_TYPES)) {
+      return HttpResponse.json({ detail: 'image: a PNG, JPEG, GIF or WebP file part with a preview' }, { status: 400 })
     }
     const id = `00000000-0000-4000-8000-${String(++next).padStart(12, '0')}`
-    const kept = { mediaType: preview.mediaType as ImagePreview['mediaType'], data: preview.data }
-    uploads.set(id, { image: { mediaType: body.mediaType, data: body.data }, preview: kept })
-    return HttpResponse.json({ id, preview: kept }, { status: 201 })
+    const sent = {
+      ...storeSentImage(image),
+      preview: storeSentImage(preview),
+    } as SentImage
+    uploads.set(id, sent)
+    return HttpResponse.json({ id, ...sent }, { status: 201 })
   }),
   http.delete('/api/v1/ai/attachments/:id', ({ params }) =>
     uploads.delete(String(params.id))

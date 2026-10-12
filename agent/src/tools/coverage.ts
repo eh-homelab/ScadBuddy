@@ -30,6 +30,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'page; the route refuses an agent-authored request.',
   },
   {
+    operation: 'GET /api/v1/workflow-runs/{run_id}/images/{name}',
+    reason:
+      "A flow run's images as the run page's thumbnails (#2477). A flow hands them to a session by " +
+      'reference (`flow_image`, in `agent_with_images`/`ask_session_with_images`), so no tool fetches them.',
+  },
+  {
     operation: 'GET /api/v1/print/library/{file_id}/objects',
     reason:
       "The Arrange dialog's list of a library file's objects, with a count each (#1863). The arrange " +

@@ -326,11 +326,13 @@ export const libraryTools: Tool[] = [
       "Dry-run a re-pin of a model's library pinned from a non-catalogue URL (a fork, another repo): clone that " +
       "URL at `ref` and parse-check the model's saved source against it. Records nothing. The backend clones " +
       'that URL, so this needs a human approval.',
-    input: z.object({ slug, name: libraryName, ref: z.string().optional().describe('A tag or branch') }),
+    // Required: the backend refuses a non-catalogue URL with no ref, so a call without
+    // one could only come back a 422 after a human had approved it (#2098).
+    input: z.object({ slug, name: libraryName, ref: z.string().min(1).describe('A tag or branch') }),
     risk: 'outward',
     routes: ['POST /api/v1/models/{slug}/libraries/{name}/check'],
     summarize: ({ slug, name, ref }) =>
-      `Clone library ${name} of model "${slug}" from the URL its pin records, at ${ref ?? "the catalogue's ref"}, ` +
+      `Clone library ${name} of model "${slug}" from the URL its pin records, at ${ref}, ` +
       'and check the model parses against it',
     handler: async ({ slug, name, ref }, ctx) => json(await checkCandidate(ctx, slug, name, ref)),
   }),

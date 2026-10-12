@@ -10,7 +10,7 @@ from psycopg import Connection
 from scadbuddy.core.events import Event, FlowRunEvent
 from scadbuddy.flows.sweep import sweep_flow_runs
 from scadbuddy.workflows.flow_models import FlowRecord
-from tests.flows.flows_support import Flows, script
+from tests.flows.flows_support import Flows, define, script
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -42,7 +42,7 @@ async def test_a_terminated_run_is_ended_and_a_running_one_left(flows: Flows) ->
 
 
 async def test_a_run_with_no_execution_is_ended(flows: Flows) -> None:
-    definition = await flows.store.create_definition("t", script("return 1"), {})
+    definition = await define(flows.store, "t")
     await flows.store.insert_run(
         FlowRecord(
             run_id="never",

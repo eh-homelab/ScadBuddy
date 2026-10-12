@@ -104,8 +104,6 @@ export type TurnServerDeps = {
         forward: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
       }
     | undefined
-  /** More servers for the turn: the headless browser and its grant tool (turnBrowser.ts). */
-  extra?: ((context: TurnContext) => Promise<TurnServer[]>) | undefined
 }
 
 export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Promise<TurnServers> {
@@ -202,8 +200,6 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         }
       }
     }
-    // The browser and its grant are a session's: a flow has neither, as it has no browser_* tools.
-    if (deps.extra && !context.flow) servers.push(...(await deps.extra(context)))
     return {
       servers,
       problems,

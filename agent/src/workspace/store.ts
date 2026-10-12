@@ -258,6 +258,15 @@ export type WriteOptions = {
   alongside?: ((tx: TransactionSql, file: WorkspaceFileInfo) => Promise<void>) | undefined
 }
 
+/**
+ * Takes the session's row lock first when an `alongside` will write to the session (its
+ * event log bumps `ai_sessions.event_seq`): a session delete takes that row before it
+ * cascades to the files, so both take the locks in the same order and never deadlock.
+ */
+async function lockSession(tx: TransactionSql, sessionId: string | null): Promise<void> {
+  if (sessionId !== null) await tx`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR NO KEY UPDATE`
+}
+
 export class SessionFiles {
   private readonly sql: Sql
   private readonly settings: SettingsReader | undefined
@@ -359,6 +368,7 @@ export class SessionFiles {
     const mediaType = options.mediaType?.trim() || guessMediaType(name, data)
     const source = options.source ?? null
     return this.sql.begin(async (tx) => {
+      if (options.alongside) await lockSession(tx, sessionId)
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${key}`}, 0))`
       const [current] = await tx<{ sha256: string }[]>`
         SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name} FOR UPDATE`
@@ -408,8 +418,9 @@ export class SessionFiles {
     options: { expectedSha256?: string | undefined; alongside?: ((tx: TransactionSql) => Promise<void>) | undefined } = {},
   ): Promise<boolean> {
     const name = workspacePath(path)
-    const { key } = keyOf(ws)
+    const { key, sessionId } = keyOf(ws)
     return this.sql.begin(async (tx) => {
+      if (options.alongside) await lockSession(tx, sessionId)
       if (options.expectedSha256 === undefined) {
         const rows = await tx`DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING path`
         if (rows.length === 0) return false

@@ -3,7 +3,11 @@ Temporal and Postgres, with the app's in-process `projects` worker."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
+import json
+import subprocess
 import time
 import uuid
 from collections.abc import Iterator
@@ -14,7 +18,11 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.core.gitrepo import git_env
+from scadbuddy.core.secrets import seal_bytes
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.images import blob_context
+from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -145,16 +153,79 @@ def test_a_waiting_run_lists_what_it_waits_on(client: TestClient) -> None:
 
 
 def test_a_definition_no_longer_type_checking_is_refused_at_start(
+    client: TestClient, settings: Settings, pg_conninfo: str
+) -> None:
+    definition = register(client, script("return 1"))
+    # As if the host functions changed under a stored script: the version names a
+    # commit whose script no longer checks.
+    flows = settings.data_dir / "flows"
+    (flows / "swap" / "flow.py").write_text(script("await gone()"))
+    git = ["git", "-c", f"safe.directory={flows}"]
+    subprocess.run([*git, "commit", "-qam", "Break"], cwd=flows, env=git_env(), check=True)
+    head = subprocess.run(
+        [*git, "rev-parse", "HEAD"], cwd=flows, env=git_env(), capture_output=True, text=True
+    ).stdout.strip()
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE workflow_definitions SET commit = %s WHERE id = %s", (head, definition["id"])
+        )
+    assert start(client, definition["id"], "k").status_code == 422
+
+
+def test_a_start_whose_script_is_missing_from_git_is_409(
     client: TestClient, pg_conninfo: str
 ) -> None:
     definition = register(client, script("return 1"))
-    # As if the host functions changed under a stored script.
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute(
-            "UPDATE workflow_definitions SET script = %s WHERE id = %s",
-            (script("await gone()"), definition["id"]),
+            "UPDATE workflow_definitions SET commit = %s WHERE id = %s",
+            ("f" * 40, definition["id"]),
         )
-    assert start(client, definition["id"], "k").status_code == 422
+    response = start(client, definition["id"], "k")
+    assert response.status_code == 409
+    assert response.json()["type"].endswith("/flow-script-missing")
+
+
+def test_a_flows_history_source_diff_and_restore(client: TestClient) -> None:
+    """#2503: a flow's versions are commits in `data/flows`, each authored by its
+    registrar, and a run records the commit it ran."""
+    one = register(client, script("return 1"))
+    response = client.post(
+        "/api/v1/workflows", json={"name": "swap", "script": script("return 2")}, headers=AGENT
+    )
+    assert response.status_code == 201, response.text
+    two = response.json()
+    assert (two["version"], two["created_by"]) == (
+        2,
+        {"kind": "agent", "principal": "token:p1", "session": "s1"},
+    )
+
+    base = "/api/v1/workflows/names/swap/versions"
+    versions = client.get(base).json()
+    assert [(v["version"], v["id"], v["commit"], v["created_by"]["kind"]) for v in versions] == [
+        (2, two["id"], two["commit"], "agent"),
+        (1, one["id"], one["commit"], "browser"),
+    ]
+    source = client.get(f"{base}/{one['commit'][:7]}/source")
+    assert (source.status_code, source.text) == (200, script("return 1"))
+    diff = client.get(f"{base}/{two['commit']}/diff").json()
+    assert (diff["base"], diff["head"]) == (one["commit"], two["commit"])
+    assert "+    return 2" in diff["patch"]
+
+    restored = client.post(f"{base}/{one['commit']}/restore")
+    assert restored.status_code == 201, restored.text
+    assert (restored.json()["version"], restored.json()["script"]) == (3, script("return 1"))
+    assert [d["version"] for d in client.get("/api/v1/workflows").json()] == [3]
+
+    # A run of an older version runs that version's commit.
+    run_id = start(client, one["id"], "k1").json()["id"]
+    view = until(client, run_id, lambda v: v["status"] == "succeeded")
+    assert (view["run"]["commit"], view["run"]["result"]) == (one["commit"], "result: 1")
+
+    register(client, script("return 3"), name="other")
+    other = client.get("/api/v1/workflows/names/other/versions").json()[0]["commit"]
+    assert client.get("/api/v1/workflows/names/nothing/versions").status_code == 404
+    assert client.get(f"{base}/{other}/source").status_code == 404
 
 
 def test_the_approval_timeout_resolves_run_then_flow_then_setting(client: TestClient) -> None:
@@ -207,6 +278,48 @@ def test_delete_forgets_the_run(client: TestClient, pg_conninfo: str) -> None:
             (f"flow-{run_id}",)
         ]
     assert client.delete(f"/api/v1/workflow-runs/{uuid.uuid4()}").status_code == 404
+
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+def test_a_runs_images_are_listed_served_from_their_blobs_and_forgotten_with_it(
+    client: TestClient, settings: Settings, pg_conninfo: str
+) -> None:
+    """#2477: the agent keeps a flow call's images sealed under the run's key; the run
+    lists them as pointers and serves each by name, until the run is forgotten."""
+    definition = register(client, script("return 1"))
+    run_id = start(client, definition["id"], "img").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+    subject = f"flow-{run_id}"
+    name = hashlib.sha256(PNG).hexdigest() + ".png"
+    keys = payload_keys(settings)
+    assert keys is not None
+    key = asyncio.run(keys[0].key_for(subject, False))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO ai_flow_blobs (subject, name, media_type, size, data)"
+            " VALUES (%s, %s, 'image/png', %s, %s)",
+            (subject, name, len(PNG), seal_bytes(key, PNG, blob_context(subject, name))),
+        )
+    view = client.get(f"/api/v1/workflow-runs/{run_id}").json()
+    assert view["images"] == [{"name": name, "mediaType": "image/png", "bytes": len(PNG)}]
+    # The run's view carries the pointer only.
+    assert base64.b64encode(PNG).decode()[:16] not in json.dumps(view)
+    served = client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}")
+    assert served.status_code == 200
+    assert (served.content, served.headers["content-type"]) == (PNG, "image/png")
+    assert "immutable" in served.headers["cache-control"]
+    other = "0" * 64 + ".png"
+    for missing in (other, "x.png", "..%2Fx.png"):
+        assert client.get(f"/api/v1/workflow-runs/{run_id}/images/{missing}").status_code == 404
+    assert client.get(f"/api/v1/workflow-runs/{uuid.uuid4()}/images/{name}").status_code == 404
+    assert client.delete(f"/api/v1/workflow-runs/{run_id}").status_code == 204
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM ai_flow_blobs").fetchone() == (0,)
+    assert client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}").status_code == 404
 
 
 class TestWithoutAKey:

@@ -13,7 +13,6 @@ import { packageKinds } from '../src/plugins/packages/operations.js'
 import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
 import { PluginError } from '../src/plugins/registry.js'
 import { ownPluginEnabled, SETTING_OWN_PLUGIN } from '../src/plugins/packages/builtins.js'
-import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { SettingsStore } from '../src/credentials.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
@@ -275,7 +274,6 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       }[]
       expect(listed.map((p) => [p.name, p.built_in, p.enabled])).toEqual([
         ['scadbuddy', true, true],
-        ['playwright', true, false],
       ])
       expect(listed[0]!.review.skills).toContain('scadbuddy:authoring')
 
@@ -283,17 +281,16 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(((await off.json()) as { enabled: boolean }).enabled).toBe(false)
       expect(await settings.get(SETTING_OWN_PLUGIN)).toBe(false)
       expect(await ownPluginEnabled(settings)).toBe(false)
-      // The browser's switch is the headless-browser setting itself.
-      await a.request('/api/v1/ai/plugin-packages/playwright', json('PATCH', { enabled: true }))
-      expect(await settings.get(SETTING_HEADLESS_BROWSER)).toBe(true)
-      const one = await a.request('/api/v1/ai/plugin-packages/playwright', { headers: READ })
-      expect(await one.json()).toMatchObject({ name: 'playwright', built_in: true, enabled: true })
+      await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: true }))
+      expect(await settings.get(SETTING_OWN_PLUGIN)).toBe(true)
+      const one = await a.request('/api/v1/ai/plugin-packages/scadbuddy', { headers: READ })
+      expect(await one.json()).toMatchObject({ name: 'scadbuddy', built_in: true, enabled: true })
 
       for (const [method, url, body] of [
         ['DELETE', '/api/v1/ai/plugin-packages/scadbuddy', undefined],
         ['POST', '/api/v1/ai/plugin-packages/scadbuddy/approve', { commit_sha: 'a', content_hash: 'b' }],
-        ['POST', '/api/v1/ai/plugin-packages/playwright/repin', {}],
-        ['DELETE', '/api/v1/ai/plugin-packages/playwright/pending', undefined],
+        ['POST', '/api/v1/ai/plugin-packages/scadbuddy/repin', {}],
+        ['DELETE', '/api/v1/ai/plugin-packages/scadbuddy/pending', undefined],
       ] as const) {
         const res = await a.request(url, body === undefined ? { method, headers: UI } : json(method, body))
         expect(res.status, `${method} ${url}`).toBe(409)
@@ -309,10 +306,10 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       const installed = await install()
       await store.approve('greeter', installed.commit_sha, installed.content_hash)
       await store.setEnabled('greeter', true)
-      await db.sql`UPDATE ai_plugin_packages SET name = 'playwright' WHERE name = 'greeter'`
+      await db.sql`UPDATE ai_plugin_packages SET name = 'scadbuddy' WHERE name = 'greeter'`
       const loaded = await loadPackagesForRun(store, installer)
       expect(loaded.paths).toEqual([])
-      expect(loaded.problems).toEqual([expect.stringMatching(/playwright was not loaded: "playwright" is built in/)])
+      expect(loaded.problems).toEqual([expect.stringMatching(/scadbuddy was not loaded: "scadbuddy" is built in/)])
 
       const a = createApp({ ...appDeps(), settings: new SettingsStore(db.sql) })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
@@ -321,13 +318,12 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       }[]
       expect(listed.map((p) => [p.name, p.built_in ?? false])).toEqual([
         ['scadbuddy', true],
-        ['playwright', true],
-        ['playwright', false],
+        ['scadbuddy', false],
       ])
       // PATCH always switches the built-in: the stored row never loads.
-      const patched = await a.request('/api/v1/ai/plugin-packages/playwright', json('PATCH', { enabled: true }))
-      expect(await patched.json()).toMatchObject({ name: 'playwright', built_in: true, enabled: true })
-      const del = () => a.request('/api/v1/ai/plugin-packages/playwright', { method: 'DELETE', headers: UI })
+      const patched = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: true }))
+      expect(await patched.json()).toMatchObject({ name: 'scadbuddy', built_in: true, enabled: true })
+      const del = () => a.request('/api/v1/ai/plugin-packages/scadbuddy', { method: 'DELETE', headers: UI })
       expect((await del()).status).toBe(204)
       expect(await store.list()).toEqual([])
       expect((await del()).status).toBe(409) // the built-in stays

@@ -241,10 +241,9 @@ export async function runScenario(
       tierOf,
       approvalGate: gate,
       onDecision: (toolName, decision) => decisions.push({ toolName, decision: decision.decision, tier: decision.tier }),
-      // What a session's turn appends (src/sessions/manager.ts `systemAppend`; no
-      // headless browser here), and nothing more: a defence only the eval added
+      // What a session's turn appends (src/sessions/manager.ts `systemAppend`), and nothing more: a defence only the eval added
       // would make the injection scenario pass for a prompt that never ships.
-      systemPromptAppend: systemAppend(false),
+      systemPromptAppend: systemAppend(),
       ...(options.stderr ? { stderr: options.stderr } : {}),
     })
     for await (const m of query) messages.push(m)

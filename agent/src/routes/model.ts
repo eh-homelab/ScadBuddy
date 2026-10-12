@@ -4,7 +4,7 @@ import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { SETTING_MODEL } from '../sessions/manager.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './headlessBrowser.js'
+import type { SettingsRepo } from './httpRequest.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/model (#1917, #255): the Claude model every assistant
@@ -92,7 +92,7 @@ export function registerModelRoutes(app: Hono, deps: ModelRouteDeps): void {
   })
 }
 
-/** The assistant's model in Settings (#1917). `deps.settings` is declared in routes/headlessBrowser.ts. */
+/** The assistant's model in Settings (#1917). `deps.settings` is declared in routes/httpRequest.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerModelRoutes(app, {

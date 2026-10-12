@@ -1,14 +1,10 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import path from 'node:path'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
-import { drainDownloads } from '../src/harness/browserDownloads.js'
 import { HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { turnToolActivity } from '../src/temporal/turnTools.js'
 import { turnServers } from '../src/temporal/turnServers.js'
@@ -484,28 +480,6 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const page = String(firstText(await runTool(tool('workspace_read'), { path: 'page.html' }, c)))
       expect(page).toContain('<p>key [redacted]</p>')
       expect(page).not.toContain('sk-ant-secret-1234')
-    })
-  })
-
-  describe('headless-browser downloads', () => {
-    it('land under downloads/ with a plain name, never replacing a file, and leave the disk', async () => {
-      const dir = path.join((await tempPaths()).stateDir, 'downloads')
-      await mkdir(dir, { recursive: true })
-      const put = async (name: string, url: string, bytes: Buffer) => {
-        const id = randomUUID()
-        await writeFile(path.join(dir, `${id}.bin`), bytes)
-        await writeFile(path.join(dir, `${id}.json`), JSON.stringify({ url, name, error: null }))
-      }
-      await put('part.stl', 'https://files.example/dl/part.stl?token=abc#x', Buffer.from('solid a'))
-      await put('part.stl', 'https://files.example/dl/part.stl', Buffer.from('solid b'))
-      await put('../../etc/passwd', 'https://files.example/p', Buffer.from('x'))
-      await put('huge.bin', 'https://files.example/huge', Buffer.alloc(1500))
-      const drained = await drainDownloads(dir, { files, ref: ws })
-      expect(drained.saved.map((f) => f.path).sort()).toEqual(['downloads/part-1.stl', 'downloads/part.stl', 'downloads/passwd'])
-      expect(drained.refused).toEqual([{ name: 'huge.bin', reason: '1500 bytes, over the 1000-byte workspace file limit' }])
-      const stored = await files.list(ws, 'downloads')
-      expect(stored.map((f) => f.source)).toContainEqual({ tool: 'browser', url: 'https://files.example/dl/part.stl' })
-      expect(await readdir(dir)).toEqual([])
     })
   })
 
