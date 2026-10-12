@@ -35,6 +35,7 @@
         "#FFFFFF"
       ],
       "painted_parts": 0,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -75,6 +76,7 @@
         "#FFFFFF"
       ],
       "painted_parts": 0,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -126,6 +128,7 @@
         "#EDEADE"
       ],
       "painted_parts": 0,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -168,6 +171,7 @@
         "#E8DBB7"
       ],
       "painted_parts": 0,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -208,6 +212,7 @@
         "#FF8D1C"
       ],
       "painted_parts": 1,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -252,6 +257,7 @@
         "#757575"
       ],
       "painted_parts": 8,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -298,6 +304,7 @@
         "#F98C36"
       ],
       "painted_parts": 2,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -340,6 +347,7 @@
         "#FF6A13"
       ],
       "painted_parts": 0,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -378,7 +386,14 @@
       "#9D2235"
     ],
     "arrange_reads": {
-      "refused": "object anquilosaurio_3556_autosave-Esfera.003.stl has a negative part, which Arrange cannot cut out"
+      "objects": 3,
+      "copies": 3,
+      "colours": [
+        "#9D432C"
+      ],
+      "painted_parts": 3,
+      "negative_parts": 3,
+      "notes": []
     }
   },
   {
@@ -416,7 +431,14 @@
       "#FFFFFF"
     ],
     "arrange_reads": {
-      "refused": "object Adapter has a negative part, which Arrange cannot cut out"
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#F99963"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 1,
+      "notes": []
     }
   },
   {
@@ -462,6 +484,7 @@
         "#FFFFFF"
       ],
       "painted_parts": 0,
+      "negative_parts": 0,
       "notes": [
         "a modifier part was left out"
       ]
@@ -512,6 +535,7 @@
         "#0ACC38"
       ],
       "painted_parts": 1,
+      "negative_parts": 0,
       "notes": [
         "a support blocker was left out"
       ]
@@ -554,6 +578,7 @@
         "#B6FF43"
       ],
       "painted_parts": 200,
+      "negative_parts": 0,
       "notes": []
     }
   },
@@ -595,7 +620,17 @@
       "#000000"
     ],
     "arrange_reads": {
-      "refused": "the 3MF is too large to read"
+      "objects": 16,
+      "copies": 16,
+      "colours": [
+        "#7D6556",
+        "#804040",
+        "#FF8000",
+        "#FFFFFF"
+      ],
+      "painted_parts": 6,
+      "negative_parts": 0,
+      "notes": []
     }
   },
   {
@@ -640,7 +675,16 @@
       "#EC008C"
     ],
     "arrange_reads": {
-      "refused": "the 3MF is too large to read"
+      "objects": 13,
+      "copies": 13,
+      "colours": [
+        "#000000",
+        "#3F8E43",
+        "#BECF00"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": []
     }
   },
   {
@@ -678,7 +722,15 @@
       "#FEC600"
     ],
     "arrange_reads": {
-      "refused": "the 3MF is too large to read"
+      "objects": 3,
+      "copies": 3,
+      "colours": [
+        "#000000",
+        "#B6FF43"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 1,
+      "notes": []
     }
   }
 ]

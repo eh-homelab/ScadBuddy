@@ -16,8 +16,6 @@ from scadbuddy.render.objects3mf import UnreadableObjectsError, read_objects
 from scadbuddy.render.read_budget import ReadBudget
 from tests.support.fixtures import makerworld, makerworld_path
 
-pytestmark = pytest.mark.requires_fixtures
-
 FIXTURES = makerworld()
 
 
@@ -25,6 +23,7 @@ def ids(entry: dict[str, Any]) -> str:
     return str(entry["file"]).removesuffix(".3mf")
 
 
+@pytest.mark.requires_fixtures
 @pytest.mark.parametrize("entry", FIXTURES, ids=ids)
 def test_a_fixture_is_the_file_its_manifest_names(entry: dict[str, Any]) -> None:
     data = makerworld_path(entry["file"]).read_bytes()
@@ -32,6 +31,7 @@ def test_a_fixture_is_the_file_its_manifest_names(entry: dict[str, Any]) -> None
     assert hashlib.sha256(data).hexdigest() == entry["sha256"]
 
 
+@pytest.mark.requires_fixtures
 @pytest.mark.parametrize("entry", FIXTURES, ids=ids)
 def test_arranges_reader_reads_each_fixture_as_recorded(entry: dict[str, Any]) -> None:
     expected = entry["arrange_reads"]
@@ -47,13 +47,14 @@ def test_arranges_reader_reads_each_fixture_as_recorded(entry: dict[str, Any]) -
         "copies": sum(o.count for o in objects),
         "colours": sorted({p.colour for o in objects for p in o.parts}),
         "painted_parts": sum(p.paint is not None for o in objects for p in o.parts),
+        "negative_parts": sum(p.negative for o in objects for p in o.parts),
         "notes": sorted({n for o in objects for n in o.notes})[:5],
     } == expected
 
 
 def test_the_fixtures_cover_every_kind_of_file() -> None:
     """The matrix the fixtures exist for: if one is dropped, its kind must be covered
-    by another."""
+    by another. Only the manifest is read (not LFS), so this runs on any checkout."""
     if not FIXTURES:
         pytest.skip("test-fixtures/makerworld/manifest.json is not here")
 

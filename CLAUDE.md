@@ -33,7 +33,7 @@ Without it most of `tests/api` skips. CI runs them against a `postgres:17` servi
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
-`manifest.json` says what each covers) and skip, naming the first missing file, without
+`manifest.json` says what each covers) and skip, naming every missing file, without
 them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
 it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
 and each shard mounts them at `/app/test-fixtures`.

@@ -36,19 +36,28 @@ def _manifest_root() -> Path | None:
 
 @cache
 def fixtures_missing() -> str | None:
-    """Why the fixtures cannot be used, naming the first file that is absent or only
-    an LFS pointer; None when every file is here."""
+    """Why the fixtures cannot be used, naming every file that is absent or only an
+    LFS pointer; None when every file is here."""
     root = _manifest_root()
     if root is None:
         return "test-fixtures/makerworld/manifest.json is not here"
+    absent: list[str] = []
+    pointers: list[str] = []
     for entry in makerworld():
         path = root / "makerworld" / entry["file"]
         if not path.is_file():
-            return f"{path} is missing"
+            absent.append(entry["file"])
+            continue
         with path.open("rb") as handle:
             if handle.read(len(LFS_POINTER)).startswith(LFS_POINTER):
-                return f"{path} is a Git LFS pointer (git lfs pull --include 'test-fixtures/**')"
-    return None
+                pointers.append(entry["file"])
+    problems = []
+    if absent:
+        problems.append(f"missing from {root / 'makerworld'}: {', '.join(absent)}")
+    if pointers:
+        pull = "git lfs pull --include 'test-fixtures/**'"
+        problems.append(f"only Git LFS pointers ({pull}): {', '.join(pointers)}")
+    return "; ".join(problems) or None
 
 
 def fixtures_root() -> Path | None:
